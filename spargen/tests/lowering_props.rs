@@ -908,6 +908,11 @@ fn default_oracle(
 
 /// The shape oracle over a generated module, read with `syn` rather than line by line, so a type is
 /// what the parser says it is however `prettyplease` wraps it.
+///
+/// It stays apart from the line-based `oracles::shape`, whose doc says why: that reader keeps
+/// declaration order and never fails, which the relocation and union oracles need over every
+/// module, where this one sorts fields and variants (the intersection laws hold up to member
+/// order) and expands a `default` function to its body.
 mod shape {
     use std::collections::BTreeMap;
 

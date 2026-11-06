@@ -9,7 +9,7 @@ use super::*;
 /// alias boxed a plain `A` and dropped the member's union with no diagnostic. Here the union
 /// (`anyOf: [{type: integer}]`) even contradicts the object `A`. As an intersection, the member's
 /// `$ref` closes the cycle back to `A`, so it is `E013` at the member — in either declaration
-/// order, through `generate` and `check` alike, for `oneOf` and `anyOf` beside the `$ref`.
+/// order, for `oneOf` and `anyOf` beside the `$ref` (`check` is held to the same by [`generate`]).
 #[test]
 fn a_nullable_alias_member_with_a_union_beside_its_ref_is_not_a_cycle_alias() {
     for keyword in ["oneOf", "anyOf"] {
@@ -41,21 +41,20 @@ components:
   schemas:
 {schemas}"##
             );
-            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-                assert_eq!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{keyword}, {order}, via {entry}: the member's union must not be dropped by \
-                     taking it as an alias: {report:#?}\n{spec}"
-                );
-                assert!(
-                    report.diagnostics().iter().any(|d| {
-                        d.code == Code::AllOfIrreconcilable
-                            && d.pointer.as_str() == "/components/schemas/B/oneOf/0"
-                    }),
-                    "{keyword}, {order}, via {entry}: E013 must point at the member: {report:#?}"
-                );
-            }
+            let report = generate(&spec);
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{keyword}, {order}: the member's union must not be dropped by taking it as an \
+                 alias: {report:#?}\n{spec}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::AllOfIrreconcilable
+                        && d.pointer.as_str() == "/components/schemas/B/oneOf/0"
+                }),
+                "{keyword}, {order}: E013 must point at the member: {report:#?}"
+            );
         }
     }
 }
@@ -142,22 +141,21 @@ components:
             "S: { description: ok }",
             "S: { $ref: '#/components/responses/R' }",
         );
-    for (entry, report) in [("generate", generate(&cycles)), ("check", check(&cycles))] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let messages = messages_for(&report, Code::UnresolvedRef);
-        for kind in ["parameter", "request body", "response"] {
-            assert!(
-                messages
-                    .iter()
-                    .any(|m| *m == format!("{kind} reference cycle cannot be resolved")),
-                "{entry}: a {kind} alias cycle must say it is a cycle: {messages:#?}"
-            );
-        }
+    let report = generate(&cycles);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::UnresolvedRef);
+    for kind in ["parameter", "request body", "response"] {
         assert!(
-            messages.iter().all(|m| !m.contains("`cycle`")),
-            "{entry}: no message may name a reference `cycle`: {messages:#?}"
+            messages
+                .iter()
+                .any(|m| *m == format!("{kind} reference cycle cannot be resolved")),
+            "a {kind} alias cycle must say it is a cycle: {messages:#?}"
         );
     }
+    assert!(
+        messages.iter().all(|m| !m.contains("`cycle`")),
+        "no message may name a reference `cycle`: {messages:#?}"
+    );
 
     // A reference outside `#/components/<kind>/` whose JSON Pointer names nothing: the resolver
     // knows the target is absent, so the message says so in the absent-target wording rather
@@ -182,29 +180,26 @@ components:
         "#/nowhere/body",
         "#/nowhere/response",
     );
-    for (entry, report) in [("generate", generate(&absent)), ("check", check(&absent))] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let messages = messages_for(&report, Code::UnresolvedRef);
-        for (kind, target) in [
-            ("parameter", "#/nowhere/parameter"),
-            ("request body", "#/nowhere/body"),
-            ("response", "#/nowhere/response"),
-        ] {
-            assert!(
-                messages.iter().any(|m| *m
-                    == format!(
-                        "{kind} reference target `{target}` was not found in the input bundle"
-                    )),
-                "{entry}: {kind}: {messages:#?}"
-            );
-        }
+    let report = generate(&absent);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::UnresolvedRef);
+    for (kind, target) in [
+        ("parameter", "#/nowhere/parameter"),
+        ("request body", "#/nowhere/body"),
+        ("response", "#/nowhere/response"),
+    ] {
         assert!(
-            messages
-                .iter()
-                .all(|m| !m.contains("unsupported or unresolved")),
-            "{entry}: an absent target is not an unclassifiable reference: {messages:#?}"
+            messages.iter().any(|m| *m
+                == format!("{kind} reference target `{target}` was not found in the input bundle")),
+            "{kind}: {messages:#?}"
         );
     }
+    assert!(
+        messages
+            .iter()
+            .all(|m| !m.contains("unsupported or unresolved")),
+        "an absent target is not an unclassifiable reference: {messages:#?}"
+    );
 
     // A named-anchor fragment the bundle cannot place at a JSON Pointer: here, and only here,
     // the resolver cannot tell an absent target from a form it declines to walk.
@@ -269,28 +264,26 @@ components:
             - type: object
               properties: { extra: { type: string } }
 "##;
-    let (generated, checked, _) = split("./lib.yaml#/components/schemas/Tree", lib);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let all_of: Vec<_> = report
-            .diagnostics()
+    let (report, _, _) = split("./lib.yaml#/components/schemas/Tree", lib);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let all_of: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::AllOfIrreconcilable)
+        .collect();
+    assert!(
+        all_of
             .iter()
-            .filter(|d| d.code == Code::AllOfIrreconcilable)
-            .collect();
-        assert!(
-            all_of
-                .iter()
-                .any(|d| d.message.contains("direct recursive")),
-            "{entry}: {report:#?}"
-        );
-        assert!(
-            !all_of
-                .iter()
-                .any(|d| d.message.contains("mixes object and scalar")),
-            "{entry}: both members are objects; naming a scalar member sends the reader to remove \
-             something the document does not contain: {report:#?}"
-        );
-    }
+            .any(|d| d.message.contains("direct recursive")),
+        "{report:#?}"
+    );
+    assert!(
+        !all_of
+            .iter()
+            .any(|d| d.message.contains("mixes object and scalar")),
+        "both members are objects; naming a scalar member sends the reader to remove something \
+         the document does not contain: {report:#?}"
+    );
 }
 
 /// A reservation intersected with **itself** is not unanswerable: `X ∩ X = X`, which is how every
@@ -426,25 +419,23 @@ EDGE
         let mut diagnoses = Vec::new();
         for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
             for entry in ["A", "B"] {
-                let (generated, checked, _) = split(
+                let (generated, _, _) = split(
                     &format!("./lib.yaml#/components/schemas/{entry}"),
                     &lib.replace("PREFIX", prefix),
                 );
-                for (run, report) in [("generate", &generated), ("check", &checked)] {
-                    assert_eq!(
-                        report.outcome(),
-                        Outcome::Rejected,
-                        "{shape}/{spelling}/{entry}/{run}: {report:#?}"
-                    );
-                    let messages = messages_for(report, Code::AllOfIrreconcilable);
-                    assert!(
-                        messages
-                            .iter()
-                            .any(|m| m.contains("closes a reference cycle")),
-                        "{shape}/{spelling}/{entry}/{run}: the rejection must name the \
-                         recursion: {messages:?}"
-                    );
-                }
+                assert_eq!(
+                    generated.outcome(),
+                    Outcome::Rejected,
+                    "{shape}/{spelling}/{entry}: {generated:#?}"
+                );
+                let messages = messages_for(&generated, Code::AllOfIrreconcilable);
+                assert!(
+                    messages
+                        .iter()
+                        .any(|m| m.contains("closes a reference cycle")),
+                    "{shape}/{spelling}/{entry}: the rejection must name the recursion: \
+                     {messages:?}"
+                );
                 diagnoses.push((
                     format!("{spelling}/{entry}"),
                     messages_for(&generated, Code::AllOfIrreconcilable)
@@ -539,29 +530,25 @@ components:
     Alias:
       $ref: '#/components/schemas/Node'
 "##;
-    let (generated, code) = generate_with_code(spec);
-    let checked = check(spec);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == Code::AllOfIrreconcilable
-                    && d.message.contains("direct recursive")),
-            "{entry}: {report:#?}"
-        );
-        // Not an alias *cycle*: `Alias` is entered once. Reporting one would blame the alias for a
-        // loop it does not form and send the reader to break a chain of length one.
-        assert!(
-            !report
-                .diagnostics()
-                .iter()
-                .any(|d| d.message.contains("alias cycle")
-                    || d.message.contains("forms a reference cycle")),
-            "{entry}: {report:#?}"
-        );
-    }
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::AllOfIrreconcilable && d.message.contains("direct recursive")),
+        "{report:#?}"
+    );
+    // Not an alias *cycle*: `Alias` is entered once. Reporting one would blame the alias for a
+    // loop it does not form and send the reader to break a chain of length one.
+    assert!(
+        !report
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("alias cycle")
+                || d.message.contains("forms a reference cycle")),
+        "{report:#?}"
+    );
     assert!(!code.contains("= serde_json::Value;"), "{code}");
 }
 
@@ -708,7 +695,7 @@ components:
     }
 
     // And the same archetype split across files, which never pre-lowers its components at all.
-    let (generated, checked, _) = split(
+    let (generated, _, _) = split(
         "./lib.yaml#/components/schemas/Node",
         r##"
 components:
@@ -724,11 +711,9 @@ components:
             - { type: string }
 "##,
     );
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(
-            report.outcome(),
-            Outcome::Rejected,
-            "split/{entry}: {report:#?}"
-        );
-    }
+    assert_ne!(
+        generated.outcome(),
+        Outcome::Rejected,
+        "split: {generated:#?}"
+    );
 }

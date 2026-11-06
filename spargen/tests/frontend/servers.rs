@@ -193,20 +193,19 @@ paths:
         "204": {{ description: No Content }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{url}: {report:#?}");
-            assert!(has_code(&report, Code::InvalidInput), "{url}: {report:#?}");
-            // Reported at the server, as the template's cause rather than an unused variable.
-            assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|diag| diag.code == Code::InvalidInput
-                        && diag.pointer.as_str() == "/servers/0"
-                        && diag.message.contains("brace")),
-                "{url}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{url}: {report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{url}: {report:#?}");
+        // Reported at the server, as the template's cause rather than an unused variable.
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diag| diag.code == Code::InvalidInput
+                    && diag.pointer.as_str() == "/servers/0"
+                    && diag.message.contains("brace")),
+            "{url}: {report:#?}"
+        );
     }
 }
 
@@ -273,15 +272,14 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            messages_for(&report, Code::InvalidInput)
-                .iter()
-                .any(|m| m.contains("server variable `region` appears more than once")),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        messages_for(&report, Code::InvalidInput)
+            .iter()
+            .any(|m| m.contains("server variable `region` appears more than once")),
+        "{report:#?}"
+    );
 }
 
 // W011 case: unused-server-variable
@@ -301,12 +299,13 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            messages_for(&report, Code::DeclarationHasNoEffect),
-            ["server variable `stage` is declared but does not appear in `https://{region}.example.com`"],
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::DeclarationHasNoEffect),
+        [
+            "server variable `stage` is declared but does not appear in `https://{region}.example.com`"
+        ],
+        "{report:#?}"
+    );
 }

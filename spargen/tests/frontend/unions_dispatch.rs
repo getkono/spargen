@@ -28,22 +28,20 @@ components:
 "##;
 
     for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
-        let (generated, checked, code) = split(
+        let (report, _, code) = split(
             "./lib.yaml#/components/schemas/Loop",
             &LIB.replace("PREFIX", prefix),
         );
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{spelling}/{entry}: a variant that is the whole union decodes by re-entering its \
-                 own `Deserialize` on the same value: {report:#?}"
-            );
-            assert!(
-                has_code(report, Code::NonDisjointUnion),
-                "{spelling}/{entry}: {report:#?}"
-            );
-        }
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{spelling}: a variant that is the whole union decodes by re-entering its own \
+             `Deserialize` on the same value: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::NonDisjointUnion),
+            "{spelling}: {report:#?}"
+        );
         // The runtime shape itself: nothing may emit a `Deserialize` arm that calls back into the
         // same type on the same value. That is what makes this a hang rather than a wrong type.
         assert!(
@@ -79,7 +77,7 @@ paths:
 /// the union with no variant. Before the rejection existed, the collapse `?`-propagated the failed
 /// intersection with no diagnostic, so the run came back clean with the response body silently
 /// dropped — the fourth behaviour. It must be refused with `E007` at the schema that carries the
-/// union, through both entry points.
+/// union (`check`'s parity is held by the harness).
 #[test]
 fn a_sole_union_member_irreconcilable_with_its_siblings_is_rejected() {
     let spec = r##"
@@ -104,22 +102,20 @@ paths:
                   - { type: "null" }
 "##;
     let pointer = "/paths/~1u/get/responses/200/content/application~1json/schema";
-    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let e007: Vec<_> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::NonDisjointUnion)
-            .collect();
-        assert!(
-            e007.iter().any(
-                |d| d.pointer.as_str() == pointer && d.message.contains("sole non-null member")
-            ),
-            "{entry}: E007 for the empty sole-member intersection must point at `{pointer}`, \
-             not at {:?}\n{report:#?}",
-            e007.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let e007: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::NonDisjointUnion)
+        .collect();
+    assert!(
+        e007.iter()
+            .any(|d| d.pointer.as_str() == pointer && d.message.contains("sole non-null member")),
+        "E007 for the empty sole-member intersection must point at `{pointer}`, not at \
+         {:?}\n{report:#?}",
+        e007.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
+    );
 }
 
 #[test]

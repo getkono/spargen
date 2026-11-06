@@ -100,23 +100,22 @@ components:
     Name: { type: string }
 "##;
     let pointer = "/paths/~1p/get/responses/200/content/application~1json/schema/oneOf/0";
-    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
-        assert_eq!(
-            report.outcome(),
-            Outcome::Rejected,
-            "{entry}: the member's `type: integer` must not be dropped in silence: {report:#?}"
-        );
-        let e013: Vec<_> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::AllOfIrreconcilable)
-            .collect();
-        assert!(
-            e013.iter().any(|d| d.pointer.as_str() == pointer),
-            "{entry}: E013 must point at the member `{pointer}`, not at {:?}\n{report:#?}",
-            e013.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(
+        report.outcome(),
+        Outcome::Rejected,
+        "the member's `type: integer` must not be dropped in silence: {report:#?}"
+    );
+    let e013: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::AllOfIrreconcilable)
+        .collect();
+    assert!(
+        e013.iter().any(|d| d.pointer.as_str() == pointer),
+        "E013 must point at the member `{pointer}`, not at {:?}\n{report:#?}",
+        e013.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
+    );
 }
 
 /// The satisfiable counterpart: `{$ref: Pet, properties: {owner: …}, required: [owner]}` narrows
@@ -287,25 +286,23 @@ fn e013_fires_when_a_ref_sibling_contradicts_its_target() {
             "/components/schemas/Holder/properties/field",
         ),
     ] {
-        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{site}` was not rejected by {entry}: {report:#?}"
-            );
-            let pointers: Vec<&str> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::AllOfIrreconcilable)
-                .map(|d| d.pointer.as_str())
-                .collect();
-            assert_eq!(
-                pointers,
-                vec![pointer],
-                "`{site}` through {entry} must report E013 once, at the offending schema: \
-                 {report:#?}"
-            );
-        }
+        let report = generate(spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{site}` was not rejected: {report:#?}"
+        );
+        let pointers: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::AllOfIrreconcilable)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        assert_eq!(
+            pointers,
+            vec![pointer],
+            "`{site}` must report E013 once, at the offending schema: {report:#?}"
+        );
     }
 }
 

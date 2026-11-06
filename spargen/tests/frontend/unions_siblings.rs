@@ -226,7 +226,7 @@ fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
 
     // A refiner that reaches no branch of its category constrains nothing the union accepts: the
     // union generates exactly as it is, and the keyword is acknowledged with `W011` rather than
-    // dropped in silence, through both entry points.
+    // dropped in silence.
     for (case, members, sibling) in [
         (
             "no object branch",
@@ -245,19 +245,18 @@ fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
         ),
     ] {
         let spec = format!("{HEAD}    U:\n      oneOf: {members}\n      {sibling}\n");
-        for report in [check(&spec), generate(&spec)] {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
-            assert!(
-                !has_code(&report, Code::AllOfIrreconcilable),
-                "{case}: {report:#?}"
-            );
-            let messages = messages_for(&report, Code::DeclarationHasNoEffect);
-            assert_eq!(messages.len(), 1, "{case}: {report:#?}");
-            assert!(
-                messages[0].contains("no branch of its union has that category"),
-                "{case}: {messages:?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "{case}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+        assert_eq!(messages.len(), 1, "{case}: {report:#?}");
+        assert!(
+            messages[0].contains("no branch of its union has that category"),
+            "{case}: {messages:?}"
+        );
         // The union and the types its branches wrap are the bare union's. (The lowered keyword
         // itself is still emitted as an unused type of its own, as every lowered sibling is.)
         let shape = |spec: &str| {
@@ -318,38 +317,37 @@ fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
         ),
     ] {
         let spec = format!("{HEAD}{schema}");
-        for report in [check(&spec), generate(&spec)] {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
-            assert!(
-                !has_code(&report, Code::AllOfIrreconcilable),
-                "{case}: {report:#?}"
-            );
-            let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+        let report = generate(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "{case}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+        assert_eq!(
+            messages.len(),
+            2,
+            "{case}: one W011 per unreached half: {report:#?}"
+        );
+        assert!(
+            messages.iter().all(|message| message.contains(needle)),
+            "{case}: {messages:?}"
+        );
+        for keywords in ["`required`", "`items`"] {
             assert_eq!(
-                messages.len(),
-                2,
-                "{case}: one W011 per unreached half: {report:#?}"
+                messages
+                    .iter()
+                    .filter(|message| message.contains(keywords))
+                    .count(),
+                1,
+                "{case}: exactly one W011 names {keywords}: {messages:?}"
             );
-            assert!(
-                messages.iter().all(|message| message.contains(needle)),
-                "{case}: {messages:?}"
-            );
-            for keywords in ["`required`", "`items`"] {
-                assert_eq!(
-                    messages
-                        .iter()
-                        .filter(|message| message.contains(keywords))
-                        .count(),
-                    1,
-                    "{case}: exactly one W011 names {keywords}: {messages:?}"
-                );
-            }
         }
     }
 
     // A branch that states no category can be given none when object and array keywords come
     // together, or when a multi-type `type` array beside them admits another category too: that is
-    // rejected through both entry points rather than generated without them.
+    // rejected rather than generated without them.
     for (case, schema) in [
         (
             "both kinds",
@@ -363,15 +361,14 @@ fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
         ),
     ] {
         let spec = format!("{HEAD}    U:\n{schema}\n");
-        for report in [check(&spec), generate(&spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
-            let messages = messages_for(&report, Code::AllOfIrreconcilable);
-            assert_eq!(messages.len(), 1, "{case}: {report:#?}");
-            assert!(
-                messages[0].contains("union member 0 states no JSON category"),
-                "{case}: {messages:?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert_eq!(messages.len(), 1, "{case}: {report:#?}");
+        assert!(
+            messages[0].contains("union member 0 states no JSON category"),
+            "{case}: {messages:?}"
+        );
     }
 
     // A multi-type `type` array deleted for lowering still excludes the branches of the categories
@@ -381,13 +378,12 @@ fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
          integer }}, {{ type: object, properties: {{ a: {{ type: string }} }} }}]\n      required: \
          [a]\n"
     );
-    for report in [check(&spec), generate(&spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::DeclarationHasNoEffect);
-        assert_eq!(messages.len(), 1, "{report:#?}");
-        assert!(messages[0].contains("union member 0"), "{messages:?}");
-    }
-    let types = types_module(&generate_with_code(&spec).1);
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(messages[0].contains("union member 0"), "{messages:?}");
+    let types = types_module(&code);
     let variants = variant_types(&types);
     assert_eq!(variants.len(), 2, "{types}");
     let a = field_a(&types, &variants[1]);

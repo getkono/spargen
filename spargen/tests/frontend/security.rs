@@ -153,23 +153,22 @@ components:
         ),
     ];
     for (what, spec, wording) in &cases {
-        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
-            let pointers = e004_pointers(&report, what);
+        let report = generate(spec);
+        let pointers = e004_pointers(&report, what);
+        assert!(
+            pointers.contains(&"/components/securitySchemes/A"),
+            "{what}: E004 must point at the aliasing scheme, not {pointers:?}"
+        );
+        let messages = messages_for(&report, Code::UnresolvedRef);
+        assert!(
+            messages.iter().any(|m| m.contains(wording)),
+            "{what}: expected `{wording}` in {messages:?}"
+        );
+        if !wording.contains("no scheme named") {
             assert!(
-                pointers.contains(&"/components/securitySchemes/A"),
-                "{what} via {entry}: E004 must point at the aliasing scheme, not {pointers:?}"
+                messages.iter().all(|m| !m.contains("unresolved")),
+                "{what}: a target that is present is not unresolved: {messages:?}"
             );
-            let messages = messages_for(&report, Code::UnresolvedRef);
-            assert!(
-                messages.iter().any(|m| m.contains(wording)),
-                "{what} via {entry}: expected `{wording}` in {messages:?}"
-            );
-            if !wording.contains("no scheme named") {
-                assert!(
-                    messages.iter().all(|m| !m.contains("unresolved")),
-                    "{what} via {entry}: a target that is present is not unresolved: {messages:?}"
-                );
-            }
         }
     }
 

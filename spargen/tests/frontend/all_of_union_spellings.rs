@@ -90,26 +90,21 @@ fn an_object_meets_the_unions_of_each_spelling_alike() {
     let several = "more than one `oneOf`/`anyOf` union";
     for (case, pick) in &rejected {
         let spec = spec(pick);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{case} via {entry}: {report:#?}"
-            );
-            let at_pick: Vec<&str> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| {
-                    d.code == Code::AllOfIrreconcilable
-                        && d.pointer.as_str() == "/components/schemas/Pick"
-                })
-                .map(|d| d.message.as_str())
-                .collect();
-            assert!(
-                at_pick.len() == 1 && at_pick[0].contains(several),
-                "{case} via {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+        let at_pick: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| {
+                d.code == Code::AllOfIrreconcilable
+                    && d.pointer.as_str() == "/components/schemas/Pick"
+            })
+            .map(|d| d.message.as_str())
+            .collect();
+        assert!(
+            at_pick.len() == 1 && at_pick[0].contains(several),
+            "{case}: {report:#?}"
+        );
     }
 
     // Each group is one conjunction in several spellings, the first its `$ref` spelling: every
@@ -180,7 +175,6 @@ fn an_object_meets_the_unions_of_each_spelling_alike() {
                 Outcome::Rejected,
                 "{case}, `{pick}`: {report:#?}"
             );
-            assert_check_agrees(&report, &check(&spec));
             let variants = enum_variants(&code, "Pick");
             assert_eq!(
                 variants.len(),
@@ -251,20 +245,17 @@ fn a_recursive_union_component_met_as_an_allof_member_is_one_cycle() {
     let pick = "{ allOf: [ { $ref: '#/components/schemas/Base' }, { $ref: \
                 '#/components/schemas/U3' } ] }";
     let spec = union_member_document(extra, pick);
-    for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert_eq!(
-            codes(&report),
-            ["E013"],
-            "{entry}: the recursion is reported once, as the cycle it is: {report:#?}"
-        );
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|d| d.pointer.as_str()
-                    == "/components/schemas/U3/anyOf/1/properties/child/allOf/1"),
-            "{entry}: {report:#?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        codes(&report),
+        ["E013"],
+        "the recursion is reported once, as the cycle it is: {report:#?}"
+    );
+    assert!(
+        report.diagnostics().iter().any(
+            |d| d.pointer.as_str() == "/components/schemas/U3/anyOf/1/properties/child/allOf/1"
+        ),
+        "{report:#?}"
+    );
 }

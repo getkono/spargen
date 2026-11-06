@@ -33,11 +33,9 @@ fn an_inline_member_pinning_its_tag_property_is_selected_by_that_value() {
                        - { $ref: '#/components/schemas/Base' }\n            \
                        - { type: object, required: [type], properties: { type: { const: ntfy } } }\n";
     let spec = spec(members, "");
-    let (generated, code) = generate_with_code(&spec);
-    for (entry, report) in [("generate", generated), ("check", check(&spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(report.diagnostics().is_empty(), "{entry}: {report:#?}");
-    }
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
     let arms = discriminated_arms(&code, "Config");
     let expected = [
         ("ConfigVariant0", "webhook"),
@@ -150,7 +148,7 @@ fn a_tag_property_that_pins_no_free_value_leaves_the_member_untagged() {
         ),
     ] {
         let spec = union(second, mapping);
-        let (generated, code) = generate_with_code(&spec);
+        let (report, code) = generate_with_code(&spec);
         let untagged = if matches!(
             what,
             "another member's pin" | "a plain string beside it" | "an undeclared tag property"
@@ -159,23 +157,14 @@ fn a_tag_property_that_pins_no_free_value_leaves_the_member_untagged() {
         } else {
             "union member 1 is no schema component"
         };
-        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} {entry}: {report:#?}"
-            );
-            let w011: Vec<_> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::DeclarationHasNoEffect)
-                .collect();
-            assert_eq!(w011.len(), 1, "{what} {entry}: {report:#?}");
-            assert!(
-                w011[0].message.contains(untagged),
-                "{what} {entry}: {report:#?}"
-            );
-        }
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        let w011: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
+            .collect();
+        assert_eq!(w011.len(), 1, "{what}: {report:#?}");
+        assert!(w011[0].message.contains(untagged), "{what}: {report:#?}");
         let arms = discriminated_arms(&code, "Config");
         let mut decoded: Vec<_> = arms
             .decode
@@ -232,32 +221,23 @@ fn a_default_mapping_member_admitting_a_pinned_value_claims_it() {
         ),
     ] {
         let spec = spec(mail_tag);
-        let (generated, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} {entry}: {report:#?}"
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        let w011: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
+            .collect();
+        if warned {
+            assert_eq!(w011.len(), 1, "{what}: {report:#?}");
+            assert!(
+                w011[0]
+                    .message
+                    .contains("union member 0 is no schema component"),
+                "{what}: {report:#?}"
             );
-            let w011: Vec<_> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::DeclarationHasNoEffect)
-                .collect();
-            if warned {
-                assert_eq!(w011.len(), 1, "{what} {entry}: {report:#?}");
-                assert!(
-                    w011[0]
-                        .message
-                        .contains("union member 0 is no schema component"),
-                    "{what} {entry}: {report:#?}"
-                );
-            } else {
-                assert!(
-                    report.diagnostics().is_empty(),
-                    "{what} {entry}: {report:#?}"
-                );
-            }
+        } else {
+            assert!(report.diagnostics().is_empty(), "{what}: {report:#?}");
         }
         let arms = discriminated_arms(&code, "Config");
         let mut decoded: Vec<_> = arms
@@ -292,29 +272,27 @@ fn an_untagged_discriminated_member_keeps_the_tag_dispatch_of_the_tagged_ones() 
             &format!("{applicator}:"),
             1,
         );
-        let (generated, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{applicator} {entry}: {report:#?}"
-            );
-            let w011: Vec<_> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::DeclarationHasNoEffect)
-                .collect();
-            assert_eq!(w011.len(), 1, "{applicator} {entry}: {report:#?}");
-            assert!(
-                w011[0]
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{applicator}: {report:#?}"
+        );
+        let w011: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
+            .collect();
+        assert_eq!(w011.len(), 1, "{applicator}: {report:#?}");
+        assert!(
+            w011[0]
+                .message
+                .contains("union member 2 is no schema component")
+                && w011[0]
                     .message
-                    .contains("union member 2 is no schema component")
-                    && w011[0]
-                        .message
-                        .contains("the tag dispatches only to the members a value names"),
-                "{applicator} {entry}: {report:#?}"
-            );
-        }
+                    .contains("the tag dispatches only to the members a value names"),
+            "{applicator}: {report:#?}"
+        );
         let arms = discriminated_arms(&code, "Pet");
         assert_eq!(
             arms.decode,

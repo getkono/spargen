@@ -213,14 +213,15 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            messages_for(&report, Code::UnsupportedMediaType),
-            ["`encoding.part.encoding` describes a nested multipart part, which spargen does not generate"],
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::UnsupportedMediaType),
+        [
+            "`encoding.part.encoding` describes a nested multipart part, which spargen does not generate"
+        ],
+        "{report:#?}"
+    );
 }
 
 // E009 case: wildcard-content-type
@@ -356,17 +357,16 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            messages_for(&report, Code::DeclarationHasNoEffect),
-            [
-                "`allowReserved` has no effect on `multipart/form-data`: part values are not \
-                 percent-encoded"
-            ],
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::DeclarationHasNoEffect),
+        [
+            "`allowReserved` has no effect on `multipart/form-data`: part values are not \
+             percent-encoded"
+        ],
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -406,21 +406,20 @@ paths:
         '204': {{ description: ok }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{declared}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::UnsupportedMediaType
-                        && d.message.contains("`pic`")
-                        && d.message.contains(&format!("`contentType: {declared}`"))
-                }),
-                "{declared}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{declared}: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message.contains("`pic`")
+                    && d.message.contains(&format!("`contentType: {declared}`"))
+            }),
+            "{declared}: {report:#?}"
+        );
     }
 }
 
@@ -448,21 +447,20 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedMediaType
-                    && d.message.contains("`pic`")
-                    && d.message.contains(
-                        "is binary, which has no `application/x-www-form-urlencoded` \
-                         representation",
-                    )
-                    && !d.message.contains("declares `contentType:")
-            }),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::UnsupportedMediaType
+                && d.message.contains("`pic`")
+                && d.message.contains(
+                    "is binary, which has no `application/x-www-form-urlencoded` \
+                     representation",
+                )
+                && !d.message.contains("declares `contentType:")
+        }),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -488,20 +486,19 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedMediaType
-                    && d.message.contains("`additionalProperties`")
-                    && d.message.contains(
-                        "is binary, which has no `application/x-www-form-urlencoded` \
-                         representation",
-                    )
-            }),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::UnsupportedMediaType
+                && d.message.contains("`additionalProperties`")
+                && d.message.contains(
+                    "is binary, which has no `application/x-www-form-urlencoded` \
+                     representation",
+                )
+        }),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -529,16 +526,15 @@ paths:
         '204': {{ description: ok }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
-            assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .all(|d| !d.message.contains("additionalProperties")),
-                "{media}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .all(|d| !d.message.contains("additionalProperties")),
+            "{media}: {report:#?}"
+        );
     }
 }
 
@@ -671,22 +667,21 @@ fn e009_a_multipart_json_rendered_part_declaring_a_non_json_content_type() {
     ];
     for (schema, declared, sent) in cases {
         let spec = multipart_part_declaring(schema, declared);
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{schema} / {declared}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::UnsupportedMediaType
-                        && d.message.contains("`part`")
-                        && d.message.contains(&format!("`contentType: {sent}`"))
-                        && d.message.contains("JSON")
-                }),
-                "{schema} / {declared}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{schema} / {declared}: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message.contains("`part`")
+                    && d.message.contains(&format!("`contentType: {sent}`"))
+                    && d.message.contains("JSON")
+            }),
+            "{schema} / {declared}: {report:#?}"
+        );
     }
 }
 
@@ -777,22 +772,21 @@ fn e009_a_form_urlencoded_json_rendered_field_declaring_a_non_json_content_type(
     ];
     for (schema, declared, sent) in cases {
         let spec = form_field_declaring(schema, declared);
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{schema} / {declared}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::UnsupportedMediaType
-                        && d.message.contains("`part`")
-                        && d.message.contains(&format!("`contentType: {sent}`"))
-                        && d.message.contains("form field only as JSON")
-                }),
-                "{schema} / {declared}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{schema} / {declared}: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message.contains("`part`")
+                    && d.message.contains(&format!("`contentType: {sent}`"))
+                    && d.message.contains("form field only as JSON")
+            }),
+            "{schema} / {declared}: {report:#?}"
+        );
     }
 }
 
@@ -919,19 +913,16 @@ paths:
         ] {
             let spec = body(media, content_type);
             let first = content_type.split(',').next().unwrap_or_default().trim();
-            for report in [generate(&spec), check(&spec)] {
-                assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-                assert!(
-                    report.diagnostics().iter().any(|diagnostic| {
-                        diagnostic.code == Code::UnsupportedMediaType
-                            && diagnostic.message
-                                == format!(
-                                    "`encoding.note.contentType: {first}` is not a media type"
-                                )
-                    }),
-                    "{media} / {content_type:?}: {report:#?}"
-                );
-            }
+            let report = generate(&spec);
+            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(
+                report.diagnostics().iter().any(|diagnostic| {
+                    diagnostic.code == Code::UnsupportedMediaType
+                        && diagnostic.message
+                            == format!("`encoding.note.contentType: {first}` is not a media type")
+                }),
+                "{media} / {content_type:?}: {report:#?}"
+            );
         }
     }
     // A well-formed type spargen has no codec for keeps the documented fallback: it rides on the
@@ -1011,20 +1002,18 @@ paths:
             }));
         for (content_type, message) in cases {
             let spec = body(media, content_type);
-            for report in [generate(&spec), check(&spec)] {
-                assert_eq!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{media} / {content_type:?}: {report:#?}"
-                );
-                assert!(
-                    report.diagnostics().iter().any(|diagnostic| {
-                        diagnostic.code == Code::UnsupportedMediaType
-                            && diagnostic.message == message
-                    }),
-                    "{media} / {content_type:?}: {report:#?}"
-                );
-            }
+            let report = generate(&spec);
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{media} / {content_type:?}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|diagnostic| {
+                    diagnostic.code == Code::UnsupportedMediaType && diagnostic.message == message
+                }),
+                "{media} / {content_type:?}: {report:#?}"
+            );
         }
     }
     // A form-urlencoded field's `contentType` only picks the codec its value is rendered with; it
@@ -1097,21 +1086,20 @@ fn e009_a_rejected_multipart_request_selection_claims_nothing_is_generated() {
         ("multipart/form-data", "{ type: string }"),
         ("application/octet-stream", "{}"),
     ]);
-    for report in [generate(&spec), check(&spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-        assert_eq!(
-            messages_for(&report, Code::UnsupportedMediaType),
-            [
-                "a `multipart/form-data` request body must be an object schema; its properties \
-                 are the form parts, so a non-object multipart body is not representable"
-            ],
-            "{report:#?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+    assert_eq!(
+        messages_for(&report, Code::UnsupportedMediaType),
+        [
+            "a `multipart/form-data` request body must be an object schema; its properties \
+             are the form parts, so a non-object multipart body is not representable"
+        ],
+        "{report:#?}"
+    );
 }
 
 // --- Media Type Object dispositions outside the request body -------------------------------
@@ -1267,21 +1255,20 @@ components:
     Plain: { schema: { type: integer } }
     Part: { schema: { type: string, const: tag } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let noted = |target: &str| {
-            let wanted = format!("the `summary`/`description` on the reference to `{target}`");
-            report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::DeclarationHasNoEffect)
-                .filter(|d| d.message.starts_with(&wanted))
-                .count()
-        };
-        assert_eq!(noted("#/components/headers/Rate"), 1, "{report:#?}");
-        assert_eq!(noted("#/components/headers/Part"), 1, "{report:#?}");
-        assert_eq!(noted("#/components/headers/Plain"), 0, "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let noted = |target: &str| {
+        let wanted = format!("the `summary`/`description` on the reference to `{target}`");
+        report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
+            .filter(|d| d.message.starts_with(&wanted))
+            .count()
+    };
+    assert_eq!(noted("#/components/headers/Rate"), 1, "{report:#?}");
+    assert_eq!(noted("#/components/headers/Part"), 1, "{report:#?}");
+    assert_eq!(noted("#/components/headers/Plain"), 0, "{report:#?}");
 }
 
 // W011 case: positional-encoding-form

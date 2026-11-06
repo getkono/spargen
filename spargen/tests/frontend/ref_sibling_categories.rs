@@ -178,17 +178,15 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
         "{HEAD}    Target: {{ oneOf: [{{ type: string }}, {{ type: integer }}] }}\n    Sibling:\n      \
          $ref: '#/components/schemas/Target'\n      required: [a]\n{holder}"
     );
-    for report in [generate(&spec), check(&spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
-        let messages = messages_for(&report, Code::DeclarationHasNoEffect);
-        assert_eq!(messages.len(), 1, "{report:#?}");
-        assert!(
-            messages[0].contains("no branch of its target union has that category"),
-            "{messages:?}"
-        );
-    }
-    let (_, code) = generate_with_code(&spec);
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+    let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("no branch of its target union has that category"),
+        "{messages:?}"
+    );
     let types = types_module(&code);
     assert_eq!(
         enum_variants(&types, "Target"),
@@ -202,15 +200,14 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
          '#/components/schemas/Target'\n      required: [a]\n      items: {{ type: integer \
          }}\n{holder}"
     );
-    for report in [generate(&spec), check(&spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::AllOfIrreconcilable);
-        assert_eq!(messages.len(), 1, "{report:#?}");
-        assert!(
-            messages[0].contains("states no JSON category"),
-            "{messages:?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::AllOfIrreconcilable);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("states no JSON category"),
+        "{messages:?}"
+    );
     // A union whose every branch has the inferred category loses no branch, so it still composes.
     let spec = format!(
         "{HEAD}    A: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }}, \
@@ -228,15 +225,14 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
          Sibling:\n      $ref: '#/components/schemas/Target'\n      required: [a]\n      \
          items: {{ type: integer }}\n"
     );
-    for report in [generate(&spec), check(&spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::AllOfIrreconcilable);
-        assert_eq!(messages.len(), 1, "{report:#?}");
-        assert!(
-            messages[0].contains("both object keywords") && messages[0].contains("array keywords"),
-            "{messages:?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::AllOfIrreconcilable);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("both object keywords") && messages[0].contains("array keywords"),
+        "{messages:?}"
+    );
 }
 
 /// The guard on the two rejections above: only an EMPTY intersection is an error. A sibling that
@@ -602,20 +598,14 @@ components:
                 let out = dir.join("client.rs");
                 let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
                 let code = std::fs::read_to_string(&out).unwrap_or_default();
-                let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
-                (generated, checked, code)
+                (generated, code)
             };
             let what = format!(
                 "`{sibling}` beside a `$ref` to a relative-file target, target first: {target_first}"
             );
-            let (generated, checked, code) =
-                run(&format!("{{ $ref: '{file_target}', {sibling} }}"));
-            let (bare_generated, _, bare_code) = run(&format!("{{ $ref: '{file_target}' }}"));
-            for (entry, report) in [
-                ("generate", &generated),
-                ("check", &checked),
-                ("bare generate", &bare_generated),
-            ] {
+            let (generated, code) = run(&format!("{{ $ref: '{file_target}', {sibling} }}"));
+            let (bare_generated, bare_code) = run(&format!("{{ $ref: '{file_target}' }}"));
+            for (entry, report) in [("generate", &generated), ("bare generate", &bare_generated)] {
                 assert_ne!(
                     report.outcome(),
                     Outcome::Rejected,
@@ -627,13 +617,11 @@ components:
                 types_module(&bare_code),
                 "{what} must lower exactly as the bare `$ref` alias does"
             );
-            for (entry, report) in [("generate", &generated), ("check", &checked)] {
-                assert_eq!(
-                    has_code(report, Code::SchemaDefaultNotApplied),
-                    sibling.contains("default"),
-                    "{what}: {entry}: `W005` must fire exactly when a default is dropped: {report:#?}"
-                );
-            }
+            assert_eq!(
+                has_code(&generated, Code::SchemaDefaultNotApplied),
+                sibling.contains("default"),
+                "{what}: `W005` must fire exactly when a default is dropped: {generated:#?}"
+            );
         }
     }
 }

@@ -922,14 +922,13 @@ components:
       properties:
         id: { type: integer }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::UnsupportedMediaType);
-        assert!(
-            messages.iter().any(|m| m.contains("`namespace`")),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::UnsupportedMediaType);
+    assert!(
+        messages.iter().any(|m| m.contains("`namespace`")),
+        "{report:#?}"
+    );
 }
 
 /// The same namespace on a type no XML body reaches changes no wire, so it warns.
@@ -954,16 +953,15 @@ components:
       properties:
         id: { type: integer }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::XmlHintIgnored);
-        assert!(
-            messages
-                .iter()
-                .any(|m| m.contains("`namespace`") && m.contains("`prefix`")),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::XmlHintIgnored);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("`namespace`") && m.contains("`prefix`")),
+        "{report:#?}"
+    );
 }
 
 /// A root node type the codec cannot produce — a text node, no element at all for an object, or an
@@ -1029,11 +1027,10 @@ components:
       type: string
       xml: { name: code-value }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::UnsupportedMediaType);
-        assert!(messages.iter().any(|m| m.contains("`name`")), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::UnsupportedMediaType);
+    assert!(messages.iter().any(|m| m.contains("`name`")), "{report:#?}");
 }
 
 /// A root `xml.name` on a struct names an element only where the schema is a component or a Media
@@ -1104,21 +1101,19 @@ components:
             } else {
                 Code::XmlHintIgnored
             };
-            for report in [generate(&spec), check(&spec)] {
-                assert_eq!(
-                    report.outcome() == Outcome::Rejected,
-                    xml_body,
-                    "{site} under {media}: {report:#?}"
-                );
-                assert!(
-                    messages_for(&report, expected)
-                        .iter()
-                        .any(|m| m.contains("`name` on the schema's own `xml` object")),
-                    "{site} under {media}: {report:#?}"
-                );
-            }
+            let (report, code) = generate_with_code(&spec);
+            assert_eq!(
+                report.outcome() == Outcome::Rejected,
+                xml_body,
+                "{site} under {media}: {report:#?}"
+            );
+            assert!(
+                messages_for(&report, expected)
+                    .iter()
+                    .any(|m| m.contains("`name` on the schema's own `xml` object")),
+                "{site} under {media}: {report:#?}"
+            );
             if !xml_body {
-                let (_, code) = generate_with_code(&spec);
                 assert!(
                     !code.contains(r#"#[serde(rename = "pet")]"#)
                         && !code.contains(r#"#[serde(rename = "left")]"#),
@@ -1354,18 +1349,17 @@ paths:
         '204': {{ description: ok }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{items_xml}: {report:#?}"
-            );
-            let messages = messages_for(&report, Code::UnsupportedMediaType);
-            assert!(
-                messages.iter().any(|m| m.contains("`items.")),
-                "{items_xml}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{items_xml}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::UnsupportedMediaType);
+        assert!(
+            messages.iter().any(|m| m.contains("`items.")),
+            "{items_xml}: {report:#?}"
+        );
     }
 }
 
@@ -1414,16 +1408,15 @@ components:
         content: {{ type: string }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
-            let messages = messages_for(&report, Code::UnsupportedMediaType);
-            assert!(
-                messages
-                    .iter()
-                    .any(|m| m.contains("`name`") && m.contains("beside a `$ref`")),
-                "{schema}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+        let messages = messages_for(&report, Code::UnsupportedMediaType);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("`name`") && m.contains("beside a `$ref`")),
+            "{schema}: {report:#?}"
+        );
     }
     // Under a JSON body nothing is serialized as XML, so the same hint only warns.
     let spec = r##"
@@ -1476,12 +1469,11 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::XmlHintIgnored);
-        assert!(
-            messages.iter().any(|m| m.contains("`items.namespace`")),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::XmlHintIgnored);
+    assert!(
+        messages.iter().any(|m| m.contains("`items.namespace`")),
+        "{report:#?}"
+    );
 }

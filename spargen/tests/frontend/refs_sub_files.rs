@@ -72,11 +72,6 @@ components:
     // property is typed rather than dropped.
     assert!(code.contains("pub inner"), "{code}");
     assert!(code.contains("pub id"), "{code}");
-
-    // `check` must agree — it runs the same lowering.
-    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
 }
 
 /// A sub-file sibling reference that names nothing. The root document's component map is consulted
@@ -86,7 +81,7 @@ components:
 /// the property with it.
 #[test]
 fn a_sub_file_ref_to_a_component_its_own_file_does_not_declare_is_rejected() {
-    let (generated, checked, _) = split(
+    let (report, _, _) = split(
         "./lib.yaml#/components/schemas/Wrapper",
         r##"
 components:
@@ -98,22 +93,20 @@ components:
       required: [inner]
 "##,
     );
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let e004: Vec<_> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::UnresolvedRef)
-            .collect();
-        assert!(!e004.is_empty(), "{entry}: {report:#?}");
-        // The message must name the reference that could not be followed: a pointer says where the
-        // `$ref` sits, not what it asked for, and `Missing` is the only thing wrong here.
-        assert!(
-            e004.iter()
-                .any(|d| d.message.contains("#/components/schemas/Missing")),
-            "{entry}: the rejection must name the reference: {report:#?}"
-        );
-    }
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let e004: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::UnresolvedRef)
+        .collect();
+    assert!(!e004.is_empty(), "{report:#?}");
+    // The message must name the reference that could not be followed: a pointer says where the
+    // `$ref` sits, not what it asked for, and `Missing` is the only thing wrong here.
+    assert!(
+        e004.iter()
+            .any(|d| d.message.contains("#/components/schemas/Missing")),
+        "the rejection must name the reference: {report:#?}"
+    );
 }
 
 /// One `#/components/<kind>/` position lowering resolves itself (#397): a valid inline document,
@@ -208,7 +201,7 @@ impl ComponentScope {
 /// Parameter, Request Body, Response and Media Type references read the **root** document's
 /// components instead: a sub-file chain `A` → `#/components/<kind>/B` was rejected with `E004`
 /// when the root declared no `B`, and silently generated the root's `B` when it did. Both reach
-/// the client the inline document generates, through `generate` and `check` alike — and the root's
+/// the client the inline document generates, `check` held to the same diagnostics — and the root's
 /// decoy `B`, read in its place, is shown to generate a different one, so the comparison can fail.
 #[test]
 fn a_component_ref_in_a_sub_file_reads_that_files_components() {
@@ -241,14 +234,12 @@ fn a_component_ref_in_a_sub_file_reads_that_files_components() {
                     "{kind}: the decoy must generate a different client than the moved object"
                 );
             }
-            let (generated, checked, client) = run_placement_with_client(&[
+            let (report, _, client) = run_placement_with_client(&[
                 ("openapi.json", scope.referencing(&inline, &reference)),
                 ("other.json", other.clone()),
             ]);
-            for (entry, report) in [("generate", &generated), ("check", &checked)] {
-                if report.outcome() == Outcome::Rejected || has_code(report, Code::UnresolvedRef) {
-                    divergent.push(format!("{kind}/{label}/{entry}: {report:#?}"));
-                }
+            if report.outcome() == Outcome::Rejected || has_code(&report, Code::UnresolvedRef) {
+                divergent.push(format!("{kind}/{label}: {report:#?}"));
             }
             if client_body(&client) != client_body(&inline_client) {
                 divergent.push(format!(
@@ -276,30 +267,25 @@ fn e004_a_component_ref_in_a_sub_file_does_not_read_the_roots_components() {
         let other = serde_json::json!({ "components": { scope.key: {
             "A": { "$ref": format!("#/components/{}/B", scope.key) },
         } } });
-        let (generated, checked) = run_placement(&[("openapi.json", root), ("other.json", other)]);
+        let (report, _) = run_placement(&[("openapi.json", root), ("other.json", other)]);
         let wanted = format!(
             "{kind} reference target `#/components/{}/B` was not found in the input bundle",
             scope.key
         );
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{kind}/{entry}: {report:#?}"
-            );
-            let found: Vec<_> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::UnresolvedRef && d.message == wanted)
-                .collect();
-            assert_eq!(found.len(), 1, "{kind}/{entry}: {report:#?}");
-            assert!(
-                found[0].remedy.as_deref().is_some_and(
-                    |remedy| remedy.contains("the root document declares `#/components/")
-                ),
-                "{kind}/{entry}: the remedy must point at the root's declaration: {report:#?}"
-            );
-        }
+        assert_eq!(report.outcome(), Outcome::Rejected, "{kind}: {report:#?}");
+        let found: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef && d.message == wanted)
+            .collect();
+        assert_eq!(found.len(), 1, "{kind}: {report:#?}");
+        assert!(
+            found[0]
+                .remedy
+                .as_deref()
+                .is_some_and(|remedy| remedy.contains("the root document declares `#/components/")),
+            "{kind}: the remedy must point at the root's declaration: {report:#?}"
+        );
     }
 }
 
@@ -314,7 +300,7 @@ fn e004_a_component_ref_in_a_sub_file_does_not_read_the_roots_components() {
 /// cannot be flattened, and the omit route ends in `E019` (pinned in `carve.rs`).
 #[test]
 fn a_self_recursive_sub_file_schema_is_boxed_rather_than_rejected() {
-    let (generated, checked, code) = split(
+    let (report, _, code) = split(
         "./lib.yaml#/components/schemas/Node",
         r##"
 components:
@@ -325,17 +311,12 @@ components:
         next: { $ref: '#/components/schemas/Node' }
 "##,
     );
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(report, Code::SchemaNestingTooDeep),
-            "{entry}: a self-reference is a cycle to box, not a chain to reject: {report:#?}"
-        );
-        assert!(
-            !has_code(report, Code::UnresolvedRef),
-            "{entry}: {report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::SchemaNestingTooDeep),
+        "a self-reference is a cycle to box, not a chain to reject: {report:#?}"
+    );
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
     // Boxed, and boxed against the type itself — not against a second copy of it under another
     // name, which is what an unmemoized re-entry would have produced had it terminated.
     assert!(code.contains("Option<Box<Node>>"), "{code}");
@@ -378,7 +359,7 @@ components:
 /// reservation rather than re-entering the one already on the stack.
 #[test]
 fn a_mutually_recursive_sub_file_pair_is_boxed_rather_than_rejected() {
-    let (generated, checked, code) = split(
+    let (report, _, code) = split(
         "./lib.yaml#/components/schemas/A",
         r##"
 components:
@@ -397,13 +378,11 @@ components:
         a: { $ref: '#/components/schemas/A' }
 "##,
     );
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(report, Code::SchemaNestingTooDeep),
-            "{entry}: {report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::SchemaNestingTooDeep),
+        "{report:#?}"
+    );
     assert_eq!(
         declared_types(&code, "A", |tail| tail.is_empty()).len(),
         1,
@@ -431,7 +410,7 @@ components:
 /// for a document that has no chain to flatten.
 #[test]
 fn a_sub_file_component_alias_cycle_is_reported_as_a_cycle_not_as_excessive_depth() {
-    let (generated, checked, _) = split(
+    let (report, _, _) = split(
         "./lib.yaml#/components/schemas/A",
         r##"
 components:
@@ -440,20 +419,18 @@ components:
     B: { $ref: '#/components/schemas/A' }
 "##,
     );
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == Code::UnresolvedRef && d.message.contains("cycle")),
-            "{entry}: the rejection must name the cycle: {report:#?}"
-        );
-        assert!(
-            !has_code(report, Code::SchemaNestingTooDeep),
-            "{entry}: a two-component loop is a cycle, not a deep chain: {report:#?}"
-        );
-    }
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef && d.message.contains("cycle")),
+        "the rejection must name the cycle: {report:#?}"
+    );
+    assert!(
+        !has_code(&report, Code::SchemaNestingTooDeep),
+        "a two-component loop is a cycle, not a deep chain: {report:#?}"
+    );
 }
 
 /// A sub-file component whose body is a nullable union keeps its nullability at every use, as the
@@ -484,10 +461,8 @@ components:
         - { type: 'null' }
         - { type: string }
 "##;
-    let (generated, checked, code) = split("./lib.yaml#/components/schemas/W", COMPONENTS);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    let (generated, _, code) = split("./lib.yaml#/components/schemas/W", COMPONENTS);
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
     for field in ["pub a:", "pub b:"] {
         assert_eq!(
             field_type(&code, field).as_deref(),
@@ -539,7 +514,7 @@ fn a_sub_file_component_default_is_documented_on_its_type() {
             .and_then(|at| at.checked_sub(1))
             .map(|above| lines[above].to_owned())
     };
-    let (generated, checked, code) = split(
+    let (generated, _, code) = split(
         "./lib.yaml#/components/schemas/Counted",
         r##"
 components:
@@ -547,9 +522,7 @@ components:
     Counted: { type: integer, default: 7 }
 "##,
     );
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
     assert_eq!(
         doc_above(&code, "pub type Counted = i64;").as_deref(),
         Some("///Default: `7`."),
@@ -590,7 +563,7 @@ components:
 /// differently from the object every other fixture here uses.
 #[test]
 fn a_non_object_sub_file_component_lowers_to_its_own_shared_type() {
-    let (generated, checked, code) = split(
+    let (report, _, code) = split(
         "./lib.yaml#/components/schemas/Wrapper",
         r##"
 components:
@@ -608,13 +581,8 @@ components:
         - type: integer
 "##,
     );
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(report, Code::UnresolvedRef),
-            "{entry}: {report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
     // Each reached the field as its own named type — not as an untyped value, and not dropped.
     assert!(code.contains("pub type Name = String;"), "{code}");
     assert!(code.contains("pub name: Name"), "{code}");
@@ -633,7 +601,7 @@ components:
 /// 40-line description reached 2^16 lowerings and produced no output at all).
 #[test]
 fn a_sub_file_component_used_twice_generates_one_type() {
-    let (generated, checked, code) = split(
+    let (generated, _, code) = split(
         "./lib.yaml#/components/schemas/Node",
         r##"
 components:
@@ -650,9 +618,7 @@ components:
       properties: { id: { type: string } }
 "##,
     );
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
     // One declaration, one type. `pub struct Inner` is a prefix of every hash-suffixed duplicate
     // (`pub struct InnerD5129632`), so this count catches them too.
     assert_eq!(
@@ -683,14 +649,9 @@ fn a_long_sub_file_ref_chain_still_exceeds_the_depth_cap() {
     lib.push_str(&format!(
         "    L{depth}:\n      type: object\n      properties: {{ id: {{ type: string }} }}\n"
     ));
-    let (generated, checked, _) = split("./lib.yaml#/components/schemas/L0", &lib);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            has_code(report, Code::SchemaNestingTooDeep),
-            "{entry}: {report:#?}"
-        );
-    }
+    let (report, _, _) = split("./lib.yaml#/components/schemas/L0", &lib);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::SchemaNestingTooDeep), "{report:#?}");
 }
 
 /// An `allOf` member that is a direct `$ref` back to the sub-file schema currently being lowered.
@@ -728,24 +689,21 @@ components:
     let body = |prefix: &str| TREE.replace("PREFIX", prefix);
 
     for (spelling, lib) in [("bare", body("")), ("explicit", body("./lib.yaml"))] {
-        let (generated, checked, code) = split("./lib.yaml#/components/schemas/Tree", &lib);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{spelling}/{entry}: a direct recursive `allOf` member must be rejected, not \
-                 silently retyped: {report:#?}"
-            );
-            assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == Code::AllOfIrreconcilable
-                        && d.message.contains("direct recursive")),
-                "{spelling}/{entry}: it is a direct recursive member, and must be named as one: \
-                 {report:#?}"
-            );
-        }
+        let (report, _, code) = split("./lib.yaml#/components/schemas/Tree", &lib);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{spelling}: a direct recursive `allOf` member must be rejected, not silently \
+             retyped: {report:#?}"
+        );
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::AllOfIrreconcilable
+                    && d.message.contains("direct recursive")),
+            "{spelling}: it is a direct recursive member, and must be named as one: {report:#?}"
+        );
         // The silent degradation itself, asserted directly: nothing may type this property as an
         // untyped value, whatever the verdict.
         assert!(
@@ -842,17 +800,15 @@ fn a_recursive_all_of_member_shadowed_by_the_root_reports_only_the_recursion() {
         &dir,
         "      allOf:\n        - { $ref: './lib.yaml#/components/schemas/W' }",
     );
-    let (generated, checked, _) = generate_and_check_dir(&dir, "openapi.yaml");
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert_eq!(codes(report), ["E013"], "{entry}: {report:#?}");
-        assert!(
-            messages_for(report, Code::AllOfIrreconcilable)
-                .iter()
-                .any(|message| message.contains("direct recursive")),
-            "{entry}: {report:#?}"
-        );
-    }
+    let (report, _, _) = generate_and_check_dir(&dir, "openapi.yaml");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(codes(&report), ["E013"], "{report:#?}");
+    assert!(
+        messages_for(&report, Code::AllOfIrreconcilable)
+            .iter()
+            .any(|message| message.contains("direct recursive")),
+        "{report:#?}"
+    );
 }
 
 /// The same member, where the root's `X` reaches `W` through a field instead (#999). `X` is
@@ -868,11 +824,9 @@ fn a_shadowed_all_of_member_reached_back_through_a_field_generates() {
         &dir,
         "      type: object\n      properties:\n        w: { $ref: './lib.yaml#/components/schemas/W' }",
     );
-    let (generated, checked, source) = generate_and_check_dir(&dir, "openapi.yaml");
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert_eq!(codes(report), ["W011"], "{entry}: {report:#?}");
-    }
+    let (report, _, source) = generate_and_check_dir(&dir, "openapi.yaml");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(codes(&report), ["W011"], "{report:#?}");
     assert!(source.contains("pub w: Option<Box<"), "{source}");
 }
 
@@ -907,19 +861,18 @@ components:
     Tree/properties/x: {{ type: string }}
 "##
         );
-        for (entry, report) in [("generate", &generate(&spec)), ("check", &check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{version}/{entry}: {report:#?}"
-            );
-            assert!(
-                messages_for(report, Code::InvalidInput)
-                    .iter()
-                    .any(|message| message.contains("\"Tree/properties/x\" does not match")),
-                "{version}/{entry}: the key itself must be what is rejected: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{version}: {report:#?}"
+        );
+        assert!(
+            messages_for(&report, Code::InvalidInput)
+                .iter()
+                .any(|message| message.contains("\"Tree/properties/x\" does not match")),
+            "{version}: the key itself must be what is rejected: {report:#?}"
+        );
     }
 }
 
@@ -959,22 +912,19 @@ components:
           allOf:
             - { $ref: './openapi.yaml#/components/schemas/Tree' }
 "##;
-    for (entry, report) in [("generate", &generate(root)), ("check", &check(root))] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == Code::AllOfIrreconcilable
-                    && d.message.contains("direct recursive")),
-            "{entry}: it is a direct recursive member, and must be named as one: {report:#?}"
-        );
-        assert!(
-            !has_code(report, Code::SchemaNestingTooDeep),
-            "{entry}: a member that names its own component is a cycle, not a deep chain: \
-             {report:#?}"
-        );
-    }
+    let report = generate(root);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::AllOfIrreconcilable && d.message.contains("direct recursive")),
+        "it is a direct recursive member, and must be named as one: {report:#?}"
+    );
+    assert!(
+        !has_code(&report, Code::SchemaNestingTooDeep),
+        "a member that names its own component is a cycle, not a deep chain: {report:#?}"
+    );
 }
 
 /// A resolved target is named for its final pointer token, and that token is RFC 6901-unescaped
@@ -1039,7 +989,7 @@ x-weird:
 /// `serde_json::Value`, so the operation's whole response body was untyped — `clean`.
 #[test]
 fn a_sub_file_component_that_is_an_all_of_of_itself_is_rejected() {
-    let (generated, checked, code) = split(
+    let (report, _, code) = split(
         "./lib.yaml#/components/schemas/Loop",
         r##"
 components:
@@ -1049,13 +999,8 @@ components:
         - { $ref: '#/components/schemas/Loop' }
 "##,
     );
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            has_code(report, Code::AllOfIrreconcilable),
-            "{entry}: {report:#?}"
-        );
-    }
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
     assert!(!code.contains("= serde_json::Value;"), "{code}");
 }
 
@@ -1192,10 +1137,8 @@ fn a_deep_sub_file_reuse_graph_generates_one_type_per_declaration() {
         "    L{DEPTH}:\n      type: object\n      properties: {{ id: {{ type: string }} }}\n"
     ));
 
-    let (generated, checked, code) = split("./lib.yaml#/components/schemas/L0", &lib);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    let (generated, _, code) = split("./lib.yaml#/components/schemas/L0", &lib);
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
     // One declaration, one type — at every level, not merely at the first. Without the bound this
     // is 2^(DEPTH+1) - 1. Counted on `L<digits>` exactly: a bare `pub struct L` prefix also matches
     // the embedded runtime's own `LinkPaginator`, and a bound that is off by a constant is not one.
@@ -1244,10 +1187,8 @@ components:
       required: [id]
       properties: { id: { type: string } }
 "##;
-    let (generated, checked, code) = split("./lib.yaml#/components/schemas/Node", lib);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    let (generated, _, code) = split("./lib.yaml#/components/schemas/Node", lib);
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
     assert_eq!(declared_types(&code, "Inner", |_| true).len(), 1, "{code}");
     assert!(code.contains("pub first: Inner"), "{code}");
     assert!(code.contains("pub second: Inner"), "{code}");

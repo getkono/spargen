@@ -119,40 +119,35 @@ components:
 
 #[test]
 fn a_default_an_intersection_narrows_away_is_reported_not_applied() {
-    for (entry, report) in [
-        ("generate", generate(NARROWED_DEFAULT_SPEC)),
-        ("check", check(NARROWED_DEFAULT_SPEC)),
-    ] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let mut pointers: Vec<&str> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
-            .map(|d| d.pointer.as_str())
-            .collect();
-        pointers.sort_unstable();
-        pointers.dedup();
-        // `bad` and `fraction` lose their defaults; `valid` and `ratio` keep theirs, re-typed. The
-        // nested `bad` is narrowed by the meet of two object-typed properties, not by flattening.
-        assert_eq!(
-            pointers,
-            [
-                "/components/schemas/Base/properties/bad/default",
-                "/components/schemas/Base/properties/fraction/default",
-                "/components/schemas/Nested/properties/inner/properties/bad/default",
-            ],
-            "{entry}: {report:#?}"
+    let (report, code) = generate_with_code(NARROWED_DEFAULT_SPEC);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let mut pointers: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    pointers.sort_unstable();
+    pointers.dedup();
+    // `bad` and `fraction` lose their defaults; `valid` and `ratio` keep theirs, re-typed. The
+    // nested `bad` is narrowed by the meet of two object-typed properties, not by flattening.
+    assert_eq!(
+        pointers,
+        [
+            "/components/schemas/Base/properties/bad/default",
+            "/components/schemas/Base/properties/fraction/default",
+            "/components/schemas/Nested/properties/inner/properties/bad/default",
+        ],
+        "{report:#?}"
+    );
+    let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+    for narrowed in ["/components/schemas/Both", "/components/schemas/Sibling"] {
+        assert!(
+            messages.iter().any(|message| message.contains(narrowed)),
+            "`{narrowed}` drops `bad`'s default and must say so: {messages:#?}"
         );
-        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
-        for narrowed in ["/components/schemas/Both", "/components/schemas/Sibling"] {
-            assert!(
-                messages.iter().any(|message| message.contains(narrowed)),
-                "{entry}: `{narrowed}` drops `bad`'s default and must say so: {messages:#?}"
-            );
-        }
     }
 
-    let (report, code) = generate_with_code(NARROWED_DEFAULT_SPEC);
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     // The string literal survives only where the field is still a string: `Base` itself.
     assert_eq!(
@@ -193,37 +188,32 @@ components:
 
 #[test]
 fn a_default_an_uninhabited_meet_drops_is_reported_not_applied() {
-    for (entry, report) in [
-        ("generate", generate(UNINHABITED_DEFAULT_SPEC)),
-        ("check", check(UNINHABITED_DEFAULT_SPEC)),
-    ] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let mut pointers: Vec<&str> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
-            .map(|d| d.pointer.as_str())
-            .collect();
-        pointers.sort_unstable();
-        pointers.dedup();
-        assert_eq!(
-            pointers,
-            [
-                "/components/schemas/Base/properties/a/default",
-                "/components/schemas/Pet/allOf/0/properties/a/default",
-            ],
-            "{entry}: {report:#?}"
+    let (report, code) = generate_with_code(UNINHABITED_DEFAULT_SPEC);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let mut pointers: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    pointers.sort_unstable();
+    pointers.dedup();
+    assert_eq!(
+        pointers,
+        [
+            "/components/schemas/Base/properties/a/default",
+            "/components/schemas/Pet/allOf/0/properties/a/default",
+        ],
+        "{report:#?}"
+    );
+    let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+    for dropping in ["/components/schemas/Pet", "/components/schemas/Sibling"] {
+        assert!(
+            messages.iter().any(|message| message.contains(dropping)),
+            "`{dropping}` drops `a`'s default and must say so: {messages:#?}"
         );
-        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
-        for dropping in ["/components/schemas/Pet", "/components/schemas/Sibling"] {
-            assert!(
-                messages.iter().any(|message| message.contains(dropping)),
-                "{entry}: `{dropping}` drops `a`'s default and must say so: {messages:#?}"
-            );
-        }
     }
 
-    let (report, code) = generate_with_code(UNINHABITED_DEFAULT_SPEC);
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     for name in ["Pet", "Sibling"] {
         let start = code
@@ -291,28 +281,27 @@ fn an_emptied_ref_sibling_meet_reports_the_default_it_drops() {
             ),
         ] {
             let spec = document(ty, &p);
-            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-                assert_eq!(
-                    report.outcome() == Outcome::Rejected,
-                    !null_only,
-                    "{ty} {what} {entry}: {report:#?}"
-                );
-                let mut seen: Vec<(&str, &str)> = report
-                    .diagnostics()
-                    .iter()
-                    .map(|d| (d.code.as_str(), d.pointer.as_str()))
-                    .collect();
-                seen.sort_unstable();
-                let mut expected = vec![(Code::SchemaDefaultNotApplied.as_str(), dropped)];
-                if !null_only {
-                    expected.push((
-                        Code::AllOfIrreconcilable.as_str(),
-                        "/components/schemas/Holder/properties/p",
-                    ));
-                }
-                expected.sort_unstable();
-                assert_eq!(seen, expected, "{ty} {what} {entry}: {report:#?}");
+            let report = generate(&spec);
+            assert_eq!(
+                report.outcome() == Outcome::Rejected,
+                !null_only,
+                "{ty} {what}: {report:#?}"
+            );
+            let mut seen: Vec<(&str, &str)> = report
+                .diagnostics()
+                .iter()
+                .map(|d| (d.code.as_str(), d.pointer.as_str()))
+                .collect();
+            seen.sort_unstable();
+            let mut expected = vec![(Code::SchemaDefaultNotApplied.as_str(), dropped)];
+            if !null_only {
+                expected.push((
+                    Code::AllOfIrreconcilable.as_str(),
+                    "/components/schemas/Holder/properties/p",
+                ));
             }
+            expected.sort_unstable();
+            assert_eq!(seen, expected, "{ty} {what}: {report:#?}");
         }
     }
 }
@@ -368,39 +357,34 @@ components:
 
 #[test]
 fn an_intersection_merges_a_default_either_side_declares() {
-    for (entry, report) in [
-        ("generate", generate(MERGED_DEFAULT_SPEC)),
-        ("check", check(MERGED_DEFAULT_SPEC)),
+    let (report, code) = generate_with_code(MERGED_DEFAULT_SPEC);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let mut pointers: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    pointers.sort_unstable();
+    pointers.dedup();
+    // Only the conflicts report, and in every order at the default they do not keep: `hello`
+    // is kept over `world`, so `Other`'s is the one reported.
+    assert_eq!(
+        pointers,
+        ["/components/schemas/Other/properties/p/default"],
+        "{report:#?}"
+    );
+    let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+    for kept in [
+        "/components/schemas/Base/properties/p/default",
+        "/components/schemas/ClashSibling/properties/p/default",
     ] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let mut pointers: Vec<&str> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
-            .map(|d| d.pointer.as_str())
-            .collect();
-        pointers.sort_unstable();
-        pointers.dedup();
-        // Only the conflicts report, and in every order at the default they do not keep: `hello`
-        // is kept over `world`, so `Other`'s is the one reported.
-        assert_eq!(
-            pointers,
-            ["/components/schemas/Other/properties/p/default"],
-            "{entry}: {report:#?}"
+        assert!(
+            messages.iter().any(|message| message.contains(kept)),
+            "the report names the default `{kept}` kept instead: {messages:#?}"
         );
-        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
-        for kept in [
-            "/components/schemas/Base/properties/p/default",
-            "/components/schemas/ClashSibling/properties/p/default",
-        ] {
-            assert!(
-                messages.iter().any(|message| message.contains(kept)),
-                "{entry}: the report names the default `{kept}` kept instead: {messages:#?}"
-            );
-        }
     }
 
-    let (report, code) = generate_with_code(MERGED_DEFAULT_SPEC);
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     for name in [
         "Base",
@@ -472,38 +456,33 @@ components:
 
 #[test]
 fn a_conflicting_intersection_default_keeps_the_one_its_side_can_apply() {
-    for (entry, report) in [
-        ("generate", generate(APPLICABLE_DEFAULT_SPEC)),
-        ("check", check(APPLICABLE_DEFAULT_SPEC)),
-    ] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let mut pointers: Vec<&str> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
-            .map(|d| d.pointer.as_str())
-            .collect();
-        pointers.sort_unstable();
-        pointers.dedup();
-        // In both orders the unapplied `aaa` is the dropped one, never `PlainP`'s `zzz`.
-        assert_eq!(
-            pointers,
-            [
-                "/components/schemas/NullP/properties/p/default",
-                "/components/schemas/ReqP/properties/p/default",
-            ],
-            "{entry}: {report:#?}"
-        );
-        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
-        assert!(
-            messages
-                .iter()
-                .all(|message| message.contains("/components/schemas/PlainP/properties/p/default")),
-            "{entry}: every report names `PlainP`'s default as the one kept: {messages:#?}"
-        );
-    }
-
     let (report, code) = generate_with_code(APPLICABLE_DEFAULT_SPEC);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let mut pointers: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    pointers.sort_unstable();
+    pointers.dedup();
+    // In both orders the unapplied `aaa` is the dropped one, never `PlainP`'s `zzz`.
+    assert_eq!(
+        pointers,
+        [
+            "/components/schemas/NullP/properties/p/default",
+            "/components/schemas/ReqP/properties/p/default",
+        ],
+        "{report:#?}"
+    );
+    let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.contains("/components/schemas/PlainP/properties/p/default")),
+        "every report names `PlainP`'s default as the one kept: {messages:#?}"
+    );
+
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let body = |name: &str| {
         let start = code
@@ -612,25 +591,24 @@ fn a_dropped_default_several_members_write_alike_is_reported_at_each_pointer() {
     for third in ["{ type: integer }", "{ type: string, default: x }"] {
         for order in [[0, 1, 2], [1, 2, 0], [2, 0, 1]] {
             let spec = spec(third, order);
-            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-                assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-                let mut pointers: Vec<&str> = report
-                    .diagnostics()
-                    .iter()
-                    .filter(|d| d.code == Code::SchemaDefaultNotApplied)
-                    .map(|d| d.pointer.as_str())
-                    .collect();
-                pointers.sort_unstable();
-                pointers.dedup();
-                assert_eq!(
-                    pointers,
-                    [
-                        "/components/schemas/M0/properties/a/default",
-                        "/components/schemas/M1/properties/a/default",
-                    ],
-                    "{entry}, {third}, order {order:?}: {report:#?}\n{spec}"
-                );
-            }
+            let report = generate(&spec);
+            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            let mut pointers: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+                .map(|d| d.pointer.as_str())
+                .collect();
+            pointers.sort_unstable();
+            pointers.dedup();
+            assert_eq!(
+                pointers,
+                [
+                    "/components/schemas/M0/properties/a/default",
+                    "/components/schemas/M1/properties/a/default",
+                ],
+                "{third}, order {order:?}: {report:#?}\n{spec}"
+            );
         }
     }
 }
@@ -681,34 +659,32 @@ fn a_default_equal_to_the_one_the_meet_keeps_is_never_reported_in_any_member_ord
     ];
     for order in orders {
         let spec = spec(order);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-            let mut pointers: Vec<&str> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::SchemaDefaultNotApplied)
-                .map(|d| d.pointer.as_str())
-                .collect();
-            pointers.sort_unstable();
-            assert_eq!(
-                pointers,
-                [
-                    "/components/schemas/M0/properties/a/default",
-                    "/components/schemas/M1/properties/c/default",
-                ],
-                "{entry}, order {order:?}: {report:#?}\n{spec}"
+        let report = generate(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let mut pointers: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        pointers.sort_unstable();
+        assert_eq!(
+            pointers,
+            [
+                "/components/schemas/M0/properties/a/default",
+                "/components/schemas/M1/properties/c/default",
+            ],
+            "order {order:?}: {report:#?}\n{spec}"
+        );
+        if let Some(superseded) = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.pointer.as_str() == "/components/schemas/M0/properties/a/default")
+        {
+            assert!(
+                superseded.message.contains("M2/properties/a/default"),
+                "order {order:?}: the kept `y` is the applicable one M2 writes: {superseded:#?}"
             );
-            if let Some(superseded) = report
-                .diagnostics()
-                .iter()
-                .find(|d| d.pointer.as_str() == "/components/schemas/M0/properties/a/default")
-            {
-                assert!(
-                    superseded.message.contains("M2/properties/a/default"),
-                    "{entry}, order {order:?}: the kept `y` is the applicable one M2 writes: \
-                     {superseded:#?}"
-                );
-            }
         }
     }
 }
@@ -895,19 +871,17 @@ components:
         body.contains("Default (not applied): `18446744073709551615`."),
         "{body}"
     );
-    for report in [report, check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::SchemaDefaultNotApplied)
-                .map(|d| d.pointer.to_string())
-                .collect::<Vec<_>>(),
-            ["/components/schemas/Thing/properties/wide"],
-            "{report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.to_string())
+            .collect::<Vec<_>>(),
+        ["/components/schemas/Thing/properties/wide"],
+        "{report:#?}"
+    );
 }
 
 /// Issue #702: JSON Schema compares numbers by value, so a `default` written `3.0` is the integer 3.
@@ -937,31 +911,26 @@ components:
 
 #[test]
 fn an_integral_float_default_is_the_integer_it_equals() {
-    for (entry, report) in [
-        ("generate", generate(INTEGRAL_FLOAT_DEFAULT_SPEC)),
-        ("check", check(INTEGRAL_FLOAT_DEFAULT_SPEC)),
-    ] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let mut pointers: Vec<&str> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
-            .map(|d| d.pointer.as_str())
-            .collect();
-        pointers.sort_unstable();
-        assert_eq!(
-            pointers,
-            [
-                "/components/schemas/Page/properties/half",
-                "/components/schemas/Page/properties/huge",
-                "/components/schemas/Page/properties/imprecise",
-                "/components/schemas/Page/properties/wide",
-            ],
-            "{entry}: only the fractional, imprecise and out-of-width defaults are dropped: {report:#?}"
-        );
-    }
-
     let (report, code) = generate_with_code(INTEGRAL_FLOAT_DEFAULT_SPEC);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let mut pointers: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    pointers.sort_unstable();
+    assert_eq!(
+        pointers,
+        [
+            "/components/schemas/Page/properties/half",
+            "/components/schemas/Page/properties/huge",
+            "/components/schemas/Page/properties/imprecise",
+            "/components/schemas/Page/properties/wide",
+        ],
+        "only the fractional, imprecise and out-of-width defaults are dropped: {report:#?}"
+    );
+
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     for applied in [
         "Default: `3`.",

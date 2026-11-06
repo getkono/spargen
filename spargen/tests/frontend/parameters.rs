@@ -98,17 +98,16 @@ paths:
       responses:
         '200': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            messages_for(&report, Code::InvalidInput),
-            [
-                "an operation may declare at most one `in: querystring` parameter and may not \
-                 combine it with `in: query` parameters"
-            ],
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::InvalidInput),
+        [
+            "an operation may declare at most one `in: querystring` parameter and may not \
+             combine it with `in: query` parameters"
+        ],
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -198,14 +197,13 @@ fn e011_a_parameter_list_naming_one_pair_twice() {
              get:\n{operation}      \
              responses: {{ '204': {{ description: ok }} }}\n"
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{level}: {report:#?}");
-            assert_eq!(
-                messages_for(&report, Code::InvalidInput),
-                [message],
-                "{level}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{level}: {report:#?}");
+        assert_eq!(
+            messages_for(&report, Code::InvalidInput),
+            [message],
+            "{level}: {report:#?}"
+        );
     }
 }
 
@@ -272,17 +270,16 @@ ADDITIONAL      responses:
     for style in ["deepObject", "form"] {
         for additional in ["", "            additionalProperties: true\n"] {
             let spec = spec(style, additional);
-            for report in [generate(&spec), check(&spec)] {
-                assert_eq!(report.outcome(), Outcome::Rejected, "{style}: {report:#?}");
-                let messages = messages_for(&report, Code::UnsupportedParameterStyle);
-                assert_eq!(messages.len(), 1, "{style}: {report:#?}");
-                assert!(
-                    messages[0].contains("`a`")
-                        && messages[0].contains("no schema constrains its value")
-                        && !messages[0].contains("nested arrays or objects"),
-                    "{style}: {messages:?}"
-                );
-            }
+            let report = generate(&spec);
+            assert_eq!(report.outcome(), Outcome::Rejected, "{style}: {report:#?}");
+            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+            assert_eq!(messages.len(), 1, "{style}: {report:#?}");
+            assert!(
+                messages[0].contains("`a`")
+                    && messages[0].contains("no schema constrains its value")
+                    && !messages[0].contains("nested arrays or objects"),
+                "{style}: {messages:?}"
+            );
         }
         let spec = spec(
             style,
@@ -339,21 +336,20 @@ paths:
         for union in unions {
             for additional in ["", ", additionalProperties: true"] {
                 let spec = union_spec(style, union, additional);
-                for report in [generate(&spec), check(&spec)] {
-                    assert_eq!(
-                        report.outcome(),
-                        Outcome::Rejected,
-                        "{style} {union}: {report:#?}"
-                    );
-                    let messages = messages_for(&report, Code::UnsupportedParameterStyle);
-                    assert_eq!(messages.len(), 1, "{style} {union}: {report:#?}");
-                    assert!(
-                        messages[0].contains("`a`")
-                            && messages[0].contains("no schema constrains its value")
-                            && !messages[0].contains("nested arrays or objects"),
-                        "{style} {union}: {messages:?}"
-                    );
-                }
+                let report = generate(&spec);
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{style} {union}: {report:#?}"
+                );
+                let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+                assert_eq!(messages.len(), 1, "{style} {union}: {report:#?}");
+                assert!(
+                    messages[0].contains("`a`")
+                        && messages[0].contains("no schema constrains its value")
+                        && !messages[0].contains("nested arrays or objects"),
+                    "{style} {union}: {messages:?}"
+                );
             }
             let spec = union_spec(style, union, ", additionalProperties: { type: integer }");
             assert_union_control(style, &spec);
@@ -400,21 +396,20 @@ paths:
     ];
     for (style, schema, named) in cases {
         let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{style} {schema}: {report:#?}"
-            );
-            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
-            assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
-            assert!(
-                messages[0].contains(named)
-                    && messages[0].contains("uninhabited")
-                    && !messages[0].contains("nested arrays or objects"),
-                "{style} {schema}: {messages:?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{style} {schema}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
+        assert!(
+            messages[0].contains(named)
+                && messages[0].contains("uninhabited")
+                && !messages[0].contains("nested arrays or objects"),
+            "{style} {schema}: {messages:?}"
+        );
     }
     // A union with an uninhabited member still admits its other members' values, so it is not
     // uninhabited; only the member is, and the message names that member rather than the union.
@@ -428,18 +423,17 @@ paths:
     ];
     for (style, schema, named) in partly {
         let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
-            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
-            assert_eq!(messages.len(), 1, "{schema}: {report:#?}");
-            assert!(
-                messages[0].contains(&format!(
-                    "{named} has a `oneOf`/`anyOf` member that is uninhabited"
-                )) && !messages[0].contains(&format!("{named} is uninhabited"))
-                    && !messages[0].contains("nested arrays or objects"),
-                "{schema}: {messages:?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{schema}: {report:#?}");
+        assert!(
+            messages[0].contains(&format!(
+                "{named} has a `oneOf`/`anyOf` member that is uninhabited"
+            )) && !messages[0].contains(&format!("{named} is uninhabited"))
+                && !messages[0].contains("nested arrays or objects"),
+            "{schema}: {messages:?}"
+        );
     }
     // One `E010` per parameter, for the first cause in a fixed order: an uninhabited part, then
     // an unconstrained property, then nesting. So an uninhabited property is reported while a
@@ -448,28 +442,25 @@ paths:
         "SCHEMA",
         "{ type: object, properties: { a: false, b: { type: object } } }",
     );
-    for report in [generate(&both), check(&both)] {
-        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
-        assert_eq!(messages.len(), 1, "{report:#?}");
-        assert!(
-            messages[0].contains("`f.a` is uninhabited")
-                && !messages[0].contains("nested arrays or objects"),
-            "{messages:?}"
-        );
-    }
+    let report = generate(&both);
+    let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("`f.a` is uninhabited")
+            && !messages[0].contains("nested arrays or objects"),
+        "{messages:?}"
+    );
     let nested = TEMPLATE.replace("STYLE", "deepObject").replace(
         "SCHEMA",
         "{ type: object, properties: { a: { type: object, properties: { b: false } } } }",
     );
-    for report in [generate(&nested), check(&nested)] {
-        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
-        assert_eq!(messages.len(), 1, "{report:#?}");
-        assert!(
-            messages[0].contains("nested arrays or objects")
-                && !messages[0].contains("uninhabited"),
-            "{messages:?}"
-        );
-    }
+    let report = generate(&nested);
+    let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("nested arrays or objects") && !messages[0].contains("uninhabited"),
+        "{messages:?}"
+    );
 }
 
 /// A `oneOf`/`anyOf` parameter schema serializes as whichever member the value is, so an
@@ -550,19 +541,18 @@ paths:
     ];
     for (style, schema, control, named) in cases {
         let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{style} {schema}: {report:#?}"
-            );
-            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
-            assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
-            assert!(
-                messages[0].contains(named) && !messages[0].contains("nested arrays or objects"),
-                "{style} {schema}: {messages:?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{style} {schema}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
+        assert!(
+            messages[0].contains(named) && !messages[0].contains("nested arrays or objects"),
+            "{style} {schema}: {messages:?}"
+        );
         // The control: the same union with the part inhabited loses this fault.
         let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", control);
         assert_union_control(style, &spec);
@@ -573,18 +563,17 @@ paths:
 /// the fault the fixture is about removed, `form` generates, and `deepObject` is left with only
 /// the scalar member it cannot serialize (#696), reported as that and nothing else.
 fn assert_union_control(style: &str, spec: &str) {
-    for report in [generate(spec), check(spec)] {
-        if style == "deepObject" {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{spec}: {report:#?}");
-            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
-            assert_eq!(messages.len(), 1, "{spec}: {report:#?}");
-            assert!(
-                messages[0].contains("`style: deepObject` serializes only objects"),
-                "{spec}: {messages:?}"
-            );
-        } else {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{spec}: {report:#?}");
-        }
+    let report = generate(spec);
+    if style == "deepObject" {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{spec}: {report:#?}");
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{spec}: {report:#?}");
+        assert!(
+            messages[0].contains("`style: deepObject` serializes only objects"),
+            "{spec}: {messages:?}"
+        );
+    } else {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{spec}: {report:#?}");
     }
 }
 
@@ -619,25 +608,24 @@ components:
             let mut named = Vec::new();
             for schema in [s, wrapped.as_str()] {
                 let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
-                for report in [generate(&spec), check(&spec)] {
-                    assert_eq!(
-                        report.outcome(),
-                        Outcome::Rejected,
-                        "{style} {schema}: {report:#?}"
-                    );
-                    let messages = messages_for(&report, Code::UnsupportedParameterStyle);
-                    assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
-                    assert!(
-                        messages[0].contains("`f.a` is uninhabited")
-                            && !messages[0].contains("nested arrays or objects"),
-                        "{style} {schema}: {messages:?}"
-                    );
-                    named.push(messages[0].to_owned());
-                }
+                let report = generate(&spec);
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{style} {schema}: {report:#?}"
+                );
+                let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+                assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
+                assert!(
+                    messages[0].contains("`f.a` is uninhabited")
+                        && !messages[0].contains("nested arrays or objects"),
+                    "{style} {schema}: {messages:?}"
+                );
+                named.push(messages[0].to_owned());
             }
-            // The bare and the wrapped schema, each through both entry points, give one message:
-            // the union adds nothing to what is named.
-            assert_eq!(named.len(), 4, "{style} {s}: {named:?}");
+            // The bare and the wrapped schema give one message (and `check` the same, which the
+            // harness holds): the union adds nothing to what is named.
+            assert_eq!(named.len(), 2, "{style} {s}: {named:?}");
             assert!(
                 named.iter().all(|message| *message == named[0]),
                 "{style} {s}: {named:#?}"
@@ -809,20 +797,19 @@ paths:
         } else {
             "only arrays and objects"
         };
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{style} {schema}: {report:#?}"
-            );
-            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
-            assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
-            assert!(
-                messages[0].contains(&format!("`style: {style}` serializes {shape}"))
-                    && messages[0].contains("`f`"),
-                "{style} {schema}: {messages:?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{style} {schema}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
+        assert!(
+            messages[0].contains(&format!("`style: {style}` serializes {shape}"))
+                && messages[0].contains("`f`"),
+            "{style} {schema}: {messages:?}"
+        );
     }
     let accepted = [
         ("spaceDelimited", true, array.to_owned()),
@@ -851,17 +838,16 @@ paths:
     ];
     for (style, required, schema) in accepted {
         let spec = spec(style, required, &schema);
-        for report in [generate(&spec), check(&spec)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{style} {schema}: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::UnsupportedParameterStyle),
-                "{style} {schema}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{style} {schema}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::UnsupportedParameterStyle),
+            "{style} {schema}: {report:#?}"
+        );
     }
     // A `null` member reached through a `$ref` is not folded into the root the way the inline
     // `{ type: 'null' }` control above is: it stays a union member, whose `null` is the whole
@@ -885,34 +871,33 @@ components:
     Arr: { type: array, items: { type: string } }
     Nil: { type: 'null' }
 "##;
-    for report in [generate(member_null), check(member_null)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
-        assert_eq!(messages.len(), 1, "{report:#?}");
-        // The parameter is optional, so the message and remedy must name the union's `null`
-        // member as the cause, not only a scalar or a required parameter's root `null`.
-        assert!(
-            messages[0].contains("`style: spaceDelimited` serializes only arrays and objects")
-                && messages[0].contains("`f`")
-                && messages[0].contains(
-                    "a `oneOf`/`anyOf` member that is `null`, which is sent even on an optional \
+    let report = generate(member_null);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    // The parameter is optional, so the message and remedy must name the union's `null`
+    // member as the cause, not only a scalar or a required parameter's root `null`.
+    assert!(
+        messages[0].contains("`style: spaceDelimited` serializes only arrays and objects")
+            && messages[0].contains("`f`")
+            && messages[0].contains(
+                "a `oneOf`/`anyOf` member that is `null`, which is sent even on an optional \
                      parameter"
-                ),
-            "{messages:?}"
-        );
-        let remedies: Vec<_> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::UnsupportedParameterStyle)
-            .filter_map(|d| d.remedy.as_deref())
-            .collect();
-        assert!(
-            remedies.len() == 1
-                && remedies[0].contains("with no `null` `oneOf`/`anyOf` member")
-                && !remedies[0].contains("nullable only if the parameter is optional"),
-            "{remedies:?}"
-        );
-    }
+            ),
+        "{messages:?}"
+    );
+    let remedies: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::UnsupportedParameterStyle)
+        .filter_map(|d| d.remedy.as_deref())
+        .collect();
+    assert!(
+        remedies.len() == 1
+            && remedies[0].contains("with no `null` `oneOf`/`anyOf` member")
+            && !remedies[0].contains("nullable only if the parameter is optional"),
+        "{remedies:?}"
+    );
 }
 
 #[test]
@@ -1209,21 +1194,20 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedParameterStyle
-                    && d.message
-                        .contains("querystring media type `image/png` is not supported")
-            }),
-            "{report:#?}"
-        );
-        assert!(
-            !has_code(&report, Code::UnsupportedMediaType),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::UnsupportedParameterStyle
+                && d.message
+                    .contains("querystring media type `image/png` is not supported")
+        }),
+        "{report:#?}"
+    );
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
 
     let spec = r##"
 openapi: 3.1.0
@@ -1240,19 +1224,18 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedMediaType
-                    && d.message.contains(
-                        "`content` parameter media type `image/png` has no single-token \
-                         serialization",
-                    )
-            }),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::UnsupportedMediaType
+                && d.message.contains(
+                    "`content` parameter media type `image/png` has no single-token \
+                     serialization",
+                )
+        }),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -1290,16 +1273,15 @@ paths:
         "204": { description: No Content }
 "##;
     for spec in [content_parameter, querystring_parameter] {
-        for report in [generate(spec), check(spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-            assert!(
-                report.diagnostics().iter().any(|diagnostic| {
-                    diagnostic.code == Code::UnsupportedMediaType
-                        && diagnostic.message == "media type `text/plain/extra` is not supported"
-                }),
-                "{report:#?}"
-            );
-        }
+        let report = generate(spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == Code::UnsupportedMediaType
+                    && diagnostic.message == "media type `text/plain/extra` is not supported"
+            }),
+            "{report:#?}"
+        );
     }
 }
 
@@ -1369,21 +1351,20 @@ paths:
         "204": {{ description: No Content }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{location}: {report:#?}"
-            );
-            assert_eq!(
-                messages_for(&report, Code::UnsupportedParameterStyle),
-                [format!(
-                    "`content` parameter `{name}` has no schema for its `{media}` entry, so the \
-                     client has no type to serialize it from"
-                )],
-                "{location}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{location}: {report:#?}"
+        );
+        assert_eq!(
+            messages_for(&report, Code::UnsupportedParameterStyle),
+            [format!(
+                "`content` parameter `{name}` has no schema for its `{media}` entry, so the \
+                 client has no type to serialize it from"
+            )],
+            "{location}: {report:#?}"
+        );
     }
 }
 
@@ -1439,11 +1420,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(report.diagnostics().is_empty(), "no warning: {report:#?}");
-    }
-    let (_, code) = generate_with_code(spec);
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "no warning: {report:#?}");
     let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
     for (field, ty) in [
         ("jq", "Jq"),

@@ -185,17 +185,15 @@ fn w011_an_encoding_header_schema_ref_whose_target_pins_nothing_has_no_effect() 
     );
     let (report, code) = generate_with_code(&spec);
     assert!(!code.contains("X-Version"), "{code}");
-    for report in [report, check(&spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            messages_for(&report, Code::DeclarationHasNoEffect),
-            [
-                "`encoding.file.headers.X-Version` pins no value, so there is nothing for the \
-                 client to send"
-            ],
-            "{report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::DeclarationHasNoEffect),
+        [
+            "`encoding.file.headers.X-Version` pins no value, so there is nothing for the \
+             client to send"
+        ],
+        "{report:#?}"
+    );
 }
 
 /// A reference in an encoding header's `schema` that resolves to nothing was reported only as
@@ -215,19 +213,18 @@ fn e004_an_unresolvable_encoding_header_schema_ref_does_not_also_warn() {
         ),
     ] {
         let spec = encoding_header_schema_document(schema, components);
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
-            let unresolved = messages_for(&report, Code::UnresolvedRef);
-            assert_eq!(unresolved.len(), 1, "{schema}: {report:#?}");
-            assert!(
-                unresolved[0].contains("`#/components/schemas/Missing`"),
-                "{schema}: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::DeclarationHasNoEffect),
-                "{schema}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+        let unresolved = messages_for(&report, Code::UnresolvedRef);
+        assert_eq!(unresolved.len(), 1, "{schema}: {report:#?}");
+        assert!(
+            unresolved[0].contains("`#/components/schemas/Missing`"),
+            "{schema}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{schema}: {report:#?}"
+        );
     }
 }
 
@@ -426,19 +423,18 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::UnsupportedMediaType);
-        assert_eq!(messages.len(), 2, "{report:#?}");
-        assert!(
-            messages.iter().any(|m| m.contains("Bad Name")),
-            "{messages:#?}"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("headers.X-Part")),
-            "{messages:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::UnsupportedMediaType);
+    assert_eq!(messages.len(), 2, "{report:#?}");
+    assert!(
+        messages.iter().any(|m| m.contains("Bad Name")),
+        "{messages:#?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.contains("headers.X-Part")),
+        "{messages:#?}"
+    );
 }
 
 /// A form-urlencoded field is one name/value pair with no headers of its own, so `headers` there
@@ -468,14 +464,12 @@ paths:
 "##;
     let (report, code) = generate_with_code(spec);
     assert!(!code.contains("X-Part-Kind"), "{code}");
-    for report in [report, check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            messages_for(&report, Code::DeclarationHasNoEffect),
-            ["`encoding.profile.headers` applies only to `multipart` content"],
-            "{report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::DeclarationHasNoEffect),
+        ["`encoding.profile.headers` applies only to `multipart` content"],
+        "{report:#?}"
+    );
 }
 
 /// A Header Object describes a header and carries no value; one whose schema pins none gives the
@@ -505,15 +499,13 @@ paths:
 "##;
     let (report, code) = generate_with_code(spec);
     assert!(!code.contains("X-Part-Kind"), "{code}");
-    for report in [report, check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            messages_for(&report, Code::DeclarationHasNoEffect),
-            [
-                "`encoding.profile.headers.X-Part-Kind` pins no value, so there is nothing for \
-                 the client to send"
-            ],
-            "{report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::DeclarationHasNoEffect),
+        [
+            "`encoding.profile.headers.X-Part-Kind` pins no value, so there is nothing for \
+             the client to send"
+        ],
+        "{report:#?}"
+    );
 }
