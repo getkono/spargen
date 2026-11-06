@@ -14,6 +14,7 @@ use crate::diag::Diagnostic;
 use super::diagnostic;
 use super::requirements::{Dependency, Placement, BLOCKING_GATE, WASM_ANCHOR};
 use super::target::{predicate_value, target_table_name, Subject, TableKey, TargetContext};
+use super::workspace::Lock;
 
 pub(super) struct DependencyCheck<'a> {
     pub(super) placement: Placement,
@@ -29,6 +30,20 @@ pub(super) struct DependencyCheck<'a> {
     /// Whether Cargo reads the underscore `default_features` spelling in the audited manifest
     /// ([`reads_underscore_default_features`]), decided once per manifest.
     pub(super) underscore_default_features: bool,
+    /// What a declaration's version is held to, decided once per manifest.
+    pub(super) versions: Versions<'a>,
+}
+
+/// What a declaration's version is held to: its requirement string, or the version the
+/// workspace's `Cargo.lock` resolves it to.
+#[derive(Clone, Copy)]
+pub(super) enum Versions<'a> {
+    /// The package can be published, so its users resolve its requirements against their own
+    /// lockfiles, and the requirement is what is checked.
+    Publishable,
+    /// The package sets `publish = false`. Where this lock locks the package, the version it
+    /// resolves each crate to is checked; otherwise the requirement is, saying why.
+    Unpublished(&'a Lock),
 }
 
 /// What the workspace lookup found, for the one diagnostic that has to explain itself.
@@ -365,15 +380,18 @@ fn check_declaration<'v>(
     }
 
     let version = declaration_version(workspace_declaration.unwrap_or(declaration));
+    // The workspace manifest an inherited requirement is declared in: only a resolved root
+    // reaches here with an entry.
+    let root = match (workspace_declaration, check.origin) {
+        (Some(_), WorkspaceOrigin::Resolved(root)) => Some(root),
+        _ => None,
+    };
     match version {
-        Some(requirement) if supported_requirement(requirement, dependency) => {}
-        Some(requirement) => diagnostics.push(diagnostic(check.audited, format!(
-            "`{}` version requirement `{requirement}` is outside the supported range >={}, <{}; use `{}` or a higher compatible caret requirement{location}",
-            dependency.name,
-            dependency.floor,
-            dependency.ceiling(),
-            dependency.floor
-        ))),
+        Some(requirement) => {
+            if let Some(message) = version_message(requirement, root, check, location) {
+                diagnostics.push(diagnostic(check.audited, message));
+            }
+        }
         None => diagnostics.push(diagnostic(check.audited, format!(
             "`{}` must declare a Cargo version requirement of `{}` or a higher compatible floor{location}",
             dependency.name, dependency.floor
@@ -444,6 +462,84 @@ fn check_declaration<'v>(
         )));
     }
     Some(features)
+}
+
+/// Why a publishable package's requirement is checked rather than its lockfile, closing every
+/// out-of-range requirement message for one.
+pub(super) const PUBLISHABLE: &str = "the package can be published, and its users resolve the \
+     requirement rather than this workspace's lockfile; with `publish = false` the version \
+     `Cargo.lock` resolves is checked instead";
+
+/// The diagnostic for a declaration whose version falls outside the supported range, or `None`
+/// when it is inside it. `root` is the workspace manifest an inherited `requirement` is declared
+/// in, which the message names as the entry to change.
+///
+/// For a `publish = false` package whose lockfile locks a version of the crate `requirement`
+/// matches, that locked version is what is held to the range, and `requirement` may be any
+/// requirement Cargo accepts. Otherwise `requirement` itself is, by [`supported_requirement`].
+/// Either way the message says which of the two it checked and why.
+fn version_message(
+    requirement: &str,
+    root: Option<&Utf8Path>,
+    check: &DependencyCheck<'_>,
+    location: &str,
+) -> Option<String> {
+    let dependency = check.dependency;
+    let name = dependency.name;
+    let floor = dependency.floor;
+    let range = format!(">={floor}, <{}", dependency.ceiling());
+    let entry = root.map_or_else(String::new, |root| {
+        format!(" in the `{name}` entry of `[workspace.dependencies]` in `{root}`")
+    });
+    let why = match check.versions {
+        Versions::Publishable => PUBLISHABLE.to_owned(),
+        Versions::Unpublished(Lock::Foreign(cache)) => {
+            format!(
+                "the package is built from Cargo's source cache `{cache}`, as a dependency of \
+                 another workspace whose `Cargo.lock` resolves it"
+            )
+        }
+        Versions::Unpublished(Lock::Absent(path)) => {
+            format!("no `Cargo.lock` exists at `{path}`")
+        }
+        Versions::Unpublished(Lock::Unusable { path, reason }) => {
+            format!("`{path}` could not be used: {reason}")
+        }
+        Versions::Unpublished(Lock::Locked { path, dependencies }) => {
+            let matching = VersionReq::parse(requirement)
+                .map(|parsed| {
+                    dependencies
+                        .iter()
+                        .filter(|(locked, version)| locked == name && parsed.matches(version))
+                        .map(|(_, version)| version)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !matching.is_empty() {
+                let supported = dependency.floor_version()..dependency.ceiling();
+                return matching
+                    .into_iter()
+                    .find(|version| !supported.contains(*version))
+                    .map(|version| {
+                        format!(
+                            "`{name}` is locked at `{version}` in `{path}`, outside the supported \
+                             range {range}; replace the requirement `{requirement}`{entry} with \
+                             `{floor}` or a higher compatible caret requirement{location}; the \
+                             locked version was checked, not the requirement, because the package \
+                             sets `publish = false` and `{path}` resolves its dependencies"
+                        )
+                    });
+            }
+            format!("`{path}` locks no `{name}` matching `{requirement}` for this package")
+        }
+    };
+    (!supported_requirement(requirement, dependency)).then(|| {
+        format!(
+            "`{name}` version requirement `{requirement}` is outside the supported range {range}; \
+             use `{floor}` or a higher compatible caret requirement{entry}{location}; the \
+             requirement was checked, not a lockfile, because {why}"
+        )
+    })
 }
 
 fn dotted_get<'a>(value: &'a toml::Value, dotted: &str, key: &str) -> Option<&'a toml::Value> {
