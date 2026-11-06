@@ -537,7 +537,7 @@ mod support {
         use bytes::Bytes;
         use reqwest::{Request, Response, Url};
         use serde::de::DeserializeOwned;
-        use super::{ClientCore, Error, ResponseValue};
+        use super::{ClientCore, Error, HttpBackend, ResponseValue};
         /// Build a request URL from the base URL, or an optional per-operation server override, and a
         /// pre-rendered path plus pre-encoded query fragments. An absolute override replaces the client's
         /// base URL; a relative one is joined onto it. Paths compile to static segment concatenation — no
@@ -669,7 +669,15 @@ mod support {
             core: &ClientCore,
             request: Request,
         ) -> Result<Response, Error<Infallible>> {
-            core.backend()
+            send_on(core.backend().as_ref(), request).await
+        }
+        /// [`send`] through the backend alone, for a caller that holds the backend rather than the whole
+        /// [`ClientCore`]: a streaming response's reconnect.
+        pub(crate) async fn send_on(
+            backend: &dyn HttpBackend,
+            request: Request,
+        ) -> Result<Response, Error<Infallible>> {
+            backend
                 .execute(request)
                 .await
                 .map_err(|error| Error::from_reqwest(error.into_source()))
@@ -773,6 +781,17 @@ mod support {
         /// parameter only threads the taxonomy through a transport failure while reading.
         pub(crate) async fn read_error_body<E>(
             core: &ClientCore,
+            response: Response,
+        ) -> Result<
+            (reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool),
+            Error<E>,
+        > {
+            read_error_body_capped(core.config().max_error_body, response).await
+        }
+        /// [`read_error_body`] under an explicit `max_error_body` cap, for a caller that holds the cap
+        /// rather than the whole [`ClientCore`].
+        async fn read_error_body_capped<E>(
+            max_error_body: usize,
             mut response: Response,
         ) -> Result<
             (reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool),
@@ -780,7 +799,7 @@ mod support {
         > {
             let status = response.status();
             let headers = std::mem::take(response.headers_mut());
-            let (body, truncated) = read_capped(core, response).await?;
+            let (body, truncated) = read_capped(max_error_body, response).await?;
             Ok((status, headers, body, truncated))
         }
         /// A status selector an operation documents a response under. Generated code passes these as
@@ -910,7 +929,25 @@ mod support {
             core: &ClientCore,
             response: Response,
         ) -> Error<E> {
-            classify_with(core, response, &[], |_| Err(String::new())).await
+            unexpected_status_capped(core.config().max_error_body, response).await
+        }
+        /// [`unexpected_status`] under an explicit `max_error_body` cap, for a caller that holds the cap
+        /// rather than the whole [`ClientCore`]: a streaming response's reconnect. With no selector
+        /// documented, [`classify_with`] would answer every status this way.
+        pub(crate) async fn unexpected_status_capped<E>(
+            max_error_body: usize,
+            response: Response,
+        ) -> Error<E> {
+            match read_error_body_capped(max_error_body, response).await {
+                Ok((status, headers, body, _truncated)) => {
+                    Error::UnexpectedStatus {
+                        status,
+                        headers,
+                        body,
+                    }
+                }
+                Err(error) => error,
+            }
         }
         /// Truncate a body to the retention cap, **copying** the retained prefix rather than slicing it.
         /// Returns the retained bytes and whether any were dropped.
@@ -937,10 +974,9 @@ mod support {
         /// which generated clients enable only for APIs with sequential responses.
         #[cfg(not(target_arch = "wasm32"))]
         async fn read_capped<E>(
-            core: &ClientCore,
+            cap: usize,
             mut response: Response,
         ) -> Result<(Bytes, bool), Error<E>> {
-            let cap = core.config().max_error_body;
             let mut buffered = bytes::BytesMut::with_capacity(cap.min(16 * 1024));
             while buffered.len() <= cap {
                 match response.chunk().await.map_err(Error::from_body_read)? {
@@ -954,10 +990,9 @@ mod support {
         /// whole and only *retention* can be bounded here, not peak memory.
         #[cfg(target_arch = "wasm32")]
         async fn read_capped<E>(
-            core: &ClientCore,
+            cap: usize,
             response: Response,
         ) -> Result<(Bytes, bool), Error<E>> {
-            let cap = core.config().max_error_body;
             let bytes = response.bytes().await.map_err(Error::from_body_read)?;
             Ok(cap_body(bytes, cap))
         }
@@ -3675,11 +3710,11 @@ mod support {
         use reqwest::header::HeaderMap;
         use reqwest::{Request, Response, StatusCode};
         use serde::de::DeserializeOwned;
-        use super::dispatch::cap_body;
+        use super::dispatch::{cap_body, send_on, unexpected_status_capped};
         use super::wasm::BoxFuture;
         use super::{
-            send, unexpected_status, ClientConfig, ClientCore, Error, MaybeSend,
-            MaybeSync, TransportError,
+            ClientConfig, ClientCore, Error, HttpBackend, MaybeSend, MaybeSync,
+            TransportError,
         };
         /// The failure yielded by a streaming response after its initial HTTP response was accepted.
         pub type StreamError = Error<Infallible>;
@@ -3787,8 +3822,11 @@ mod support {
             EndOfStream,
             Failure(StreamError),
         }
+        /// What a reconnect resends and through what: the client's transport alone, shared rather than
+        /// copied with the rest of its [`ClientCore`]. A reconnect's error body is capped at the stream's
+        /// own `max_error_body`, taken from the same client configuration.
         struct ReconnectContext {
-            core: ClientCore,
+            backend: Arc<dyn HttpBackend>,
             request: Request,
             policy: Option<Arc<dyn ReconnectPolicy>>,
             attempt: u32,
@@ -3824,7 +3862,7 @@ mod support {
             pub(crate) fn new_reconnectable(
                 response: Response,
                 framing: Framing,
-                core: ClientCore,
+                core: &ClientCore,
                 request: Option<Request>,
             ) -> Self {
                 let last_event_id = request
@@ -3842,7 +3880,7 @@ mod support {
                     last_event_id,
                     reconnect: request
                         .map(|request| ReconnectContext {
-                            core,
+                            backend: Arc::clone(core.backend()),
                             request,
                             policy: None,
                             attempt: 0,
@@ -4079,7 +4117,8 @@ mod support {
             }
             fn reconnect_future(&self) -> Option<ReconnectFuture> {
                 let reconnect = self.reconnect.as_ref()?;
-                let core = reconnect.core.clone();
+                let backend = Arc::clone(&reconnect.backend);
+                let max_error_body = self.max_error_body;
                 let mut request = reconnect.request.try_clone()?;
                 if let Some(id) = self.last_event_id.as_deref() {
                     match reqwest::header::HeaderValue::from_str(id) {
@@ -4093,11 +4132,11 @@ mod support {
                 }
                 Some(
                     Box::pin(async move {
-                        let response = send(&core, request).await?;
+                        let response = send_on(backend.as_ref(), request).await?;
                         if response.status().is_success() {
                             Ok(response)
                         } else {
-                            Err(unexpected_status(&core, response).await)
+                            Err(unexpected_status_capped(max_error_body, response).await)
                         }
                     }),
                 )
@@ -11032,7 +11071,7 @@ Response `409`: binary error*/
                 support::EventStream::new_reconnectable(
                     response,
                     support::Framing::Sse,
-                    self.core.clone(),
+                    &self.core,
                     reconnect_request,
                 ),
             )
@@ -11074,7 +11113,7 @@ Response `409`: binary error*/
                 support::EventStream::new_reconnectable(
                     response,
                     support::Framing::Ndjson,
-                    self.core.clone(),
+                    &self.core,
                     reconnect_request,
                 ),
             )
@@ -11117,7 +11156,7 @@ Response `409`: binary error*/
                 support::EventStream::new_reconnectable(
                     response,
                     support::Framing::JsonSequence,
-                    self.core.clone(),
+                    &self.core,
                     reconnect_request,
                 ),
             )

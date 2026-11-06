@@ -539,7 +539,8 @@ fn reconnectable_stream_over(
         .header(reqwest::header::COOKIE, "session=secret")
         .build()
         .unwrap();
-    let stream = EventStream::new_reconnectable(initial, Framing::SseJsonData, core, Some(request));
+    let stream =
+        EventStream::new_reconnectable(initial, Framing::SseJsonData, &core, Some(request));
     match stream.with_reconnect(policy) {
         Ok(stream) => stream,
         Err(error) => panic!("reconnect should be available: {error}"),
@@ -629,7 +630,7 @@ fn an_unsendable_sse_id_reconnects_without_last_event_id() {
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response("id: a\u{1}b\ndata: {\"seq\":1}\n\n"),
         Framing::SseJsonData,
-        core,
+        &core,
         Some(request),
     );
     let mut stream = match stream.with_reconnect(policy.clone()) {
@@ -673,7 +674,7 @@ fn an_empty_sse_id_reconnects_without_last_event_id() {
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response("id: evt-1\ndata: {\"seq\":1}\n\nid:\ndata: {\"seq\":2}\n\n"),
         Framing::SseJsonData,
-        core,
+        &core,
         Some(request),
     );
     let mut stream = match stream.with_reconnect(policy.clone()) {
@@ -723,6 +724,41 @@ fn declined_reconnect_failure_preserves_the_original_error_variant() {
             .collect::<Vec<_>>(),
         vec!["eof", "failure"]
     );
+}
+
+/// A reconnect holds the client's transport and limits, not its `ClientCore`: the core the stream
+/// was built from is dropped before the reconnect, which still goes out through that core's
+/// backend, and the rejected reconnect's body is retained to that core's `max_error_body`.
+#[test]
+fn a_rejected_reconnect_outlives_its_core_and_keeps_its_error_body_cap() {
+    let backend = SequenceBackend::new([Reply::status(503, "unavailable")]);
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 1,
+        ..ImmediateReconnect::default()
+    });
+    let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
+    core.config_mut().max_error_body = 4;
+    let request = core
+        .http()
+        .request(Method::GET, "https://example.com/events")
+        .build()
+        .unwrap();
+    let stream: EventStream<serde_json::Value> =
+        EventStream::new_reconnectable(response(""), Framing::SseJsonData, &core, Some(request));
+    drop(core);
+    let mut stream = match stream.with_reconnect(policy) {
+        Ok(stream) => stream,
+        Err(error) => panic!("reconnect should be available: {error}"),
+    };
+
+    match poll_ready(stream.next()) {
+        Some(Err(Error::UnexpectedStatus { status, body, .. })) => {
+            assert_eq!(status.as_u16(), 503);
+            assert_eq!(&body[..], b"unav");
+        }
+        other => panic!("expected the rejected reconnect's status, got {other:?}"),
+    }
+    assert_eq!(backend.header("last-event-id").len(), 1);
 }
 
 #[test]
@@ -853,7 +889,7 @@ fn with_reconnect_refuses_a_stream_that_holds_no_replayable_request() {
     let core = core();
     for stream in [
         EventStream::<serde_json::Value>::new(response(""), Framing::Sse),
-        EventStream::new_reconnectable(response(""), Framing::Sse, core, None),
+        EventStream::new_reconnectable(response(""), Framing::Sse, &core, None),
     ] {
         match stream.with_reconnect(policy.clone()) {
             Err(Error::RequestConstruction(cause)) => assert_eq!(
@@ -884,7 +920,7 @@ fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
         .unwrap();
     assert!(request.try_clone().is_none());
     let stream: EventStream<serde_json::Value> =
-        EventStream::new_reconnectable(response(""), Framing::SseJsonData, core, Some(request));
+        EventStream::new_reconnectable(response(""), Framing::SseJsonData, &core, Some(request));
     let mut stream = match stream.with_reconnect(policy.clone()) {
         Ok(stream) => stream,
         Err(error) => panic!("the stream holds a request, so reconnect is available: {error}"),
@@ -1035,7 +1071,7 @@ fn a_reconnectable_stream_starts_from_the_requests_last_event_id() {
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response("data: 1\n\n"),
         Framing::SseJsonData,
-        core,
+        &core,
         Some(request),
     );
     assert_eq!(stream.last_event_id(), Some("evt-0"));
@@ -1124,7 +1160,7 @@ fn bounded_stream(
         .request(Method::GET, "https://example.com/events")
         .build()
         .unwrap();
-    match EventStream::new_reconnectable(response(body), framing, core, Some(request))
+    match EventStream::new_reconnectable(response(body), framing, &core, Some(request))
         .with_reconnect(policy)
     {
         Ok(stream) => stream,

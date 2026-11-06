@@ -267,7 +267,7 @@ pub(super) fn success_decode_tokens(
                 Ok(support::EventStream::new_reconnectable(
                     response,
                     #framing_tokens,
-                    self.core.clone(),
+                    &self.core,
                     #reconnect_request_binding,
                 ))
             }

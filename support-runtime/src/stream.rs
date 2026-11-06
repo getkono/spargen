@@ -24,11 +24,9 @@ use reqwest::header::HeaderMap;
 use reqwest::{Request, Response, StatusCode};
 use serde::de::DeserializeOwned;
 
-use crate::dispatch::cap_body;
+use crate::dispatch::{cap_body, send_on, unexpected_status_capped};
 use crate::wasm::BoxFuture;
-use crate::{
-    send, unexpected_status, ClientConfig, ClientCore, Error, MaybeSend, MaybeSync, TransportError,
-};
+use crate::{ClientConfig, ClientCore, Error, HttpBackend, MaybeSend, MaybeSync, TransportError};
 
 /// The failure yielded by a streaming response after its initial HTTP response was accepted.
 pub type StreamError = Error<Infallible>;
@@ -144,8 +142,11 @@ enum OwnedReconnectReason {
     Failure(StreamError),
 }
 
+/// What a reconnect resends and through what: the client's transport alone, shared rather than
+/// copied with the rest of its [`ClientCore`]. A reconnect's error body is capped at the stream's
+/// own `max_error_body`, taken from the same client configuration.
 struct ReconnectContext {
-    core: ClientCore,
+    backend: Arc<dyn HttpBackend>,
     request: Request,
     policy: Option<Arc<dyn ReconnectPolicy>>,
     attempt: u32,
@@ -183,7 +184,7 @@ impl<T> EventStream<T> {
     pub(crate) fn new_reconnectable(
         response: Response,
         framing: Framing,
-        core: ClientCore,
+        core: &ClientCore,
         request: Option<Request>,
     ) -> Self {
         let last_event_id = request.as_ref().and_then(|request| {
@@ -198,7 +199,7 @@ impl<T> EventStream<T> {
             max_error_body: core.config().max_error_body,
             last_event_id,
             reconnect: request.map(|request| ReconnectContext {
-                core,
+                backend: Arc::clone(core.backend()),
                 request,
                 policy: None,
                 attempt: 0,
@@ -420,7 +421,8 @@ impl<T> EventStream<T> {
 
     fn reconnect_future(&self) -> Option<ReconnectFuture> {
         let reconnect = self.reconnect.as_ref()?;
-        let core = reconnect.core.clone();
+        let backend = Arc::clone(&reconnect.backend);
+        let max_error_body = self.max_error_body;
         let mut request = reconnect.request.try_clone()?;
         // An empty id resets replay state, so the header goes. So does an id `HeaderValue` refuses
         // (the framer drops an id holding NUL, and keeps every other control character but the
@@ -438,11 +440,11 @@ impl<T> EventStream<T> {
             }
         }
         Some(Box::pin(async move {
-            let response = send(&core, request).await?;
+            let response = send_on(backend.as_ref(), request).await?;
             if response.status().is_success() {
                 Ok(response)
             } else {
-                Err(unexpected_status(&core, response).await)
+                Err(unexpected_status_capped(max_error_body, response).await)
             }
         }))
     }
