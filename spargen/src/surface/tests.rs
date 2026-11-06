@@ -567,7 +567,6 @@ fn insert(node: &Node, api: &mut crate::ir::Api, names: &mut crate::name::Names)
             variants: Vec::new(),
             strategy: UnionStrategy::Trial {
                 mode: UnionMode::OneOf,
-                priorities: Vec::new(),
             },
         }),
         Shape::Nominal(NominalKind::Never) => TypeKind::Never,

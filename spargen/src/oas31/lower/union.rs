@@ -4,7 +4,9 @@
 use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic, Provenance};
-use crate::ir::{Ty, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant};
+use crate::ir::{
+    Ty, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch,
+};
 use crate::oas31::discriminator::is_schema_component_name;
 use crate::oas31::{Schema, SchemaOr};
 
@@ -17,6 +19,7 @@ use super::refiner::{
     multi_category_types, union_sibling_is_categories_alone, unreached_halves, unreached_message,
 };
 use super::shape::ref_siblings_bear_shape;
+use super::strategy::UnionDispatch;
 use super::{LowerCtx, Refiner, ScopeReach, UnionSibling};
 
 /// A union's members, sorted before any is lowered: what [`LowerCtx::lower_union_with_sibling`]
@@ -335,14 +338,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
-    /// Whether every one of `variants` is the exact null type.
-    pub(super) fn all_exact_null<'v>(
-        &self,
-        variants: impl IntoIterator<Item = &'v UnionVariant>,
-    ) -> bool {
-        variants
-            .into_iter()
-            .all(|variant| self.is_exact_null(variant.ty))
+    /// Whether every one of the variant types `variants` is the exact null type.
+    pub(super) fn all_exact_null(&self, variants: impl IntoIterator<Item = Ty>) -> bool {
+        variants.into_iter().all(|ty| self.is_exact_null(ty))
     }
 
     /// [`Self::lower_union_with_sibling`] for a union with one real `member` beside its null-only
@@ -620,7 +618,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if mode == UnionMode::OneOf
             && sibling.is_some()
             && variants.len() + null_members > 1
-            && self.all_exact_null(variants.iter().map(|variant| &variant.variant))
+            && self.all_exact_null(variants.iter().map(|variant| variant.ty))
         {
             return self.reject_one_of_null_in_every_branch(schema);
         }
@@ -640,7 +638,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if variants
             .iter()
             .any(|variant| met_into_null.contains(&variant.member()))
-            && !self.all_exact_null(variants.iter().map(|variant| &variant.variant))
+            && !self.all_exact_null(variants.iter().map(|variant| variant.ty))
         {
             let dropped: Vec<usize> = variants
                 .iter()
@@ -650,10 +648,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             variants.retain(|variant| !met_into_null.contains(&variant.member()));
             nullable = !null_twice;
             if variants.len() > 1 {
-                let roots: Vec<TypeId> = variants
-                    .iter()
-                    .map(|variant| variant.variant.ty.id)
-                    .collect();
+                let roots: Vec<TypeId> = variants.iter().map(|variant| variant.ty.id).collect();
                 let reached = reachable_types(&self.graph, &roots);
                 let inserts = dropped
                     .iter()
@@ -710,7 +705,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if mode == UnionMode::AnyOf
             && sibling.is_some()
             && variants.len() > 1
-            && self.all_exact_null(variants.iter().map(|variant| &variant.variant))
+            && self.all_exact_null(variants.iter().map(|variant| variant.ty))
         {
             variants.truncate(1);
         }
@@ -718,15 +713,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.lower_sole_variant(
                 schema,
                 hint,
-                variant.variant.ty,
+                variant.ty,
                 nullable,
                 meet_inserts,
                 member_lowerings,
             );
         }
 
-        let strategy =
-            self.union_strategy(schema, &variants, mode, discriminator_members.as_ref())?;
+        let UnionDispatch {
+            strategy,
+            variants: dispatches,
+        } = self.union_strategy(schema, &variants, mode, discriminator_members.as_ref())?;
         // The member each variant came from, and every member it stands for.
         let labels: Vec<usize> = variants.iter().map(LoweredVariant::member).collect();
         let merged_members: Vec<Vec<usize>> = variants
@@ -736,7 +733,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let union = Union {
             variants: variants
                 .into_iter()
-                .map(|variant| variant.variant)
+                .zip(dispatches)
+                .map(|(variant, dispatch)| variant.into_variant(dispatch))
                 .collect(),
             strategy,
         };
@@ -954,7 +952,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 disambiguator += 1;
             }
             lowering.variants.push(LoweredVariant {
-                variant: UnionVariant { name_hint, ty },
+                name_hint,
+                ty,
                 ref_name,
                 members: vec![index],
             });
@@ -1056,13 +1055,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         lowered: &[LoweredVariant],
         mode: UnionMode,
         discriminator_members: Option<&DiscriminatorMembers>,
-    ) -> Option<UnionStrategy> {
-        let variants: Vec<UnionVariant> = lowered
-            .iter()
-            .map(|variant| variant.variant.clone())
-            .collect();
-        let variants = variants.as_slice();
-        let strategy = if let (Some(discriminator), Some(resolved)) =
+    ) -> Option<UnionDispatch> {
+        let types: Vec<Ty> = lowered.iter().map(|variant| variant.ty).collect();
+        let types = types.as_slice();
+        let dispatch = if let (Some(discriminator), Some(resolved)) =
             (&schema.discriminator, discriminator_members)
         {
             // `discriminator_members` already refused a `defaultMapping` naming a non-member. A
@@ -1093,20 +1089,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 default_variant,
                 mode,
             );
-            if let Some(UnionStrategy::Discriminated {
-                tags,
-                categories,
-                default_variant,
-                untagged,
+            if let Some(UnionDispatch {
+                variants: variant_dispatch,
                 ..
             }) = &mut discriminated
             {
-                let unselectable: Vec<usize> = (0..variants.len())
-                    .filter(|&index| {
-                        categories[index].is_none()
-                            && tags[index].is_empty()
-                            && *default_variant != Some(index)
+                let unselectable: Vec<usize> = variant_dispatch
+                    .iter()
+                    .enumerate()
+                    .filter(|&(index, dispatch)| {
+                        matches!(
+                            dispatch,
+                            VariantDispatch::Discriminated {
+                                tags,
+                                category: None,
+                                ..
+                            } if tags.is_empty()
+                        ) && default_variant != Some(index)
                     })
+                    .map(|(index, _)| index)
                     .collect();
                 let component = |index: usize| {
                     lowered[index]
@@ -1145,13 +1146,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .iter()
                         .map(|&index| lowered[index].member())
                         .collect();
-                    let dispatches = tags.iter().any(|accepted| !accepted.is_empty());
+                    let dispatches = variant_dispatch.iter().any(|dispatch| {
+                        matches!(
+                            dispatch,
+                            VariantDispatch::Discriminated { tags, .. } if !tags.is_empty()
+                        )
+                    });
                     self.warn_untagged_discriminated_members(discriminator, &members, dispatches);
                     if dispatches {
                         for &index in &unselectable {
-                            untagged[index] = Some(
-                                self.type_specificity(variants[index].ty, &mut HashSet::new()),
-                            );
+                            if let VariantDispatch::Discriminated { untagged, .. } =
+                                &mut variant_dispatch[index]
+                            {
+                                *untagged =
+                                    Some(self.type_specificity(types[index], &mut HashSet::new()));
+                            }
                         }
                     } else {
                         discriminated = None;
@@ -1159,13 +1168,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
             discriminated
-                .or_else(|| self.disjoint_strategy(variants))
-                .unwrap_or_else(|| self.trial_strategy(variants, mode))
+                .or_else(|| self.disjoint_strategy(types))
+                .unwrap_or_else(|| self.trial_strategy(types, mode))
         } else {
-            self.disjoint_strategy(variants)
-                .unwrap_or_else(|| self.trial_strategy(variants, mode))
+            self.disjoint_strategy(types)
+                .unwrap_or_else(|| self.trial_strategy(types, mode))
         };
-        Some(strategy)
+        Some(dispatch)
     }
 
     /// Report, as `W001` at `provenance`, the variants of a trial-matched `oneOf` (one whose decode
@@ -1296,8 +1305,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         variants: &mut Vec<LoweredVariant>,
     ) {
         let groups = group_alike(variants, |kept, variant| {
-            self.graph
-                .same_decoded_values(kept.variant.ty, variant.variant.ty)
+            self.graph.same_decoded_values(kept.ty, variant.ty)
         });
         if groups.len() == variants.len() {
             return;
@@ -1396,8 +1404,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// member, and a merge folds several into one variant, so a variant's position is not its
 /// member's.
 pub(super) struct LoweredVariant {
-    /// The variant as the generated union carries it.
-    pub(super) variant: UnionVariant,
+    /// The variant's name hint, as [`UnionVariant::name_hint`] carries it.
+    pub(super) name_hint: String,
+    /// The variant's payload type, as [`UnionVariant::ty`] carries it.
+    pub(super) ty: Ty,
     /// The `$ref` component name the member was written as, which names the variant and is its
     /// implicit discriminator tag ([`LowerCtx::discriminated_strategy`]).
     pub(super) ref_name: Option<String>,
@@ -1410,6 +1420,15 @@ impl LoweredVariant {
     /// The real member this variant came from.
     pub(super) fn member(&self) -> usize {
         self.members[0]
+    }
+
+    /// The variant as the generated union carries it, selected by `dispatch`.
+    fn into_variant(self, dispatch: VariantDispatch) -> UnionVariant {
+        UnionVariant {
+            name_hint: self.name_hint,
+            ty: self.ty,
+            dispatch,
+        }
     }
 }
 

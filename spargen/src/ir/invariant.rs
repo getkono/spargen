@@ -9,7 +9,7 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 
 /// Check the IR's well-formedness invariants, reporting any violation through `diags`.
 ///
-/// Run unconditionally after every lowering, on every entry point. It checks three invariants:
+/// Run unconditionally after every lowering, on every entry point. It checks four invariants:
 ///
 /// 1. Referential integrity of the type graph: every [`super::Ty`] reachable from the API —
 ///    operation parameters, request bodies, response bodies, response headers, and, transitively,
@@ -22,6 +22,8 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 ///    such a body only through its raw-bytes path, which sets `Content-Type` and passes the value
 ///    to `.body(..)`, which accepts `bytes::Bytes` but not `Option<bytes::Bytes>`.
 /// 3. No definition that is not elided is still a [`TypeKind::Reserved`].
+/// 4. Every variant of a union that is not elided carries a [`super::VariantDispatch`] of its
+///    union's [`super::UnionStrategy`] arm ([`super::UnionStrategy::admits`]).
 ///
 /// A failure here is a frontend bug, not a spec problem, so it is reported as
 /// [`Code::InvalidInput`] against the construct that carries the violation.
@@ -116,6 +118,17 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                         &def.name_hint,
                         def.provenance.clone(),
                     );
+                    // The emitter reads each variant's dispatch under the union's strategy, so a
+                    // variant of another arm has nothing it could emit.
+                    if !union.strategy.admits(&variant.dispatch) {
+                        Diagnostic::error(Code::InvalidInput, def.provenance.clone())
+                            .message(format!(
+                                "{INVARIANT_FAILURE}: variant `{}` of union `{}` carries a \
+                                 dispatch of another strategy than its union's",
+                                variant.name_hint, def.name_hint
+                            ))
+                            .emit(diags);
+                    }
                 }
             }
             // A reservation is not a type: it is an id handed out before its body was lowered, and
@@ -189,11 +202,11 @@ mod tests {
     use super::{check_invariants, INVARIANT_FAILURE};
     use crate::diag::{Code, Diagnostics, JsonPointer, Provenance};
     use crate::ir::{
-        AdditionalProps, Api, BodyEncoding, Field, HeaderShape, Info, MediaType, Method, Operation,
-        OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
-        PropertyName, RequestBody, Response, ResponseHeader, Responses, StatusSpec, Struct, Ty,
-        TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant,
-        XmlField,
+        AdditionalProps, Api, BodyEncoding, DisjointFeature, Field, HeaderShape, Info,
+        JsonCategory, MediaType, Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter,
+        PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response, ResponseHeader,
+        Responses, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode,
+        UnionStrategy, UnionVariant, VariantDispatch, XmlField,
     };
     use indexmap::IndexMap;
 
@@ -422,6 +435,7 @@ mod tests {
                     let variant = |name: &str, ty| UnionVariant {
                         name_hint: name.to_owned(),
                         ty,
+                        dispatch: VariantDispatch::Trial { priority: 0 },
                     };
                     api.types.insert(def(
                         "Shape",
@@ -429,7 +443,6 @@ mod tests {
                             variants: vec![variant("Circle", ty(0)), variant("Square", dangling)],
                             strategy: UnionStrategy::Trial {
                                 mode: UnionMode::OneOf,
-                                priorities: vec![0, 0],
                             },
                         }),
                     ));
@@ -480,6 +493,73 @@ mod tests {
             ),
             "a reservation that survived lowering must be caught here, because the next stage \
              emits it"
+        );
+    }
+
+    /// Each strategy admits exactly its own dispatch arm, and a union variant of another arm is
+    /// caught with its own message: the emitter reads a variant's dispatch under its union's
+    /// strategy, so a mismatch reaching it would be a panic in a consumer's `build.rs`. Lowering
+    /// assigns every variant its dispatch together with the strategy, so no document reaches it.
+    #[test]
+    fn a_union_variant_of_another_strategy_is_caught() {
+        let strategies = [
+            UnionStrategy::Discriminated {
+                tag_field: "kind".to_owned(),
+                default_variant: None,
+                mode: UnionMode::OneOf,
+            },
+            UnionStrategy::Disjoint,
+            UnionStrategy::Trial {
+                mode: UnionMode::AnyOf,
+            },
+        ];
+        let dispatches = [
+            VariantDispatch::Discriminated {
+                tags: vec!["circle".to_owned()],
+                category: None,
+                untagged: None,
+            },
+            VariantDispatch::Disjoint(DisjointFeature::JsonType(JsonCategory::String)),
+            VariantDispatch::Trial { priority: 0 },
+        ];
+        for (at, strategy) in strategies.iter().enumerate() {
+            for (other, dispatch) in dispatches.iter().enumerate() {
+                assert_eq!(
+                    strategy.admits(dispatch),
+                    at == other,
+                    "{strategy:?} admitting {dispatch:?}"
+                );
+            }
+        }
+        let mut api = api_with_header_ty(ty(0));
+        api.types.insert(def(
+            "Shape",
+            TypeKind::Union(Union {
+                variants: vec![
+                    UnionVariant {
+                        name_hint: "Circle".to_owned(),
+                        ty: ty(0),
+                        dispatch: VariantDispatch::Trial { priority: 0 },
+                    },
+                    UnionVariant {
+                        name_hint: "Square".to_owned(),
+                        ty: ty(0),
+                        dispatch: VariantDispatch::Disjoint(DisjointFeature::RequiredKey(
+                            "side".to_owned(),
+                        )),
+                    },
+                ],
+                strategy: UnionStrategy::Trial {
+                    mode: UnionMode::OneOf,
+                },
+            }),
+        ));
+        assert_eq!(
+            only_failure(&api),
+            format!(
+                "{INVARIANT_FAILURE}: variant `Square` of union `Shape` carries a dispatch of \
+                 another strategy than its union's"
+            )
         );
     }
 

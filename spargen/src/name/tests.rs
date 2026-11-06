@@ -655,7 +655,7 @@ fn synthetic_api(
     use crate::ir::{
         AdditionalProps, Field, Openness, PropertyName, Response, ResponseHeader, ScalarEnum,
         ScalarRepr, ScalarValue, Server, ServerVariable, StatusSpec, Struct, Union, UnionMode,
-        UnionStrategy, UnionVariant,
+        UnionStrategy, UnionVariant, VariantDispatch,
     };
     let mut api = api(Vec::new(), false);
     let text = Ty {
@@ -702,11 +702,11 @@ fn synthetic_api(
                     .map(|hint| UnionVariant {
                         name_hint: hint.clone(),
                         ty: text,
+                        dispatch: VariantDispatch::Trial { priority: 0 },
                     })
                     .collect(),
                 strategy: UnionStrategy::Trial {
                     mode: UnionMode::OneOf,
-                    priorities: vec![0; hints.len()],
                 },
             }),
         };

@@ -486,6 +486,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     variants.push(UnionVariant {
                         name_hint: variant.name_hint.clone(),
                         ty,
+                        dispatch: variant.dispatch.clone(),
                     });
                     retained.push(index);
                 }

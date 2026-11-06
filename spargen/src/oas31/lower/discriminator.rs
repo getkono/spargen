@@ -3,7 +3,8 @@
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{
-    AdditionalProps, JsonCategory, ScalarValue, TypeKind, UnionMode, UnionStrategy, UnionVariant,
+    AdditionalProps, JsonCategory, ScalarValue, Ty, TypeKind, UnionMode, UnionStrategy,
+    VariantDispatch,
 };
 use crate::oas31::discriminator::{
     discriminator_entry, discriminator_target_identity, is_schema_component_name,
@@ -12,6 +13,7 @@ use crate::oas31::discriminator::{
 use crate::oas31::{Resolver, Schema, SchemaOr};
 
 use super::shape::schema_has_union;
+use super::strategy::UnionDispatch;
 use super::union::LoweredVariant;
 use super::LowerCtx;
 
@@ -146,13 +148,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         discriminator: &DiscriminatorMembers,
         default_variant: Option<usize>,
         mode: UnionMode,
-    ) -> Option<UnionStrategy> {
+    ) -> Option<UnionDispatch> {
         let mut tags = Vec::new();
         let mut categories = Vec::new();
         for lowered in lowered {
-            let (variant, member) = (&lowered.variant, lowered.member());
-            if !matches!(self.kind_of(variant.ty.id), Some(TypeKind::Struct(_))) {
-                let category = self.json_category(variant.ty)?;
+            let (ty, member) = (lowered.ty, lowered.member());
+            if !matches!(self.kind_of(ty.id), Some(TypeKind::Struct(_))) {
+                let category = self.json_category(ty)?;
                 if category == JsonCategory::Object || categories.contains(&Some(category)) {
                     return None;
                 }
@@ -205,13 +207,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .zip(&categories)
             .map(|(accepted, category)| category.is_none() && accepted.is_empty())
             .collect();
-        let variants: Vec<&UnionVariant> = lowered.iter().map(|lowered| &lowered.variant).collect();
+        let variants: Vec<Ty> = lowered.iter().map(|lowered| lowered.ty).collect();
         let pinned: Vec<Option<String>> = variants
             .iter()
             .zip(&untagged_objects)
             .map(|(variant, untagged_object)| {
                 untagged_object
-                    .then(|| self.pinned_tag(variant, tag_field))
+                    .then(|| self.pinned_tag(*variant, tag_field))
                     .flatten()
             })
             .collect();
@@ -225,7 +227,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     |(other, (variant, untagged_object))| {
                         other != index
                             && *untagged_object
-                            && self.admits_tag(variant, tag_field, value)
+                            && self.admits_tag(*variant, tag_field, value)
                     },
                 )
                 || default_variant.is_some_and(|fallback| {
@@ -237,13 +239,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 tags[index].push(value.clone());
             }
         }
-        Some(UnionStrategy::Discriminated {
-            tag_field: tag_field.to_owned(),
-            untagged: vec![None; tags.len()],
-            tags,
-            categories,
-            default_variant,
-            mode,
+        Some(UnionDispatch {
+            strategy: UnionStrategy::Discriminated {
+                tag_field: tag_field.to_owned(),
+                default_variant,
+                mode,
+            },
+            variants: tags
+                .into_iter()
+                .zip(categories)
+                .map(|(tags, category)| VariantDispatch::Discriminated {
+                    tags,
+                    category,
+                    untagged: None,
+                })
+                .collect(),
         })
     }
 
@@ -251,8 +261,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// nullable, and its type is a closed string set of exactly one value (a `const`, or an `enum`
     /// of one). `None` for any other variant, including one whose field admits several values,
     /// whose tag the dispatch could not write back without overwriting the one the payload held.
-    fn pinned_tag(&self, variant: &UnionVariant, tag_field: &str) -> Option<String> {
-        let Some(TypeKind::Struct(object)) = self.kind_of(variant.ty.id) else {
+    fn pinned_tag(&self, variant: Ty, tag_field: &str) -> Option<String> {
+        let Some(TypeKind::Struct(object)) = self.kind_of(variant.id) else {
             return None;
         };
         let field = object
@@ -276,8 +286,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// enum set that omits `value`, or is undeclared on an object that denies unknown properties;
     /// every other declaration (a plain `string`, an open set, a `$ref` to anything else) is
     /// taken to admit it, so a doubt keeps the pinned value claimed rather than tagged.
-    fn admits_tag(&self, variant: &UnionVariant, tag_field: &str, value: &str) -> bool {
-        let Some(TypeKind::Struct(object)) = self.kind_of(variant.ty.id) else {
+    fn admits_tag(&self, variant: Ty, tag_field: &str, value: &str) -> bool {
+        let Some(TypeKind::Struct(object)) = self.kind_of(variant.id) else {
             return true;
         };
         let Some(field) = object

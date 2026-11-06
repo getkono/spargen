@@ -38,7 +38,7 @@ pub(crate) use responses::{
 pub(crate) use types::{
     AdditionalProps, DefaultValue, DisjointFeature, Field, FieldDefault, JsonCategory, Openness,
     Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef, TypeId, TypeKind,
-    Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
+    Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch, XmlField,
 };
 
 /// The whole lowered API: the single artifact frontends produce and backends consume.
@@ -288,7 +288,7 @@ mod tests {
         AdditionalProps, Api, BodyEncoding, Field, Info, MediaType, Method, Operation, OperationId,
         ParamLoc, ParamStyle, Parameter, PathTemplate, Prim, PropertyName, RequestBody, Response,
         Responses, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeKind, Union, UnionMode,
-        UnionStrategy, UnionVariant,
+        UnionStrategy, UnionVariant, VariantDispatch,
     };
     use crate::diag::{JsonPointer, Provenance};
 
@@ -674,6 +674,7 @@ mod tests {
                         let variant = |ty| UnionVariant {
                             name_hint: "V".to_owned(),
                             ty,
+                            dispatch: VariantDispatch::Trial { priority: 0 },
                         };
                         insert(
                             api,
@@ -681,7 +682,6 @@ mod tests {
                                 variants: vec![variant(text), variant(item)],
                                 strategy: UnionStrategy::Trial {
                                     mode: UnionMode::AnyOf,
-                                    priorities: vec![0, 0],
                                 },
                             }),
                         );
