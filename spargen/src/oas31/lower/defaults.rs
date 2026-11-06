@@ -307,9 +307,6 @@ fn representable_default(raw: &RawDefault, kind: Option<&TypeKind>) -> Option<De
         // not representable: it is documented and reported (`W005`) rather than wired. It is also
         // the answer the filled body would get — a cycle closes only through a schema that holds a
         // reference (an object, array, tuple, or union), and none of those takes a literal here.
-        // Mutation testing: deleting this arm is an equivalent mutant, declared in
-        // `.cargo/mutants.toml`: the catch-all below answers the same `None`. The arm is kept
-        // because every catch-all over `TypeKind` names `Reserved` above it (`ir/types.rs`).
         (_, TypeKind::Reserved) => None,
         _ => None,
     }

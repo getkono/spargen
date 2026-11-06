@@ -63,8 +63,4 @@ exclude_re = [
   #   equals `a & c`, so their xor is clear there.
   '^spargen/src/source/sha256\.rs:133:27: replace \^ with \| in compress$',
   '^spargen/src/source/sha256\.rs:133:37: replace \^ with \| in compress$',
-  # `spargen/src/oas31/lower/defaults.rs`, `representable_default`'s `(_, TypeKind::Reserved)`
-  # arm deleted: the catch-all `_ => None` below it answers the same `None`. The arm stays
-  # because `ir/types.rs` holds every catch-all over `TypeKind` to naming `Reserved` above it.
-  '^spargen/src/oas31/lower/defaults\.rs:313:9: delete match arm \(_, TypeKind::Reserved\) in representable_default$',
 ]
