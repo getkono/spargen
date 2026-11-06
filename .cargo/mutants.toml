@@ -42,4 +42,25 @@ exclude_re = [
   # and no test or caller can observe what the body returns.
   '^support-runtime/src/error\.rs:\d+:\d+: replace <impl ApiErrorBody for std::convert::Infallible>::body -> ',
   '^support-runtime/src/error\.rs:\d+:\d+: replace <impl ApiErrorProblem for std::convert::Infallible>::problem -> ',
+  # `spargen/src/source/sha256.rs`, `Sha256::update`'s `self.buffered > 0` to `>=`: from an empty
+  # block the branch then copies up to 64 bytes into it, returning with them buffered when fewer
+  # arrived (what the tail copy below would buffer) and otherwise compressing the full block (the
+  # block the loop below would compress first) and emptying it. Only the number of bytes copied
+  # differs, never a digest. Anchored on line and column like the entries above.
+  '^spargen/src/source/sha256\.rs:60:26: replace > with >= in Sha256::update$',
+  # `spargen/src/source/sha256.rs`, `compress`'s choice function `ch = (e & f) ^ ((!e) & g)` with
+  # its `^` replaced by `|`: the two terms never share a set bit (a bit of `e` is set in the first
+  # only, clear in the second only), and the xor of two such words is their or.
+  '^spargen/src/source/sha256\.rs:121:26: replace \^ with \| in compress$',
+  # `spargen/src/source/sha256.rs`, `compress`'s majority function
+  # `maj = (a & b) ^ (a & c) ^ (b & c)` with either `^` replaced by `|`. The mutant replaces the
+  # token, so the precedence of `&` over `^` over `|` regroups what is left, and each result is
+  # another form of the bitwise majority:
+  # - the first: `(a & b) | (a & c) ^ (b & c)` parses as `(a & b) | (c & (a ^ b))`, set where `a`
+  #   and `b` both are, or where exactly one of them is and `c` is;
+  # - the second: `(a & b) ^ (a & c) | (b & c)` differs from the xor only where both
+  #   `(a & b) ^ (a & c)` and `b & c` are set, and wherever `b` and `c` are both set, `a & b`
+  #   equals `a & c`, so their xor is clear there.
+  '^spargen/src/source/sha256\.rs:133:27: replace \^ with \| in compress$',
+  '^spargen/src/source/sha256\.rs:133:37: replace \^ with \| in compress$',
 ]

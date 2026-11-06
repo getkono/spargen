@@ -105,7 +105,10 @@ pub(super) fn schema_has_union(schema: &Schema) -> bool {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{ref_siblings_bear_shape, schema_has_shape_constraint, Schema, SHAPE_KEYWORDS};
+    use super::{
+        ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union,
+        schema_imposes_scalar, schema_is_object_like, Schema, SHAPE_KEYWORDS,
+    };
     use crate::diag::{Code, Diagnostics, FileId, JsonPointer};
 
     fn schema(yaml: &str) -> Schema {
@@ -247,6 +250,52 @@ mod tests {
         }
         assert!(!ref_siblings_bear_shape(&schema(probes[0])));
         assert!(ref_siblings_bear_shape(&schema(probes[3])));
+    }
+
+    /// `schema_imposes_scalar`, `schema_is_object_like` and `schema_has_union` over a schema
+    /// carrying one keyword each: a row per clause each documents, each clause alone deciding,
+    /// and keywords none of them reads answering `false`.
+    #[test]
+    fn the_scalar_object_and_union_gates_follow_the_table() {
+        // (probe, imposes a scalar, object-like, has a union)
+        let rows: &[(&str, bool, bool, bool)] = &[
+            ("description: d", false, false, false),
+            ("type: string", true, false, false),
+            ("type: 'null'", true, false, false),
+            ("type: array", true, false, false),
+            ("type: object", true, true, false),
+            ("enum: [a]", true, false, false),
+            ("const: a", true, false, false),
+            ("contentEncoding: base64", true, false, false),
+            ("format: binary", true, false, false),
+            ("format: byte", false, false, false),
+            ("oneOf: [{ type: string }]", true, false, true),
+            ("anyOf: [{ type: string }]", true, false, true),
+            ("allOf: [{ type: string }]", false, false, false),
+            ("items: { type: string }", false, false, false),
+            ("prefixItems: [{ type: string }]", false, false, false),
+            ("properties: { a: { type: string } }", false, true, false),
+            (
+                "patternProperties: { '^a': { type: string } }",
+                false,
+                true,
+                false,
+            ),
+            ("additionalProperties: false", false, true, false),
+            ("required: [a]", false, true, false),
+        ];
+        for &(probe, scalar, object_like, union) in rows {
+            let schema = schema(probe);
+            assert_eq!(
+                (
+                    schema_imposes_scalar(&schema),
+                    schema_is_object_like(&schema),
+                    schema_has_union(&schema),
+                ),
+                (scalar, object_like, union),
+                "(imposes a scalar, object-like, has a union) for {probe:?}"
+            );
+        }
     }
 
     /// The gate reads nothing the table does not name. A schema carrying every other keyword the

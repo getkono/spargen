@@ -252,6 +252,74 @@ fn only_the_additive_kinds_are_minor() {
     }
 }
 
+/// The spellings a change's detail and the human report are built from: a server variable's
+/// setter argument, a `{method}_url` argument, and each type kind's label.
+#[test]
+fn the_surface_spellings_follow_the_table() {
+    use super::{ServerVariableSurface, TypeSurface, UrlArgSurface};
+    use std::collections::BTreeMap;
+
+    assert_eq!(ServerVariableSurface::Free.argument(), "impl Into<String>");
+    assert_eq!(
+        ServerVariableSurface::Enum {
+            name: "Region".to_owned(),
+            variants: BTreeSet::new(),
+        }
+        .argument(),
+        "servers::Region"
+    );
+    assert_eq!(
+        UrlArgSurface::Param(("id".to_owned(), "path")).to_string(),
+        "`id` (path)"
+    );
+    assert_eq!(UrlArgSurface::Optional.to_string(), "optional parameters");
+    let kinds = [
+        (TypeSurface::Struct(BTreeMap::new(), None), "struct"),
+        (TypeSurface::Enum(BTreeSet::new(), None), "enum"),
+        (TypeSurface::Union(BTreeMap::new()), "union"),
+        (TypeSurface::Newtype("String".to_owned()), "newtype"),
+        (TypeSurface::Never, "empty enum"),
+    ];
+    for (surface, label) in kinds {
+        assert_eq!(surface.kind_label(), label);
+    }
+}
+
+/// The human report: one line per change (impact, code, location, detail), the summary counting
+/// breaking and additive changes apart, and the recommended bump; and the summary of an empty
+/// diff.
+#[test]
+fn the_human_report_lists_each_change_then_the_summary_and_bump() {
+    use super::{Change, DiffReport};
+
+    let report = DiffReport {
+        changes: vec![
+            Change::new(ChangeKind::OperationRemoved, "GET /a", "removed"),
+            Change::new(ChangeKind::OperationAdded, "GET /b", "added"),
+            Change::new(ChangeKind::TypeAdded, "Pet", "added"),
+        ],
+        bump: Impact::Major,
+    };
+    assert_eq!(report.summary(), "major: 1 breaking, 2 additive change(s)");
+    assert_eq!(
+        report.to_string(),
+        "major [operation-removed] GET /a: removed\n\
+         minor [operation-added] GET /b: added\n\
+         minor [type-added] Pet: added\n\
+         major: 1 breaking, 2 additive change(s)\n\
+         recommended bump: major"
+    );
+    let empty = DiffReport {
+        changes: Vec::new(),
+        bump: Impact::Patch,
+    };
+    assert_eq!(empty.summary(), "patch: no public API changes");
+    assert_eq!(
+        empty.to_string(),
+        "patch: no public API changes\nrecommended bump: patch"
+    );
+}
+
 /// AGENTS.md asks the `diff` suite for "semver classification per change kind": every
 /// [`ChangeKind`] has a fixture proving the classifier produces it, not only a policy row.
 ///

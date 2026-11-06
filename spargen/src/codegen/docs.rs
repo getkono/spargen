@@ -243,6 +243,16 @@ mod tests {
                 "1.5 is\na number",
             ),
             ("a marker alone is no list", "1.\nnext", "1.\nnext"),
+            (
+                "a marker with no digits is no list",
+                "> q\n. a\n) b",
+                "> q\n> . a\n> ) b",
+            ),
+            (
+                "digits with no marker are no list, however many spaces follow",
+                "> q\n2024  was",
+                "> q\n> 2024  was",
+            ),
             // Block quotes.
             ("a lazy quote continuation", "> q\nlazy", "> q\n> lazy"),
             // What ends a continuation.

@@ -466,6 +466,56 @@ mod tests {
         assert!(err.0.contains("unsupported version"), "{err}");
     }
 
+    /// A written string escapes exactly its quotes and backslashes, so a quote followed by a `#`
+    /// stays inside the value rather than closing it before a comment.
+    #[cfg(feature = "remote-fetch")]
+    #[test]
+    fn a_written_string_escapes_its_quotes_and_backslashes() {
+        assert_eq!(toml_string("a\"#b\\c"), "\"a\\\"#b\\\\c\"");
+        let line = format!("path = {}", toml_string("a\"#b"));
+        assert_eq!(strip_comment(&line), line);
+    }
+
+    /// A parse failure displays as its message, verbatim: the text `generate` and `lock` report.
+    #[test]
+    fn a_lock_error_displays_its_message() {
+        let err = Lock::parse("version = 2\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "spargen.lock declares unsupported version 2 (expected 1)"
+        );
+    }
+
+    /// `keep_unpinned_from` adds the earlier lock's pins for URLs this one does not pin, leaves
+    /// this lock's own pin where both pin a URL, and keeps the entries in URL order.
+    #[cfg(feature = "remote-fetch")]
+    #[test]
+    fn keeping_unpinned_entries_adds_only_what_the_lock_lacks() {
+        let entry = |url: &str, sha256: &str| RemoteEntry {
+            url: url.to_owned(),
+            sha256: sha256.to_owned(),
+            path: "p".to_owned(),
+            retrieval_url: None,
+        };
+        let mut lock = Lock::default();
+        lock.upsert(entry("https://h/b.yaml", "new"));
+        let mut earlier = Lock::default();
+        earlier.upsert(entry("https://h/c.yaml", "kept"));
+        earlier.upsert(entry("https://h/b.yaml", "old"));
+        earlier.upsert(entry("https://h/a.yaml", "kept"));
+
+        lock.keep_unpinned_from(earlier);
+
+        assert_eq!(
+            lock.entries,
+            [
+                entry("https://h/a.yaml", "kept"),
+                entry("https://h/b.yaml", "new"),
+                entry("https://h/c.yaml", "kept"),
+            ]
+        );
+    }
+
     #[test]
     fn rejects_traversal_and_absolute_vendor_paths() {
         // Security: a lock that would escape the vendor directory must fail at parse, before any
