@@ -3,7 +3,9 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::ir::{DisjointFeature, JsonCategory, Union, UnionMode, UnionStrategy, UnionVariant};
+use crate::ir::{
+    DisjointFeature, JsonCategory, Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch,
+};
 use crate::name::Names;
 
 use super::ty::boxed_ty_tokens;
@@ -32,33 +34,25 @@ pub(super) fn emit_union(
         // `Value` degrade.
         UnionStrategy::Discriminated {
             tag_field,
-            tags,
-            categories,
             default_variant,
-            untagged,
             mode,
         } => {
             let decl = union_enum_decl(id, ident, union, names, &docs, &deprecated);
-            let category_arms =
-                union
-                    .variants
-                    .iter()
-                    .zip(categories)
-                    .filter_map(|(variant, category)| {
-                        let category = category.as_ref()?;
-                        let variant_ident = union_variant_ident(names, id, variant);
-                        let predicate = json_category_predicate(category);
-                        let decode = decode_variant_tokens(ident, variant_ident);
-                        Some(quote! {
-                            if #predicate {
-                                return #decode;
-                            }
-                        })
-                    });
+            let category_arms = union.variants.iter().filter_map(|variant| {
+                let category = discriminated_dispatch(variant).category?;
+                let variant_ident = union_variant_ident(names, id, variant);
+                let predicate = json_category_predicate(&category);
+                let decode = decode_variant_tokens(ident, variant_ident);
+                Some(quote! {
+                    if #predicate {
+                        return #decode;
+                    }
+                })
+            });
             let de_arms = union
                 .variants
                 .iter()
-                .zip(tags)
+                .map(|variant| (variant, discriminated_dispatch(variant).tags))
                 .filter(|(_, accepted)| !accepted.is_empty())
                 .map(|(variant, accepted)| {
                     let variant_ident = union_variant_ident(names, id, variant);
@@ -68,7 +62,8 @@ pub(super) fn emit_union(
                         #(#accepted)|* => #decode,
                     }
                 });
-            let ser_arms = union.variants.iter().zip(tags).map(|(variant, accepted)| {
+            let ser_arms = union.variants.iter().map(|variant| {
+                let accepted = discriminated_dispatch(variant).tags;
                 let variant_ident = union_variant_ident(names, id, variant);
                 // The first accepted tag is the canonical one written back.
                 let tag = match accepted.first() {
@@ -112,9 +107,8 @@ pub(super) fn emit_union(
             let attempts: Vec<TokenStream> = union
                 .variants
                 .iter()
-                .zip(untagged)
-                .filter_map(|(variant, priority)| {
-                    let priority = (*priority)?;
+                .filter_map(|variant| {
+                    let priority = discriminated_dispatch(variant).untagged?;
                     let variant_ident = union_variant_ident(names, id, variant);
                     let ty = boxed_ty_tokens(variant.ty, names, false);
                     Some(trial_attempt_tokens(ident, variant_ident, &ty, priority))
@@ -187,27 +181,28 @@ pub(super) fn emit_union(
         // Strategy B: no discriminator but statically-disjoint variants → an enum with a custom
         // content-inspecting `Deserialize` (buffer the value, dispatch on the proven feature) and
         // a `Serialize` that emits just the active variant's inner value (no wrapper, no tag).
-        UnionStrategy::Disjoint { features } => {
+        UnionStrategy::Disjoint => {
             let decl = union_enum_decl(id, ident, union, names, &docs, &deprecated);
-            let de_arms = union
-                .variants
-                .iter()
-                .zip(features)
-                .map(|(variant, feature)| {
-                    let variant_ident = union_variant_ident(names, id, variant);
-                    let predicate = match feature {
-                        DisjointFeature::JsonType(category) => json_category_predicate(category),
-                        DisjointFeature::RequiredKey(key) => {
-                            quote! { value.get(#key).is_some() }
-                        }
-                    };
-                    let decode = decode_variant_tokens(ident, variant_ident);
-                    quote! {
-                        if #predicate {
-                            return #decode;
-                        }
+            let de_arms = union.variants.iter().map(|variant| {
+                let variant_ident = union_variant_ident(names, id, variant);
+                let predicate = match &variant.dispatch {
+                    VariantDispatch::Disjoint(DisjointFeature::JsonType(category)) => {
+                        json_category_predicate(category)
                     }
-                });
+                    VariantDispatch::Disjoint(DisjointFeature::RequiredKey(key)) => {
+                        quote! { value.get(#key).is_some() }
+                    }
+                    VariantDispatch::Discriminated { .. } | VariantDispatch::Trial { .. } => {
+                        unreachable!("{MISMATCHED_DISPATCH}")
+                    }
+                };
+                let decode = decode_variant_tokens(ident, variant_ident);
+                quote! {
+                    if #predicate {
+                        return #decode;
+                    }
+                }
+            });
             let ser_arms = union.variants.iter().map(|variant| {
                 let variant_ident = union_variant_ident(names, id, variant);
                 quote! { #ident::#variant_ident(inner) => inner.serialize(serializer), }
@@ -240,17 +235,19 @@ pub(super) fn emit_union(
                 }
             }
         }
-        UnionStrategy::Trial { mode, priorities } => {
+        UnionStrategy::Trial { mode } => {
             let decl = union_enum_decl(id, ident, union, names, &docs, &deprecated);
-            let attempts = union
-                .variants
-                .iter()
-                .zip(priorities)
-                .map(|(variant, priority)| {
-                    let variant_ident = union_variant_ident(names, id, variant);
-                    let ty = boxed_ty_tokens(variant.ty, names, false);
-                    trial_attempt_tokens(ident, variant_ident, &ty, *priority)
-                });
+            let attempts = union.variants.iter().map(|variant| {
+                let priority = match variant.dispatch {
+                    VariantDispatch::Trial { priority } => priority,
+                    VariantDispatch::Discriminated { .. } | VariantDispatch::Disjoint(_) => {
+                        unreachable!("{MISMATCHED_DISPATCH}")
+                    }
+                };
+                let variant_ident = union_variant_ident(names, id, variant);
+                let ty = boxed_ty_tokens(variant.ty, names, false);
+                trial_attempt_tokens(ident, variant_ident, &ty, priority)
+            });
             let ser_arms = union.variants.iter().map(|variant| {
                 let variant_ident = union_variant_ident(names, id, variant);
                 quote! {
@@ -321,6 +318,40 @@ pub(super) fn emit_union(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Why a union variant's dispatch is always of its union's strategy arm: lowering assigns them
+/// together, and `check_invariants` refuses an API where they disagree before codegen runs.
+const MISMATCHED_DISPATCH: &str =
+    "check_invariants holds every union variant's dispatch to its union's strategy";
+
+/// What selects one variant of a [`UnionStrategy::Discriminated`] union, borrowed from its
+/// [`VariantDispatch::Discriminated`].
+struct Discriminated<'a> {
+    /// The tag values that select the variant; the first is the one serialization writes.
+    tags: &'a [String],
+    /// The JSON category that selects a non-object variant.
+    category: Option<JsonCategory>,
+    /// The trial priority of an object variant no tag selects.
+    untagged: Option<u32>,
+}
+
+/// `variant`'s dispatch, as a variant of a [`UnionStrategy::Discriminated`] union carries it.
+fn discriminated_dispatch(variant: &UnionVariant) -> Discriminated<'_> {
+    match &variant.dispatch {
+        VariantDispatch::Discriminated {
+            tags,
+            category,
+            untagged,
+        } => Discriminated {
+            tags,
+            category: *category,
+            untagged: *untagged,
+        },
+        VariantDispatch::Disjoint(_) | VariantDispatch::Trial { .. } => {
+            unreachable!("{MISMATCHED_DISPATCH}")
         }
     }
 }

@@ -222,7 +222,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // alone: it is the null type, as the sibling spelling collapses such an `anyOf` (#625).
         if ty.id.0 >= mark && !self.is_component_root(ty.id) {
             if let Some(TypeKind::Union(union)) = self.kind_of(ty.id) {
-                if self.all_exact_null(&union.variants) {
+                if self.all_exact_null(union.variants.iter().map(|variant| variant.ty)) {
                     let dropped: Vec<u32> = union.variants.iter().map(|v| v.ty.id.0).collect();
                     if let Some(def) = self.graph.get_mut(ty.id) {
                         def.kind = TypeKind::Null;

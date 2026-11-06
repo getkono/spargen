@@ -5,11 +5,21 @@ use std::collections::HashSet;
 
 use crate::ir::{
     AdditionalProps, DisjointFeature, JsonCategory, Prim, Struct, Ty, TypeId, TypeKind, UnionMode,
-    UnionStrategy, UnionVariant,
+    UnionStrategy, VariantDispatch,
 };
 
 use super::meet::value_category;
 use super::LowerCtx;
+
+/// How the union being lowered tells its variants apart: the union-level strategy, and what
+/// selects each variant, in variant order, which lowering moves onto each
+/// [`crate::ir::UnionVariant`] as it assembles them.
+pub(super) struct UnionDispatch {
+    /// The union-level strategy.
+    pub(super) strategy: UnionStrategy,
+    /// What selects each variant, of `strategy`'s arm, one per variant in order.
+    pub(super) variants: Vec<VariantDispatch>,
+}
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Build the disjoint fast path for an undiscriminated union. Two proofs are attempted:
@@ -20,10 +30,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///    false`) with at least one required property whose name appears in no other variant. Closed
     ///    is essential — an open object could carry another variant's unique key as an extra field
     ///    and be misrouted, so open-object required-key unions are never provably disjoint.
-    pub(super) fn disjoint_strategy(&self, variants: &[UnionVariant]) -> Option<UnionStrategy> {
+    ///
+    /// `variants` are the variants' types, in order.
+    pub(super) fn disjoint_strategy(&self, variants: &[Ty]) -> Option<UnionDispatch> {
         // Proof 1: pairwise-distinct JSON type categories.
         let categories: Option<Vec<JsonCategory>> =
-            variants.iter().map(|v| self.json_category(v.ty)).collect();
+            variants.iter().map(|ty| self.json_category(*ty)).collect();
         if let Some(categories) = categories {
             let all_distinct = categories.iter().enumerate().all(|(i, cat)| {
                 categories
@@ -32,10 +44,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .all(|(j, other)| i == j || cat != other)
             });
             if all_distinct {
-                return Some(UnionStrategy::Disjoint {
-                    features: categories
+                return Some(UnionDispatch {
+                    strategy: UnionStrategy::Disjoint,
+                    variants: categories
                         .into_iter()
-                        .map(DisjointFeature::JsonType)
+                        .map(|category| {
+                            VariantDispatch::Disjoint(DisjointFeature::JsonType(category))
+                        })
                         .collect(),
                 });
             }
@@ -43,24 +58,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         // Proof 2: object variants each carrying a unique required key.
         if let Some(keys) = self.required_key_features(variants) {
-            return Some(UnionStrategy::Disjoint {
-                features: keys.into_iter().map(DisjointFeature::RequiredKey).collect(),
+            return Some(UnionDispatch {
+                strategy: UnionStrategy::Disjoint,
+                variants: keys
+                    .into_iter()
+                    .map(|key| VariantDispatch::Disjoint(DisjointFeature::RequiredKey(key)))
+                    .collect(),
             });
         }
 
         None
     }
 
-    pub(super) fn trial_strategy(
-        &self,
-        variants: &[UnionVariant],
-        mode: UnionMode,
-    ) -> UnionStrategy {
-        UnionStrategy::Trial {
-            mode,
-            priorities: variants
+    /// Trial matching under `mode` for the variants of types `variants`, each ranked by its
+    /// static specificity.
+    pub(super) fn trial_strategy(&self, variants: &[Ty], mode: UnionMode) -> UnionDispatch {
+        UnionDispatch {
+            strategy: UnionStrategy::Trial { mode },
+            variants: variants
                 .iter()
-                .map(|variant| self.type_specificity(variant.ty, &mut HashSet::new()))
+                .map(|ty| VariantDispatch::Trial {
+                    priority: self.type_specificity(*ty, &mut HashSet::new()),
+                })
                 .collect(),
         }
     }
@@ -142,10 +161,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// one required property whose name appears in no other variant, return that unique required key
     /// per variant (source order); else `None`. Closed is required for soundness: an open object
     /// could carry another variant's unique key as an extra field, misrouting the payload.
-    fn required_key_features(&self, variants: &[UnionVariant]) -> Option<Vec<String>> {
+    fn required_key_features(&self, variants: &[Ty]) -> Option<Vec<String>> {
         let structs: Option<Vec<&Struct>> = variants
             .iter()
-            .map(|v| match &self.graph.get(v.ty.id)?.kind {
+            .map(|ty| match &self.graph.get(ty.id)?.kind {
                 // Only closed objects are sound discriminators by required-key presence.
                 TypeKind::Struct(structure)
                     if matches!(structure.additional, AdditionalProps::Deny) =>
@@ -178,36 +197,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 }
 
 /// `strategy` restricted to the variants at `retained` (ascending positions into the union it
-/// described), in that order.
+/// described), in that order. Each retained variant keeps its own dispatch; only the
+/// `defaultMapping` fallback's position moves.
 pub(super) fn retain_strategy(strategy: &UnionStrategy, retained: &[usize]) -> UnionStrategy {
     match strategy {
         UnionStrategy::Discriminated {
             tag_field,
-            tags,
-            categories,
             default_variant,
-            untagged,
             mode,
         } => UnionStrategy::Discriminated {
             tag_field: tag_field.clone(),
-            tags: retained.iter().map(|index| tags[*index].clone()).collect(),
-            categories: retained.iter().map(|index| categories[*index]).collect(),
-            untagged: retained.iter().map(|index| untagged[*index]).collect(),
             mode: *mode,
             // The fallback variant's index moves with the retained set; if the fallback itself
             // was dropped, the union simply has no fallback any more.
             default_variant: default_variant
                 .and_then(|target| retained.iter().position(|index| *index == target)),
         },
-        UnionStrategy::Disjoint { features } => UnionStrategy::Disjoint {
-            features: retained
-                .iter()
-                .map(|index| features[*index].clone())
-                .collect(),
-        },
-        UnionStrategy::Trial { mode, priorities } => UnionStrategy::Trial {
-            mode: *mode,
-            priorities: retained.iter().map(|index| priorities[*index]).collect(),
-        },
+        UnionStrategy::Disjoint => UnionStrategy::Disjoint,
+        UnionStrategy::Trial { mode } => UnionStrategy::Trial { mode: *mode },
     }
 }

@@ -102,17 +102,22 @@ pub(crate) struct Union {
     pub(crate) strategy: UnionStrategy,
 }
 
-/// One variant of a [`Union`]: a name hint (allocated to a Rust variant identifier by `name`) and
-/// the variant's payload type.
+/// One variant of a [`Union`]: a name hint (allocated to a Rust variant identifier by `name`), the
+/// variant's payload type, and what selects it under the union's [`UnionStrategy`].
 #[derive(Debug, Clone)]
 pub(crate) struct UnionVariant {
     /// The preferred variant name; the Rust identifier is allocated by `name` (keyed by this hint).
     pub(crate) name_hint: String,
     /// The variant's payload type.
     pub(crate) ty: Ty,
+    /// What selects this variant, of the same arm as the union's [`UnionStrategy`]: a
+    /// [`VariantDispatch::Discriminated`] variant belongs to a [`UnionStrategy::Discriminated`]
+    /// union, and so on. `check_invariants` holds every emitted union to that agreement.
+    pub(crate) dispatch: VariantDispatch,
 }
 
-/// The (de)serialization strategy of a [`Union`].
+/// The (de)serialization strategy of a [`Union`]: its union-level settings. What selects each
+/// variant is that variant's own [`UnionVariant::dispatch`].
 #[derive(Debug, Clone)]
 pub(crate) enum UnionStrategy {
     /// A `discriminator` → a custom `Deserialize`/`Serialize` that reads/writes the tag field on a
@@ -123,45 +128,70 @@ pub(crate) enum UnionStrategy {
     Discriminated {
         /// The discriminator `propertyName` — the tag field read from / written into the object.
         tag_field: String,
-        /// Every tag value that selects each variant, parallel to [`Union::variants`], in dispatch
-        /// order: each `mapping` key naming the variant's member in document order, then its
-        /// implicit component name unless a `mapping` key claims that value, or, for a member with
-        /// neither, the one string its required tag property pins, unless something else claims
-        /// it. Deserialization
-        /// accepts every entry; serialization writes the first. Empty for a variant routed by
-        /// `categories`, for an object variant reached only as the `default_variant` fallback, and
-        /// for an `untagged` variant.
-        tags: Vec<Vec<String>>,
-        /// The JSON category per non-object variant, parallel to [`Union::variants`].
-        categories: Vec<Option<JsonCategory>>,
-        /// OpenAPI 3.2 `defaultMapping`: the variant used when the tag is absent or unrecognized
-        /// and no `untagged` variant matches. Without one, either case is a deserialization error.
+        /// OpenAPI 3.2 `defaultMapping`: the position in [`Union::variants`] of the variant used
+        /// when the tag is absent or unrecognized and no `untagged` variant matches. Without one,
+        /// either case is a deserialization error.
         default_variant: Option<usize>,
-        /// The trial priority of each object variant that no tag selects and that is not the
-        /// `default_variant`, parallel to [`Union::variants`]; `None` for every other variant. Such
-        /// a variant (inline, or a pointer into another schema, that no `mapping` entry names) has
-        /// no discriminator value, so it is tried against the buffered value, with `mode`'s
-        /// semantics, only when the tag is absent or selects no tagged variant; a tag that does
-        /// select one dispatches to it alone. Serialization writes no tag for it.
-        untagged: Vec<Option<u32>>,
         /// How the `untagged` variants are matched: the source applicator's semantics.
         mode: UnionMode,
     },
     /// No discriminator, but the variants were proven statically disjoint → a custom
     /// content-inspecting `Deserialize`/`Serialize`. Each variant carries the feature that
-    /// unambiguously selects it.
-    Disjoint {
-        /// The discriminating feature per variant, parallel to [`Union::variants`].
-        features: Vec<DisjointFeature>,
-    },
+    /// unambiguously selects it ([`VariantDispatch::Disjoint`]).
+    Disjoint,
     /// Variants overlap structurally, so generated serde implementations try each typed payload
     /// against one buffered JSON value. `oneOf` requires exactly one match; `anyOf` selects the
-    /// highest-specificity match, with source order breaking ties.
+    /// highest-specificity match ([`VariantDispatch::Trial`]), with source order breaking ties.
     Trial {
         /// Whether the source applicator was `oneOf` or `anyOf`.
         mode: UnionMode,
-        /// Static specificity per variant, parallel to [`Union::variants`].
-        priorities: Vec<u32>,
+    },
+}
+
+impl UnionStrategy {
+    /// Whether `dispatch` is of this strategy's arm, as every variant of a union using it must be.
+    pub(crate) fn admits(&self, dispatch: &VariantDispatch) -> bool {
+        matches!(
+            (self, dispatch),
+            (
+                UnionStrategy::Discriminated { .. },
+                VariantDispatch::Discriminated { .. }
+            ) | (UnionStrategy::Disjoint, VariantDispatch::Disjoint(_))
+                | (UnionStrategy::Trial { .. }, VariantDispatch::Trial { .. })
+        )
+    }
+}
+
+/// What selects one [`UnionVariant`], one arm per [`UnionStrategy`] arm.
+#[derive(Debug, Clone)]
+pub(crate) enum VariantDispatch {
+    /// A variant of a [`UnionStrategy::Discriminated`] union.
+    Discriminated {
+        /// Every tag value that selects the variant, in dispatch order: each `mapping` key naming
+        /// the variant's member in document order, then its implicit component name unless a
+        /// `mapping` key claims that value, or, for a member with neither, the one string its
+        /// required tag property pins, unless something else claims it. Deserialization accepts
+        /// every entry; serialization writes the first. Empty for a variant routed by `category`,
+        /// for an object variant reached only as the `default_variant` fallback, and for an
+        /// `untagged` variant.
+        tags: Vec<String>,
+        /// The JSON category of a non-object variant, which selects it; `None` for an object
+        /// variant.
+        category: Option<JsonCategory>,
+        /// The trial priority of an object variant that no tag selects and that is not the
+        /// `default_variant`; `None` for every other variant. Such a variant (inline, or a pointer
+        /// into another schema, that no `mapping` entry names) has no discriminator value, so it
+        /// is tried against the buffered value, with the strategy's `mode` semantics, only when
+        /// the tag is absent or selects no tagged variant; a tag that does select one dispatches
+        /// to it alone. Serialization writes no tag for it.
+        untagged: Option<u32>,
+    },
+    /// A variant of a [`UnionStrategy::Disjoint`] union: the feature that selects it.
+    Disjoint(DisjointFeature),
+    /// A variant of a [`UnionStrategy::Trial`] union.
+    Trial {
+        /// The variant's static specificity: of two matches, the higher is selected.
+        priority: u32,
     },
 }
 
@@ -174,7 +204,7 @@ pub(crate) enum UnionMode {
     AnyOf,
 }
 
-/// The statically-proven feature that selects a [`UnionStrategy::Disjoint`] variant when inspecting
+/// The statically-proven feature that selects a [`VariantDispatch::Disjoint`] variant when inspecting
 /// a buffered `serde_json::Value`.
 #[derive(Debug, Clone)]
 pub(crate) enum DisjointFeature {
