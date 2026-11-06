@@ -11,7 +11,7 @@ are in the contract linked below:
 | Capability | Adds |
 | --- | --- |
 | `multipart/form-data` request bodies | reqwest's `multipart` feature |
-| A `bytes` value serde encodes (in a model, a JSON `content` parameter, or a serde-encoded body) | `bytes`' `serde` feature |
+| A raw `bytes` value serde encodes (a `format: binary` value in a model, a JSON `content` parameter, or a serde-encoded body; a [`contentEncoding: base64`](#binary-content) one carries its own codec) | `bytes`' `serde` feature |
 | [Streaming](#streaming) (sequential responses) | `futures-core` and reqwest's `stream` feature |
 | [XML bodies](#xml-bodies) | `quick-xml` |
 | [`format: date-time` / `date`](#uuid-and-time) | `time` |
@@ -31,7 +31,7 @@ The capabilities are layered around a single seam so the generated `Client` stay
 a caller adds retry or middleware by wrapping the backend. Several sections below summarize one
 module of the embedded runtime and link to its source; that module's own documentation, carried
 as doc comments in the private `support` module of every generated client that embeds the module,
-is the full account. The `stream`, `xml` and `datetime` modules are embedded only when the
+is the full account. The `stream`, `xml`, `datetime` and `base64` modules are embedded only when the
 compiled API uses them; the rest are in every client.
 
 ## The transport seam
@@ -244,3 +244,16 @@ these formats are defined as. They carry a hand-written RFC 3339 codec, so only 
 inner type, and parse with `FromStr`, failing with `DateParseError`, which the generated root
 re-exports beside them. The [`datetime` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/datetime.rs)
 sets out why `time`'s own representation is not RFC 3339.
+
+### Binary content
+
+`format: binary` maps to `bytes::Bytes`. A `contentEncoding: base64` string is a generated newtype
+over `bytes::Bytes` (`pub struct Data(pub bytes::Bytes);`), which `Deref`s to the bytes and
+converts with `From` in both directions. Its serde form is RFC 4648 base64 text, standard alphabet
+and padded, wherever a JSON, XML or form body carries it: a field, an array item, a map value or a
+union variant. Decoding also accepts the text without its padding. `bytes::Bytes`' own serde form
+is a sequence of numbers, so the newtype carries the embedded
+[`base64` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/base64.rs)'s
+codec instead, which adds no dependency and is embedded only when such a schema is emitted. A
+whole request or response body and a multipart part carry the octets themselves under either
+keyword: a whole body is typed `bytes::Bytes`, and a part is read through the newtype's `Deref`.
