@@ -156,7 +156,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             for (provenance, lowered) in lowerings {
                 // The member's own lowering is an input to the meet, emitted as a public type
                 // nothing referred to once the meet replaced it, whatever the member order (#675).
-                self.elide_unused_union_lowering(lowered);
+                self.elide_unused_lowering(lowered);
                 let Some(index) = held
                     .iter()
                     .position(|warning| warning.provenance == provenance)
@@ -740,7 +740,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(met) = met.filter(|met| !self.is_reservation(met.id)) {
             for (_, lowered) in lowerings {
                 if !lowered.contains(&met.id.0) {
-                    self.elide_unused_union_lowering(lowered);
+                    self.elide_unused_lowering(lowered);
                 }
             }
         }
@@ -749,7 +749,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         met
     }
 
-    /// [`Self::elide_unused_union_lowering`] of `composed`, the ids [`Self::combine_all_of`]
+    /// [`Self::elide_unused_lowering`] of `composed`, the ids [`Self::combine_all_of`]
     /// inserted for the composition a union was met with, once the meet re-emitted its result
     /// under the schema's own name. The composition is an input to that meet, as a `$ref` sibling's
     /// keywords are to theirs (#571): left in the graph, its `<hint>Composition` struct would be
@@ -758,15 +758,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// reservation's body is not known yet, so nothing is elided against it.
     fn elide_unused_composition(&mut self, met: Option<Ty>, composed: Range<u32>) {
         if met.is_some_and(|met| !self.is_reservation(met.id)) {
-            self.elide_unused_union_lowering(composed);
-        }
-    }
-
-    /// [`Self::elide_unused_union_lowering`] of each of `lowerings`, the ids an `allOf` member's
-    /// own lowering inserted ([`objects_met_as_their_unions`]), once the merge's result is in.
-    pub(super) fn elide_unused_lowerings(&mut self, lowerings: Vec<Range<u32>>) {
-        for lowered in lowerings {
-            self.elide_unused_union_lowering(lowered);
+            self.elide_unused_lowering(composed);
         }
     }
 
@@ -1182,7 +1174,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // is withheld from the emitted types unless something refers to it (#571), by the same
         // rule as the union's lowering: whatever the met type, a memo, or another schema names
         // stays.
-        self.elide_unused_union_lowering(keywords_lowered);
+        self.elide_unused_lowering(keywords_lowered);
         Some(ty)
     }
 
@@ -1328,7 +1320,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut ty = self.reemit_meet(schema, hint, mark, kind);
         ty.nullable = meet.nullable;
         ty.boxed = meet.boxed;
-        self.elide_unused_union_lowering(union_mark..mark);
+        self.elide_unused_lowering(union_mark..mark);
         Some(ty)
     }
 }

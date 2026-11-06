@@ -130,7 +130,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             !sibling_lowered.contains(&union.id.0)
                 && (multi_category_types(schema).is_some() || left_one_variant(self, union))
         }) {
-            self.elide_unused_union_lowering(sibling_lowered);
+            self.elide_unused_lowering(sibling_lowered);
         }
         union
     }
@@ -444,7 +444,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut ty = self.reemit_meet(schema, hint, mark, kind);
         // The member's own lowering, which the re-emitted def replaced, is unused unless the
         // re-emitted kind reaches it or a memo holds it (#926).
-        self.elide_unused_union_lowering(member_from..mark);
+        self.elide_unused_lowering(member_from..mark);
         // The sibling meet narrowed the member to the exact null type beside a `null` member:
         // `null` matches both branches and fails exactly-one, and the member accepts nothing
         // else, so nothing satisfies the schema, as the multi-member path below rejects for
@@ -833,9 +833,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 &mut variant_members,
                 |_, member| !is_own_null(&member),
             );
-            for (_, lowered) in own_nulls {
-                self.elide_unused_union_lowering(lowered);
-            }
+            self.elide_unused_lowerings(own_nulls.into_iter().map(|(_, lowered)| lowered));
         }
         // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
         // by which variants decode. Variants that lower to the same generated type decode the same
@@ -910,7 +908,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // a branch the sibling excludes, and the `null` a branch's meet narrowed it to.
                 // These two calls keep `TypeGraph::emitted` exact for the elisions lowering runs
                 // after this one, which read it for their roots
-                // ([`Self::elide_unused_union_lowering`]). The generated output is the same
+                // ([`Self::elide_unused_lowering`]). The generated output is the same
                 // without them, because `elide_unreachable` withholds every type nothing reaches
                 // once lowering ends (#924), so an output fixture holds the types they elide out
                 // of the module but does not pin these calls (#1190):
@@ -920,9 +918,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     meet_inserts.into_iter().flatten().map(TypeId),
                     &HashSet::new(),
                 );
-                for lowered in member_lowerings {
-                    self.elide_unused_union_lowering(lowered);
-                }
+                self.elide_unused_lowerings(member_lowerings);
                 inner.nullable = inner.nullable || nullable;
                 inner.boxed = true;
                 return Some(inner);
@@ -940,10 +936,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `…Variant<N>` types with whatever they built on the way (`…Item`), whether its
             // member is the surviving variant, one the sibling excluded, or one the merge folded
             // into it (#987).
-            self.elide_unused_union_lowering(inner.id.0..inner.id.0 + 1);
-            for lowered in member_lowerings {
-                self.elide_unused_union_lowering(lowered);
-            }
+            self.elide_unused_lowering(inner.id.0..inner.id.0 + 1);
+            self.elide_unused_lowerings(member_lowerings);
             ty.nullable = inner.nullable || nullable;
             ty.boxed = inner.boxed;
             return Some(ty);

@@ -233,7 +233,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     self.union_variant_members.remove(&ty.id);
                     for id in dropped.into_iter().filter(|id| *id >= mark) {
-                        self.elide_unused_union_lowering(id..id + 1);
+                        self.elide_unused_lowering(id..id + 1);
                     }
                 }
             }
@@ -358,7 +358,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         for unused in dropped.into_iter().chain(collapsed) {
             if unused.0 >= mark {
-                self.elide_unused_union_lowering(unused.0..unused.0 + 1);
+                self.elide_unused_lowering(unused.0..unused.0 + 1);
             }
         }
         settled

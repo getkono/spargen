@@ -325,7 +325,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The sibling's union was lowered with its merge held back, as the `allOf` spellings'
         // is, and the collapse re-emitted what the meet left of it (#561).
         if has_union_sibling {
-            self.elide_unused_union_lowering(sibling_mark..mark);
+            self.elide_unused_lowering(sibling_mark..mark);
         }
         Some(ty)
     }

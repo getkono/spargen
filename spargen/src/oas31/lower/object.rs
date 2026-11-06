@@ -198,7 +198,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // them `$ref`s, which a memo holds (#926). The deferred comparison above reads the graph,
         // which keeps an elided definition.
         if let Some(rest_from) = rest_from {
-            self.elide_unused_union_lowering(rest_from..self.graph_mark());
+            self.elide_unused_lowering(rest_from..self.graph_mark());
         }
 
         Some(AdditionalProps::Typed(Box::new(first)))

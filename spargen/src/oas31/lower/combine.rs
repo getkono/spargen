@@ -160,7 +160,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .map(|def| def.kind.clone())?;
             let mut ty = self.reemit_meet(schema, hint, mark, kind);
             ty.nullable = intersection.nullable;
-            self.elide_unused_member_lowerings(contributions);
+            self.elide_unused_lowerings(object_member_lowerings(contributions));
             return Some(ty);
         }
 
@@ -400,24 +400,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // As the all-scalar branch takes its meet's nullability: `null` satisfies the merge when
         // it satisfies every member.
         ty.nullable = object_all_of_admits_null(contributions);
-        self.elide_unused_member_lowerings(contributions);
+        self.elide_unused_lowerings(object_member_lowerings(contributions));
         Some(ty)
-    }
-
-    /// Elide what the merge's result leaves unused of each inline member's own lowering that
-    /// [`Contribution::Object`]'s `lowered` records: the union of its `type` array's categories
-    /// where the merge took it as an object, and its fields where it took it as that union. The
-    /// result is inserted already, so whatever it reaches stays.
-    fn elide_unused_member_lowerings(&mut self, contributions: &[Contribution]) {
-        for contribution in contributions {
-            if let Contribution::Object {
-                lowered: Some(lowered),
-                ..
-            } = contribution
-            {
-                self.elide_unused_union_lowering(lowered.clone());
-            }
-        }
     }
 
     /// Gather every member of `schema.all_of` (source order) plus the enclosing schema's own object
@@ -949,7 +933,7 @@ pub(super) enum Contribution {
         union: Option<Ty>,
         /// The ids the inline member's own lowering inserted, where `union` is the union of its
         /// `type` array's categories: its fields and that union, each elided where the merge
-        /// leaves it unused ([`LowerCtx::elide_unused_union_lowering`]). `None` for every other
+        /// leaves it unused ([`LowerCtx::elide_unused_lowering`]). `None` for every other
         /// object member.
         lowered: Option<Range<u32>>,
     },
@@ -1026,6 +1010,24 @@ pub(super) fn objects_met_as_their_unions(contributions: &mut [Contribution]) ->
         }
     }
     lowerings
+}
+
+/// The ids each inline object member's own lowering inserted that [`Contribution::Object`]'s
+/// `lowered` records, for [`LowerCtx::elide_unused_lowerings`] once a merge's result is in: the
+/// union of its `type` array's categories where the merge took it as an object, and its fields
+/// where it took it as that union. The result is inserted already, so whatever it reaches stays.
+fn object_member_lowerings(
+    contributions: &[Contribution],
+) -> impl Iterator<Item = Range<u32>> + '_ {
+    contributions
+        .iter()
+        .filter_map(|contribution| match contribution {
+            Contribution::Object {
+                lowered: Some(lowered),
+                ..
+            } => Some(lowered.clone()),
+            _ => None,
+        })
 }
 
 /// Whether `schema`'s own `type` names `object` and at least one other category besides `null`:

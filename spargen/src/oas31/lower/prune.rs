@@ -28,7 +28,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// contribution. So a type stays when the graph outside `lowered` reaches it, which takes in
     /// the re-emitted meet, or a memo holds it, or one of those reaches it. Eliding keeps each id
     /// and name, so no type the output carries is renamed or reordered.
-    pub(super) fn elide_unused_union_lowering(&mut self, lowered: std::ops::Range<u32>) {
+    pub(super) fn elide_unused_lowering(&mut self, lowered: std::ops::Range<u32>) {
         if lowered.is_empty() {
             return;
         }
@@ -62,6 +62,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if !reached.contains(&id) && self.graph.get(id).is_some() {
                 self.graph.elide(id);
             }
+        }
+    }
+
+    /// [`Self::elide_unused_lowering`] of each of `lowerings`, in order: the ids each of several
+    /// discarded lowerings inserted, such as an `allOf` member's own lowering
+    /// (`objects_met_as_their_unions`) or a union member's, once the result that replaced them
+    /// is in.
+    pub(super) fn elide_unused_lowerings(
+        &mut self,
+        lowerings: impl IntoIterator<Item = std::ops::Range<u32>>,
+    ) {
+        for lowered in lowerings {
+            self.elide_unused_lowering(lowered);
         }
     }
 
@@ -143,7 +156,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// a `$ref` sibling's own lowering (`<Hint>Constraint`), the per-member types an `allOf` merge
     /// replaced (`<Hint>Member<N>`, `<Hint>Member<N><prop>`), and a referenced file's target met
     /// only as an `allOf` member. The meets' own elisions ([`Self::elide_meet_intermediates`],
-    /// [`Self::elide_unused_union_lowering`]) still run where they are, because the passes inside
+    /// [`Self::elide_unused_lowering`]) still run where they are, because the passes inside
     /// lowering read [`TypeGraph::emitted`]; this one holds the output to the rule whichever
     /// lowering path left a type behind.
     ///

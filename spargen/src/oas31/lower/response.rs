@@ -222,7 +222,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// (`E009`), or a schema that fails to lower.
     ///
     /// A header skipped after its schema was lowered has the types that lowering inserted
-    /// [elided](Self::elide_unused_union_lowering) where nothing else reaches them, so they are
+    /// [elided](Self::elide_unused_lowering) where nothing else reaches them, so they are
     /// not emitted as public types nothing refers to (#927); a component the header `$ref`s stays,
     /// since its memo holds it.
     fn lower_response_headers(&mut self, response: &ResponseObject) -> Vec<ResponseHeader> {
@@ -252,7 +252,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 };
                 let Some(shape) = self.header_shape(ty) else {
                     let lowered = mark..self.graph_mark();
-                    self.elide_unused_union_lowering(lowered);
+                    self.elide_unused_lowering(lowered);
                     // W011 case: response-header-untyped
                     Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
                         .message(format!(
@@ -318,7 +318,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // the value is framed, and `simple` is not that framing.
                     let Some(shape @ crate::ir::HeaderShape::Scalar) = self.header_shape(ty) else {
                         let lowered = mark..self.graph_mark();
-                        self.elide_unused_union_lowering(lowered);
+                        self.elide_unused_lowering(lowered);
                         // W011 case: response-header-untyped
                         Diagnostic::warning(
                             Code::DeclarationHasNoEffect,
