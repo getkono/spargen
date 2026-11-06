@@ -79,7 +79,9 @@ A package that sets `publish = false` builds only with the versions its `Cargo.l
 when that lockfile sits at the workspace root the audit checks the locked version of each crate
 instead of the requirement: a broad `serde = "1"` inherited from `[workspace.dependencies]` passes
 while the lockfile resolves it at or above the floor. A publishable package keeps the requirement
-check, because its users resolve the requirement with lockfiles of their own. Every version
+check, because its users resolve the requirement with lockfiles of their own, and so does a
+`publish = false` package built as a git or registry dependency from Cargo's source cache, which
+the dependent workspace's lockfile resolves. Every version
 diagnostic says which of the two it checked, and names the `[workspace.dependencies]` entry to
 change when the requirement is inherited. The lockfile is a rebuild trigger beside the manifests.
 

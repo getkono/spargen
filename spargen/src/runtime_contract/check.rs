@@ -493,6 +493,12 @@ fn version_message(
     });
     let why = match check.versions {
         Versions::Publishable => PUBLISHABLE.to_owned(),
+        Versions::Unpublished(Lock::Foreign(cache)) => {
+            format!(
+                "the package is built from Cargo's source cache `{cache}`, as a dependency of \
+                 another workspace whose `Cargo.lock` resolves it"
+            )
+        }
         Versions::Unpublished(Lock::Absent(path)) => {
             format!("no `Cargo.lock` exists at `{path}`")
         }

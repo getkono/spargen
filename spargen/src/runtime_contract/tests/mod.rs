@@ -228,6 +228,12 @@ impl Sandbox {
         self.root.as_std_path()
     }
 
+    /// The Cargo home directory every audit through this sandbox is given: `cargo-home` inside
+    /// it, so which manifests count as Cargo's source cache never depends on the host's own.
+    fn cargo_home(&self) -> Utf8PathBuf {
+        self.root.join("cargo-home")
+    }
+
     /// [`audit`], bounded by this sandbox.
     fn audit(&self, manifest_path: &Utf8Path, requirements: &RuntimeRequirements) -> Audit {
         self.audit_in(manifest_path, requirements, &TargetContext::from_env())
@@ -273,7 +279,13 @@ impl Sandbox {
         requirements: &RuntimeRequirements,
         target: &TargetContext,
     ) -> Audit {
-        audit_in(manifest_path, requirements, target, Some(&self.root))
+        audit_in(
+            manifest_path,
+            requirements,
+            target,
+            Some(&self.cargo_home()),
+            Some(&self.root),
+        )
     }
 }
 
@@ -433,6 +445,35 @@ fn the_build_script_manifest_is_the_manifest_path_else_cargo_toml_in_the_manifes
     assert_eq!(
         manifest_from(Err(NotPresent), Err(NotUnicode("/work/\u{fffd}".into()))),
         None
+    );
+}
+
+#[test]
+fn cargos_home_is_cargo_home_else_dot_cargo_in_the_home_directory() {
+    let home = || Some(std::path::PathBuf::from("/home/user"));
+    // `CARGO_HOME` wins whenever it is set and not empty.
+    assert_eq!(
+        cargo_home_from(Some("/opt/cargo".into()), home()),
+        Some(Utf8PathBuf::from("/opt/cargo"))
+    );
+    assert_eq!(
+        cargo_home_from(Some("/opt/cargo".into()), None),
+        Some(Utf8PathBuf::from("/opt/cargo"))
+    );
+    // Otherwise `.cargo` in the home directory, and with neither, nothing.
+    for unset in [None, Some("".into())] {
+        assert_eq!(
+            cargo_home_from(unset.clone(), home()),
+            Some(Utf8PathBuf::from("/home/user/.cargo"))
+        );
+        assert_eq!(cargo_home_from(unset, None), None);
+    }
+    // A relative `CARGO_HOME` is taken against the working directory, as Cargo takes it, since
+    // the manifest paths it is compared with are absolute.
+    let working = Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap()).unwrap();
+    assert_eq!(
+        cargo_home_from(Some("cargo".into()), home()),
+        Some(working.join("cargo"))
     );
 }
 

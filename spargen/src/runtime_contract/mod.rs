@@ -29,6 +29,7 @@ use crate::Code;
 use check::{
     check_dependency, reads_underscore_default_features, DependencyCheck, Versions, WorkspaceOrigin,
 };
+use integration::cargo_home;
 #[cfg(test)]
 pub(crate) use integration::rerun_if_changed_lines;
 pub(crate) use integration::{build_script_manifest, cargo_environment, print_rerun};
@@ -37,7 +38,8 @@ pub(crate) use requirements::RuntimeRequirements;
 pub use requirements::{RequiredDependency, Requirements};
 use target::TargetContext;
 use workspace::{
-    absolutized, lockfile_path, read_lock, unpublished, workspace_root, Lock, WorkspaceRoot,
+    absolutized, cargo_source_cache, lockfile_path, read_lock, unpublished, workspace_root, Lock,
+    WorkspaceRoot,
 };
 
 pub(crate) struct Audit {
@@ -53,17 +55,20 @@ pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements
         manifest_path,
         requirements,
         &TargetContext::from_env(),
+        cargo_home().as_deref(),
         None,
     )
 }
 
-/// [`audit`] for an explicit target context, so no test has to mutate the process environment,
-/// and an explicit `ceiling` on the workspace-root walk (see [`workspace_root`]), so no test's
-/// outcome depends on the manifests that happen to sit above its temporary directory.
+/// [`audit`] for an explicit target context and Cargo home directory, so no test has to mutate
+/// the process environment, and an explicit `ceiling` on the workspace-root walk (see
+/// [`workspace_root`]), so no test's outcome depends on the manifests that happen to sit above its
+/// temporary directory.
 fn audit_in(
     manifest_path: &Utf8Path,
     requirements: &RuntimeRequirements,
     target: &TargetContext,
+    cargo_home: Option<&Utf8Path>,
     ceiling: Option<&Utf8Path>,
 ) -> Audit {
     let mut diagnostics = Vec::new();
@@ -129,8 +134,13 @@ fn audit_in(
     let underscore_default_features = reads_underscore_default_features(&manifest, workspace);
     // A `publish = false` package builds only with the versions its workspace's lockfile
     // resolves, so that lockfile is read, and named to Cargo beside the manifests, whose edits it
-    // follows. A publishable one's users resolve its requirements themselves, so it is not.
+    // follows. A publishable one's users resolve its requirements themselves, so it is not, and
+    // neither is one in Cargo's source cache: that is a git or registry dependency of another
+    // workspace, built with the other workspace's lockfile.
     let lock = unpublished(&manifest, workspace).then(|| {
+        if let Some(cache) = cargo_source_cache(manifest_path, cargo_home) {
+            return Lock::Foreign(cache);
+        }
         let package = manifest
             .get("package")
             .and_then(|package| package.get("name"))

@@ -626,6 +626,17 @@ fn standalone_audit(
     bytes: &str,
     lock: Option<&str>,
 ) -> (Audit, Utf8PathBuf) {
+    standalone_audit_under("", publish, bytes, lock)
+}
+
+/// [`standalone_audit`] with the package in `directory`, relative to its sandbox, whose Cargo
+/// home directory is `cargo-home`.
+fn standalone_audit_under(
+    directory: &str,
+    publish: Option<&str>,
+    bytes: &str,
+    lock: Option<&str>,
+) -> (Audit, Utf8PathBuf) {
     let (core_bytes, _) = core_entry("bytes");
     let mut manifest = replace_once(CORE_MANIFEST, core_bytes, bytes);
     if let Some(publish) = publish {
@@ -636,9 +647,11 @@ fn standalone_audit(
         );
     }
     let sandbox = Sandbox::new();
-    let path = sandbox.root.join("Cargo.toml");
+    let package = sandbox.root.join(directory);
+    std::fs::create_dir_all(&package).unwrap();
+    let path = package.join("Cargo.toml");
     std::fs::write(&path, manifest).unwrap();
-    let lockfile = sandbox.root.join("Cargo.lock");
+    let lockfile = package.join("Cargo.lock");
     if let Some(lock) = lock {
         std::fs::write(&lockfile, lock).unwrap();
     }
@@ -804,4 +817,52 @@ fn an_unpublished_package_without_a_usable_lock_has_its_requirement_checked() {
         messages(&audit.diagnostics),
         format!("{floor_message}`{lockfile}` locks no `bytes` matching `1` for this package")
     );
+}
+
+#[test]
+fn an_unpublished_package_in_cargos_source_cache_has_its_requirement_checked() {
+    // A `publish = false` package built as a git dependency of another project sits in a checkout
+    // under Cargo's home, with its own repository's `Cargo.lock` beside it; Cargo resolves it
+    // with the dependent's lockfile, so that one decides nothing and the requirement is checked.
+    // The lock here would pass `bytes = "1"`, so only the requirement check refuses it.
+    let lock = core_lock("consumer", &[("bytes", &bytes_above_floor())], "");
+    for cache in ["git/checkouts", "registry/src"] {
+        let (audit, lockfile) = standalone_audit_under(
+            &format!("cargo-home/{cache}/consumer-0123456789abcdef/0a1b2c3"),
+            Some("false"),
+            "bytes = \"1\"",
+            Some(&lock),
+        );
+        let cache = lockfile
+            .ancestors()
+            .nth(3)
+            .expect("the lockfile sits three levels under the cache");
+        assert_eq!(
+            messages(&audit.diagnostics),
+            format!(
+                "`bytes` version requirement `1` is outside the supported range >={floor}, \
+                 <{ceiling}; use `{floor}` or a higher compatible caret requirement; the \
+                 requirement was checked, not a lockfile, because the package is built from \
+                 Cargo's source cache `{cache}`, as a dependency of another workspace whose \
+                 `Cargo.lock` resolves it",
+                floor = BYTES.floor,
+                ceiling = BYTES.ceiling(),
+            ),
+        );
+        assert!(
+            !audit.manifests.contains(&lockfile),
+            "{:?}",
+            audit.manifests
+        );
+    }
+    // The cache is matched by whole path components: a directory whose name only starts with the
+    // same spelling is an ordinary checkout, and its lockfile is read.
+    let (audit, lockfile) = standalone_audit_under(
+        "cargo-home/git/checkouts-old/consumer",
+        Some("false"),
+        "bytes = \"1\"",
+        Some(&lock),
+    );
+    assert!(audit.diagnostics.is_empty(), "{:#?}", audit.diagnostics);
+    assert!(audit.manifests.contains(&lockfile), "{:?}", audit.manifests);
 }

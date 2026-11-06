@@ -458,8 +458,8 @@ fn the_production_walk_has_no_ceiling() {
         .filter(|c| !c.is_whitespace())
         .collect();
     assert!(
-        entry.ends_with("&TargetContext::from_env(),None,)")
-            || entry.ends_with("&TargetContext::from_env(),None)"),
+        entry.ends_with("&TargetContext::from_env(),cargo_home().as_deref(),None,)")
+            || entry.ends_with("&TargetContext::from_env(),cargo_home().as_deref(),None)"),
         "`audit` must not bound a real build's walk: {entry}"
     );
 }

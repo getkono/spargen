@@ -172,8 +172,29 @@ pub(super) fn lockfile_path(root: &WorkspaceRoot) -> Utf8PathBuf {
         .join("Cargo.lock")
 }
 
+/// The directory of Cargo's source cache the audited manifest lies in, when it lies in one:
+/// `git/checkouts` (a git dependency) or `registry/src` (a registry dependency) under
+/// `cargo_home`, compared component by component against the absolutized manifest path.
+///
+/// Cargo builds such a package as a dependency of another workspace, with that workspace's
+/// `Cargo.lock`, so a lockfile committed in the package's own sources decides nothing.
+pub(super) fn cargo_source_cache(
+    manifest_path: &Utf8Path,
+    cargo_home: Option<&Utf8Path>,
+) -> Option<Utf8PathBuf> {
+    let cargo_home = cargo_home?;
+    let manifest = absolutized(manifest_path);
+    [["git", "checkouts"], ["registry", "src"]]
+        .into_iter()
+        .map(|[first, second]| cargo_home.join(first).join(second))
+        .find(|cache| manifest.starts_with(cache))
+}
+
 /// What the workspace's `Cargo.lock` says about the audited package's direct dependencies.
 pub(super) enum Lock {
+    /// The package is built from Cargo's source cache at this directory, as a dependency of a
+    /// workspace whose own lockfile resolves it, so no lockfile is read.
+    Foreign(Utf8PathBuf),
     /// No file exists at this path.
     Absent(Utf8PathBuf),
     /// The file exists, and could not be read or parsed or does not lock the audited package.
@@ -191,7 +212,7 @@ impl Lock {
     /// The lockfile's path, when a file exists there to be read: the one a rebuild has to watch.
     pub(super) fn existing(&self) -> Option<&Utf8Path> {
         match self {
-            Lock::Absent(_) => None,
+            Lock::Absent(_) | Lock::Foreign(_) => None,
             Lock::Unusable { path, .. } | Lock::Locked { path, .. } => Some(path),
         }
     }
