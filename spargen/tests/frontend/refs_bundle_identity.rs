@@ -80,12 +80,12 @@ fn a_contested_type_name_survives_reordering_the_paths_that_reach_it() {
 /// `Never` type whose provenance falls back to the root document's own (empty) pointer — must never
 /// take a contested name from a declared schema. The empty pointer is the lowest a plain ordering
 /// could produce, so without the `anonymous` term of the rank the synthesized `Holder x` would take
-/// `Holderx` from the component declared under that name. Both component orders are generated, so
+/// `HolderX` from the component declared under that name. Both component orders are generated, so
 /// arrival order cannot be what decides it.
 #[test]
 fn a_synthesized_type_with_no_identity_never_takes_a_name_from_a_declared_schema() {
     const HOLDER: &str = "    Holder:\n      type: object\n      properties:\n        x: false\n";
-    const DECLARED: &str = "    Holderx:\n      type: object\n      required: [declared]\n      \
+    const DECLARED: &str = "    HolderX:\n      type: object\n      required: [declared]\n      \
                             properties: { declared: { type: string } }\n";
     for (first, second) in [(HOLDER, DECLARED), (DECLARED, HOLDER)] {
         let (report, code) = generate_with_code(&format!(
@@ -97,11 +97,11 @@ fn a_synthesized_type_with_no_identity_never_takes_a_name_from_a_declared_schema
         let types = types_module(&code);
         assert_eq!(
             field_owner(&types, "pub declared:").as_deref(),
-            Some("Holderx"),
+            Some("HolderX"),
             "the declared schema keeps the bare name: {types}"
         );
         assert!(
-            types.contains("pub enum Holderx84222325 {}"),
+            types.contains("pub enum HolderX84222325 {}"),
             "and the synthesized `Never` carries the root pointer's disambiguator: {types}"
         );
     }
@@ -839,7 +839,7 @@ fn a_long_file_referenced_all_of_member_chain_still_exceeds_the_depth_cap() {
 ///
 /// The member's body is named for the target, so a hint equal to the one `ensure_resolved` gives
 /// the direct type would put two types on one name, and the naming scope hands the bare name to
-/// whichever lowering reaches it first. Reordering two properties would then move `Basemeta` (and,
+/// whichever lowering reaches it first. Reordering two properties would then move `BaseMeta` (and,
 /// for a scalar target, `Code` itself) from the direct type to the member's copy. Both orders must
 /// generate the same set of names, with the direct type and its nested types on the bare ones.
 #[test]
@@ -894,7 +894,7 @@ components:
         );
         assert_eq!(
             field_type("Base", "meta").as_deref(),
-            Some("Option<Basemeta>"),
+            Some("Option<BaseMeta>"),
             "{types}"
         );
         assert_eq!(
@@ -902,8 +902,8 @@ components:
             Some("Option<Code>"),
             "{types}"
         );
-        let wrapped_meta = field_type("Holderwrapped", "meta").expect("the member's `meta`");
-        assert_ne!(wrapped_meta, "Option<Basemeta>", "{types}");
+        let wrapped_meta = field_type("HolderWrapped", "meta").expect("the member's `meta`");
+        assert_ne!(wrapped_meta, "Option<BaseMeta>", "{types}");
         let mut declared: Vec<String> = types
             .lines()
             .filter_map(|line| {

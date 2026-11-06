@@ -27,16 +27,16 @@ fn date_and_date_time_reach_the_wire_as_rfc3339() {
     // model is exactly the defect, since they carry the non-RFC-3339 serde implementation. (The
     // newtype *definitions* name them, which is why this checks the aliases rather than the file.)
     assert!(
-        generated.contains("pub type Eventat = DateTime;"),
+        generated.contains("pub type EventAt = DateTime;"),
         "a date-time property must resolve to the RFC 3339 newtype: {generated}"
     );
     assert!(
-        generated.contains("pub type Eventday = Date;"),
+        generated.contains("pub type EventDay = Date;"),
         "a date property must resolve to the RFC 3339 newtype: {generated}"
     );
     assert!(
-        !generated.contains("pub type Eventat = time::")
-            && !generated.contains("pub type Eventday = time::"),
+        !generated.contains("pub type EventAt = time::")
+            && !generated.contains("pub type EventDay = time::"),
         "no model alias may name time's own serde types"
     );
     assert!(

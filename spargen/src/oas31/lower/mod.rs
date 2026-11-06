@@ -264,6 +264,7 @@ fn lower_pass(
         union_variant_members: HashMap::new(),
         variant_meets: Vec::new(),
         deferred_map_values: Vec::new(),
+        pinned_tag_fields: Vec::new(),
     };
 
     for opening in first {
@@ -297,6 +298,10 @@ fn lower_pass(
     // Every reservation is filled now, so the map-value comparisons a reservation held back can
     // be decided.
     ctx.check_deferred_map_values();
+
+    // Every meet is made, so the tag fields the pinned variants leave out can go; the elision
+    // below then withholds each one-value tag type nothing else names.
+    ctx.drop_pinned_tag_fields();
 
     // Every schema is lowered, so what neither a component nor an operation reaches is a type
     // the output would carry with nothing naming it (#924). Withheld before the passes below,
@@ -685,6 +690,11 @@ struct LowerCtx<'a, 'doc> {
     /// with the object's provenance, in source order; [`Self::check_deferred_map_values`] decides
     /// them once lowering has filled every reservation.
     deferred_map_values: Vec<(Provenance, Vec<Ty>)>,
+    /// Each struct [`Self::name_pinned_variants`] named from its pinned tag, with the tag
+    /// property it leaves out. The field stays through lowering, so a later meet still reads the
+    /// pin and excludes the branch a conflicting tag constraint rules out;
+    /// [`Self::drop_pinned_tag_fields`] removes it once every meet is made.
+    pinned_tag_fields: Vec<(TypeId, String)>,
 }
 
 impl LowerCtx<'_, '_> {

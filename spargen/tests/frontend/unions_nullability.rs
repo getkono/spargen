@@ -1577,7 +1577,7 @@ fn a_null_only_type_beside_an_all_of_is_its_type_or_null() {
 
 /// A schema that composes a `$ref` to that spelling reads the target as its type or `null` too, as
 /// at 0.5.0: a required field that is an `allOf` of it, or a `oneOf` / `anyOf` of it beside a
-/// branch that refuses `null`, is `Option<Holderpick>`, not a non-null type that refuses the
+/// branch that refuses `null`, is `Option<HolderPick>`, not a non-null type that refuses the
 /// `null` the API sends. A `oneOf` in which `null` matches a second branch admits no `null`.
 #[test]
 fn a_ref_to_a_null_only_type_beside_an_all_of_is_its_type_or_null_where_composed() {
@@ -1598,7 +1598,7 @@ fn a_ref_to_a_null_only_type_beside_an_all_of_is_its_type_or_null_where_composed
         let types = types_module(&code);
         assert_eq!(
             field_type(&types, "pub pick").as_deref(),
-            Some("Option<Holderpick>"),
+            Some("Option<HolderPick>"),
             "{field}: {types}"
         );
     }

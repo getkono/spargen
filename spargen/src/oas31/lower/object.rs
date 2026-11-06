@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{AdditionalProps, Docs, Field, PropertyName, Ty, TypeKind, XmlField};
+use crate::name::hint_segment;
 use crate::oas31::{Schema, SchemaOr};
 
 use super::xml::field_xml;
@@ -27,7 +28,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut fields = Vec::new();
         for (name, child) in &schema.properties {
             self.claim_field_xml(child);
-            let ty = self.lower_schema_or(child, &format!("{hint}{name}"))?;
+            let ty = self.lower_schema_or(child, &format!("{hint}{}", hint_segment(name)))?;
             let is_required = required.contains(name);
             let default = self.field_default(child, ty, is_required);
             let xml = field_xml(child);
@@ -87,7 +88,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ty
                 }
                 _ => self.insert_type(
-                    &format!("{hint}{name}"),
+                    &format!("{hint}{}", hint_segment(&name)),
                     TypeKind::Any,
                     Docs::default(),
                     None,

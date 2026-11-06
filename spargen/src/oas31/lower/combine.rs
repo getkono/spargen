@@ -8,6 +8,7 @@ use indexmap::{IndexMap, IndexSet};
 
 use crate::diag::Provenance;
 use crate::ir::{AdditionalProps, Docs, Field, FieldDefault, Struct, Ty, TypeKind};
+use crate::name::hint_segment;
 use crate::oas31::{JsonType, Resolver, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
@@ -243,7 +244,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         // declaring member supplies the type and the metadata, and the requirement
                         // survives (see `merge_repeated_field`). Every member's `default` is
                         // decided after the loop, so none is merged pair by pair here.
-                        let field_hint = format!("{hint}{}Intersection", field.name.wire);
+                        let field_hint =
+                            format!("{hint}{}Intersection", hint_segment(&field.name.wire));
                         match self.merge_repeated_field(existing, field, &field_hint, false) {
                             None | Some(Ok(())) => {}
                             // A reservation's body is not known yet, so the failure here says
@@ -326,7 +328,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if !field.undeclared || carries_key(member_fields, &field.name.wire) {
                     continue;
                 }
-                let field_hint = format!("{hint}{}Intersection", field.name.wire);
+                let field_hint = format!("{hint}{}Intersection", hint_segment(&field.name.wire));
                 match self.narrow_undeclared(field.ty, member_additional, &field_hint) {
                     Ok(ty) => field.ty = ty,
                     Err(_)

@@ -5502,17 +5502,17 @@ pub mod types {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct DeepFilter {
         #[serde(rename = "kind")]
-        pub kind: DeepFilterkind,
+        pub kind: DeepFilterKind,
         #[serde(
             rename = "limit",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub limit: Option<DeepFilterlimit>,
+        pub limit: Option<DeepFilterLimit>,
     }
-    pub type DeepFilterkind = String;
-    pub type DeepFilterlimit = i64;
+    pub type DeepFilterKind = String;
+    pub type DeepFilterLimit = i64;
     pub type CollisionPayload = String;
     pub type BlankDocs = String;
     #[doc = "*   A list item\n    continuation text\n\n> A quoted warning\n> continuation text"]
@@ -5562,73 +5562,73 @@ pub mod types {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Refined {
         #[serde(rename = "run_id")]
-        pub run_id: RefinedMember1runId,
+        pub run_id: RefinedMember1RunId,
         #[serde(rename = "status")]
-        pub status: RefinedMember1status,
+        pub status: RefinedMember1Status,
         #[serde(rename = "marker")]
-        pub marker: Option<RefinedmarkerIntersection>,
+        pub marker: Option<RefinedMarkerIntersection>,
         #[serde(rename = "labels")]
-        pub labels: RefinedlabelsIntersection,
+        pub labels: RefinedLabelsIntersection,
         #[serde(rename = "steps")]
-        pub steps: RefinedstepsIntersection,
+        pub steps: RefinedStepsIntersection,
         #[serde(rename = "empty_only")]
-        pub empty_only: RefinedemptyOnlyIntersection,
+        pub empty_only: RefinedEmptyOnlyIntersection,
     }
-    pub type RefinedMember0labelsItem = String;
-    pub type RefinedMember1runId = i64;
+    pub type RefinedMember0LabelsItem = String;
+    pub type RefinedMember1RunId = i64;
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    pub enum RefinedMember1status {
+    pub enum RefinedMember1Status {
         #[serde(rename = "queued")]
         Queued,
         #[serde(rename = "complete")]
         Complete,
     }
-    impl std::fmt::Display for RefinedMember1status {
+    impl std::fmt::Display for RefinedMember1Status {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(
                 match self {
-                    RefinedMember1status::Queued => "queued",
-                    RefinedMember1status::Complete => "complete",
+                    RefinedMember1Status::Queued => "queued",
+                    RefinedMember1Status::Complete => "complete",
                 },
             )
         }
     }
-    pub type RefinedMember1stepsItemname = String;
-    pub type RefinedmarkerIntersection = ();
-    pub type RefinedlabelsIntersection = Vec<RefinedMember0labelsItem>;
+    pub type RefinedMember1StepsItemName = String;
+    pub type RefinedMarkerIntersection = ();
+    pub type RefinedLabelsIntersection = Vec<RefinedMember0LabelsItem>;
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct RefinedstepsIntersectionItem {
+    pub struct RefinedStepsIntersectionItem {
         #[serde(rename = "name")]
-        pub name: RefinedMember1stepsItemname,
+        pub name: RefinedMember1StepsItemName,
     }
-    pub type RefinedstepsIntersection = Vec<RefinedstepsIntersectionItem>;
+    pub type RefinedStepsIntersection = Vec<RefinedStepsIntersectionItem>;
     #[derive(Debug, Clone)]
-    pub enum RefinedemptyOnlyIntersectionItem {}
-    impl<'de> serde::Deserialize<'de> for RefinedemptyOnlyIntersectionItem {
+    pub enum RefinedEmptyOnlyIntersectionItem {}
+    impl<'de> serde::Deserialize<'de> for RefinedEmptyOnlyIntersectionItem {
         fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
         {
             Err(
                 serde::de::Error::custom(
-                    "no JSON value can inhabit schema RefinedemptyOnlyIntersectionItem",
+                    "no JSON value can inhabit schema RefinedEmptyOnlyIntersectionItem",
                 ),
             )
         }
     }
-    impl serde::Serialize for RefinedemptyOnlyIntersectionItem {
+    impl serde::Serialize for RefinedEmptyOnlyIntersectionItem {
         fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
         {
             Err(
                 serde::ser::Error::custom(
-                    "no JSON value can inhabit schema RefinedemptyOnlyIntersectionItem",
+                    "no JSON value can inhabit schema RefinedEmptyOnlyIntersectionItem",
                 ),
             )
         }
     }
-    pub type RefinedemptyOnlyIntersection = Vec<RefinedemptyOnlyIntersectionItem>;
+    pub type RefinedEmptyOnlyIntersection = Vec<RefinedEmptyOnlyIntersectionItem>;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ConflictDefaultTarget {
         ///Default: `a`.
@@ -5638,12 +5638,12 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub x: Option<ConflictDefaultTargetx>,
+        pub x: Option<ConflictDefaultTargetX>,
     }
-    fn default_35_x() -> Option<ConflictDefaultTargetx> {
+    fn default_35_x() -> Option<ConflictDefaultTargetX> {
         Some("a".to_owned())
     }
-    pub type ConflictDefaultTargetx = String;
+    pub type ConflictDefaultTargetX = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ConflictDefault {
         ///Default (not applied): `"a"`.
@@ -5653,30 +5653,30 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub x: Option<ConflictDefaultxIntersection>,
+        pub x: Option<ConflictDefaultXintersection>,
     }
     #[derive(Debug, Clone)]
-    pub enum ConflictDefaultxIntersection {}
-    impl<'de> serde::Deserialize<'de> for ConflictDefaultxIntersection {
+    pub enum ConflictDefaultXintersection {}
+    impl<'de> serde::Deserialize<'de> for ConflictDefaultXintersection {
         fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
         {
             Err(
                 serde::de::Error::custom(
-                    "no JSON value can inhabit schema ConflictDefaultxIntersection",
+                    "no JSON value can inhabit schema ConflictDefaultXintersection",
                 ),
             )
         }
     }
-    impl serde::Serialize for ConflictDefaultxIntersection {
+    impl serde::Serialize for ConflictDefaultXintersection {
         fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
         {
             Err(
                 serde::ser::Error::custom(
-                    "no JSON value can inhabit schema ConflictDefaultxIntersection",
+                    "no JSON value can inhabit schema ConflictDefaultXintersection",
                 ),
             )
         }
@@ -5690,30 +5690,30 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub x: Option<ConflictDefaultSiblingReferenceIntersectionx>,
+        pub x: Option<ConflictDefaultSiblingReferenceIntersectionX>,
     }
     #[derive(Debug, Clone)]
-    pub enum ConflictDefaultSiblingReferenceIntersectionx {}
-    impl<'de> serde::Deserialize<'de> for ConflictDefaultSiblingReferenceIntersectionx {
+    pub enum ConflictDefaultSiblingReferenceIntersectionX {}
+    impl<'de> serde::Deserialize<'de> for ConflictDefaultSiblingReferenceIntersectionX {
         fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
         {
             Err(
                 serde::de::Error::custom(
-                    "no JSON value can inhabit schema ConflictDefaultSiblingReferenceIntersectionx",
+                    "no JSON value can inhabit schema ConflictDefaultSiblingReferenceIntersectionX",
                 ),
             )
         }
     }
-    impl serde::Serialize for ConflictDefaultSiblingReferenceIntersectionx {
+    impl serde::Serialize for ConflictDefaultSiblingReferenceIntersectionX {
         fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
         {
             Err(
                 serde::ser::Error::custom(
-                    "no JSON value can inhabit schema ConflictDefaultSiblingReferenceIntersectionx",
+                    "no JSON value can inhabit schema ConflictDefaultSiblingReferenceIntersectionX",
                 ),
             )
         }
@@ -5727,7 +5727,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub valid: Option<NarrowDefaultBasevalid>,
+        pub valid: Option<NarrowDefaultBaseValid>,
         ///Default: `zzz`.
         #[serde(
             rename = "bad",
@@ -5735,7 +5735,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub bad: Option<NarrowDefaultBasebad>,
+        pub bad: Option<NarrowDefaultBaseBad>,
         ///Default: `3`.
         #[serde(
             rename = "ratio",
@@ -5743,7 +5743,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub ratio: Option<NarrowDefaultBaseratio>,
+        pub ratio: Option<NarrowDefaultBaseRatio>,
         ///Default: `2.5`.
         #[serde(
             rename = "fraction",
@@ -5751,24 +5751,24 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub fraction: Option<NarrowDefaultBasefraction>,
+        pub fraction: Option<NarrowDefaultBaseFraction>,
     }
-    fn default_46_valid() -> Option<NarrowDefaultBasevalid> {
+    fn default_46_valid() -> Option<NarrowDefaultBaseValid> {
         Some("a".to_owned())
     }
-    fn default_46_bad() -> Option<NarrowDefaultBasebad> {
+    fn default_46_bad() -> Option<NarrowDefaultBaseBad> {
         Some("zzz".to_owned())
     }
-    fn default_46_ratio() -> Option<NarrowDefaultBaseratio> {
+    fn default_46_ratio() -> Option<NarrowDefaultBaseRatio> {
         Some(3.0)
     }
-    fn default_46_fraction() -> Option<NarrowDefaultBasefraction> {
+    fn default_46_fraction() -> Option<NarrowDefaultBaseFraction> {
         Some(2.5)
     }
-    pub type NarrowDefaultBasevalid = String;
-    pub type NarrowDefaultBasebad = String;
-    pub type NarrowDefaultBaseratio = f64;
-    pub type NarrowDefaultBasefraction = f64;
+    pub type NarrowDefaultBaseValid = String;
+    pub type NarrowDefaultBaseBad = String;
+    pub type NarrowDefaultBaseRatio = f64;
+    pub type NarrowDefaultBaseFraction = f64;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct NarrowDefaultEnum {
         #[serde(
@@ -5777,65 +5777,65 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub valid: Option<NarrowDefaultEnumvalid>,
+        pub valid: Option<NarrowDefaultEnumValid>,
         #[serde(
             rename = "bad",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub bad: Option<NarrowDefaultEnumbad>,
+        pub bad: Option<NarrowDefaultEnumBad>,
         #[serde(
             rename = "ratio",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub ratio: Option<NarrowDefaultEnumratio>,
+        pub ratio: Option<NarrowDefaultEnumRatio>,
         #[serde(
             rename = "fraction",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub fraction: Option<NarrowDefaultEnumfraction>,
+        pub fraction: Option<NarrowDefaultEnumFraction>,
     }
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    pub enum NarrowDefaultEnumvalid {
+    pub enum NarrowDefaultEnumValid {
         #[serde(rename = "a")]
         A,
         #[serde(rename = "b")]
         B,
     }
-    impl std::fmt::Display for NarrowDefaultEnumvalid {
+    impl std::fmt::Display for NarrowDefaultEnumValid {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(
                 match self {
-                    NarrowDefaultEnumvalid::A => "a",
-                    NarrowDefaultEnumvalid::B => "b",
+                    NarrowDefaultEnumValid::A => "a",
+                    NarrowDefaultEnumValid::B => "b",
                 },
             )
         }
     }
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    pub enum NarrowDefaultEnumbad {
+    pub enum NarrowDefaultEnumBad {
         #[serde(rename = "a")]
         A,
         #[serde(rename = "b")]
         B,
     }
-    impl std::fmt::Display for NarrowDefaultEnumbad {
+    impl std::fmt::Display for NarrowDefaultEnumBad {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(
                 match self {
-                    NarrowDefaultEnumbad::A => "a",
-                    NarrowDefaultEnumbad::B => "b",
+                    NarrowDefaultEnumBad::A => "a",
+                    NarrowDefaultEnumBad::B => "b",
                 },
             )
         }
     }
-    pub type NarrowDefaultEnumratio = i64;
-    pub type NarrowDefaultEnumfraction = i64;
+    pub type NarrowDefaultEnumRatio = i64;
+    pub type NarrowDefaultEnumFraction = i64;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct NarrowDefault {
         ///Default: `a`.
@@ -5845,7 +5845,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub valid: Option<NarrowDefaultEnumvalid>,
+        pub valid: Option<NarrowDefaultEnumValid>,
         ///Default (not applied): `"zzz"`.
         #[serde(
             rename = "bad",
@@ -5853,7 +5853,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub bad: Option<NarrowDefaultEnumbad>,
+        pub bad: Option<NarrowDefaultEnumBad>,
         ///Default: `3`.
         #[serde(
             rename = "ratio",
@@ -5861,7 +5861,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub ratio: Option<NarrowDefaultEnumratio>,
+        pub ratio: Option<NarrowDefaultEnumRatio>,
         ///Default (not applied): `2.5`.
         #[serde(
             rename = "fraction",
@@ -5869,12 +5869,12 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub fraction: Option<NarrowDefaultEnumfraction>,
+        pub fraction: Option<NarrowDefaultEnumFraction>,
     }
-    fn default_56_valid() -> Option<NarrowDefaultEnumvalid> {
-        Some(NarrowDefaultEnumvalid::A)
+    fn default_56_valid() -> Option<NarrowDefaultEnumValid> {
+        Some(NarrowDefaultEnumValid::A)
     }
-    fn default_56_ratio() -> Option<NarrowDefaultEnumratio> {
+    fn default_56_ratio() -> Option<NarrowDefaultEnumRatio> {
         Some(3)
     }
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5886,7 +5886,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub valid: Option<NarrowDefaultSiblingConstraintvalid>,
+        pub valid: Option<NarrowDefaultSiblingConstraintValid>,
         ///Default (not applied): `"zzz"`.
         #[serde(
             rename = "bad",
@@ -5894,7 +5894,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub bad: Option<NarrowDefaultSiblingConstraintbad>,
+        pub bad: Option<NarrowDefaultSiblingConstraintBad>,
         ///Default: `3`.
         #[serde(
             rename = "ratio",
@@ -5902,7 +5902,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub ratio: Option<NarrowDefaultSiblingConstraintratio>,
+        pub ratio: Option<NarrowDefaultSiblingConstraintRatio>,
         ///Default (not applied): `2.5`.
         #[serde(
             rename = "fraction",
@@ -5910,50 +5910,50 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub fraction: Option<NarrowDefaultSiblingConstraintfraction>,
+        pub fraction: Option<NarrowDefaultSiblingConstraintFraction>,
     }
-    fn default_57_valid() -> Option<NarrowDefaultSiblingConstraintvalid> {
-        Some(NarrowDefaultSiblingConstraintvalid::A)
+    fn default_57_valid() -> Option<NarrowDefaultSiblingConstraintValid> {
+        Some(NarrowDefaultSiblingConstraintValid::A)
     }
-    fn default_57_ratio() -> Option<NarrowDefaultSiblingConstraintratio> {
+    fn default_57_ratio() -> Option<NarrowDefaultSiblingConstraintRatio> {
         Some(3)
     }
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    pub enum NarrowDefaultSiblingConstraintvalid {
+    pub enum NarrowDefaultSiblingConstraintValid {
         #[serde(rename = "a")]
         A,
         #[serde(rename = "b")]
         B,
     }
-    impl std::fmt::Display for NarrowDefaultSiblingConstraintvalid {
+    impl std::fmt::Display for NarrowDefaultSiblingConstraintValid {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(
                 match self {
-                    NarrowDefaultSiblingConstraintvalid::A => "a",
-                    NarrowDefaultSiblingConstraintvalid::B => "b",
+                    NarrowDefaultSiblingConstraintValid::A => "a",
+                    NarrowDefaultSiblingConstraintValid::B => "b",
                 },
             )
         }
     }
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    pub enum NarrowDefaultSiblingConstraintbad {
+    pub enum NarrowDefaultSiblingConstraintBad {
         #[serde(rename = "a")]
         A,
         #[serde(rename = "b")]
         B,
     }
-    impl std::fmt::Display for NarrowDefaultSiblingConstraintbad {
+    impl std::fmt::Display for NarrowDefaultSiblingConstraintBad {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(
                 match self {
-                    NarrowDefaultSiblingConstraintbad::A => "a",
-                    NarrowDefaultSiblingConstraintbad::B => "b",
+                    NarrowDefaultSiblingConstraintBad::A => "a",
+                    NarrowDefaultSiblingConstraintBad::B => "b",
                 },
             )
         }
     }
-    pub type NarrowDefaultSiblingConstraintratio = i64;
-    pub type NarrowDefaultSiblingConstraintfraction = i64;
+    pub type NarrowDefaultSiblingConstraintRatio = i64;
+    pub type NarrowDefaultSiblingConstraintFraction = i64;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MergedDefaultNarrow {
         #[serde(
@@ -5962,9 +5962,9 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub p: Option<MergedDefaultNarrowp>,
+        pub p: Option<MergedDefaultNarrowP>,
     }
-    pub type MergedDefaultNarrowp = String;
+    pub type MergedDefaultNarrowP = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MergedDefaultBase {
         ///Default: `hello`.
@@ -5974,12 +5974,12 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub p: Option<MergedDefaultBasep>,
+        pub p: Option<MergedDefaultBaseP>,
     }
-    fn default_65_p() -> Option<MergedDefaultBasep> {
+    fn default_65_p() -> Option<MergedDefaultBaseP> {
         Some("hello".to_owned())
     }
-    pub type MergedDefaultBasep = String;
+    pub type MergedDefaultBaseP = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MergedDefaultOther {
         ///Default: `world`.
@@ -5989,12 +5989,12 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub p: Option<MergedDefaultOtherp>,
+        pub p: Option<MergedDefaultOtherP>,
     }
-    fn default_67_p() -> Option<MergedDefaultOtherp> {
+    fn default_67_p() -> Option<MergedDefaultOtherP> {
         Some("world".to_owned())
     }
-    pub type MergedDefaultOtherp = String;
+    pub type MergedDefaultOtherP = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MergedDefault {
         ///Default: `hello`.
@@ -6004,9 +6004,9 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub p: Option<MergedDefaultNarrowp>,
+        pub p: Option<MergedDefaultNarrowP>,
     }
-    fn default_69_p() -> Option<MergedDefaultNarrowp> {
+    fn default_69_p() -> Option<MergedDefaultNarrowP> {
         Some("hello".to_owned())
     }
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6018,9 +6018,9 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub p: Option<MergedDefaultNarrowp>,
+        pub p: Option<MergedDefaultNarrowP>,
     }
-    fn default_70_p() -> Option<MergedDefaultNarrowp> {
+    fn default_70_p() -> Option<MergedDefaultNarrowP> {
         Some("hello".to_owned())
     }
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6032,9 +6032,9 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub p: Option<MergedDefaultOtherp>,
+        pub p: Option<MergedDefaultOtherP>,
     }
-    fn default_73_p() -> Option<MergedDefaultOtherp> {
+    fn default_73_p() -> Option<MergedDefaultOtherP> {
         Some("hello".to_owned())
     }
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6045,30 +6045,30 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub x: Option<ForbiddenPropertyx>,
+        pub x: Option<ForbiddenPropertyX>,
     }
     #[derive(Debug, Clone)]
-    pub enum ForbiddenPropertyx {}
-    impl<'de> serde::Deserialize<'de> for ForbiddenPropertyx {
+    pub enum ForbiddenPropertyX {}
+    impl<'de> serde::Deserialize<'de> for ForbiddenPropertyX {
         fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
         {
             Err(
                 serde::de::Error::custom(
-                    "no JSON value can inhabit schema ForbiddenPropertyx",
+                    "no JSON value can inhabit schema ForbiddenPropertyX",
                 ),
             )
         }
     }
-    impl serde::Serialize for ForbiddenPropertyx {
+    impl serde::Serialize for ForbiddenPropertyX {
         fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
         {
             Err(
                 serde::ser::Error::custom(
-                    "no JSON value can inhabit schema ForbiddenPropertyx",
+                    "no JSON value can inhabit schema ForbiddenPropertyX",
                 ),
             )
         }
@@ -6076,30 +6076,30 @@ pub mod types {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct NullOnlyProperty {
         #[serde(rename = "x", default, skip_serializing_if = "Option::is_none")]
-        pub x: Option<NullOnlyPropertyx>,
+        pub x: Option<NullOnlyPropertyX>,
     }
     #[derive(Debug, Clone)]
-    pub enum NullOnlyPropertyx {}
-    impl<'de> serde::Deserialize<'de> for NullOnlyPropertyx {
+    pub enum NullOnlyPropertyX {}
+    impl<'de> serde::Deserialize<'de> for NullOnlyPropertyX {
         fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
         {
             Err(
                 serde::de::Error::custom(
-                    "no JSON value can inhabit schema NullOnlyPropertyx",
+                    "no JSON value can inhabit schema NullOnlyPropertyX",
                 ),
             )
         }
     }
-    impl serde::Serialize for NullOnlyPropertyx {
+    impl serde::Serialize for NullOnlyPropertyX {
         fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
         {
             Err(
                 serde::ser::Error::custom(
-                    "no JSON value can inhabit schema NullOnlyPropertyx",
+                    "no JSON value can inhabit schema NullOnlyPropertyX",
                 ),
             )
         }
@@ -6112,28 +6112,28 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub name: Option<OptionalFieldsname>,
+        pub name: Option<OptionalFieldsName>,
         #[serde(
             rename = "count",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub count: Option<OptionalFieldscount>,
+        pub count: Option<OptionalFieldsCount>,
         #[serde(
             rename = "flag",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub flag: Option<OptionalFieldsflag>,
+        pub flag: Option<OptionalFieldsFlag>,
         #[serde(
             rename = "tags",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub tags: Option<OptionalFieldstags>,
+        pub tags: Option<OptionalFieldsTags>,
         #[serde(
             rename = "mode",
             default,
@@ -6154,7 +6154,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub choice: Option<OptionalFieldschoice>,
+        pub choice: Option<OptionalFieldsChoice>,
         ///Default: `red`.
         #[serde(
             rename = "colour",
@@ -6162,25 +6162,25 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub colour: Option<OptionalFieldscolour>,
+        pub colour: Option<OptionalFieldsColour>,
         #[serde(
             rename = "anything",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub anything: Option<OptionalFieldsanything>,
+        pub anything: Option<OptionalFieldsAnything>,
         #[serde(rename = "maybe", default, skip_serializing_if = "Option::is_none")]
-        pub maybe: Option<OptionalFieldsmaybe>,
+        pub maybe: Option<OptionalFieldsMaybe>,
     }
-    fn default_79_colour() -> Option<OptionalFieldscolour> {
+    fn default_79_colour() -> Option<OptionalFieldsColour> {
         Some("red".to_owned())
     }
-    pub type OptionalFieldsname = String;
-    pub type OptionalFieldscount = i64;
-    pub type OptionalFieldsflag = bool;
-    pub type OptionalFieldstagsItem = String;
-    pub type OptionalFieldstags = Vec<OptionalFieldstagsItem>;
+    pub type OptionalFieldsName = String;
+    pub type OptionalFieldsCount = i64;
+    pub type OptionalFieldsFlag = bool;
+    pub type OptionalFieldsTagsItem = String;
+    pub type OptionalFieldsTags = Vec<OptionalFieldsTagsItem>;
     ///Default: `auto`.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub enum Mode {
@@ -6199,14 +6199,14 @@ pub mod types {
             )
         }
     }
-    pub type OptionalFieldschoiceVariant0 = String;
-    pub type OptionalFieldschoiceVariant1 = i64;
+    pub type OptionalFieldsChoiceVariant0 = String;
+    pub type OptionalFieldsChoiceVariant1 = i64;
     #[derive(Debug, Clone)]
-    pub enum OptionalFieldschoice {
-        OptionalFieldschoiceVariant0(Box<OptionalFieldschoiceVariant0>),
-        OptionalFieldschoiceVariant1(Box<OptionalFieldschoiceVariant1>),
+    pub enum OptionalFieldsChoice {
+        OptionalFieldsChoiceVariant0(Box<OptionalFieldsChoiceVariant0>),
+        OptionalFieldsChoiceVariant1(Box<OptionalFieldsChoiceVariant1>),
     }
-    impl<'de> serde::Deserialize<'de> for OptionalFieldschoice {
+    impl<'de> serde::Deserialize<'de> for OptionalFieldsChoice {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
@@ -6214,39 +6214,39 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             if value.is_string() {
                 return serde_json::from_value(value)
-                    .map(OptionalFieldschoice::OptionalFieldschoiceVariant0)
+                    .map(OptionalFieldsChoice::OptionalFieldsChoiceVariant0)
                     .map_err(serde::de::Error::custom);
             }
             if value.is_number() {
                 return serde_json::from_value(value)
-                    .map(OptionalFieldschoice::OptionalFieldschoiceVariant1)
+                    .map(OptionalFieldsChoice::OptionalFieldsChoiceVariant1)
                     .map_err(serde::de::Error::custom);
             }
             Err(
                 serde::de::Error::custom(
-                    "data did not match any variant of union OptionalFieldschoice",
+                    "data did not match any variant of union OptionalFieldsChoice",
                 ),
             )
         }
     }
-    impl serde::Serialize for OptionalFieldschoice {
+    impl serde::Serialize for OptionalFieldsChoice {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
         {
             match self {
-                OptionalFieldschoice::OptionalFieldschoiceVariant0(inner) => {
+                OptionalFieldsChoice::OptionalFieldsChoiceVariant0(inner) => {
                     inner.serialize(serializer)
                 }
-                OptionalFieldschoice::OptionalFieldschoiceVariant1(inner) => {
+                OptionalFieldsChoice::OptionalFieldsChoiceVariant1(inner) => {
                     inner.serialize(serializer)
                 }
             }
         }
     }
-    pub type OptionalFieldscolour = String;
-    pub type OptionalFieldsanything = serde_json::Value;
-    pub type OptionalFieldsmaybe = String;
+    pub type OptionalFieldsColour = String;
+    pub type OptionalFieldsAnything = serde_json::Value;
+    pub type OptionalFieldsMaybe = String;
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub enum StringLiteral {
         #[serde(rename = "special")]
@@ -6519,9 +6519,9 @@ pub mod types {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct DetailedOwner {
         #[serde(rename = "id")]
-        pub id: DetailedOwnerid,
+        pub id: DetailedOwnerId,
     }
-    pub type DetailedOwnerid = i64;
+    pub type DetailedOwnerId = i64;
     #[derive(Debug, Clone)]
     pub enum AnyOwner {
         BroadOwner(Box<BroadOwner>),
@@ -6606,47 +6606,47 @@ pub mod types {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ContentFile {
         #[serde(rename = "type")]
-        pub r#type: ContentFiletype,
+        pub r#type: ContentFileType,
         #[serde(rename = "content")]
-        pub content: ContentFilecontent,
+        pub content: ContentFileContent,
     }
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    pub enum ContentFiletype {
+    pub enum ContentFileType {
         #[serde(rename = "file")]
         File,
     }
-    impl std::fmt::Display for ContentFiletype {
+    impl std::fmt::Display for ContentFileType {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(
                 match self {
-                    ContentFiletype::File => "file",
+                    ContentFileType::File => "file",
                 },
             )
         }
     }
-    pub type ContentFilecontent = String;
+    pub type ContentFileContent = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ContentLink {
         #[serde(rename = "type")]
-        pub r#type: ContentLinktype,
+        pub r#type: ContentLinkType,
         #[serde(rename = "target")]
-        pub target: ContentLinktarget,
+        pub target: ContentLinkTarget,
     }
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    pub enum ContentLinktype {
+    pub enum ContentLinkType {
         #[serde(rename = "symlink")]
         Symlink,
     }
-    impl std::fmt::Display for ContentLinktype {
+    impl std::fmt::Display for ContentLinkType {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(
                 match self {
-                    ContentLinktype::Symlink => "symlink",
+                    ContentLinkType::Symlink => "symlink",
                 },
             )
         }
     }
-    pub type ContentLinktarget = String;
+    pub type ContentLinkTarget = String;
     #[derive(Debug, Clone)]
     pub enum MixedContent {
         MixedContentVariant0(Box<MixedContentVariant0>),
@@ -6740,23 +6740,23 @@ pub mod types {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct User {
         #[serde(rename = "id")]
-        pub id: Userid,
+        pub id: UserId,
         #[serde(
             rename = "external_id",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub external_id: Option<UserexternalId>,
+        pub external_id: Option<UserExternalId>,
         #[serde(
             rename = "created_at",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub created_at: Option<UsercreatedAt>,
+        pub created_at: Option<UserCreatedAt>,
         #[serde(rename = "name")]
-        pub name: Username,
+        pub name: UserName,
         #[serde(
             rename = "tree",
             default,
@@ -6853,14 +6853,14 @@ pub mod types {
         )]
         pub mixed_content: Option<MixedContent>,
     }
-    pub type Userid = String;
-    pub type UserexternalId = uuid::Uuid;
-    pub type UsercreatedAt = DateTime;
-    pub type Username = String;
+    pub type UserId = String;
+    pub type UserExternalId = uuid::Uuid;
+    pub type UserCreatedAt = DateTime;
+    pub type UserName = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct TreeNode {
         #[serde(rename = "value")]
-        pub value: TreeNodevalue,
+        pub value: TreeNodeValue,
         #[serde(
             rename = "parent",
             default,
@@ -6874,14 +6874,14 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub children: Option<TreeNodechildren>,
+        pub children: Option<TreeNodeChildren>,
     }
-    pub type TreeNodevalue = String;
-    pub type TreeNodechildren = Vec<TreeNode>;
+    pub type TreeNodeValue = String;
+    pub type TreeNodeChildren = Vec<TreeNode>;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Category {
         #[serde(rename = "name")]
-        pub name: Categoryname,
+        pub name: CategoryName,
         #[serde(
             rename = "item",
             default,
@@ -6890,11 +6890,11 @@ pub mod types {
         )]
         pub item: Option<Item>,
     }
-    pub type Categoryname = String;
+    pub type CategoryName = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Item {
         #[serde(rename = "label")]
-        pub label: Itemlabel,
+        pub label: ItemLabel,
         #[serde(
             rename = "category",
             default,
@@ -6903,7 +6903,7 @@ pub mod types {
         )]
         pub category: Option<Box<Category>>,
     }
-    pub type Itemlabel = String;
+    pub type ItemLabel = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Dict {
         #[serde(flatten)]
@@ -6912,11 +6912,11 @@ pub mod types {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct AliasNode {
         #[serde(rename = "value")]
-        pub value: AliasNodevalue,
+        pub value: AliasNodeValue,
         #[serde(rename = "parent", default, skip_serializing_if = "Option::is_none")]
         pub parent: Option<Box<AliasNode>>,
     }
-    pub type AliasNodevalue = String;
+    pub type AliasNodeValue = String;
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub enum Priority {
         #[serde(rename = "low")]
@@ -7016,18 +7016,18 @@ pub mod types {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Cat {
         #[serde(rename = "petType")]
-        pub pet_type: CatpetType,
+        pub pet_type: CatPetType,
         #[serde(rename = "name")]
-        pub name: Catname,
+        pub name: CatName,
     }
-    pub type CatpetType = String;
-    pub type Catname = String;
+    pub type CatPetType = String;
+    pub type CatName = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Dog {
         #[serde(rename = "bark")]
-        pub bark: Dogbark,
+        pub bark: DogBark,
     }
-    pub type Dogbark = bool;
+    pub type DogBark = bool;
     #[derive(Debug, Clone)]
     pub enum LooseAnimal {
         Cat(Box<Cat>),
@@ -7157,14 +7157,14 @@ pub mod types {
             value.serialize(serializer)
         }
     }
-    pub type LooseAnimalVariant2petType = String;
-    pub type LooseAnimalVariant2fins = i64;
+    pub type LooseAnimalVariant2PetType = String;
+    pub type LooseAnimalVariant2Fins = i64;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct LooseAnimalVariant2 {
         #[serde(rename = "petType")]
-        pub pet_type: LooseAnimalVariant2petType,
+        pub pet_type: LooseAnimalVariant2PetType,
         #[serde(rename = "fins")]
-        pub fins: LooseAnimalVariant2fins,
+        pub fins: LooseAnimalVariant2Fins,
     }
     #[derive(Debug, Clone)]
     pub enum StringOrList {
@@ -7256,8 +7256,8 @@ pub mod types {
     pub type StringListOrNullVariant1 = Vec<StringListOrNullVariant1Item>;
     #[derive(Debug, Clone)]
     pub enum Channel {
-        ChannelVariant0(Box<ChannelVariant0>),
-        ChannelVariant1(Box<ChannelVariant1>),
+        Webhook(Box<ChannelWebhook>),
+        Apprise(Box<ChannelApprise>),
     }
     impl<'de> serde::Deserialize<'de> for Channel {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -7279,12 +7279,12 @@ pub mod types {
             match tag.as_str() {
                 "webhook" => {
                     serde_json::from_value(value)
-                        .map(Channel::ChannelVariant0)
+                        .map(Channel::Webhook)
                         .map_err(serde::de::Error::custom)
                 }
                 "apprise" => {
                     serde_json::from_value(value)
-                        .map(Channel::ChannelVariant1)
+                        .map(Channel::Apprise)
                         .map_err(serde::de::Error::custom)
                 }
                 _ => {
@@ -7303,13 +7303,13 @@ pub mod types {
             S: serde::Serializer,
         {
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
-                Channel::ChannelVariant0(inner) => {
+                Channel::Webhook(inner) => {
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("webhook"),
                     )
                 }
-                Channel::ChannelVariant1(inner) => {
+                Channel::Apprise(inner) => {
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("apprise"),
@@ -7330,54 +7330,22 @@ pub mod types {
             value.serialize(serializer)
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    pub enum ChannelVariant0type {
-        #[serde(rename = "webhook")]
-        Webhook,
-    }
-    impl std::fmt::Display for ChannelVariant0type {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    ChannelVariant0type::Webhook => "webhook",
-                },
-            )
-        }
-    }
-    pub type ChannelVariant0url = String;
+    pub type ChannelWebhookUrl = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct ChannelVariant0 {
-        #[serde(rename = "type")]
-        pub r#type: ChannelVariant0type,
+    pub struct ChannelWebhook {
         #[serde(rename = "url")]
-        pub url: ChannelVariant0url,
+        pub url: ChannelWebhookUrl,
     }
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    pub enum ChannelVariant1type {
-        #[serde(rename = "apprise")]
-        Apprise,
-    }
-    impl std::fmt::Display for ChannelVariant1type {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    ChannelVariant1type::Apprise => "apprise",
-                },
-            )
-        }
-    }
-    pub type ChannelVariant1url = String;
+    pub type ChannelAppriseUrl = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct ChannelVariant1 {
-        #[serde(rename = "type")]
-        pub r#type: ChannelVariant1type,
+    pub struct ChannelApprise {
         #[serde(rename = "url")]
-        pub url: ChannelVariant1url,
+        pub url: ChannelAppriseUrl,
     }
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MaybeAliasNode {
         #[serde(rename = "value")]
-        pub value: AliasNodevalue,
+        pub value: AliasNodeValue,
         #[serde(rename = "parent", default, skip_serializing_if = "Option::is_none")]
         pub parent: Option<Box<AliasNode>>,
     }
@@ -7386,9 +7354,9 @@ pub mod types {
         #[serde(rename = "priority")]
         pub priority: Option<Priority>,
         #[serde(rename = "history")]
-        pub history: Tickethistory,
+        pub history: TicketHistory,
     }
-    pub type Tickethistory = Vec<Option<Priority>>;
+    pub type TicketHistory = Vec<Option<Priority>>;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Settings {
         ///Default: `red`.
@@ -7398,7 +7366,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub color: Option<Settingscolor>,
+        pub color: Option<SettingsColor>,
         ///Default: `true`.
         #[serde(
             rename = "enabled",
@@ -7406,7 +7374,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub enabled: Option<Settingsenabled>,
+        pub enabled: Option<SettingsEnabled>,
         ///Default: `1.5`.
         #[serde(
             rename = "ratio",
@@ -7414,10 +7382,10 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub ratio: Option<Settingsratio>,
+        pub ratio: Option<SettingsRatio>,
         ///Default: `3`.
         #[serde(rename = "retries")]
-        pub retries: Settingsretries,
+        pub retries: SettingsRetries,
         ///Default (not applied): `5000000000`.
         #[serde(
             rename = "wide",
@@ -7425,7 +7393,7 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub wide: Option<Settingswide>,
+        pub wide: Option<SettingsWide>,
         ///Default: `auto`.
         #[serde(
             rename = "mode",
@@ -7435,23 +7403,23 @@ pub mod types {
         )]
         pub mode: Option<Mode>,
     }
-    fn default_157_color() -> Option<Settingscolor> {
+    fn default_157_color() -> Option<SettingsColor> {
         Some("red".to_owned())
     }
-    fn default_157_enabled() -> Option<Settingsenabled> {
+    fn default_157_enabled() -> Option<SettingsEnabled> {
         Some(true)
     }
-    fn default_157_ratio() -> Option<Settingsratio> {
+    fn default_157_ratio() -> Option<SettingsRatio> {
         Some(1.5)
     }
     fn default_157_mode() -> Option<Mode> {
         Some(Mode::Auto)
     }
-    pub type Settingscolor = String;
-    pub type Settingsenabled = bool;
-    pub type Settingsratio = f64;
-    pub type Settingsretries = i64;
-    pub type Settingswide = i32;
+    pub type SettingsColor = String;
+    pub type SettingsEnabled = bool;
+    pub type SettingsRatio = f64;
+    pub type SettingsRetries = i64;
+    pub type SettingsWide = i32;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Headers {
         #[serde(
@@ -7460,11 +7428,11 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub host: Option<Headershost>,
+        pub host: Option<HeadersHost>,
         #[serde(flatten)]
         pub additional: BTreeMap<String, HeadersValue>,
     }
-    pub type Headershost = String;
+    pub type HeadersHost = String;
     pub type HeadersValue = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Tags {
@@ -7480,123 +7448,123 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub additional: Option<Bagadditional>,
+        pub additional: Option<BagAdditional>,
         #[serde(flatten)]
         pub additional_0093371c: BTreeMap<String, BagValue>,
     }
-    pub type Bagadditional = String;
+    pub type BagAdditional = String;
     pub type BagValue = i64;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct AccountBase {
         #[serde(rename = "id")]
-        pub id: AccountBaseid,
+        pub id: AccountBaseId,
     }
-    pub type AccountBaseid = String;
+    pub type AccountBaseId = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Account {
         #[serde(rename = "id")]
-        pub id: AccountBaseid,
+        pub id: AccountBaseId,
         #[serde(rename = "label")]
-        pub label: AccountMember1label,
+        pub label: AccountMember1Label,
         #[serde(
             rename = "owner",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub owner: Option<Accountowner>,
+        pub owner: Option<AccountOwner>,
     }
-    pub type AccountMember1label = String;
-    pub type Accountowner = String;
+    pub type AccountMember1Label = String;
+    pub type AccountOwner = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MultiOk {
         #[serde(rename = "ok")]
-        pub ok: MultiOkok,
+        pub ok: MultiOkOk,
     }
-    pub type MultiOkok = String;
+    pub type MultiOkOk = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MultiCreated {
         #[serde(rename = "id")]
-        pub id: MultiCreatedid,
+        pub id: MultiCreatedId,
     }
-    pub type MultiCreatedid = i64;
+    pub type MultiCreatedId = i64;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct NotFoundError {
         #[serde(rename = "reason")]
-        pub reason: NotFoundErrorreason,
+        pub reason: NotFoundErrorReason,
     }
-    pub type NotFoundErrorreason = String;
+    pub type NotFoundErrorReason = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ConflictError {
         #[serde(rename = "detail")]
-        pub detail: ConflictErrordetail,
+        pub detail: ConflictErrorDetail,
     }
-    pub type ConflictErrordetail = String;
+    pub type ConflictErrorDetail = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Problem {
         #[serde(rename = "title")]
-        pub title: Problemtitle,
+        pub title: ProblemTitle,
         #[serde(rename = "detail")]
-        pub detail: Problemdetail,
+        pub detail: ProblemDetail,
     }
-    pub type Problemtitle = String;
-    pub type Problemdetail = String;
+    pub type ProblemTitle = String;
+    pub type ProblemDetail = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MaybeProblem {
         #[serde(rename = "title")]
-        pub title: MaybeProblemtitle,
+        pub title: MaybeProblemTitle,
     }
-    pub type MaybeProblemtitle = String;
+    pub type MaybeProblemTitle = String;
     pub type PlainMessage = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ChatChunk {
         #[serde(rename = "delta")]
-        pub delta: ChatChunkdelta,
+        pub delta: ChatChunkDelta,
     }
-    pub type ChatChunkdelta = String;
+    pub type ChatChunkDelta = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename = "order")]
     pub struct XmlOrder {
         #[serde(rename = "@id")]
-        pub id: XmlOrderid,
+        pub id: XmlOrderId,
         #[serde(rename = "sku")]
-        pub sku: XmlOrdersku,
+        pub sku: XmlOrderSku,
     }
-    pub type XmlOrderid = i64;
-    pub type XmlOrdersku = String;
+    pub type XmlOrderId = i64;
+    pub type XmlOrderSku = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename = "xml-receipt")]
     pub struct XmlReceipt {
         #[serde(rename = "ReceiptCode")]
-        pub code: XmlReceiptcode,
+        pub code: XmlReceiptCode,
         #[serde(
             rename = "note",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub note: Option<XmlReceiptnote>,
+        pub note: Option<XmlReceiptNote>,
     }
-    pub type XmlReceiptcode = String;
-    pub type XmlReceiptnote = String;
+    pub type XmlReceiptCode = String;
+    pub type XmlReceiptNote = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename = "meta")]
     pub struct JsonMeta {
         #[serde(rename = "id")]
-        pub id: JsonMetaid,
+        pub id: JsonMetaId,
         #[serde(rename = "sku")]
-        pub sku: JsonMetasku,
+        pub sku: JsonMetaSku,
         #[serde(
             rename = "note",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub note: Option<JsonMetanote>,
+        pub note: Option<JsonMetaNote>,
     }
-    pub type JsonMetaid = i64;
-    pub type JsonMetasku = String;
-    pub type JsonMetanote = String;
+    pub type JsonMetaId = i64;
+    pub type JsonMetaSku = String;
+    pub type JsonMetaNote = String;
     pub type Path = String;
     pub type Query = String;
     pub type Url = String;
@@ -7621,59 +7589,59 @@ pub mod types {
     pub type Filter = i64;
     pub type Type = String;
     pub type ResponseBody = String;
-    pub type RequestBodyfileBb3f81ea = bytes::Bytes;
-    pub type RequestBodycaption = String;
-    pub type RequestBodycount = i64;
-    pub type RequestBodytagsItemDdafbaaa = String;
-    pub type RequestBodytags0d6778a5 = Vec<RequestBodytagsItemDdafbaaa>;
+    pub type RequestBodyFileBb3f81ea = bytes::Bytes;
+    pub type RequestBodyCaption = String;
+    pub type RequestBodyCount = i64;
+    pub type RequestBodyTagsItemDdafbaaa = String;
+    pub type RequestBodyTags0d6778a5 = Vec<RequestBodyTagsItemDdafbaaa>;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBodyE12d70b5 {
         #[serde(rename = "file")]
-        pub file: RequestBodyfileBb3f81ea,
+        pub file: RequestBodyFileBb3f81ea,
         #[serde(rename = "caption")]
-        pub caption: RequestBodycaption,
+        pub caption: RequestBodyCaption,
         #[serde(
             rename = "count",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub count: Option<RequestBodycount>,
+        pub count: Option<RequestBodyCount>,
         #[serde(
             rename = "tags",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub tags: Option<RequestBodytags0d6778a5>,
+        pub tags: Option<RequestBodyTags0d6778a5>,
     }
     pub type Token84222325 = String;
     pub type Cursor84222325 = String;
     pub type RequestBody43755b84 = bytes::Bytes;
     pub type Cursor842223252 = String;
-    pub type RequestBodydigest = bytes::Bytes;
-    pub type RequestBodyprevious = bytes::Bytes;
+    pub type RequestBodyDigest = bytes::Bytes;
+    pub type RequestBodyPrevious = bytes::Bytes;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody4fcf0620 {
         #[serde(rename = "digest")]
-        pub digest: Option<RequestBodydigest>,
+        pub digest: Option<RequestBodyDigest>,
         #[serde(rename = "previous")]
-        pub previous: Option<RequestBodyprevious>,
+        pub previous: Option<RequestBodyPrevious>,
     }
-    pub type ResponseBodydigest = bytes::Bytes;
+    pub type ResponseBodyDigest = bytes::Bytes;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ResponseBody8899a140 {
         #[serde(rename = "digest")]
-        pub digest: Option<ResponseBodydigest>,
+        pub digest: Option<ResponseBodyDigest>,
     }
-    pub type RequestBodyfile = bytes::Bytes;
-    pub type RequestBodythumb = bytes::Bytes;
+    pub type RequestBodyFile = bytes::Bytes;
+    pub type RequestBodyThumb = bytes::Bytes;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody20d50470 {
         #[serde(rename = "file")]
-        pub file: Option<RequestBodyfile>,
+        pub file: Option<RequestBodyFile>,
         #[serde(rename = "thumb", default, skip_serializing_if = "Option::is_none")]
-        pub thumb: Option<RequestBodythumb>,
+        pub thumb: Option<RequestBodyThumb>,
     }
     pub type ResponseBody4555dd31 = String;
     pub type ResponseBodyE2c17756 = String;
@@ -7703,28 +7671,28 @@ pub mod types {
     pub type Reserved = String;
     pub type Text = String;
     pub type XText = String;
-    pub type RequestBodyname = String;
-    pub type RequestBodytagsItem = String;
-    pub type RequestBodytags = Vec<RequestBodytagsItem>;
+    pub type RequestBodyName = String;
+    pub type RequestBodyTagsItem = String;
+    pub type RequestBodyTags = Vec<RequestBodyTagsItem>;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody75618f63 {
         #[serde(rename = "name")]
-        pub name: RequestBodyname,
+        pub name: RequestBodyName,
         #[serde(rename = "tags")]
-        pub tags: RequestBodytags,
+        pub tags: RequestBodyTags,
         #[serde(rename = "blob")]
         pub blob: DeepFilter,
     }
-    pub type RequestBodya = String;
+    pub type RequestBodyA = String;
     pub type RequestBodyAdditional = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody3c5761a3 {
         #[serde(rename = "a")]
-        pub a: RequestBodya,
+        pub a: RequestBodyA,
         #[serde(flatten)]
         pub additional: BTreeMap<String, RequestBodyAdditional>,
     }
-    pub type RequestBodyaF8000e9c = String;
+    pub type RequestBodyAF8000e9c = String;
     pub type RequestBodyAdditionalAba279dd = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBodyE2940da4 {
@@ -7734,17 +7702,17 @@ pub mod types {
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub a: Option<RequestBodyaF8000e9c>,
+        pub a: Option<RequestBodyAF8000e9c>,
         #[serde(flatten)]
         pub additional: BTreeMap<String, RequestBodyAdditionalAba279dd>,
     }
-    pub type RequestBodycaption820ffb52 = String;
+    pub type RequestBodyCaption820ffb52 = String;
     pub type RequestBodyAdditionalItem = i64;
     pub type RequestBodyAdditionalB504903e = Vec<RequestBodyAdditionalItem>;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody1654af29 {
         #[serde(rename = "caption")]
-        pub caption: RequestBodycaption820ffb52,
+        pub caption: RequestBodyCaption820ffb52,
         #[serde(flatten)]
         pub additional: BTreeMap<String, RequestBodyAdditionalB504903e>,
     }

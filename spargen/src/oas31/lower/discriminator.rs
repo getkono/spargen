@@ -3,9 +3,10 @@
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{
-    AdditionalProps, JsonCategory, ScalarValue, Ty, TypeKind, UnionMode, UnionStrategy,
+    AdditionalProps, JsonCategory, ScalarValue, Ty, TypeId, TypeKind, UnionMode, UnionStrategy,
     VariantDispatch,
 };
+use crate::name::hint_segment;
 use crate::oas31::discriminator::{
     discriminator_entry, discriminator_target_identity, is_schema_component_name,
     resolve_discriminator_targets,
@@ -281,6 +282,118 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
+    /// Name each inline variant its pinned tag selects from that tag, and leave the tag property
+    /// out of its struct (#1232).
+    ///
+    /// A variant qualifies when its member is an inline schema (no `$ref`), its one tag is the
+    /// value its own required tag property pins ([`Self::pinned_tag`]), and its payload is a def
+    /// that member's lowering or sibling meet inserted under the member's numbered hint
+    /// (`{hint}Variant{N}`), so no component or other shared type is touched. Every def that
+    /// lowering inserted under that hint is renamed onto `{hint}{Tag}` (the variant's struct,
+    /// its nested inline types, and a `…Constrained` meet alike), and the variant is named from
+    /// the tag itself. A tag that does not start with an ASCII letter, or that another variant's
+    /// hint already spells, keeps the numbered name.
+    ///
+    /// The tag property is recorded for [`Self::drop_pinned_tag_fields`], which drops it once
+    /// lowering is done from a struct that ignores unknown properties: it admits one
+    /// value, which the union's `Serialize` writes for the variant whenever the struct did not,
+    /// and its `Deserialize` hands the whole object, tag included, to the struct, which ignores
+    /// the key. A struct that denies unknown properties, or collects them into a typed map, keeps
+    /// the field, since the tag would otherwise fail or fill that map.
+    pub(super) fn name_pinned_variants(
+        &mut self,
+        hint: &str,
+        tag_field: &str,
+        lowered: &mut [LoweredVariant],
+        dispatches: &[VariantDispatch],
+        members: &PinnedMembers<'_, '_>,
+    ) {
+        for index in 0..lowered.len() {
+            let variant = &lowered[index];
+            let Some(VariantDispatch::Discriminated {
+                tags,
+                category: None,
+                ..
+            }) = dispatches.get(index)
+            else {
+                continue;
+            };
+            let [tag] = tags.as_slice() else {
+                continue;
+            };
+            let member = variant.member();
+            let inline = matches!(
+                members.real.get(member),
+                Some(SchemaOr::Schema(schema)) if schema.reference.is_none()
+            );
+            if !inline
+                || variant.ref_name.is_some()
+                || variant.members.len() != 1
+                || self.pinned_tag(variant.ty, tag_field).as_deref() != Some(tag.as_str())
+                || !tag
+                    .chars()
+                    .find(char::is_ascii_alphanumeric)
+                    .is_some_and(|first| first.is_ascii_alphabetic())
+                || lowered.iter().any(|other| other.name_hint == *tag)
+            {
+                continue;
+            }
+            let numbered = format!("{hint}Variant{member}");
+            let fresh: Vec<TypeId> = [
+                members.member_lowerings.get(member),
+                members.meet_inserts.get(member),
+            ]
+            .into_iter()
+            .flatten()
+            .flat_map(Clone::clone)
+            .map(TypeId)
+            .filter(|id| {
+                self.graph
+                    .get(*id)
+                    .is_some_and(|def| def.name_hint.starts_with(&numbered))
+            })
+            .collect();
+            if !fresh.contains(&variant.ty.id) {
+                continue;
+            }
+            let tagged = format!("{hint}{}", hint_segment(tag));
+            let renamed = |name: &mut String| {
+                if let Some(rest) = name.strip_prefix(&numbered) {
+                    *name = format!("{tagged}{rest}");
+                }
+            };
+            for id in fresh {
+                if let Some(def) = self.graph.get_mut(id) {
+                    renamed(&mut def.name_hint);
+                    // A nested inline union's own variants carry the same prefix.
+                    if let TypeKind::Union(union) = &mut def.kind {
+                        for nested in &mut union.variants {
+                            renamed(&mut nested.name_hint);
+                        }
+                    }
+                }
+            }
+            self.pinned_tag_fields
+                .push((variant.ty.id, tag_field.to_owned()));
+            lowered[index].name_hint = tag.clone();
+        }
+    }
+
+    /// Leave each tag property [`Self::name_pinned_variants`] recorded out of its struct, where
+    /// the struct ignores unknown properties. Run once lowering is done: until then the field is
+    /// the pin a meet reads, so a tag constraint met with the union later (`allOf: [{$ref:
+    /// Union}, {properties: {kind: {const: other}}}]`) still excludes the branch it rules out.
+    pub(super) fn drop_pinned_tag_fields(&mut self) {
+        for (id, tag_field) in std::mem::take(&mut self.pinned_tag_fields) {
+            if let Some(TypeKind::Struct(object)) = self.graph.get_mut(id).map(|def| &mut def.kind)
+            {
+                if matches!(object.additional, AdditionalProps::Allow) {
+                    object.fields.retain(|field| field.name.wire != tag_field);
+                }
+            }
+        }
+    }
+
     /// Whether an object variant may accept a payload whose `tag_field` holds `value`, as far as
     /// that one property decides it. `false` only where the property is declared with a closed
     /// enum set that omits `value`, or is undeclared on an object that denies unknown properties;
@@ -453,4 +566,13 @@ pub(super) fn member_component_name<'m>(
 pub(super) struct DiscriminatorMembers {
     pub(super) mapping: Vec<(String, usize)>,
     pub(super) default: Option<usize>,
+}
+
+/// What [`LowerCtx::name_pinned_variants`] reads of a union's real members, each indexed by the
+/// member's position: the member itself, and the ids its own lowering and its sibling meet
+/// inserted.
+pub(super) struct PinnedMembers<'m, 's> {
+    pub(super) real: &'m [&'s SchemaOr],
+    pub(super) member_lowerings: &'m [std::ops::Range<u32>],
+    pub(super) meet_inserts: &'m [std::ops::Range<u32>],
 }
