@@ -8,6 +8,7 @@ use crate::oas31::Schema;
 use super::meet::same_ty;
 use super::nullability::non_nullable;
 use super::strategy::retain_strategy;
+use super::union::group_alike;
 use super::{LowerCtx, MetUnion};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -34,18 +35,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         let structural =
             structural && !matches!(union.strategy, UnionStrategy::Discriminated { .. });
-        let (first, rest) = union.variants.split_first()?;
+        let first = union.variants.first()?;
         let nullable = union
             .variants
             .iter()
             .filter(|variant| variant.ty.nullable)
             .count();
-        (!rest.is_empty()
-            && rest.iter().all(|variant| {
-                same_ty(non_nullable(variant.ty), non_nullable(first.ty))
-                    || (structural && self.same_type_apart_from_null(variant.ty, first.ty))
-            }))
-        .then_some((first.ty, nullable))
+        let groups = group_alike(&union.variants, |kept, variant| {
+            same_ty(non_nullable(variant.ty), non_nullable(kept.ty))
+                || (structural && self.same_type_apart_from_null(variant.ty, kept.ty))
+        });
+        (union.variants.len() > 1 && groups.len() == 1).then_some((first.ty, nullable))
     }
 
     /// Whether two `oneOf` variants decode the same values — one Rust type, or two of one
@@ -365,16 +365,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return None;
         }
         let union = union.clone();
-        let mut groups: Vec<Vec<usize>> = Vec::new();
-        for (index, variant) in union.variants.iter().enumerate() {
-            let shared = groups.iter_mut().find(|group| {
-                self.same_type_apart_from_null(union.variants[group[0]].ty, variant.ty)
-            });
-            match shared {
-                Some(group) => group.push(index),
-                None => groups.push(vec![index]),
-            }
-        }
+        let groups = group_alike(&union.variants, |kept, variant| {
+            self.same_type_apart_from_null(kept.ty, variant.ty)
+        });
         if groups.len() == union.variants.len() {
             return None;
         }
