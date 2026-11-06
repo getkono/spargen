@@ -157,7 +157,8 @@ components:
 
 /// `ty` with every `pub type` alias the generated `types` module declares expanded, recursively,
 /// down to the Rust type the alias chain finally names — `Holderblob` to `bytes::Bytes`, `Coord` to
-/// `(f64, f64)`.
+/// `(f64, f64)`. A `contentEncoding: base64` newtype, `pub struct X(pub bytes::Bytes);`, expands to
+/// `Base64(bytes::Bytes)`, since its name differs per spelling as an alias's does.
 ///
 /// Different spellings of one schema emit differently named intermediate aliases (`Data`,
 /// `HolderblobConstraint`, `ResponseBody`, …), so comparing names compares spellings. What the
@@ -165,9 +166,17 @@ components:
 fn expand_aliases(types: &str, ty: &str) -> String {
     let aliases: std::collections::HashMap<&str, &str> = types
         .lines()
-        .filter_map(|line| line.trim_start().strip_prefix("pub type "))
-        .filter_map(|rest| rest.split_once(" = "))
-        .map(|(name, rhs)| (name, rhs.trim_end_matches(';')))
+        .filter_map(|line| {
+            let line = line.trim_start();
+            line.strip_prefix("pub type ")
+                .and_then(|rest| rest.split_once(" = "))
+                .map(|(name, rhs)| (name, rhs.trim_end_matches(';')))
+                .or_else(|| {
+                    line.strip_prefix("pub struct ")
+                        .and_then(|rest| rest.strip_suffix("(pub bytes::Bytes);"))
+                        .map(|name| (name, "Base64(bytes::Bytes)"))
+                })
+        })
         .collect();
     let mut current = ty.replace("types::", "");
     // A bound rather than a fixpoint test alone: a cyclic alias set must fail the fixture, not
@@ -311,14 +320,6 @@ fn a_binary_string_lowers_to_bytes_however_the_binary_constraint_is_spelled() {
             "{ $ref: '#/components/schemas/Data', format: binary }",
         ),
         (
-            "ref to string + contentEncoding",
-            "{ $ref: '#/components/schemas/Data', contentEncoding: base64 }",
-        ),
-        (
-            "ref to base64 + type: string",
-            "{ $ref: '#/components/schemas/Blob64', type: string }",
-        ),
-        (
             "allOf",
             "{ allOf: [{ $ref: '#/components/schemas/Data' }, { format: binary }] }",
         ),
@@ -333,6 +334,52 @@ fn a_binary_string_lowers_to_bytes_however_the_binary_constraint_is_spelled() {
         disagreeing.is_empty(),
         "every spelling of a binary string must lower to `bytes::Bytes` in every position, \
          but these did not: {disagreeing:#?}"
+    );
+}
+
+/// The base64 counterpart of the test above (#1230): every spelling of a `contentEncoding: base64`
+/// string is the base64 newtype as a JSON property, whose serde form is the base64 text, and plain
+/// `bytes::Bytes` as a whole raw body, which is sent and read as the octets themselves. Beside
+/// `format: binary`, on one schema or across a composition, `contentEncoding: base64` decides.
+#[test]
+fn a_base64_string_lowers_to_the_base64_newtype_however_it_is_spelled() {
+    let components = "    Data: { type: string }\n    \
+                      Blob: { type: string, format: binary }\n    \
+                      Blob64: { type: string, contentEncoding: base64 }";
+    let spellings: &[(&str, &str)] = &[
+        ("inline", "{ type: string, contentEncoding: base64 }"),
+        ("ref to base64", "{ $ref: '#/components/schemas/Blob64' }"),
+        (
+            "ref to string + contentEncoding",
+            "{ $ref: '#/components/schemas/Data', contentEncoding: base64 }",
+        ),
+        (
+            "ref to base64 + type: string",
+            "{ $ref: '#/components/schemas/Blob64', type: string }",
+        ),
+        (
+            "binary and base64 on one schema",
+            "{ type: string, format: binary, contentEncoding: base64 }",
+        ),
+        (
+            "ref to binary + contentEncoding",
+            "{ $ref: '#/components/schemas/Blob', contentEncoding: base64 }",
+        ),
+        (
+            "allOf of binary and base64",
+            "{ allOf: [{ $ref: '#/components/schemas/Blob' }, { contentEncoding: base64 }] }",
+        ),
+    ];
+    let expected = Ok(("Base64(bytes::Bytes)".to_owned(), "bytes::Bytes".to_owned()));
+    let disagreeing: Vec<_> =
+        lower_each_spelling(spellings, components, "application/octet-stream", true)
+            .into_iter()
+            .filter(|(_, outcome)| *outcome != expected)
+            .collect();
+    assert!(
+        disagreeing.is_empty(),
+        "every spelling of a base64 string must lower to the base64 newtype as a property and to \
+         `bytes::Bytes` as a raw body, but these did not: {disagreeing:#?}"
     );
 }
 

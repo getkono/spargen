@@ -744,6 +744,33 @@ mod tests {
         );
     }
 
+    /// Lowering takes a whole base64 body raw (#1230), since the emitter sends and decodes every
+    /// whole `bytes` body raw, which the base64 newtype is not; one here is a frontend bug, under
+    /// any media.
+    #[test]
+    fn a_whole_base64_request_body_is_caught() {
+        for (media, content_type) in [
+            (MediaType::Json, "application/json"),
+            (MediaType::OctetStream, "application/octet-stream"),
+        ] {
+            let api = api_with_request_body(
+                media,
+                content_type,
+                Some(TypeKind::Bytes(super::BytesEncoding::Base64)),
+            );
+            let mut diags = Diagnostics::new(100);
+            check_invariants(&api, &mut diags);
+            let [diagnostic] = diags.items() else {
+                panic!("{content_type}: expected exactly one diagnostic: {diags:#?}");
+            };
+            assert_eq!(diagnostic.code, Code::InvalidInput, "{diags:#?}");
+            assert!(
+                diagnostic.message.contains("base64 bytes type"),
+                "{diags:#?}"
+            );
+        }
+    }
+
     #[test]
     fn an_untyped_octet_stream_request_body_is_left_to_the_frontend() {
         let api = api_with_request_body(MediaType::OctetStream, "application/octet-stream", None);

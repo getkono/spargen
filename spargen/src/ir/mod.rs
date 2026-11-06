@@ -765,9 +765,84 @@ mod tests {
                     },
                     false,
                 ),
+                (
+                    "a model field of base64 bytes, whose newtype is serialized by the codec",
+                    |api| {
+                        let item = base64(api);
+                        object(api, item, AdditionalProps::Allow);
+                    },
+                    false,
+                ),
+                (
+                    "a JSON request body over an array of base64 bytes",
+                    |api| {
+                        let item = base64(api);
+                        let ty = insert(api, TypeKind::Array(Box::new(item)));
+                        request(api, MediaType::Json, ty);
+                    },
+                    false,
+                ),
+                (
+                    "an event stream of base64 items",
+                    |api| {
+                        let ty = base64(api);
+                        respond(api, OK, MediaType::EventStream, ty);
+                    },
+                    false,
+                ),
             ],
             Api::uses_bytes_serde,
         );
+    }
+
+    /// The base64 codec is embedded exactly when a base64 definition the output carries exists,
+    /// wherever it sits; raw bytes and an elided base64 definition do not embed it.
+    #[test]
+    fn uses_base64_follows_the_table() {
+        check(
+            &[
+                ("no type", |_| {}, false),
+                (
+                    "raw bytes",
+                    |api| {
+                        let item = bytes(api);
+                        object(api, item, AdditionalProps::Allow);
+                    },
+                    false,
+                ),
+                (
+                    "a base64 definition referenced by nothing",
+                    |api| {
+                        base64(api);
+                    },
+                    true,
+                ),
+                (
+                    "a model field of base64 bytes",
+                    |api| {
+                        let item = base64(api);
+                        object(api, item, AdditionalProps::Allow);
+                    },
+                    true,
+                ),
+                (
+                    "an elided base64 definition",
+                    |api| {
+                        let ty = base64(api);
+                        api.types.elide(ty.id);
+                    },
+                    false,
+                ),
+            ],
+            Api::uses_base64,
+        );
+        let mut api = api();
+        base64(&mut api);
+        assert!(api.runtime_features(false).base64);
+    }
+
+    fn base64(api: &mut Api) -> Ty {
+        insert(api, TypeKind::Bytes(super::BytesEncoding::Base64))
     }
 
     fn parameter(ty: Ty, style: ParamStyle) -> Parameter {

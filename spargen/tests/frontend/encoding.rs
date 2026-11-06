@@ -255,6 +255,50 @@ paths:
     );
 }
 
+/// A `contentEncoding: base64` multipart part (#1230): the property is the base64 newtype, which a
+/// JSON body writes as base64 text, but a part defaults to `application/octet-stream` and carries
+/// the octets, read through the newtype's `Deref`. The base64 codec is embedded for the newtype.
+#[test]
+fn a_base64_multipart_part_is_a_bytes_part_of_the_base64_newtype() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties: { image: { type: string, contentEncoding: base64 } }
+      responses:
+        '204': { description: ok }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        code.contains("pub struct RequestBodyimage(pub bytes::Bytes);"),
+        "{code}"
+    );
+    assert!(
+        code.contains("reqwest::multipart::Part::bytes(body.image.to_vec())"),
+        "{code}"
+    );
+    assert!(
+        code.contains(".mime_str(\"application/octet-stream\")"),
+        "{code}"
+    );
+    assert!(
+        code.contains("pub use base64::{deserialize_base64, serialize_base64};"),
+        "{code}"
+    );
+}
+
 #[test]
 fn e009_form_urlencoded_body_requires_an_object_schema() {
     // A non-object form body used to compile and then fail at runtime inside the form encoder.
