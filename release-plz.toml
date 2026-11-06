@@ -7,3 +7,6 @@
 [[package]]
 name = "support-runtime"
 release = false
+# release-plz defaults `publish` to true and refuses a config that contradicts the manifest's
+# `publish = false`, so `release = false` alone fails every `release-plz release` run.
+publish = false
