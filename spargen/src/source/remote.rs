@@ -1,7 +1,8 @@
-//! Remote (`http`/`https`) `$ref` primitives: URL math, `$ref` classification, and the ref
-//! rewriting that keeps hermetic resolution correct. The networked vendor step lives in
-//! [`vendor`](fn@super::vendor) (feature `remote-fetch`); these helpers are shared by both the hermetic bundle
-//! loader and the vendor walk.
+//! Remote (`http`/`https`) `$ref` primitives: URL math, the [`is_http_url`] predicate, `$ref`
+//! classification, the [`classify_self`] reading of a document's `$self`, and the ref rewriting
+//! that keeps hermetic resolution correct. The networked vendor step lives in
+//! [`vendor`](fn@super::vendor) (feature `remote-fetch`); these helpers are shared by both the
+//! hermetic bundle loader and the vendor walk.
 //!
 //! ## Hermetic by construction
 //!

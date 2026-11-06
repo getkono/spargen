@@ -1,20 +1,22 @@
 //! # Subsystem: source
 //! layer-deps: diag
 //!
-//! Input bundles (JSON/YAML, relative-file `$ref` loading) and a span-preserving, event-based
-//! parse into a [`SpannedValue`] tree.
+//! Input bundles (JSON/YAML, relative-file `$ref` loading) and a span-preserving parse into a
+//! [`SpannedValue`] tree.
 //!
 //! Parsing preserves file/line/column per node so downstream diagnostics can point at exact
 //! source locations. serde is deliberately *not* used for the document tree: it discards
 //! spans, and precise diagnostics are non-negotiable — hence the in-house [`SpannedValue`].
-//! YAML is parsed through `yaml_rust2`'s event-level parser into the same tree, over the
-//! JSON-compatible subset OAS prescribes: aliases expand to their anchored values, and non-string
-//! keys and multi-document streams are diagnosed rather than accepted.
+//! `parse` holds both parsers: JSON is a hand-rolled recursive-descent parser (`parse/json.rs`),
+//! and YAML is parsed through `yaml_rust2`'s event-level parser (`parse/yaml.rs`) into the same
+//! tree, over the JSON-compatible subset OAS prescribes: aliases expand to their anchored values,
+//! and non-string keys and multi-document streams are diagnosed rather than accepted.
 //!
 //! Remote `$ref`s are covered by four more modules: `lock` (the `spargen.lock` pin file and the
-//! vendor-directory layout), `remote` (URL math, `$ref` classification and rewriting), `vendor`
-//! (the `remote-fetch`-gated walk behind `spargen lock` that fetches and pins remote documents),
-//! and `sha256` (the in-tree digest that pins vendored bytes and fingerprints the build cache).
+//! vendor-directory layout), `remote` (URL math, `$ref` and `$self` classification, and
+//! rewriting), `vendor` (the `remote-fetch`-gated walk behind `spargen lock` that fetches and pins
+//! remote documents), and `sha256` (the in-tree digest that pins vendored bytes and fingerprints
+//! the build cache).
 
 mod bundle;
 mod lock;

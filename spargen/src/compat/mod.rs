@@ -17,8 +17,8 @@
 //!   semantics.
 //! * **Auto-carve.** [`carve_rules`] maps error diagnostics to the smallest enclosing *omittable*
 //!   construct, so the facade can iteratively omit the unsupported islands of a spec and generate
-//!   the rest. The fixpoint driver lives in the facade (it must re-run the pipeline); this module
-//!   supplies only the pure pointer→construct mapping.
+//!   the rest. The fixpoint driver lives in the facade's `pipeline` module (it must re-run the
+//!   pipeline); this module supplies only the pure pointer→construct mapping.
 //!
 //! The rule grammar is in `rule`, the matcher in `glob`, and the auto-carve mapping in `carve`;
 //! this module applies a profile to a bundle and checks what survives it.
