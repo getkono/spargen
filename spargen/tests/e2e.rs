@@ -488,10 +488,10 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
     let lock: toml::Value =
         toml::from_str(&std::fs::read_to_string(out.join("Cargo.lock")).unwrap()).unwrap();
     let packages = lock["package"].as_array().unwrap();
-    // Every floor the requirement table states: the ten crates the fixture manifest declares, so
+    // Every floor the requirement table states: the twelve crates the fixture manifest declares, so
     // the proof cannot pass by the table having shrunk, and a crate added to it fails here until
     // the fixture declares it too.
-    assert_eq!(runtime_floors().len(), 10, "{:#?}", runtime_floors());
+    assert_eq!(runtime_floors().len(), 12, "{:#?}", runtime_floors());
     for (&name, &expected) in runtime_floors() {
         assert!(
             packages.iter().any(|package| {
