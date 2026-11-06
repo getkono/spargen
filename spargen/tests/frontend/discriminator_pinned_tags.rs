@@ -144,6 +144,49 @@ fn an_inline_member_selected_by_its_pinned_tag_is_named_from_it_and_leaves_the_t
     assert!(!types.contains("ConfigVariant0"), "{types}");
 }
 
+/// Issue #1245: the rename #1232 makes touches only the types the inline member itself lowers. A
+/// declared component the member reaches keeps its name, and so do the inline types nested in it,
+/// even where that name starts with the member's numbered hint (`SrcVariant0Uri`) and the
+/// component is first lowered while the member is.
+#[test]
+fn a_component_named_like_a_numbered_variant_keeps_its_name() {
+    let spec = "openapi: 3.1.0\n\
+                info: { title: T, version: 1.0.0 }\n\
+                paths: {}\n\
+                components:\n  \
+                schemas:\n    \
+                Src:\n      \
+                oneOf:\n        \
+                - { type: object, required: [type, uri], properties: { type: { const: magnet }, uri: { $ref: '#/components/schemas/SrcVariant0Uri' }, note: { type: string } } }\n        \
+                - { type: object, required: [type, path], properties: { type: { const: file }, path: { type: string } } }\n      \
+                discriminator:\n        \
+                propertyName: type\n    \
+                SrcVariant0Uri: { type: object, required: [href], properties: { href: { type: string }, rel: { oneOf: [{ type: string }, { type: integer }] } } }\n";
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    assert!(
+        types.contains("Magnet(Box<SrcMagnet>),") && types.contains("File(Box<SrcFile>),"),
+        "{types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "SrcMagnet"),
+        ["uri", "note"],
+        "{types}"
+    );
+    assert!(
+        types.contains("pub uri: SrcVariant0Uri,"),
+        "the member's field still names the component: {types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "SrcVariant0Uri"),
+        ["href", "rel"],
+        "{types}"
+    );
+    assert!(types.contains("pub enum SrcVariant0UriRel {"), "{types}");
+    assert!(!types.contains("SrcMagnetUri"), "{types}");
+}
+
 /// The pinned value of #1001 selects a member only where it is the one value every payload the
 /// member accepts carries, and nothing else claims it. A tag property that is optional, nullable,
 /// or admits several values pins nothing; a value a `mapping` key, another member's tag, or another
