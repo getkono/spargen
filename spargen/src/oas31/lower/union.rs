@@ -849,8 +849,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             {
                 ty.nullable = true;
             }
+            let mark = self.graph_mark();
+            // A member with no sibling to meet (none at all, or a cycle-closing branch kept
+            // unmet) inserted nothing for it: an empty range keeps `meet_inserts` aligned with
+            // member positions, which the met-into-null drop reads it by (#1226).
+            if sibling.is_none() {
+                lowering.meet_inserts.push(mark..mark);
+            }
             if let Some(sibling) = sibling {
-                let mark = self.graph_mark();
                 let null_before = self.is_exact_null(ty);
                 let constrained_hint = format!("{hint}Variant{index}Constrained");
                 let met = self.meet_union_sibling(
@@ -954,6 +960,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         }
 
+        debug_assert_eq!(
+            lowering.meet_inserts.len(),
+            real_members.len(),
+            "one meet range per real member, by member position"
+        );
         if let Some(sibling) = sibling {
             for keywords in unreached_halves(sibling.refiner, &reach) {
                 self.warn_unreached_union_sibling(schema, unreached_message(keywords));
@@ -1411,9 +1422,9 @@ struct MemberLowering {
     /// `null` payload then resolves at the outer `Option<Union>` (→ `None`), and the
     /// discriminated or disjoint dispatch only ever inspects non-null content.
     hoisted_null: bool,
-    /// The ids each member's sibling meet inserted, in the order the members were met. They
-    /// interleave with the members' own lowered types, which stay, so a re-emit elides the
-    /// unused ones rather than popping.
+    /// The ids each member's sibling meet inserted, one range per real member and indexed by its
+    /// position, empty for a member met with nothing. They interleave with the members' own
+    /// lowered types, which stay, so a re-emit elides the unused ones rather than popping.
     meet_inserts: Vec<std::ops::Range<u32>>,
     /// The members the sibling meet narrowed to the exact null type, each typed before it: an
     /// `anyOf` hoists them to its `Option` beside typed variants (#633). A branch that is the
