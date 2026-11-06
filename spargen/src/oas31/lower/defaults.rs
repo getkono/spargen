@@ -307,6 +307,9 @@ fn representable_default(raw: &RawDefault, kind: Option<&TypeKind>) -> Option<De
         // not representable: it is documented and reported (`W005`) rather than wired. It is also
         // the answer the filled body would get — a cycle closes only through a schema that holds a
         // reference (an object, array, tuple, or union), and none of those takes a literal here.
+        // Mutation testing: deleting this arm is an equivalent mutant, declared in
+        // `.cargo/mutants.toml`: the catch-all below answers the same `None`. The arm is kept
+        // because every catch-all over `TypeKind` names `Reserved` above it (`ir/types.rs`).
         (_, TypeKind::Reserved) => None,
         _ => None,
     }
@@ -425,6 +428,265 @@ mod tests {
         assert_eq!(
             representable_default(&RawDefault::Int(1), Some(&kind)),
             None
+        );
+    }
+
+    /// `spec` lowered through the whole frontend from a temporary root document, with every
+    /// diagnostic it reported.
+    fn lowered(spec: &str) -> (crate::ir::Api, Vec<crate::Diagnostic>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("openapi.yaml");
+        std::fs::write(&path, spec).unwrap();
+        let spec = crate::Spec::new(camino::Utf8PathBuf::from_path_buf(path).unwrap());
+        let mut diags = Diagnostics::default();
+        let lowered = crate::pipeline::lower_frontend(&spec, &mut diags);
+        let (api, _) = lowered.unwrap_or_else(|()| panic!("the spec lowers: {:?}", diags.items()));
+        (api, diags.items().to_vec())
+    }
+
+    /// Each property of the emitted struct `name`, as `(wire name, doc note, applied value)`, the
+    /// note and value `None` for a property that declared no `default`.
+    fn field_defaults(
+        api: &crate::ir::Api,
+        name: &str,
+    ) -> Vec<(String, Option<String>, Option<DefaultValue>)> {
+        let (_, def) = api
+            .types
+            .emitted()
+            .find(|(_, def)| def.name_hint == name)
+            .unwrap_or_else(|| panic!("no emitted type `{name}`"));
+        let TypeKind::Struct(object) = &def.kind else {
+            panic!("`{name}` is no struct");
+        };
+        object
+            .fields
+            .iter()
+            .map(|field| {
+                let default = field.default.as_ref();
+                (
+                    field.name.wire.clone(),
+                    default.map(|default| default.doc_note.clone()),
+                    default.and_then(|default| default.applied.clone()),
+                )
+            })
+            .collect()
+    }
+
+    /// The messages of the `W005`s in `diagnostics`.
+    fn w005(diagnostics: &[crate::Diagnostic]) -> Vec<&str> {
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == crate::diag::Code::SchemaDefaultNotApplied)
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect()
+    }
+
+    const DEFAULTS_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: t, version: '1' }
+paths:
+  /p:
+    post:
+      operationId: postP
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, format: int32, default: 10 } }
+        - { name: tags, in: query, schema: { type: array, items: { type: string }, default: [a, b] } }
+        - { name: plain, in: query, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { a: { type: string } }, default: { a: x } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+        '201':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Narrow' }
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [req]
+      properties:
+        i32: { type: integer, format: int32, default: 10 }
+        wide: { type: integer, format: int32, default: 3000000000 }
+        i64: { type: integer, default: 4 }
+        int_float: { type: integer, default: 3.0 }
+        fraction: { type: integer, default: 2.5 }
+        huge: { type: integer, default: 9007199254740992.0 }
+        float_from_int: { type: number, default: 2 }
+        float: { type: number, default: 1.5 }
+        flag: { type: boolean, default: true }
+        name: { type: string, default: hi }
+        color: { type: string, enum: [red, blue], default: blue }
+        off_color: { type: string, enum: [red], default: green }
+        req: { type: string, default: r }
+        maybe: { type: [string, 'null'], default: m }
+        obj: { type: object, default: { k: [1, null, 2.5, true, -3, 18446744073709551615] } }
+        list: { type: array, items: { type: string, default: x } }
+        plain: { type: string }
+    Narrow:
+      allOf:
+        - type: object
+          properties:
+            kept: { type: string, default: a }
+            dropped: { type: string, default: c }
+            whole: { type: number, default: 3 }
+        - type: object
+          properties:
+            kept: { enum: [a, b] }
+            dropped: { enum: [a, b] }
+            whole: { type: integer }
+"#;
+
+    /// A property's `default` lowered end to end: applied only for a representable scalar on a
+    /// plain optional field, documented either way, and reported as `W005` where it is not
+    /// applied; a float default that names an integer exactly read as that integer, below 2^53
+    /// only.
+    #[test]
+    fn a_property_default_is_applied_only_where_representable_and_optional() {
+        let (api, _) = lowered(DEFAULTS_SPEC);
+        let applied = |note: &str, value: DefaultValue| (Some(note.to_owned()), Some(value));
+        let documented = |note: &str| (Some(note.to_owned()), None);
+        let expected = [
+            ("i32", applied("Default: `10`.", DefaultValue::Int(10))),
+            ("wide", documented("Default (not applied): `3000000000`.")),
+            ("i64", applied("Default: `4`.", DefaultValue::Int(4))),
+            ("int_float", applied("Default: `3`.", DefaultValue::Int(3))),
+            ("fraction", documented("Default (not applied): `2.5`.")),
+            (
+                "huge",
+                documented("Default (not applied): `9007199254740992`."),
+            ),
+            (
+                "float_from_int",
+                applied("Default: `2`.", DefaultValue::Float(2.0)),
+            ),
+            (
+                "float",
+                applied("Default: `1.5`.", DefaultValue::Float(1.5)),
+            ),
+            (
+                "flag",
+                applied("Default: `true`.", DefaultValue::Bool(true)),
+            ),
+            (
+                "name",
+                applied("Default: `hi`.", DefaultValue::Str("hi".to_owned())),
+            ),
+            (
+                "color",
+                applied(
+                    "Default: `blue`.",
+                    DefaultValue::EnumVariant("blue".to_owned()),
+                ),
+            ),
+            (
+                "off_color",
+                documented("Default (not applied): `\"green\"`."),
+            ),
+            ("req", documented("Default: `r`.")),
+            ("maybe", documented("Default: `m`.")),
+            (
+                "obj",
+                documented(
+                    "Default (not applied): `{\"k\": [1, null, 2.5, true, -3, \
+                     18446744073709551615]}`.",
+                ),
+            ),
+            ("list", (None, None)),
+            ("plain", (None, None)),
+        ];
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(wire, (note, value))| (wire.to_owned(), note, value))
+            .collect();
+        assert_eq!(field_defaults(&api, "Pet"), expected);
+    }
+
+    /// Every `default` lowering cannot apply is reported as `W005`: one a field's type does not
+    /// admit, one in a structural position (array `items`, a request body root), and one an
+    /// intersection's narrowing drops, named with the value it wrote.
+    #[test]
+    fn every_default_not_applied_is_reported() {
+        let (_, diagnostics) = lowered(DEFAULTS_SPEC);
+        let reported = w005(&diagnostics);
+        let not_a_field_scalar = reported
+            .iter()
+            .filter(|message| message.starts_with("schema `default` is not a scalar matching"))
+            .count();
+        // `wide`, `fraction`, `huge`, `off_color` and `obj`.
+        assert_eq!(not_a_field_scalar, 5, "{reported:#?}");
+        for position in ["array `items`", "a request body schema"] {
+            assert!(
+                reported.contains(
+                    &format!(
+                        "schema `default` on {position} has no field to carry it and is not \
+                         applied"
+                    )
+                    .as_str()
+                ),
+                "no structural W005 on {position}: {reported:#?}"
+            );
+        }
+        assert!(
+            reported.iter().any(
+                |message| message.starts_with("schema `default` `\"c\"` of property `dropped`")
+            ),
+            "no W005 for the narrowed-away default: {reported:#?}"
+        );
+    }
+
+    /// An intersection that narrows a property's type re-types its applied default: a member of
+    /// the narrowed enum becomes its variant, an integral `number` default becomes the integer,
+    /// and a value the narrowed type does not admit is documented as not applied.
+    #[test]
+    fn a_narrowed_property_retypes_its_default() {
+        let (api, _) = lowered(DEFAULTS_SPEC);
+        assert_eq!(
+            field_defaults(&api, "Narrow"),
+            [
+                (
+                    "kept".to_owned(),
+                    Some("Default: `a`.".to_owned()),
+                    Some(DefaultValue::EnumVariant("a".to_owned())),
+                ),
+                (
+                    "dropped".to_owned(),
+                    Some("Default (not applied): `\"c\"`.".to_owned()),
+                    None,
+                ),
+                (
+                    "whole".to_owned(),
+                    Some("Default: `3`.".to_owned()),
+                    Some(DefaultValue::Int(3)),
+                ),
+            ]
+        );
+    }
+
+    /// A parameter's `default` is documented, as its value when its type admits it and as JSON
+    /// otherwise; a parameter that declares none has no note.
+    #[test]
+    fn a_parameter_default_is_documented() {
+        let (api, _) = lowered(DEFAULTS_SPEC);
+        let notes: Vec<(&str, Option<&str>)> = api.operations[0]
+            .params
+            .iter()
+            .map(|param| (param.name.as_str(), param.default_display.as_deref()))
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                ("limit", Some("10")),
+                ("tags", Some("[\"a\", \"b\"]")),
+                ("plain", None),
+            ]
         );
     }
 
