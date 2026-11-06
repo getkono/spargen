@@ -2,10 +2,10 @@
 //! newline-delimited JSON (`application/x-ndjson`), or RFC 7464 JSON Text Sequences
 //! (`application/json-seq`); [`Framing`] names each mode. A streaming operation returns an
 //! [`EventStream<T>`], a standard [`futures_core::Stream`] with a dependency-free inherent
-//! `next().await` convenience method. Reqwest's body stream delivers chunks incrementally on native
-//! targets; on `wasm32`, its fetch implementation may buffer the body internally, and the stream
-//! API and framing are the same. Dropping `EventStream` drops that body stream and cancels the
-//! transfer.
+//! `next().await` convenience method. It reads the response's [`HttpBody`] chunk by chunk as the
+//! backend delivers it: `ReqwestBackend` delivers chunks incrementally on native targets; on
+//! `wasm32`, reqwest's fetch implementation may buffer the body internally, and the stream API and
+//! framing are the same. Dropping `EventStream` drops that body and cancels the transfer.
 //!
 //! Framing is a pure function ([`next_frame`]) over an owned [`FrameBuffer`], with no network IO
 //! and no async runtime. The buffer remembers how far the framer has already searched, so each
@@ -21,20 +21,19 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 use reqwest::header::HeaderMap;
-use reqwest::{Request, Response, StatusCode};
+use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 
 use crate::dispatch::{cap_body, send_on, unexpected_status_capped};
+use crate::transport::{request_from_reqwest, try_clone_request};
 use crate::wasm::BoxFuture;
-use crate::{ClientConfig, ClientCore, Error, HttpBackend, MaybeSend, MaybeSync, TransportError};
+use crate::{ClientConfig, ClientCore, Error, HttpBackend, HttpBody, MaybeSend, MaybeSync};
 
 /// The failure yielded by a streaming response after its initial HTTP response was accepted.
 pub type StreamError = Error<Infallible>;
 
-#[cfg(not(target_arch = "wasm32"))]
-type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
-#[cfg(target_arch = "wasm32")]
-type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>;
+/// A response as the transport seam carries it.
+type Response = http::Response<HttpBody>;
 
 /// The caller-provided wait before an automatic reconnect attempt. `Send` off `wasm32` and not on
 /// it, as the `wasm` module explains.
@@ -130,7 +129,7 @@ pub struct EventStream<T> {
 }
 
 enum StreamState {
-    Body(BodyStream),
+    Body(HttpBody),
     Eof,
     Waiting(ReconnectWait),
     Connecting(ReconnectFuture),
@@ -147,7 +146,7 @@ enum OwnedReconnectReason {
 /// own `max_error_body`, taken from the same client configuration.
 struct ReconnectContext {
     backend: Arc<dyn HttpBackend>,
-    request: Request,
+    request: http::Request<HttpBody>,
     policy: Option<Arc<dyn ReconnectPolicy>>,
     attempt: u32,
 }
@@ -157,12 +156,13 @@ impl<T> EventStream<T> {
     /// consumed lazily — no bytes are read until the first [`Self::next`] call. It holds no
     /// [`ClientCore`], so its limits are `ClientConfig::default()`'s.
     /// Crate-visible, like [`Self::new_reconnectable`], which builds on it.
-    pub(crate) fn new(mut response: Response, framing: Framing) -> Self {
+    pub(crate) fn new(response: Response, framing: Framing) -> Self {
         let config = ClientConfig::default();
+        let (parts, body) = response.into_parts();
         Self {
-            status: response.status(),
-            headers: std::mem::take(response.headers_mut()),
-            state: StreamState::Body(Box::pin(response.bytes_stream())),
+            status: parts.status,
+            headers: parts.headers,
+            state: StreamState::Body(streamed(body)),
             buffer: FrameBuffer::default(),
             max_frame: config.max_stream_frame,
             max_error_body: config.max_error_body,
@@ -180,13 +180,17 @@ impl<T> EventStream<T> {
     /// Crate-visible: the generated operation methods share the consumer's crate with the
     /// embedded runtime, so they reach it while the [`Framing`] it takes stays outside the
     /// generated public API. The `allow` is for this crate's own build: its caller is generated code.
+    ///
+    /// `request` is the clone the operation kept of what it sent, built on reqwest; a URL that is
+    /// not a valid URI cannot cross the seam again, so it leaves the stream nothing to resend.
     #[allow(dead_code)]
     pub(crate) fn new_reconnectable(
         response: Response,
         framing: Framing,
         core: &ClientCore,
-        request: Option<Request>,
+        request: Option<reqwest::Request>,
     ) -> Self {
+        let request = request.and_then(|request| request_from_reqwest(request).ok());
         let last_event_id = request.as_ref().and_then(|request| {
             request
                 .headers()
@@ -287,27 +291,30 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
             }
 
             match std::mem::replace(&mut this.state, StreamState::Done) {
-                StreamState::Body(mut body) => match body.as_mut().poll_next(cx) {
+                StreamState::Body(mut body) => match body.poll_chunk(cx) {
                     Poll::Pending => {
                         this.state = StreamState::Body(body);
                         return Poll::Pending;
                     }
-                    Poll::Ready(Some(Ok(chunk))) => {
+                    Poll::Ready(Ok(Some(chunk))) => {
                         this.state = StreamState::Body(body);
                         this.buffer.extend_from_slice(&chunk);
                         if this.bom_pending {
                             this.bom_pending = this.buffer.strip_leading_bom();
                         }
                     }
-                    Poll::Ready(Some(Err(error))) => {
-                        let error = Error::InterruptedBody(TransportError::new(error));
+                    // Whatever class the read failure carries, the connection is gone partway
+                    // through the body, so it is the interruption a reconnect policy is asked
+                    // about.
+                    Poll::Ready(Err(error)) => {
+                        let error = Error::InterruptedBody(error);
                         if let Some(error) =
                             this.schedule_reconnect(OwnedReconnectReason::Failure(error))
                         {
                             return Poll::Ready(Some(Err(error)));
                         }
                     }
-                    Poll::Ready(None) => this.state = StreamState::Eof,
+                    Poll::Ready(Ok(None)) => this.state = StreamState::Eof,
                 },
                 StreamState::Eof => {
                     let _ = this.schedule_reconnect(OwnedReconnectReason::EndOfStream);
@@ -335,11 +342,12 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                         this.state = StreamState::Connecting(future);
                         return Poll::Pending;
                     }
-                    Poll::Ready(Ok(mut response)) => {
-                        this.status = response.status();
-                        this.headers = std::mem::take(response.headers_mut());
+                    Poll::Ready(Ok(response)) => {
+                        let (parts, body) = response.into_parts();
+                        this.status = parts.status;
+                        this.headers = parts.headers;
                         this.bom_pending = is_sse(this.framing);
-                        this.state = StreamState::Body(Box::pin(response.bytes_stream()));
+                        this.state = StreamState::Body(streamed(body));
                     }
                     Poll::Ready(Err(error)) => {
                         if let Some(error) =
@@ -423,7 +431,7 @@ impl<T> EventStream<T> {
         let reconnect = self.reconnect.as_ref()?;
         let backend = Arc::clone(&reconnect.backend);
         let max_error_body = self.max_error_body;
-        let mut request = reconnect.request.try_clone()?;
+        let mut request = try_clone_request(&reconnect.request)?;
         // An empty id resets replay state, so the header goes. So does an id `HeaderValue` refuses
         // (the framer drops an id holding NUL, and keeps every other control character but the
         // line-ending LF and CR): the server's latest resume point cannot be sent, and replaying
@@ -447,6 +455,45 @@ impl<T> EventStream<T> {
                 Err(unexpected_status_capped(max_error_body, response).await)
             }
         }))
+    }
+}
+
+/// The body a stream reads its items from. Off `wasm32` that is the response body as the backend
+/// delivered it. On `wasm32`, a `fetch` response `ReqwestBackend` received, still unread, is read
+/// chunk by chunk as the browser delivers it, through reqwest's `stream` feature, which an API
+/// with a streaming response requires; `ReqwestBackend` alone would read it whole, which for an
+/// event stream that never ends would never yield an item.
+fn streamed(body: HttpBody) -> HttpBody {
+    #[cfg(target_arch = "wasm32")]
+    return match body.into_fetch_response() {
+        Ok(response) => HttpBody::wrap(FetchChunks(Box::pin(response.bytes_stream()))),
+        Err(body) => body,
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    body
+}
+
+/// A `fetch` response body read chunk by chunk. A failed read is yielded as reqwest reported it,
+/// which the stream reads as an interruption whatever its kind.
+// Mutation testing: replacing `FetchChunks`'s `poll_frame` survives the native suite and is
+// declared rather than killed. It is compiled only for `wasm32`, so no native test reaches it; on
+// `wasm32` the runtime is compile-checked, not tested.
+#[cfg(target_arch = "wasm32")]
+struct FetchChunks(Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>);
+
+#[cfg(target_arch = "wasm32")]
+impl http_body::Body for FetchChunks {
+    type Data = Bytes;
+    type Error = reqwest::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, reqwest::Error>>> {
+        self.0
+            .as_mut()
+            .poll_next(cx)
+            .map(|chunk| chunk.map(|chunk| chunk.map(http_body::Frame::data)))
     }
 }
 

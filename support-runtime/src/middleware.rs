@@ -8,7 +8,7 @@
 //! A middleware receives the request plus a [`Next`] handle. Calling [`Next::run`] advances to the
 //! rest of the chain — the next middleware, or, when the chain is exhausted, the inner
 //! [`HttpBackend`]. A middleware may inspect/modify the request before calling `run`, inspect the
-//! [`reqwest::Response`] after, or return a response *without* calling `run` at all to
+//! [`http::Response`] after, or return a response *without* calling `run` at all to
 //! short-circuit. This is
 //! the classic "onion" middleware shape, expressed with std's `Future`/`Pin`/`Box` — no
 //! `async-trait` and no `tower`, so middleware adds no dependency to the generated runtime.
@@ -52,14 +52,15 @@
 
 use std::sync::Arc;
 
-use reqwest::Request;
-
 use crate::transport::{ExecuteFuture, HttpBackend};
-use crate::{MaybeSend, MaybeSync};
+use crate::{HttpBody, MaybeSend, MaybeSync};
+
+/// A request as the transport seam carries it.
+type Request = http::Request<HttpBody>;
 
 /// One link in the interceptor chain: it observes/modifies a request on the way in, calls
 /// [`Next::run`] to proceed (eventually reaching the transport), and observes/modifies the
-/// [`reqwest::Response`] on the way out — or returns early to short-circuit.
+/// [`http::Response`] on the way out — or returns early to short-circuit.
 ///
 /// Implementations must be [`MaybeSend`] + [`MaybeSync`] — `Send + Sync` on native (the `Client` is
 /// shared across tasks), vacuous on `wasm32` — and `Debug` (so [`MiddlewareBackend`] — and thus
@@ -68,7 +69,7 @@ use crate::{MaybeSend, MaybeSync};
 pub trait Middleware: MaybeSend + MaybeSync + std::fmt::Debug {
     /// Handle a request. Call `next.run(request)` to proceed to the rest of the chain (eventually
     /// the transport), or return a response without calling it to short-circuit. May inspect/modify
-    /// the request before and the [`reqwest::Response`] after.
+    /// the request before and the [`http::Response`] after.
     fn handle<'a>(&'a self, request: Request, next: Next<'a>) -> ExecuteFuture<'a>;
 }
 
@@ -87,7 +88,7 @@ pub struct Next<'a> {
 
 impl<'a> Next<'a> {
     /// Proceed to the rest of the chain: run the next middleware, or — when no middlewares remain —
-    /// execute the request on the inner transport. Returns the eventual [`reqwest::Response`] or the
+    /// execute the request on the inner transport. Returns the eventual [`http::Response`] or the
     /// [`crate::TransportError`] the transport failed with.
     pub fn run(self, request: Request) -> ExecuteFuture<'a> {
         match self.remaining.split_first() {

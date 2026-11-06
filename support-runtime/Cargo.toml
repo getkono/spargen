@@ -20,6 +20,10 @@ blocking = ["dep:tokio"]
 time = ["dep:time"]
 
 [dependencies]
+# The transport seam's currency: `HttpBackend` takes an `http::Request` and answers an
+# `http::Response`, whose body is the runtime's own `HttpBody`, an `http_body::Body`.
+http.workspace = true
+http-body.workspace = true
 reqwest.workspace = true
 futures-core = { workspace = true, optional = true }
 serde.workspace = true
@@ -36,11 +40,7 @@ tokio = { workspace = true, features = ["rt"], optional = true }
 # `serde-human-readable` feature. Keeping `serde` off is what makes that impossible to regress into.
 time = { workspace = true, features = ["formatting", "parsing"], optional = true }
 
-# Test-only: synthesize in-memory `reqwest::Response`s (via `http::Response`) to exercise the body
-# readers with a poll-once noop waker — no async runtime, and never embedded (the test module is
-# stripped at embed time).
 [dev-dependencies]
-http = "1"
 # Test-only: the shared scripted response body (`Chunks` in src/lib.rs) is a `futures_core::Stream`
 # wrapped through reqwest's `stream` feature, and every module's tests read bodies through it, not
 # only the `stream` module's.

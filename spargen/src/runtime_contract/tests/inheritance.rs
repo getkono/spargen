@@ -23,6 +23,8 @@ version = "0.0.0"
 
 [dependencies]
 bytes.workspace = true
+http.workspace = true
+http-body.workspace = true
 reqwest.workspace = true
 secrecy.workspace = true
 serde.workspace = true
@@ -47,7 +49,7 @@ enum RootDefaults {
 #[test]
 fn a_member_inheriting_plain_and_table_dependencies_with_an_added_feature_passes() {
     // The layout exactly as #71 reported it: the root spells `futures-core` as a plain string
-    // and `uuid` as a table with its own features; the member inherits both beside the five
+    // and `uuid` as a table with its own features; the member inherits both beside the seven
     // core crates. The report said both came back as "generated client requires …". The
     // member adds `stream` to the inherited `reqwest`, which is the feature union a stream
     // needs and the half of it no other fixture exercises.

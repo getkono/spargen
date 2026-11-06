@@ -209,7 +209,9 @@ pub(crate) const SERVERS_MODULE_NAMES: &[&str] = &["Default", "Into", "String"];
 /// whole nameable runtime surface of a generated client, and so part of its semver surface. It has
 /// to cover every type that appears in a signature the output emits: `HeaderError` is the return
 /// type of each `…Headers::from_headers`, `RetryWait` is what a caller's `RetryPolicy` must return,
-/// `ClientCore` is what `Client::core` hands back, and the taxonomy's payload types are matched on.
+/// `ClientCore` is what `Client::core` hands back, `HttpBody` is the body of every request and
+/// response an `HttpBackend` handles, `MaybeSend` and `MaybeSync` bound the body `HttpBody::wrap`
+/// adopts, and the taxonomy's payload types are matched on.
 /// Anything short of that leaves a generated signature a caller can call but cannot write down.
 /// `ApiErrorBody` is the bound `Error::api_body` needs, implemented by the uniform-body error enum,
 /// the single-body newtype, and the uninhabited shape (an enum whose bodies are different generated
@@ -235,7 +237,10 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "ExposeSecret",
     "HeaderError",
     "HttpBackend",
+    "HttpBody",
     "LinkPaginator",
+    "MaybeSend",
+    "MaybeSync",
     "Middleware",
     "MiddlewareBackend",
     "Next",

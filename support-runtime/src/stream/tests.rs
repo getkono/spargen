@@ -456,15 +456,15 @@ fn an_sse_body_opening_with_a_bom_reads_its_first_field() {
 // The tests below drive the async `next` await-loop with a noop waker and no async runtime,
 // proving it threads the pure framing correctly over an in-memory `reqwest::Response`.
 
-fn response(body: &str) -> reqwest::Response {
+fn response(body: &str) -> crate::tests::Response {
     response_with_status(200, body)
 }
 
 /// Every synthetic initial response carries `x-response: initial`, and every response a
 /// [`SequenceBackend`] returns carries `x-response: backend`, so a test can tell which
 /// response's headers a `Decode` error reports.
-fn response_with_status(status: u16, body: &str) -> reqwest::Response {
-    reqwest::Response::from(
+fn response_with_status(status: u16, body: &str) -> crate::tests::Response {
+    crate::tests::from_http(
         http::Response::builder()
             .status(status)
             .header("x-response", "initial")
@@ -528,7 +528,7 @@ fn reconnectable_stream(
 /// A `SseJsonData` stream over `initial` whose request carries a cookie and whose reconnects go
 /// to `backend` under `policy`.
 fn reconnectable_stream_over(
-    initial: reqwest::Response,
+    initial: crate::tests::Response,
     backend: Arc<SequenceBackend>,
     policy: Arc<ImmediateReconnect>,
 ) -> EventStream<serde_json::Value> {

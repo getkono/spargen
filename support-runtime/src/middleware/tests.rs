@@ -2,11 +2,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use reqwest::header::{HeaderName, HeaderValue};
-use reqwest::{Request, StatusCode};
+use reqwest::StatusCode;
 
-use crate::tests::{poll_ready, request, response, RetryTransient, SequenceBackend};
+use crate::tests::{poll_ready, response, seam_request, RetryTransient, SequenceBackend};
 use crate::transport::{ExecuteFuture, HttpBackend};
-use crate::RetryBackend;
+use crate::{HttpBody, RetryBackend};
+
+/// A request as the transport seam carries it.
+type Request = http::Request<HttpBody>;
 
 use super::{Middleware, MiddlewareBackend, Next};
 
@@ -94,7 +97,7 @@ fn middleware_modifies_outgoing_request_seen_by_inner_backend() {
         name: HeaderName::from_static("x-trace"),
         value: HeaderValue::from_static("on"),
     }));
-    let response = poll_ready(backend.execute(request())).expect("chain succeeds");
+    let response = poll_ready(backend.execute(seam_request())).expect("chain succeeds");
     assert_eq!(response.status(), StatusCode::OK);
     // The inner backend actually received the header the middleware inserted.
     assert_eq!(inner.header("x-trace"), [Some("on".to_owned())]);
@@ -106,7 +109,7 @@ fn middleware_observes_response_after_transport() {
     let seen = Arc::new(Mutex::new(None));
     let backend =
         MiddlewareBackend::new(inner).layer(Arc::new(ObserveStatus { seen: seen.clone() }));
-    let response = poll_ready(backend.execute(request())).expect("chain succeeds");
+    let response = poll_ready(backend.execute(seam_request())).expect("chain succeeds");
     assert_eq!(response.status(), StatusCode::OK);
     // The observer captured the response status the inner backend produced.
     assert_eq!(*seen.lock().unwrap(), Some(StatusCode::OK));
@@ -117,7 +120,7 @@ fn short_circuit_middleware_never_hits_inner_backend() {
     let inner = ok_backend();
     let backend =
         MiddlewareBackend::new(inner.clone()).layer(Arc::new(ShortCircuit { status: 418 }));
-    let response = poll_ready(backend.execute(request())).expect("short-circuit succeeds");
+    let response = poll_ready(backend.execute(seam_request())).expect("short-circuit succeeds");
     assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
     // The transport was never reached: short-circuit returned before calling `next`.
     assert_eq!(inner.calls(), 0);
@@ -137,7 +140,7 @@ fn two_middlewares_compose_outer_wraps_inner() {
             label: "inner",
             log: log.clone(),
         }));
-    let response = poll_ready(backend.execute(request())).expect("chain succeeds");
+    let response = poll_ready(backend.execute(seam_request())).expect("chain succeeds");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(inner.calls(), 1);
     // Onion order: outer opens first and closes last, inner is nested within it.
@@ -166,7 +169,7 @@ fn with_middlewares_matches_layered_order() {
         log: log.clone(),
     });
     let backend = MiddlewareBackend::with_middlewares(inner, vec![outer, inner_mw]);
-    poll_ready(backend.execute(request())).expect("chain succeeds");
+    poll_ready(backend.execute(seam_request())).expect("chain succeeds");
     assert_eq!(
         *log.lock().unwrap(),
         vec![
@@ -192,7 +195,7 @@ fn composes_over_retry_backend() {
         name: HeaderName::from_static("x-trace"),
         value: HeaderValue::from_static("via-retry"),
     }));
-    let response = poll_ready(backend.execute(request())).expect("composed chain succeeds");
+    let response = poll_ready(backend.execute(seam_request())).expect("composed chain succeeds");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(recording.header("x-trace"), [Some("via-retry".to_owned())]);
 }
@@ -235,7 +238,7 @@ fn retry_nesting_decides_whether_middleware_runs_once_or_per_attempt() {
     let backend = MiddlewareBackend::new(retry).layer(as_dyn.clone());
     assert_eq!(backend.middlewares().len(), 1);
     assert!(Arc::ptr_eq(&backend.middlewares()[0], &as_dyn));
-    let response = poll_ready(backend.execute(request())).expect("retried chain succeeds");
+    let response = poll_ready(backend.execute(seam_request())).expect("retried chain succeeds");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(transport.calls(), 3);
     assert_eq!(counting.runs.load(Ordering::SeqCst), 1);
@@ -249,7 +252,7 @@ fn retry_nesting_decides_whether_middleware_runs_once_or_per_attempt() {
     assert_eq!(chain.middlewares().len(), 1);
     assert!(Arc::ptr_eq(&chain.middlewares()[0], &as_dyn));
     let backend = RetryBackend::new(Arc::new(chain), Arc::new(RetryTransient { max_retries: 5 }));
-    let response = poll_ready(backend.execute(request())).expect("retried chain succeeds");
+    let response = poll_ready(backend.execute(seam_request())).expect("retried chain succeeds");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(transport.calls(), 3);
     assert_eq!(counting.runs.load(Ordering::SeqCst), 3);
@@ -261,7 +264,7 @@ fn empty_chain_delegates_straight_to_inner() {
     // A `MiddlewareBackend` with no layers is a transparent pass-through to the inner transport.
     let inner = ok_backend();
     let backend = MiddlewareBackend::new(inner.clone());
-    let response = poll_ready(backend.execute(request())).expect("pass-through succeeds");
+    let response = poll_ready(backend.execute(seam_request())).expect("pass-through succeeds");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(inner.calls(), 1);
 }

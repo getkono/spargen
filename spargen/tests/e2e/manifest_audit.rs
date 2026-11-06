@@ -17,6 +17,8 @@ version = "0.0.0"
 
 [dependencies]
 bytes = "1.12.1"
+http = "1.4.2"
+http-body = "1.0.1"
 reqwest = { version = "0.12.28", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -147,6 +149,8 @@ members = ["client"]
 
 [workspace.dependencies]
 bytes = "1.12.1"
+http = "1.4.2"
+http-body = "1.0.1"
 reqwest = { version = "0.12.28", default-features = false, features = ["stream"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -164,6 +168,8 @@ version = "0.0.0"
 
 [dependencies]
 bytes = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true }
 reqwest = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
@@ -833,7 +839,7 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
     let (requirements, _) = spargen::requirements(&Spec::new(spec.clone())).expect("spec lowers");
 
     // The set is non-trivial: every conditional crate and feature is in it, so neither layout can
-    // pass by the table having shrunk to the five core crates.
+    // pass by the table having shrunk to the seven core crates.
     let features_of = |name: &str| {
         requirements
             .dependencies
@@ -1016,6 +1022,8 @@ uuid = ["dep:uuid"]
 
 [dependencies]
 bytes = "1.12.1"
+http = "1.4.2"
+http-body = "1.0.1"
 reqwest = { version = "0.12.28", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -1126,6 +1134,8 @@ edition = "2021"
 
 [dependencies]
 bytes = "1.12.1"
+http = "1.4.2"
+http-body = "1.0.1"
 reqwest = {{ version = "0.12.28", default-features = false }}
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}

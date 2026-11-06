@@ -66,10 +66,10 @@ use std::convert::Infallible;
 use std::marker::PhantomData;
 
 use reqwest::header::HeaderMap;
-use reqwest::{Response, Url};
+use reqwest::Url;
 use serde::de::DeserializeOwned;
 
-use crate::{decode_success, send, unexpected_status, ClientCore, Error, ResponseValue};
+use crate::{decode_success, send, unexpected_status, ClientCore, Error, HttpBody, ResponseValue};
 
 /// A manual async iterator over the pages of a `Link`-header-paginated collection.
 ///
@@ -175,7 +175,7 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
     async fn handle_response(
         &mut self,
         url: Url,
-        response: Response,
+        response: http::Response<HttpBody>,
     ) -> Option<Result<ResponseValue<T>, Error<Infallible>>> {
         // `send` returns `Ok` for 4xx/5xx too (only transport failures error), so gate on status
         // exactly as every generated operation does: a non-2xx page is NOT decoded as `T`, it

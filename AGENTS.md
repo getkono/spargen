@@ -20,8 +20,9 @@ changes.
   end-to-end guard.
 - `support-runtime/` — the freestanding runtime embedded, trimmed and path-rewritten, into
   generated output. `publish = false`; its unconditional dependencies are exactly `reqwest` /
-  `serde` / `serde_json` / `bytes` / `secrecy`, plus optional ones for the conditionally embedded
-  modules: `futures-core` and reqwest's `stream` feature (`stream`, emitted only for APIs with
+  `http` / `http-body` / `serde` / `serde_json` / `bytes` / `secrecy` (`http` and `http-body`
+  carry the transport seam's request, response and body), plus optional ones for the
+  conditionally embedded modules: `futures-core` and reqwest's `stream` feature (`stream`, emitted only for APIs with
   sequential responses), `quick-xml` (`xml`), `tokio` (`blocking`), and `time` (`time`, the RFC
   3339 date newtypes). Each source file keeps its `#[cfg(test)]` module last — inline, or `mod
   tests;` reading `<stem>/tests.rs` — and everything above that marker is embedded into generated

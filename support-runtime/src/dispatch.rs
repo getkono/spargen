@@ -10,10 +10,14 @@
 use std::convert::Infallible;
 
 use bytes::Bytes;
-use reqwest::{Request, Response, Url};
+use reqwest::{Request, Url};
 use serde::de::DeserializeOwned;
 
-use crate::{ClientCore, Error, HttpBackend, ResponseValue};
+use crate::transport::request_from_reqwest;
+use crate::{ClientCore, Error, HttpBackend, HttpBody, ResponseValue};
+
+/// A response as the transport seam carries it.
+type Response = http::Response<HttpBody>;
 
 /// Build a request URL from the base URL, or an optional per-operation server override, and a
 /// pre-rendered path plus pre-encoded query fragments. An absolute override replaces the client's
@@ -144,25 +148,30 @@ pub fn build_url_with_query_string_on(
     Ok(url)
 }
 
-/// Send a prepared request through the core's transport [`crate::HttpBackend`], mapping
-/// transport/timeout/protocol/redirect failures into the taxonomy. The backend reports failures as
-/// a [`crate::TransportError`] wrapping the originating `reqwest::Error`; that error is run back
-/// through [`Error::from_reqwest`] here, so classification is identical to executing directly on the
-/// reqwest client. Non-generic.
-pub async fn send(core: &ClientCore, request: Request) -> Result<Response, Error<Infallible>> {
+/// Send a request built on the core's `reqwest::Client` through the core's transport
+/// [`crate::HttpBackend`], mapping transport/timeout/protocol/redirect failures into the taxonomy.
+/// The request crosses the seam as an [`http::Request`] whose in-memory body moves without a copy
+/// off `wasm32`; a URL that is not a valid URI is refused first, as
+/// [`Error::RequestConstruction`]. The backend reports failures as a [`crate::TransportError`]
+/// carrying its taxonomy class, which picks the variant here. Non-generic.
+pub async fn send(
+    core: &ClientCore,
+    request: Request,
+) -> Result<http::Response<HttpBody>, Error<Infallible>> {
+    let request = request_from_reqwest(request).map_err(Error::from_reqwest)?;
     send_on(core.backend().as_ref(), request).await
 }
 
-/// [`send`] through the backend alone, for a caller that holds the backend rather than the whole
-/// [`ClientCore`]: a streaming response's reconnect.
+/// [`send`] through the backend alone, for a caller that holds the backend and a request already
+/// on the seam rather than the whole [`ClientCore`]: a streaming response's reconnect.
 pub(crate) async fn send_on(
     backend: &dyn HttpBackend,
-    request: Request,
+    request: http::Request<HttpBody>,
 ) -> Result<Response, Error<Infallible>> {
     backend
         .execute(request)
         .await
-        .map_err(|error| Error::from_reqwest(error.into_source()))
+        .map_err(Error::from_transport)
 }
 
 /// Decode a success response body into `T`, wrapping it with status and headers. Monomorphized once
@@ -208,12 +217,12 @@ where
 /// binary variant keeps it without a copy.
 pub async fn decode_success_with<T>(
     core: &ClientCore,
-    mut response: Response,
+    response: Response,
     decode: impl FnOnce(&Bytes) -> Result<T, String>,
 ) -> Result<ResponseValue<T>, Error<Infallible>> {
-    let status = response.status();
-    let headers = std::mem::take(response.headers_mut());
-    let body = response.bytes().await.map_err(Error::from_body_read)?;
+    let (parts, body) = response.into_parts();
+    let (status, headers) = (parts.status, parts.headers);
+    let body = body.collect().await.map_err(Error::from_transport)?;
     match decode(&body) {
         Ok(value) => Ok(ResponseValue::new(status, headers, value)),
         Err(path) => {
@@ -274,12 +283,11 @@ pub(crate) async fn read_error_body<E>(
 /// rather than the whole [`ClientCore`].
 async fn read_error_body_capped<E>(
     max_error_body: usize,
-    mut response: Response,
+    response: Response,
 ) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool), Error<E>> {
-    let status = response.status();
-    let headers = std::mem::take(response.headers_mut());
-    let (body, truncated) = read_capped(max_error_body, response).await?;
-    Ok((status, headers, body, truncated))
+    let (parts, body) = response.into_parts();
+    let (body, truncated) = read_capped(max_error_body, body).await?;
+    Ok((parts.status, parts.headers, body, truncated))
 }
 
 /// A status selector an operation documents a response under. Generated code passes these as
@@ -420,7 +428,7 @@ pub(crate) async fn unexpected_status_capped<E>(
 /// The copy is unconditional, including when nothing is truncated, because a `Bytes` does not
 /// reveal how much memory stands behind it and every source here can hand over more than it holds:
 /// `Bytes::slice` is a refcounted view onto the whole original; `BytesMut::freeze` hands over the
-/// buffer at its doubled capacity; and `response.bytes()` can return a view sharing the transport's
+/// buffer at its doubled capacity; and a body read whole can be a view sharing the transport's
 /// read buffer. Retention is documented as bounded by the cap, so the only way to mean it is to
 /// detach every time. The cost is one copy of at most `cap` bytes, on error paths only.
 pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
@@ -434,18 +442,17 @@ pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
 /// so peak memory depends on the cap (plus one transport chunk, and the retained copy `cap_body`
 /// makes) rather than on whatever the server chose to send; `reqwest` imposes no response size
 /// limit of its own. Abandoning the body forgoes reuse of that connection; a deployment that would
-/// rather keep it raises the cap.
-///
-/// Uses `Response::chunk`, which, unlike `bytes_stream`, is not behind reqwest's `stream` feature,
-/// which generated clients enable only for APIs with sequential responses.
-#[cfg(not(target_arch = "wasm32"))]
-async fn read_capped<E>(cap: usize, mut response: Response) -> Result<(Bytes, bool), Error<E>> {
+/// rather keep it raises the cap. A body the backend delivers whole arrives as one chunk, so there
+/// only *retention* is bounded, not peak memory. `ReqwestBackend` delivers every `fetch` body on
+/// `wasm32` whole, including an error body of a streaming operation and of a reconnect, because
+/// only `EventStream` reads a body chunk by chunk there.
+async fn read_capped<E>(cap: usize, mut body: HttpBody) -> Result<(Bytes, bool), Error<E>> {
     // Pre-size to the cap, but do not honour an enormous configured cap up front — the point is to
     // avoid large speculative allocations.
     let mut buffered = bytes::BytesMut::with_capacity(cap.min(16 * 1024));
     while buffered.len() <= cap {
         // One byte past the cap is enough to know the remainder is being dropped.
-        match response.chunk().await.map_err(Error::from_body_read)? {
+        match body.chunk().await.map_err(Error::from_transport)? {
             Some(chunk) => buffered.extend_from_slice(&chunk),
             None => break,
         }
@@ -453,20 +460,6 @@ async fn read_capped<E>(cap: usize, mut response: Response) -> Result<(Bytes, bo
     // `freeze` hands the buffer over at its doubled capacity, so an under-cap body would pin up to
     // twice its length. `cap_body` copies unconditionally, which is what settles that here.
     Ok(cap_body(buffered.freeze(), cap))
-}
-
-/// The `wasm32` counterpart. reqwest's `fetch` backend exposes no `chunk`, so the body arrives
-/// whole and only *retention* can be bounded here, not peak memory.
-// Mutation testing: replacing this body with `Ok((Default::default(), _))` survives the native
-// suite and is declared rather than killed. The function is compiled only for `wasm32`, so a
-// native test binary holds the native `read_capped` above in its place and no native test can
-// reach the mutated code; on `wasm32` the runtime is compile-checked, not tested.
-#[cfg(target_arch = "wasm32")]
-async fn read_capped<E>(cap: usize, response: Response) -> Result<(Bytes, bool), Error<E>> {
-    // `fetch` reports a failed read as a JavaScript error, so `from_body_read` gives `Protocol`
-    // here even for a connection that gave out, as `Error::InterruptedBody` documents.
-    let bytes = response.bytes().await.map_err(Error::from_body_read)?;
-    Ok(cap_body(bytes, cap))
 }
 
 #[cfg(test)]

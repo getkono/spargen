@@ -117,43 +117,29 @@ impl<E> Error<E> {
     /// `RequestBuilder::build`, or from `execute` on a request that built fine — a URL whose
     /// scheme is not `http`/`https`, plain `http` on an `https_only` client, or a URL that is not
     /// a valid URI. Re-sending it is refused again, so it is not transient.
-    pub fn from_reqwest(error: reqwest::Error) -> Self {
-        Self::from_class(ReqwestClass::of(&error), error)
-    }
-
-    /// Build the variant `class` names around `error`.
-    fn from_class(class: ReqwestClass, error: reqwest::Error) -> Self {
-        match class {
-            ReqwestClass::Timeout(kind) => Error::Timeout(kind),
-            ReqwestClass::Redirect => Error::Redirect(RedirectError { source: error }),
-            ReqwestClass::Protocol => Error::Protocol(ProtocolError { source: error }),
-            ReqwestClass::Transport => Error::Transport(TransportError { source: error }),
-            ReqwestClass::Request => {
-                Error::RequestConstruction(RequestError::Other(RequestCause(Box::new(error))))
-            }
-        }
-    }
-
-    /// Classify a failure reading the body of a response that has already arrived, the same way
-    /// `EventStream` classifies one mid-stream: the connection giving out partway through the
-    /// body is [`Error::InterruptedBody`], and so transient.
     ///
-    /// reqwest reports any failure while reading a body as a decode-kind error, so the cause
-    /// decides. The first [`std::io::Error`] in its source chain is the evidence: a reset,
-    /// aborted, broken, or unconnected connection, or one that ended before the body did, is an
-    /// interruption, including a compressed body that ends before its compressed stream does;
-    /// any other kind (corrupt compressed data, a malformed chunked encoding) is not. With no I/O
-    /// error in the chain, a body-kind reqwest error, the error itself or one in the chain, is an
-    /// interruption. A timeout is asked for first, and everything that is not an interruption is
-    /// classified as [`Error::from_reqwest`] classifies it, so a body that is malformed rather
-    /// than cut short stays [`Error::Protocol`]. On `wasm32`, reqwest's `fetch` backend reports a
-    /// failed read as a decode-kind error over a JavaScript error, with neither an I/O error nor
-    /// a body-kind error in its chain, so every such failure there is [`Error::Protocol`].
-    pub(crate) fn from_body_read(error: reqwest::Error) -> Self {
-        if !error.is_timeout() && is_interrupted_read(&error) {
-            Error::InterruptedBody(TransportError::new(error))
-        } else {
-            Self::from_reqwest(error)
+    /// This is [`TransportError::from_reqwest`]'s classification, read as the variant
+    /// [`crate::send`] maps that transport error to.
+    pub fn from_reqwest(error: reqwest::Error) -> Self {
+        Self::from_transport(TransportError::from_reqwest(error))
+    }
+
+    /// The taxonomy variant a backend's [`TransportError`] stands for: the class its constructor
+    /// named decides. A timeout keeps only its [`TimeoutKind`]; a request-kind failure is
+    /// [`RequestError::Other`] with the cause as its source; the redirect, protocol, connection
+    /// and interruption classes keep it behind [`RedirectError`], [`ProtocolError`], and the
+    /// transport error itself.
+    pub(crate) fn from_transport(error: TransportError) -> Self {
+        let TransportError { class, source } = error;
+        match class {
+            TransportClass::Timeout(kind) => Error::Timeout(kind),
+            TransportClass::Redirect => Error::Redirect(RedirectError { source }),
+            TransportClass::Protocol => Error::Protocol(ProtocolError { source }),
+            TransportClass::Connection => Error::Transport(TransportError { class, source }),
+            TransportClass::Interrupted => Error::InterruptedBody(TransportError { class, source }),
+            TransportClass::Request => {
+                Error::RequestConstruction(RequestError::Other(RequestCause(source)))
+            }
         }
     }
 
@@ -583,78 +569,168 @@ impl std::error::Error for RequestCause {
     }
 }
 
-/// Transport-layer failure (taxonomy #2 / #9).
+/// The failure an [`crate::HttpBackend`] reports, or an [`crate::HttpBody`] yields while it is
+/// read, carrying the taxonomy class it belongs to; and the payload of the transport-layer
+/// variants that keep it (taxonomy #2 / #9).
+///
+/// A backend picks the class through the constructor it builds the error with, and
+/// [`crate::send`] maps the error to that class's [`Error`] variant: [`Self::connection`] to
+/// [`Error::Transport`], [`Self::timeout`] to [`Error::Timeout`], [`Self::protocol`] to
+/// [`Error::Protocol`], [`Self::redirect`] to [`Error::Redirect`], [`Self::request`] to
+/// [`RequestError::Other`], and [`Self::interrupted`] to [`Error::InterruptedBody`].
+/// [`Self::from_reqwest`] reads the class off a `reqwest::Error`, so [`crate::ReqwestBackend`]
+/// classifies exactly as executing on a `reqwest::Client` always has. The cause is reachable
+/// through [`std::error::Error::source`], and downcasts to its own type there.
 #[derive(Debug)]
 pub struct TransportError {
-    source: reqwest::Error,
+    class: TransportClass,
+    source: Box<dyn std::error::Error + Send + Sync>,
 }
 
 impl TransportError {
-    /// Wrap a `reqwest::Error` as a transport failure. [`crate::HttpBackend`] implementations, whose
-    /// currency is reqwest's own types, report failures through this so [`crate::send`] can
-    /// reclassify them via [`Error::from_reqwest`] — keeping timeout/redirect/protocol
-    /// classification identical to executing directly on a `reqwest::Client`.
-    pub fn new(source: reqwest::Error) -> Self {
-        Self { source }
+    fn new(class: TransportClass, source: impl Into<BoxError>) -> Self {
+        Self {
+            class,
+            source: source.into(),
+        }
     }
 
-    /// Consume the transport error, yielding the underlying `reqwest::Error` so [`crate::send`] can
-    /// run it back through the full taxonomy classifier.
-    pub(crate) fn into_source(self) -> reqwest::Error {
-        self.source
+    /// A connection-level failure: name resolution, a refused or reset connection, a TLS
+    /// handshake or certificate error. It becomes [`Error::Transport`], which is transient.
+    pub fn connection(source: impl Into<BoxError>) -> Self {
+        Self::new(TransportClass::Connection, source)
     }
 
-    /// Whether [`Error::from_reqwest`] would classify this failure as transient, decided on a
-    /// borrow: [`crate::RetryBackend`] asks before it has to hand the error back unconsumed.
+    /// A timeout of the given kind. It becomes [`Error::Timeout`], which is transient; the cause
+    /// is dropped there, as the variant carries only its [`TimeoutKind`].
+    pub fn timeout(kind: TimeoutKind, source: impl Into<BoxError>) -> Self {
+        Self::new(TransportClass::Timeout(kind), source)
+    }
+
+    /// Malformed HTTP, or a body that could not be decoded (decompression). It becomes
+    /// [`Error::Protocol`], which is not transient.
+    pub fn protocol(source: impl Into<BoxError>) -> Self {
+        Self::new(TransportClass::Protocol, source)
+    }
+
+    /// Redirect-policy exhaustion. It becomes [`Error::Redirect`], which is not transient.
+    pub fn redirect(source: impl Into<BoxError>) -> Self {
+        Self::new(TransportClass::Redirect, source)
+    }
+
+    /// The backend refused the request, or failed inside the send without a connection failure to
+    /// show for it. It becomes [`RequestError::Other`], which is not transient; that variant's
+    /// documentation says why such a request may already have been transmitted.
+    pub fn request(source: impl Into<BoxError>) -> Self {
+        Self::new(TransportClass::Request, source)
+    }
+
+    /// The connection gave out partway through a body. It becomes [`Error::InterruptedBody`],
+    /// which is transient; an [`crate::HttpBody`] whose source fails with an error of any other
+    /// type reports it as this class.
+    pub fn interrupted(source: impl Into<BoxError>) -> Self {
+        Self::new(TransportClass::Interrupted, source)
+    }
+
+    /// Classify a `reqwest::Error` from executing a request, keeping it as the source. This is
+    /// the classification [`Error::from_reqwest`] documents.
+    pub fn from_reqwest(error: reqwest::Error) -> Self {
+        Self::new(TransportClass::of(&error), error)
+    }
+
+    /// Classify a `reqwest::Error` from reading the body of a response that has already
+    /// arrived, the same way `EventStream` classifies one mid-stream: the connection giving out
+    /// partway through the body is an interruption, and so transient.
+    ///
+    /// reqwest wraps any failure while reading a body in an error of its own, decode-kind or
+    /// body-kind depending on how the body is read, so the cause under that wrapper decides. The
+    /// first [`std::io::Error`] in its source chain is the evidence: a reset, aborted, broken,
+    /// or unconnected connection, or one that ended before the body did, is an interruption,
+    /// including a compressed body that ends before its compressed stream does; any other kind
+    /// (corrupt compressed data, a malformed chunked encoding) is not. With no I/O error in the
+    /// chain, a body-kind reqwest error in the chain is an interruption. A timeout is asked for
+    /// first, and everything else is a protocol failure, so a body that is malformed rather than
+    /// cut short stays [`Error::Protocol`]. On `wasm32`, reqwest's `fetch` backend reports a
+    /// failed read over a JavaScript error, with neither an I/O error nor a body-kind error in
+    /// its chain, so every such failure there is [`Error::Protocol`].
+    pub(crate) fn from_reqwest_body(error: reqwest::Error) -> Self {
+        let class = if error.is_timeout() {
+            TransportClass::of(&error)
+        } else if is_interrupted_read(&error) {
+            TransportClass::Interrupted
+        } else {
+            TransportClass::Protocol
+        };
+        Self::new(class, error)
+    }
+
+    /// The error a body source failed with: a [`TransportError`] keeps its own class, and any
+    /// other error is an interruption.
+    pub(crate) fn from_body_source(error: BoxError) -> Self {
+        match error.downcast::<TransportError>() {
+            Ok(error) => *error,
+            Err(other) => Self::new(TransportClass::Interrupted, other),
+        }
+    }
+
+    /// Whether the [`Error`] variant [`crate::send`] maps this failure to is transient, decided
+    /// on a borrow: [`crate::RetryBackend`] asks before it has to hand the error back unconsumed.
     pub(crate) fn is_transient(&self) -> bool {
-        ReqwestClass::of(&self.source).is_transient()
+        self.class.is_transient()
     }
 }
 
-/// The taxonomy class [`Error::from_reqwest`] assigns a `reqwest::Error`, decided without
-/// consuming it, so the retry adapter and the taxonomy read one classification.
+/// The boxed cause a [`TransportError`] carries.
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The taxonomy class of a [`TransportError`], decided without consuming it, so the retry
+/// adapter and the taxonomy read one classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReqwestClass {
+enum TransportClass {
     Timeout(TimeoutKind),
     Redirect,
     Protocol,
-    Transport,
+    Connection,
     Request,
+    Interrupted,
 }
 
-impl ReqwestClass {
-    /// The order is the classification: a timeout first, split by the connect discriminator; then
-    /// redirect and decode; then a connection failure, which reqwest also reports as request-kind;
-    /// then reqwest's request and builder kinds; anything else falls back to transport.
+impl TransportClass {
+    /// The class of a `reqwest::Error` from executing a request. The order is the
+    /// classification: a timeout first, split by the connect discriminator; then redirect and
+    /// decode; then a connection failure, which reqwest also reports as request-kind; then
+    /// reqwest's request and builder kinds; anything else falls back to a connection failure.
     fn of(error: &reqwest::Error) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let connect = error.is_connect();
         #[cfg(target_arch = "wasm32")]
         let connect = false;
         if error.is_timeout() {
-            ReqwestClass::Timeout(if connect {
+            TransportClass::Timeout(if connect {
                 TimeoutKind::Connect
             } else {
                 TimeoutKind::Total
             })
         } else if error.is_redirect() {
-            ReqwestClass::Redirect
+            TransportClass::Redirect
         } else if error.is_decode() {
-            ReqwestClass::Protocol
+            TransportClass::Protocol
         } else if connect {
-            ReqwestClass::Transport
+            TransportClass::Connection
         } else if error.is_request() || error.is_builder() {
-            ReqwestClass::Request
+            TransportClass::Request
         } else {
-            ReqwestClass::Transport
+            TransportClass::Connection
         }
     }
 
-    /// [`Error::is_transient`] of the variant [`Error::from_reqwest`] builds for this class.
+    /// [`Error::is_transient`] of the variant [`Error::from_transport`] builds for this class.
     fn is_transient(self) -> bool {
         match self {
-            ReqwestClass::Timeout(_) | ReqwestClass::Transport => true,
-            ReqwestClass::Redirect | ReqwestClass::Protocol | ReqwestClass::Request => false,
+            TransportClass::Timeout(_)
+            | TransportClass::Connection
+            | TransportClass::Interrupted => true,
+            TransportClass::Redirect | TransportClass::Protocol | TransportClass::Request => false,
         }
     }
 }
@@ -669,12 +745,11 @@ const CONNECTION_LOST: [std::io::ErrorKind; 5] = [
     std::io::ErrorKind::UnexpectedEof,
 ];
 
-/// Whether a failed body read is an interruption, as [`Error::from_body_read`] describes.
+/// Whether a failed body read is an interruption, as [`TransportError::from_reqwest_body`]
+/// describes. The error itself is reqwest's wrapper of the read failure, so only its causes are
+/// read.
 fn is_interrupted_read(error: &reqwest::Error) -> bool {
-    if !error.is_body() && !error.is_decode() {
-        return false;
-    }
-    let mut body_kind = error.is_body();
+    let mut body_kind = false;
     let mut cause = std::error::Error::source(error);
     while let Some(current) = cause {
         if let Some(io) = current.downcast_ref::<std::io::Error>() {
@@ -705,13 +780,13 @@ pub enum TimeoutKind {
 /// Protocol-layer failure — malformed HTTP or decompression (taxonomy #4).
 #[derive(Debug)]
 pub struct ProtocolError {
-    source: reqwest::Error,
+    source: BoxError,
 }
 
 /// Redirect-policy exhaustion (taxonomy #5).
 #[derive(Debug)]
 pub struct RedirectError {
-    source: reqwest::Error,
+    source: BoxError,
 }
 
 impl std::fmt::Display for RequestError {
@@ -774,7 +849,7 @@ impl std::error::Error for RequestError {
     }
 }
 
-macro_rules! impl_reqwest_source_error {
+macro_rules! impl_source_error {
     ($ty:ty, $label:literal) => {
         impl std::fmt::Display for $ty {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -784,15 +859,16 @@ macro_rules! impl_reqwest_source_error {
 
         impl std::error::Error for $ty {
             fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                Some(&self.source)
+                // The boxed cause itself, not the box, so `downcast_ref` reaches its own type.
+                Some(self.source.as_ref() as &(dyn std::error::Error + 'static))
             }
         }
     };
 }
 
-impl_reqwest_source_error!(TransportError, "transport error");
-impl_reqwest_source_error!(ProtocolError, "protocol error");
-impl_reqwest_source_error!(RedirectError, "redirect error");
+impl_source_error!(TransportError, "transport error");
+impl_source_error!(ProtocolError, "protocol error");
+impl_source_error!(RedirectError, "redirect error");
 
 #[cfg(test)]
 mod tests;

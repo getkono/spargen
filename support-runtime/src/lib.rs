@@ -92,7 +92,7 @@ pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, Re
 pub use stream::{
     EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
 };
-pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
+pub use transport::{ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend};
 pub use wasm::{MaybeSend, MaybeSync};
 #[cfg(feature = "xml")]
 pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml};
@@ -111,12 +111,16 @@ mod tests {
 
     use bytes::Bytes;
     use reqwest::header::HeaderMap;
-    use reqwest::{Method, Request, Response};
+    use reqwest::{Method, Request};
 
+    use crate::transport::response_from_reqwest;
     use crate::{
-        ClientCore, ExecuteFuture, HttpBackend, RetryOutcome, RetryPolicy, RetryWait,
+        ClientCore, ExecuteFuture, HttpBackend, HttpBody, RetryOutcome, RetryPolicy, RetryWait,
         TransportError,
     };
+
+    /// A response as the transport seam carries it.
+    pub(crate) type Response = http::Response<HttpBody>;
 
     /// Drives `future` with one poll and a noop waker, panicking if it is not ready. The runtime's
     /// tests use no async runtime: their transports answer from canned in-memory responses and
@@ -192,14 +196,34 @@ mod tests {
             .expect("build request")
     }
 
-    /// An in-memory response (no server, no runtime) with `status` and `body`.
-    pub(crate) fn response(status: u16, body: impl Into<reqwest::Body>) -> Response {
-        Response::from(
+    /// A `GET https://example.com/op` as the transport seam carries it.
+    pub(crate) fn seam_request() -> http::Request<HttpBody> {
+        crate::transport::request_from_reqwest(request()).expect("a valid URI")
+    }
+
+    /// An in-memory reqwest response (no server, no runtime) with `status` and `body`.
+    pub(crate) fn reqwest_response(
+        status: u16,
+        body: impl Into<reqwest::Body>,
+    ) -> reqwest::Response {
+        reqwest::Response::from(
             http::Response::builder()
                 .status(status)
                 .body(body.into())
                 .expect("valid synthetic response"),
         )
+    }
+
+    /// An `http::Response` as reqwest would have received it, crossed into the seam the way
+    /// `ReqwestBackend` hands one over, so its body reads through reqwest.
+    pub(crate) fn from_http<T: Into<reqwest::Body>>(response: http::Response<T>) -> Response {
+        response_from_reqwest(reqwest::Response::from(response))
+    }
+
+    /// An in-memory response with `status` and `body`, crossed into the seam the way
+    /// `ReqwestBackend` hands one over, so its body reads through reqwest.
+    pub(crate) fn response(status: u16, body: impl Into<reqwest::Body>) -> Response {
+        response_from_reqwest(reqwest_response(status, body))
     }
 
     /// The two requests reqwest builds but refuses at `execute`, without any I/O, as a
@@ -223,13 +247,13 @@ mod tests {
         })
     }
 
-    /// A transport failure that `Error::from_reqwest` classifies as `Transport`, and so as
-    /// transient, built without a socket: reqwest's status-kind error, which falls through to the
-    /// same class a failed connection reaches. `status` appears in its message, so a test can
-    /// tell two failures apart.
+    /// A transport failure that `TransportError::from_reqwest` classifies as a connection failure,
+    /// and so as transient, built without a socket: reqwest's status-kind error, which falls
+    /// through to the same class a failed connection reaches. `status` appears in its message, so
+    /// a test can tell two failures apart.
     pub(crate) fn transport_failure(status: u16) -> TransportError {
-        TransportError::new(
-            response(status, String::new())
+        TransportError::from_reqwest(
+            reqwest_response(status, String::new())
                 .error_for_status()
                 .expect_err("an error status"),
         )
@@ -253,11 +277,14 @@ mod tests {
         }
     }
 
-    /// A response body that plays a script of [`Chunk`]s, then ends. It counts the data chunks
-    /// read, so a test can see where a reader stopped pulling.
+    /// A response body that plays a script of [`Chunk`]s, then ends, after a trailers frame where
+    /// one was given. It counts the data chunks read, so a test can see where a reader stopped
+    /// pulling. It is a `futures_core::Stream` for reqwest to wrap and an `http_body::Body` for
+    /// `HttpBody::wrap` to adopt.
     pub(crate) struct Chunks {
         script: VecDeque<Chunk>,
         pulled: Arc<AtomicUsize>,
+        trailers: Option<http::HeaderMap>,
     }
 
     impl Chunks {
@@ -265,7 +292,14 @@ mod tests {
             Self {
                 script: script.into_iter().collect(),
                 pulled: Arc::new(AtomicUsize::new(0)),
+                trailers: None,
             }
+        }
+
+        /// End the body with a trailers frame holding `trailers`.
+        pub(crate) fn with_trailers(mut self, trailers: http::HeaderMap) -> Self {
+            self.trailers = Some(trailers);
+            self
         }
 
         /// `count` chunks of `size` bytes of `x`.
@@ -278,9 +312,29 @@ mod tests {
             Arc::clone(&self.pulled)
         }
 
-        /// A response with `status` whose body plays this script.
+        /// A response with `status` whose body plays this script, read through reqwest.
         pub(crate) fn into_response(self, status: u16) -> Response {
             response(status, reqwest::Body::wrap_stream(self))
+        }
+    }
+
+    impl http_body::Body for Chunks {
+        type Data = Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<http_body::Frame<Bytes>, std::io::Error>>> {
+            if self.script.is_empty() {
+                return Poll::Ready(
+                    self.trailers
+                        .take()
+                        .map(|t| Ok(http_body::Frame::trailers(t))),
+                );
+            }
+            futures_core::Stream::poll_next(self, cx)
+                .map(|chunk| chunk.map(|chunk| chunk.map(http_body::Frame::data)))
         }
     }
 
@@ -397,11 +451,11 @@ mod tests {
     }
 
     impl HttpBackend for SequenceBackend {
-        fn execute(&self, request: Request) -> ExecuteFuture<'_> {
+        fn execute(&self, request: http::Request<HttpBody>) -> ExecuteFuture<'_> {
             self.requests
                 .lock()
                 .unwrap()
-                .push((request.url().to_string(), request.headers().clone()));
+                .push((request.uri().to_string(), request.headers().clone()));
             let Reply {
                 outcome,
                 headers,
@@ -424,9 +478,9 @@ mod tests {
                         for (name, value) in headers {
                             builder = builder.header(name, value);
                         }
-                        Ok(Response::from(
-                            builder.body(body).expect("valid synthetic response"),
-                        ))
+                        Ok(builder
+                            .body(HttpBody::from(body))
+                            .expect("valid synthetic response"))
                     }
                     Err(status) => Err(transport_failure(status)),
                 }

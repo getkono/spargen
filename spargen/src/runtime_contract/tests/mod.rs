@@ -83,13 +83,15 @@ version = "0.0.0"
 
 [dependencies]
 bytes = "1.12.1"
+http = "1.4.2"
+http-body = "1.0.1"
 reqwest = { version = "0.12.28", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 "#;
 
-/// The five core dependencies as a `[workspace.dependencies]` body, reusing `CORE_MANIFEST` so
+/// The seven core dependencies as a `[workspace.dependencies]` body, reusing `CORE_MANIFEST` so
 /// the floors in these fixtures cannot drift from the ones every other test audits against.
 fn core_workspace_dependencies() -> &'static str {
     CORE_MANIFEST.split_once("[dependencies]\n").unwrap().1
@@ -117,6 +119,8 @@ fn core_entry(key: &str) -> (&'static str, &'static str) {
 const CORE_INHERITED: &str = "\
 [dependencies]
 bytes.workspace = true
+http.workspace = true
+http-body.workspace = true
 reqwest.workspace = true
 secrecy.workspace = true
 serde.workspace = true

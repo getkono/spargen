@@ -161,8 +161,8 @@ fn xml_decode_failure_honours_the_error_body_cap() {
 #[test]
 fn xml_decode_failures_keep_the_response_status_and_headers() {
     use crate::tests::poll_ready;
-    fn response(status: u16, retry_after: &'static str) -> reqwest::Response {
-        reqwest::Response::from(
+    fn response(status: u16, retry_after: &'static str) -> crate::tests::Response {
+        crate::tests::from_http(
             http::Response::builder()
                 .status(status)
                 .header("retry-after", retry_after)

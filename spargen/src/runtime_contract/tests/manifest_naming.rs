@@ -129,7 +129,15 @@ fn a_corrupt_ancestor_is_only_a_hint_when_no_workspace_root_was_found() {
     // move away from the file it explains with this fixture still green. The reason has to
     // ride inline: the candidate is never audited as a manifest, so nothing else prints why
     // it failed.
-    for dependency in ["bytes", "reqwest", "secrecy", "serde", "serde_json"] {
+    for dependency in [
+        "bytes",
+        "http",
+        "http-body",
+        "reqwest",
+        "secrecy",
+        "serde",
+        "serde_json",
+    ] {
         let expected = format!(
             "`{dependency}` inherits from `[workspace.dependencies]`, but no workspace \
              manifest was found above `{member}`; if the workspace root is `{root}`, it could \
@@ -262,7 +270,15 @@ fn an_unresolvable_inheritance_says_where_the_lookup_went() {
 
     // No workspace manifest anywhere above the member.
     let orphaned = directory.audit(&member, &RuntimeRequirements::default());
-    for dependency in ["bytes", "reqwest", "secrecy", "serde", "serde_json"] {
+    for dependency in [
+        "bytes",
+        "http",
+        "http-body",
+        "reqwest",
+        "secrecy",
+        "serde",
+        "serde_json",
+    ] {
         assert!(
             orphaned.diagnostics.iter().any(|diagnostic| {
                 diagnostic
@@ -288,7 +304,7 @@ fn an_unresolvable_inheritance_says_where_the_lookup_went() {
         orphaned.diagnostics
     );
 
-    // A workspace that resolves, but declares four of the five.
+    // A workspace that resolves, but declares six of the seven.
     std::fs::write(
         &root,
         format!(

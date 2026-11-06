@@ -10,6 +10,8 @@ use crate::Spec;
 
 pub(super) const BYTES: Dependency = Dependency::new("bytes", "1.12.1", 2, 0);
 pub(super) const FUTURES_CORE: Dependency = Dependency::new("futures-core", "0.3.32", 0, 4);
+pub(super) const HTTP: Dependency = Dependency::new("http", "1.4.2", 2, 0);
+pub(super) const HTTP_BODY: Dependency = Dependency::new("http-body", "1.0.1", 2, 0);
 pub(super) const REQWEST: Dependency = Dependency::new("reqwest", "0.12.28", 0, 13);
 pub(super) const SECRECY: Dependency = Dependency::new("secrecy", "0.10.3", 0, 11);
 pub(super) const SERDE: Dependency = Dependency::new("serde", "1.0.229", 2, 0);
@@ -151,6 +153,10 @@ pub(super) fn requirement_table(requirements: &RuntimeRequirements) -> Vec<Requi
         },
         false,
     );
+    // The transport seam's request, response, and body trait: every generated client carries
+    // `HttpBackend`, so both are unconditional.
+    push(HTTP, NONE, false);
+    push(HTTP_BODY, NONE, false);
     push(
         REQWEST,
         match (requirements.reqwest_multipart, requirements.streams) {
