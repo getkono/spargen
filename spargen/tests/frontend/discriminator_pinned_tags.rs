@@ -419,3 +419,47 @@ fn an_untagged_discriminated_member_keeps_the_tag_dispatch_of_the_tagged_ones() 
         );
     }
 }
+
+/// The tag property a pinned variant leaves out (#1232) is still its pin to a later meet: a
+/// union of pinned branches met with a constraint on the tag (`allOf: [{$ref: Src}, {properties:
+/// {kind: {const: file}}}]`) excludes the branch the constraint rules out (`W011`), and the one
+/// left generates a struct carrying the met tag, while `Src`'s own structs still leave it out.
+#[test]
+fn a_meet_constraining_the_tag_excludes_the_pinned_branch_it_rules_out() {
+    let spec = "openapi: 3.1.0\n\
+info: { title: T, version: 1.0.0 }\n\
+paths: {}\n\
+components:\n  \
+schemas:\n    \
+Src:\n      \
+oneOf:\n        \
+- { type: object, required: [kind, uri], properties: { kind: { const: magnet }, uri: { type: string } } }\n        \
+- { type: object, required: [kind, path], properties: { kind: { const: file }, path: { type: string } } }\n      \
+discriminator: { propertyName: kind }\n    \
+Narrow:\n      \
+allOf:\n        \
+- { $ref: '#/components/schemas/Src' }\n        \
+- { properties: { kind: { const: file } } }\n";
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let w011: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::DeclarationHasNoEffect)
+        .collect();
+    assert_eq!(w011.len(), 1, "{report:#?}");
+    assert!(
+        w011[0].message.contains("union member 0 cannot satisfy"),
+        "{report:#?}"
+    );
+    let types = types_module(&code);
+    assert!(types.contains("pub struct Narrow {"), "{types}");
+    assert_eq!(
+        declared_fields(&types, "Narrow"),
+        ["kind", "path"],
+        "{types}"
+    );
+    assert_eq!(declared_fields(&types, "SrcMagnet"), ["uri"], "{types}");
+    assert_eq!(declared_fields(&types, "SrcFile"), ["path"], "{types}");
+    assert!(!types.contains("SrcMagnetKind"), "{types}");
+}

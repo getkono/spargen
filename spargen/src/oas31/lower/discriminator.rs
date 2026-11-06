@@ -294,7 +294,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// the tag itself. A tag that does not start with an ASCII letter, or that another variant's
     /// hint already spells, keeps the numbered name.
     ///
-    /// The tag property is dropped from a struct that ignores unknown properties: it admits one
+    /// The tag property is recorded for [`Self::drop_pinned_tag_fields`], which drops it once
+    /// lowering is done from a struct that ignores unknown properties: it admits one
     /// value, which the union's `Serialize` writes for the variant whenever the struct did not,
     /// and its `Deserialize` hands the whole object, tag included, to the struct, which ignores
     /// the key. A struct that denies unknown properties, or collects them into a typed map, keeps
@@ -372,14 +373,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                 }
             }
-            if let Some(TypeKind::Struct(object)) =
-                self.graph.get_mut(variant.ty.id).map(|def| &mut def.kind)
+            self.pinned_tag_fields
+                .push((variant.ty.id, tag_field.to_owned()));
+            lowered[index].name_hint = tag.clone();
+        }
+    }
+
+    /// Leave each tag property [`Self::name_pinned_variants`] recorded out of its struct, where
+    /// the struct ignores unknown properties. Run once lowering is done: until then the field is
+    /// the pin a meet reads, so a tag constraint met with the union later (`allOf: [{$ref:
+    /// Union}, {properties: {kind: {const: other}}}]`) still excludes the branch it rules out.
+    pub(super) fn drop_pinned_tag_fields(&mut self) {
+        for (id, tag_field) in std::mem::take(&mut self.pinned_tag_fields) {
+            if let Some(TypeKind::Struct(object)) = self.graph.get_mut(id).map(|def| &mut def.kind)
             {
                 if matches!(object.additional, AdditionalProps::Allow) {
                     object.fields.retain(|field| field.name.wire != tag_field);
                 }
             }
-            lowered[index].name_hint = tag.clone();
         }
     }
 
