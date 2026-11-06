@@ -9,7 +9,8 @@ use crate::oas31::{JsonType, Schema, SchemaOr, ValidationKeywords};
 use super::meet::{same_ty, value_category, NoMeet};
 use super::nullability::{non_nullable, type_accepts_null};
 use super::shape::{
-    ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union, schema_is_object_like,
+    bears_shape_except, ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union,
+    schema_is_object_like, union_siblings_bear_shape,
 };
 use super::strategy::retain_strategy;
 use super::{LowerCtx, Refiner, ScopeReach, ScopedRefiners, UnionSibling, MAX_SCHEMA_DEPTH};
@@ -37,23 +38,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         schema: &Schema,
         hint: &str,
     ) -> Option<Option<UnionSibling>> {
-        let mut sibling = schema.clone();
-        sibling.clear_union_keywords();
-
         // Asked of the sibling's OWN keywords. `type`, `enum`, `const`, `$ref` and `allOf` each
         // state something about `null` — an `enum` either lists it or does not, a `$ref`'s target
         // carries its own nullability. The object and array applicators (`properties`,
         // `patternProperties`, `required`, `additionalProperties`, `items`, `prefixItems`) state
         // nothing: in 2020-12 they are vacuously satisfied by every instance of another category,
         // `null` included.
-        let speaks_about_null = !sibling.types.types.is_empty()
-            || sibling.enum_values.is_some()
-            || sibling.const_value.is_some()
-            || sibling.reference.is_some()
-            || !sibling.all_of.is_empty();
-        if !schema_has_shape_constraint(&sibling) {
+        let speaks_about_null = !schema.types.types.is_empty()
+            || schema.enum_values.is_some()
+            || schema.const_value.is_some()
+            || schema.reference.is_some()
+            || !schema.all_of.is_empty();
+        if !union_siblings_bear_shape(schema) {
             return Some(None);
         }
+        let mut sibling = schema.clone();
+        sibling.clear_union_keywords();
         // Untyped object or array applicators alone name no `type`, so `lower_schema` would lower
         // them to `TypeKind::Any`, which intersects as identity and drops them from every branch
         // in silence (#282). Nor do they establish their category for the whole union, as they do
@@ -618,10 +618,7 @@ pub(super) fn multi_category_types(schema: &Schema) -> Option<CategoryMask> {
 /// nothing but each branch's category and `null`.
 pub(super) fn union_sibling_is_categories_alone(schema: &Schema) -> Option<CategoryMask> {
     let categories = multi_category_types(schema)?;
-    let mut rest = schema.clone();
-    rest.clear_union_keywords();
-    rest.types.types.clear();
-    (!schema_has_shape_constraint(&rest)).then_some(categories)
+    (!bears_shape_except(schema, &["oneOf", "anyOf", "type"])).then_some(categories)
 }
 
 impl LowerCtx<'_, '_> {

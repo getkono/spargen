@@ -1,6 +1,7 @@
 //! `allOf` lowering and a `$ref` with sibling keywords: the entry points, and meeting an
 //! `allOf` or `$ref` with a union beside or inside it.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 
@@ -20,15 +21,40 @@ use super::{LowerCtx, MetUnion, Refiner};
 pub(super) struct MetUnionMember {
     /// The type the union lowered to.
     pub(super) union: crate::ir::TypeId,
-    /// The union's schema: the member itself, or a `$ref` member's target body.
-    pub(super) schema: Schema,
+    /// The union's real branches ([`union_branches`]), each at its real-member position.
+    pub(super) branches: Vec<SchemaOr>,
     /// What the members the union is met with hold `null` to ([`LowerCtx::null_admission`]).
     pub(super) conjunct: NullAdmission,
     /// Whether those members meet in the exact null type, which keeps no branch's non-null values.
     pub(super) conjunct_is_null: bool,
 }
 
+/// The real branches of `union`, its `oneOf` and `anyOf` members that are not null-only
+/// ([`member_is_null_only`]), in document order, so each one's position is its real-member
+/// position.
+pub(super) fn union_branches(union: &Schema) -> Vec<SchemaOr> {
+    union
+        .one_of
+        .iter()
+        .chain(&union.any_of)
+        .filter(|branch| !member_is_null_only(branch))
+        .cloned()
+        .collect()
+}
+
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// The union `member` is, inline or behind a `$ref`: the member itself where it writes a
+    /// `oneOf`/`anyOf` of its own, and otherwise the body its `$ref` names
+    /// ([`Self::ref_target_body`]) where that writes one. `None` where neither does.
+    fn union_body<'s>(&'s self, member: &'s Schema) -> Option<Cow<'s, Schema>> {
+        if schema_has_union(member) {
+            return Some(Cow::Borrowed(member));
+        }
+        let reference = member.reference.as_deref()?;
+        let target = self.ref_target_body(reference, &member.provenance)?;
+        schema_has_union(&target).then_some(target)
+    }
+
     /// Merge an `allOf` composition (plus the enclosing schema's own sibling
     /// `properties`/`required`/`additionalProperties`) into a single typed [`TypeKind`].
     ///
@@ -156,7 +182,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             for (provenance, lowered) in lowerings {
                 // The member's own lowering is an input to the meet, emitted as a public type
                 // nothing referred to once the meet replaced it, whatever the member order (#675).
-                self.elide_unused_union_lowering(lowered);
+                self.elide_unused_lowering(lowered);
                 let Some(index) = held
                     .iter()
                     .position(|warning| warning.provenance == provenance)
@@ -217,16 +243,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         contributions: Vec<Contribution>,
         union_members: &[(usize, &'s Schema)],
     ) -> (Vec<Contribution>, Vec<(usize, &'s Schema)>) {
-        let is_union = |member: &Schema| {
-            schema_has_union(member)
-                || member.reference.as_deref().is_some_and(|reference| {
-                    self.ref_target_body(reference, &member.provenance)
-                        .is_some_and(|target| schema_has_union(&target))
-                })
-        };
         let unions: HashSet<usize> = union_members
             .iter()
-            .filter(|(_, member)| is_union(member))
+            .filter(|(_, member)| self.union_body(member).is_some())
             .map(|(slot, _)| *slot)
             .collect();
         let mut order: Vec<usize> = (0..contributions.len()).collect();
@@ -277,12 +296,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     return false;
                 };
                 let lowered_union = matches!(self.kind_of(ty.id), Some(TypeKind::Union(_)));
-                lowered_union
-                    && (schema_has_union(member)
-                        || member.reference.as_deref().is_some_and(|reference| {
-                            self.ref_target_body(reference, &member.provenance)
-                                .is_some_and(|target| schema_has_union(&target))
-                        }))
+                lowered_union && self.union_body(member).is_some()
             })
             .count();
         gathered + met_beside >= 2
@@ -329,20 +343,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 let Some(Contribution::Scalar(ty)) = contributions.get(slot) else {
                     return None;
                 };
-                let union = if schema_has_union(member) {
-                    member.clone()
-                } else {
-                    let reference = member.reference.as_deref()?;
-                    let target = self.ref_target_body(reference, &member.provenance)?;
-                    schema_has_union(&target).then(|| target.into_owned())?
-                };
+                let branches = union_branches(&*self.union_body(member)?);
                 let conjunct_is_null = contributions.iter().enumerate().any(|(index, other)| {
                     index != slot
                         && matches!(other, Contribution::Scalar(other) if self.is_exact_null(*other))
                 });
                 Some(MetUnionMember {
                     union: ty.id,
-                    schema: union,
+                    branches,
                     conjunct: self.null_admission_without(schema, &member.provenance),
                     conjunct_is_null,
                 })
@@ -382,13 +390,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(TypeKind::Reserved) => continue,
                 _ => continue,
             };
-            let branches: Vec<&SchemaOr> = met
-                .schema
-                .one_of
-                .iter()
-                .chain(&met.schema.any_of)
-                .filter(|branch| !member_is_null_only(branch))
-                .collect();
+            let branches = &met.branches;
             let meets = &self.variant_meets[meets_from..];
             let mut excluded: Vec<usize> = Vec::new();
             for (variant, variant_members) in members.iter().enumerate() {
@@ -708,39 +710,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if contributions.is_empty() && scoped.is_empty() && nested.is_empty() {
             return self.lower_union(&union, hint);
         }
-        let composed_from = self.graph_mark();
-        let composed = if contributions.is_empty() {
-            None
-        } else {
-            // Under the nullability `combine_all_of` gives it, as the `allOf`-member spelling
-            // takes it: an untyped object member admits `null` and decides nothing, so a
-            // composition no member decides leaves `null` to the union.
-            let composed = self.combine_all_of(&composition, &composition_hint, &contributions)?;
-            Some(self.composition_takes_union_null(composed, &contributions, schema))
-        };
-        let composed_lowered = composed_from..self.graph_mark();
-        let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
-        refiners.extend(
-            nested
-                .iter()
-                .map(|(member, refiner)| (member.as_ref(), *refiner)),
-        );
-        let met = self.meet_union_with_all_of(
+        let (met, composed_lowered) = self.meet_composition_with_union(
             schema,
             hint,
-            composed,
-            refiners,
+            GatheredComposition {
+                schema: &composition,
+                contributions: &contributions,
+                met_as_objects: Vec::new(),
+                scoped: &scoped,
+                nested: &nested,
+            },
             &union,
             &format!("{hint}Union"),
             MetUnion::BesideAllOf,
-        );
+        )?;
         // A composition union member's own lowering is an input to the meet, as it is in the
         // `allOf` spelling ([`Self::combine_scalar_union_members`]): held unmerged, it was
         // emitted as a public union of indistinguishable variants nothing referred to.
         if let Some(met) = met.filter(|met| !self.is_reservation(met.id)) {
             for (_, lowered) in lowerings {
                 if !lowered.contains(&met.id.0) {
-                    self.elide_unused_union_lowering(lowered);
+                    self.elide_unused_lowering(lowered);
                 }
             }
         }
@@ -749,7 +739,66 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         met
     }
 
-    /// [`Self::elide_unused_union_lowering`] of `composed`, the ids [`Self::combine_all_of`]
+    /// The pipeline [`Self::lower_all_of_beside_union`] and [`Self::meet_all_of_union_member`]
+    /// share once the members other than the union are gathered into `composition`: its
+    /// contributions combined as an `allOf` (under `composition.schema` and the hint
+    /// `<hint>Composition`) and met with each of its `met_as_objects`, under the nullability
+    /// [`Self::composition_takes_union_null`] gives the merge; its scoped members and nested
+    /// refiners lowered as the refiners of the union's branches; and the union `union` lowered
+    /// under `union_hint` and met with both ([`Self::meet_union_with_all_of`]). Returns the meet
+    /// beside the ids the combined composition inserted, for the caller to elide once the meet's
+    /// result is in ([`Self::elide_unused_composition`]); `None` where the composition, an object
+    /// meet with it (`E013`) or a refiner fails.
+    fn meet_composition_with_union(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        composition: GatheredComposition<'_>,
+        union: &Schema,
+        union_hint: &str,
+        spelling: MetUnion,
+    ) -> Option<(Option<Ty>, Range<u32>)> {
+        let GatheredComposition {
+            schema: composition,
+            contributions,
+            met_as_objects,
+            scoped,
+            nested,
+        } = composition;
+        let composed_from = self.graph_mark();
+        let composed = if contributions.is_empty() {
+            None
+        } else {
+            // Under the nullability `combine_all_of` gives it: an untyped object member admits
+            // `null` and decides nothing, so a composition no member decides leaves `null` to the
+            // union.
+            let mut composed =
+                self.combine_all_of(composition, &format!("{hint}Composition"), contributions)?;
+            for (index, object) in met_as_objects.into_iter().enumerate() {
+                let Ok(met) =
+                    self.intersect_types(composed, object, &format!("{hint}Composition{index}"))
+                else {
+                    self.reject_all_of_union_meet(schema, spelling);
+                    return None;
+                };
+                composed = met;
+            }
+            Some(self.composition_takes_union_null(composed, contributions, schema))
+        };
+        let composed_lowered = composed_from..self.graph_mark();
+        let mut refiners = self.lower_all_of_refiners(scoped, hint)?;
+        refiners.extend(
+            nested
+                .iter()
+                .map(|(member, refiner)| (member.as_ref(), *refiner)),
+        );
+        let met = self.meet_union_with_all_of(
+            schema, hint, composed, refiners, union, union_hint, spelling,
+        );
+        Some((met, composed_lowered))
+    }
+
+    /// [`Self::elide_unused_lowering`] of `composed`, the ids [`Self::combine_all_of`]
     /// inserted for the composition a union was met with, once the meet re-emitted its result
     /// under the schema's own name. The composition is an input to that meet, as a `$ref` sibling's
     /// keywords are to theirs (#571): left in the graph, its `<hint>Composition` struct would be
@@ -758,15 +807,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// reservation's body is not known yet, so nothing is elided against it.
     fn elide_unused_composition(&mut self, met: Option<Ty>, composed: Range<u32>) {
         if met.is_some_and(|met| !self.is_reservation(met.id)) {
-            self.elide_unused_union_lowering(composed);
-        }
-    }
-
-    /// [`Self::elide_unused_union_lowering`] of each of `lowerings`, the ids an `allOf` member's
-    /// own lowering inserted ([`objects_met_as_their_unions`]), once the merge's result is in.
-    pub(super) fn elide_unused_lowerings(&mut self, lowerings: Vec<Range<u32>>) {
-        for lowered in lowerings {
-            self.elide_unused_union_lowering(lowered);
+            self.elide_unused_lowering(composed);
         }
     }
 
@@ -895,7 +936,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .iter()
             .any(|contribution| matches!(contribution, Contribution::Refiner { .. }));
         if !has_object && !has_refiner && scoped.is_empty() {
-            if target.is_some() {
+            let mut held = held;
+            let (spliced, recorded) = if target.is_some() {
                 // A `$ref` member is gathered as [`Self::lower_all_of`] gathers it, so the scalar
                 // meet reads the component's own type, as it did before the member was met as
                 // its target's union beside object members.
@@ -913,57 +955,36 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         )
                     })
                 });
-                let mut held = held;
                 held.extend(member_held);
                 if result.is_none() {
                     self.report_held_untyped_warnings(held);
                     return None;
                 }
-                let count = gathered.len();
-                for (slot, _) in &mut union_members {
-                    if *slot >= union_slot {
-                        *slot += count;
-                    }
-                }
-                union_members.extend(
-                    recorded
-                        .into_iter()
-                        .map(|(slot, member)| (slot + union_slot, member)),
-                );
-                contributions.splice(union_slot..union_slot, gathered);
-                let met = self.combine_scalar_union_members(
-                    schema,
-                    hint,
-                    contributions,
-                    &union_members,
-                    held,
-                    lowerings,
-                );
-                self.elide_unused_lowerings(member_lowerings);
-                return met;
-            }
-            // Its `W001` is held with the members', for the meet to settle (#660), and so is the
-            // merge of its indistinguishable branches, for the meet to collapse (#678).
-            let from = self.graph_mark();
-            let (lowered, union_held) = self.holding_untyped_warnings(|ctx| {
-                ctx.lower_scalar_meet_union(&union.provenance, |ctx| {
-                    ctx.lower_schema(union, &union_hint)
-                })
-            });
-            lowerings.push((union.provenance.clone(), from..self.graph_mark()));
-            let mut held = held;
-            held.extend(union_held);
-            let Some(ty) = lowered else {
-                self.report_held_untyped_warnings(held);
-                return None;
+                (gathered, recorded)
+            } else {
+                // Its `W001` is held with the members', for the meet to settle (#660), and so is
+                // the merge of its indistinguishable branches, for the meet to collapse (#678).
+                let from = self.graph_mark();
+                let (lowered, union_held) = self.holding_untyped_warnings(|ctx| {
+                    ctx.lower_scalar_meet_union(&union.provenance, |ctx| {
+                        ctx.lower_schema(union, &union_hint)
+                    })
+                });
+                lowerings.push((union.provenance.clone(), from..self.graph_mark()));
+                held.extend(union_held);
+                let Some(ty) = lowered else {
+                    self.report_held_untyped_warnings(held);
+                    return None;
+                };
+                (vec![Contribution::Scalar(ty)], vec![(0, union)])
             };
-            contributions.insert(union_slot, Contribution::Scalar(ty));
-            for (slot, _) in &mut union_members {
-                if *slot >= union_slot {
-                    *slot += 1;
-                }
-            }
-            union_members.push((union_slot, union));
+            splice_union_contribution(
+                &mut contributions,
+                &mut union_members,
+                union_slot,
+                spliced,
+                recorded,
+            );
             // The union members take `null` there, where it can satisfy the merge.
             let met = self.combine_scalar_union_members(
                 schema,
@@ -1018,38 +1039,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
         let nested = take_refiners(&mut contributions);
-        let composed_from = self.graph_mark();
-        let composed = if contributions.is_empty() {
-            None
-        } else {
-            let mut composed =
-                self.combine_all_of(schema, &format!("{hint}Composition"), &contributions)?;
-            for (index, object) in met_as_objects.into_iter().enumerate() {
-                let Ok(met) =
-                    self.intersect_types(composed, object, &format!("{hint}Composition{index}"))
-                else {
-                    return self.reject_all_of_union_meet(schema, MetUnion::AllOfMember);
-                };
-                composed = met;
-            }
-            Some(self.composition_takes_union_null(composed, &contributions, schema))
-        };
-        let composed_lowered = composed_from..self.graph_mark();
-        let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
-        refiners.extend(
-            nested
-                .iter()
-                .map(|(member, refiner)| (member.as_ref(), *refiner)),
-        );
-        let met = self.meet_union_with_all_of(
+        let (met, composed_lowered) = self.meet_composition_with_union(
             schema,
             hint,
-            composed,
-            refiners,
+            GatheredComposition {
+                schema,
+                contributions: &contributions,
+                met_as_objects,
+                scoped: &scoped,
+                nested: &nested,
+            },
             union,
             &union_hint,
             MetUnion::AllOfMember,
-        );
+        )?;
         self.elide_unused_composition(met, composed_lowered);
         self.elide_unused_lowerings(member_lowerings);
         met
@@ -1182,7 +1185,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // is withheld from the emitted types unless something refers to it (#571), by the same
         // rule as the union's lowering: whatever the met type, a memo, or another schema names
         // stays.
-        self.elide_unused_union_lowering(keywords_lowered);
+        self.elide_unused_lowering(keywords_lowered);
         Some(ty)
     }
 
@@ -1224,23 +1227,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ),
         };
         let meet_hint = format!("{hint}{}", spelling.meet_suffix());
-        let enclosing_unmerged = self.unmerged_union.replace(union.provenance.clone());
         // With no composition, only untyped refiners meet the union: they leave `null` to it, as
         // an untyped composition does ([`Self::composition_takes_union_null`]), so they admit it
         // where a branch admits it itself ([`union_branch_admits_null`]), and its untyped branches
         // take it there (#586).
-        let enclosing_meets_null = std::mem::replace(
-            &mut self.unmerged_union_meets_null,
-            composed.map_or_else(
-                || union_branch_admits_null(union),
-                |composed| composed.nullable,
-            ),
+        let meets_null = composed.map_or_else(
+            || union_branch_admits_null(union),
+            |composed| composed.nullable,
         );
         let union_mark = self.graph_mark();
-        let lowered = self.lower_schema(union, union_hint);
-        self.unmerged_union = enclosing_unmerged;
-        self.unmerged_union_meets_null = enclosing_meets_null;
-        let lowered = lowered?;
+        let lowered = self
+            .with_unmerged_union(Some((union.provenance.clone(), meets_null)), |ctx| {
+                ctx.lower_schema(union, union_hint)
+            })?;
         let mark = self.graph_mark();
         let meets_from = self.variant_meets.len();
         let mut meet = lowered;
@@ -1315,7 +1314,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         let met_union = MetUnionMember {
             union: lowered.id,
-            schema: union.clone(),
+            branches: union_branches(union),
             conjunct,
             conjunct_is_null: composed.is_some_and(|composed| self.is_exact_null(composed)),
         };
@@ -1328,9 +1327,52 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut ty = self.reemit_meet(schema, hint, mark, kind);
         ty.nullable = meet.nullable;
         ty.boxed = meet.boxed;
-        self.elide_unused_union_lowering(union_mark..mark);
+        self.elide_unused_lowering(union_mark..mark);
         Some(ty)
     }
+}
+
+/// The members of an `allOf` beside or around a union, other than the union, as
+/// [`LowerCtx::meet_composition_with_union`] meets them with it.
+struct GatheredComposition<'c> {
+    /// The schema the contributions are combined under.
+    schema: &'c Schema,
+    /// The gathered contributions, with the refiners among them taken out into `nested`.
+    contributions: &'c [Contribution],
+    /// The objects a further union member of one real branch lowered to, each met with the
+    /// combined composition as the object it is (#841).
+    met_as_objects: Vec<Ty>,
+    /// The members of untyped object or array applicators alone, refining the union's branches
+    /// of their own category.
+    scoped: &'c [SchemaOr],
+    /// The refiners gathered from a nested `allOf` or a sub-file target.
+    nested: &'c [(Box<Schema>, Refiner)],
+}
+
+/// Splice `spliced`, what an `allOf`'s union member contributes to its scalar meet, into
+/// `contributions` at `union_slot`, where the member was skipped while the others were gathered,
+/// and `recorded`, the union members among it by their slot in `spliced`, into `union_members`:
+/// every slot recorded at or past `union_slot` moves past the spliced contributions
+/// ([`LowerCtx::meet_all_of_union_member`]).
+fn splice_union_contribution<'s>(
+    contributions: &mut Vec<Contribution>,
+    union_members: &mut Vec<(usize, &'s Schema)>,
+    union_slot: usize,
+    spliced: Vec<Contribution>,
+    recorded: Vec<(usize, &'s Schema)>,
+) {
+    let count = spliced.len();
+    for (slot, _) in union_members.iter_mut() {
+        if *slot >= union_slot {
+            *slot += count;
+        }
+    }
+    union_members.extend(
+        recorded
+            .into_iter()
+            .map(|(slot, member)| (slot + union_slot, member)),
+    );
+    contributions.splice(union_slot..union_slot, spliced);
 }
 
 /// Whether `union`'s `oneOf`/`anyOf` has two or more branches that are not the bare null type, so

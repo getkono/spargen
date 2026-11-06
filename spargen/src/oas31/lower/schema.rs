@@ -9,12 +9,12 @@ use crate::ir::{
 use crate::oas31::{JsonType, RefOr, Schema, SchemaOr, ValidationKeywords};
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
-use super::all_of::MetUnionMember;
+use super::all_of::{union_branches, MetUnionMember};
 use super::defaults::exact_integer;
 use super::meet::value_category;
 use super::nullability::{union_branch_admits_null, NullAdmission};
 use super::refiner::{implied_applicator_category, split_union_sibling, ImpliedCategory};
-use super::shape::{schema_has_shape_constraint, schema_has_union};
+use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union};
 use super::{LowerCtx, MetUnion, MAX_SCHEMA_DEPTH};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -97,9 +97,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         // In JSON Schema 2020-12 `$ref` is an applicator, not a replacement for the containing
         // schema. Intersect every shape-bearing sibling instead of silently discarding it.
-        let mut sibling = schema.clone();
-        sibling.reference = None;
-        if !schema_has_shape_constraint(&sibling) {
+        if !ref_siblings_bear_shape(schema) {
             // No shape to compose, so a cycle-closing reference here is the ordinary recursive
             // schema: it boxes and generates. Only the intersection below needs a real target.
             self.record_ref_xml(schema, referenced.id);
@@ -155,6 +153,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // silence — `oneOf: [string, Obj]` with a `required` sibling would become `Obj` alone
         // and reject the strings the target accepts. There the applicators refine the branches
         // of their own category, as they do beside an inline union (#282).
+        let mut sibling = schema.clone();
+        sibling.reference = None;
         let category = implied_applicator_category(&sibling);
         if category.is_some() {
             if let TypeKind::Union(union) = &self.graph.get(referenced.id)?.kind {
@@ -222,17 +222,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self.meet_ref_union_sibling(schema, hint, referenced, &keywords, &union);
             }
         }
-        let enclosing_unmerged = std::mem::replace(
-            &mut self.unmerged_union,
-            has_union_sibling.then(|| schema.provenance.clone()),
-        );
-        let enclosing_meets_null =
-            std::mem::replace(&mut self.unmerged_union_meets_null, referenced.nullable);
         let sibling_mark = self.graph_mark();
-        let sibling = self.lower_ref_sibling(referenced, &sibling, &format!("{hint}Constraint"));
-        self.unmerged_union = enclosing_unmerged;
-        self.unmerged_union_meets_null = enclosing_meets_null;
-        let sibling = sibling?;
+        let sibling = self.with_unmerged_union(
+            has_union_sibling.then(|| (schema.provenance.clone(), referenced.nullable)),
+            |ctx| ctx.lower_ref_sibling(referenced, &sibling, &format!("{hint}Constraint")),
+        )?;
         let mark = self.graph_mark();
         let meets_from = self.variant_meets.len();
         let intersection =
@@ -240,11 +234,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A branch of the union sibling the target excludes is reported as the inline sibling
         // spelling reports it (#671).
         if has_union_sibling && intersection.is_ok() {
-            let mut union = schema.clone();
-            union.reference = None;
             let met = MetUnionMember {
                 union: sibling.id,
-                schema: union,
+                branches: union_branches(schema),
                 conjunct: self.union_sibling_null_admission(schema),
                 conjunct_is_null: self.is_exact_null(referenced),
             };
@@ -325,7 +317,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The sibling's union was lowered with its merge held back, as the `allOf` spellings'
         // is, and the collapse re-emitted what the meet left of it (#561).
         if has_union_sibling {
-            self.elide_unused_union_lowering(sibling_mark..mark);
+            self.elide_unused_lowering(sibling_mark..mark);
         }
         Some(ty)
     }

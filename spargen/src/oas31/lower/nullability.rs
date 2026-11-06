@@ -9,7 +9,7 @@ use crate::oas31::{JsonType, Schema, SchemaOr};
 use crate::source::{is_remote_ref, Node};
 
 use super::combine::Contribution;
-use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union};
+use super::shape::{ref_siblings_bear_shape, schema_has_union};
 use super::strategy::retain_strategy;
 use super::{memoised_answer, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
 
@@ -222,18 +222,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // alone: it is the null type, as the sibling spelling collapses such an `anyOf` (#625).
         if ty.id.0 >= mark && !self.is_component_root(ty.id) {
             if let Some(TypeKind::Union(union)) = self.kind_of(ty.id) {
-                if union
-                    .variants
-                    .iter()
-                    .all(|variant| self.is_exact_null(variant.ty))
-                {
+                if self.all_exact_null(&union.variants) {
                     let dropped: Vec<u32> = union.variants.iter().map(|v| v.ty.id.0).collect();
                     if let Some(def) = self.graph.get_mut(ty.id) {
                         def.kind = TypeKind::Null;
                     }
                     self.union_variant_members.remove(&ty.id);
                     for id in dropped.into_iter().filter(|id| *id >= mark) {
-                        self.elide_unused_union_lowering(id..id + 1);
+                        self.elide_unused_lowering(id..id + 1);
                     }
                 }
             }
@@ -358,7 +354,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         for unused in dropped.into_iter().chain(collapsed) {
             if unused.0 >= mark {
-                self.elide_unused_union_lowering(unused.0..unused.0 + 1);
+                self.elide_unused_lowering(unused.0..unused.0 + 1);
             }
         }
         settled
@@ -700,11 +696,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     Err(_) => true,
                 };
+            if !target_admits || !ref_siblings_bear_shape(member) {
+                return target_admits;
+            }
             let mut sibling = member.clone();
             sibling.reference = None;
-            return target_admits
-                && (!schema_has_shape_constraint(&sibling)
-                    || self.flattened_member_admits_null(&sibling, visited, depth + 1));
+            return self.flattened_member_admits_null(&sibling, visited, depth + 1);
         }
         own_keywords_admit_null(member)
             && (member.all_of.is_empty()

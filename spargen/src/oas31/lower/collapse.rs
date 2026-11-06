@@ -8,6 +8,7 @@ use crate::oas31::Schema;
 use super::meet::same_ty;
 use super::nullability::non_nullable;
 use super::strategy::retain_strategy;
+use super::union::group_alike;
 use super::{LowerCtx, MetUnion};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -365,16 +366,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return None;
         }
         let union = union.clone();
-        let mut groups: Vec<Vec<usize>> = Vec::new();
-        for (index, variant) in union.variants.iter().enumerate() {
-            let shared = groups.iter_mut().find(|group| {
-                self.same_type_apart_from_null(union.variants[group[0]].ty, variant.ty)
-            });
-            match shared {
-                Some(group) => group.push(index),
-                None => groups.push(vec![index]),
-            }
-        }
+        let groups = group_alike(&union.variants, |kept, variant| {
+            self.same_type_apart_from_null(kept.ty, variant.ty)
+        });
         if groups.len() == union.variants.len() {
             return None;
         }

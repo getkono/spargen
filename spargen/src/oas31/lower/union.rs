@@ -130,7 +130,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             !sibling_lowered.contains(&union.id.0)
                 && (multi_category_types(schema).is_some() || left_one_variant(self, union))
         }) {
-            self.elide_unused_union_lowering(sibling_lowered);
+            self.elide_unused_lowering(sibling_lowered);
         }
         union
     }
@@ -142,6 +142,36 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn kept_unmet(&self, schema: &Schema, member: &SchemaOr) -> bool {
         union_sibling_is_categories_alone(schema)
             .is_some_and(|allowed| self.cycle_branch_within(member, allowed))
+    }
+
+    /// Run `lower` with `unmerged` as [`Self::unmerged_union`]: the union whose merge waits for
+    /// its meet, beside whether a conjunct it is met with admits `null`, or `None` for no such
+    /// union. The enclosing value is restored.
+    pub(super) fn with_unmerged_union<T>(
+        &mut self,
+        unmerged: Option<(Provenance, bool)>,
+        lower: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let enclosing = std::mem::replace(&mut self.unmerged_union, unmerged);
+        let lowered = lower(self);
+        self.unmerged_union = enclosing;
+        lowered
+    }
+
+    /// Whether the union written at `provenance` is [`Self::unmerged_union`], whose merge waits
+    /// for its meet.
+    fn is_unmerged_union(&self, provenance: &Provenance) -> bool {
+        self.unmerged_union
+            .as_ref()
+            .is_some_and(|(unmerged, _)| unmerged == provenance)
+    }
+
+    /// Whether the union written at `provenance` is [`Self::unmerged_union`] and a conjunct it is
+    /// met with admits `null`.
+    fn unmerged_union_meets_null(&self, provenance: &Provenance) -> bool {
+        self.unmerged_union
+            .as_ref()
+            .is_some_and(|(unmerged, meets_null)| unmerged == provenance && *meets_null)
     }
 
     /// [`Self::lower_union_closed`] past the lowering of its `sibling`, which it meets with every
@@ -235,6 +265,86 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.lower_union_variants(schema, hint, &members, sibling, discriminator_members)
     }
 
+    /// Refuse `member`, a real branch of the union `schema` lowered to `ty`, where it closes a
+    /// cycle the union cannot hold; `None` where it is refused. Asked of the sole member and of
+    /// every variant alike, right after the member is lowered and before anything is met with it.
+    ///
+    /// A member whose type is the reservation *this* schema will occupy is the whole union:
+    /// `Selfy = Selfy | null` describes nothing a decoder can terminate on, and the emitted
+    /// `Deserialize` would open by re-entering itself on the same value, with no base case, and
+    /// recurse until the stack is exhausted. It compiles, so nothing downstream can catch it, and
+    /// it is `E007` whatever the member count. Asked before the reservation guard below, which
+    /// would otherwise answer the narrower question first and hand one shape two codes. The
+    /// document-half guard (`member_closes_a_cycle`, in [`Self::lower_union_with_sibling`]) runs
+    /// first and would otherwise answer `E013` for this shape whenever the union carries sibling
+    /// keywords; it excludes a member that is this union's own reservation
+    /// (`member_is_this_union`), so the self-union reaches here and draws `E007` with or without
+    /// siblings, and with one member or several.
+    /// `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in
+    /// `tests/frontend/recursion_reservations.rs` asserts the reported error codes are
+    /// **exactly** `[E007]` on both its spellings.
+    ///
+    /// The test is against *this* schema's own reservation, not against any open one. Asking
+    /// `is_in_progress_root(ty.id)` answers the strictly weaker "is the member any open
+    /// reservation", which is true of every ordinary recursive schema whose union sits in a
+    /// property: `Node.child: {oneOf: [{$ref: Node}, …]}` has a member pointing at `Node`'s
+    /// reservation while the union being built is `Nodechild`. That decodes perfectly well — the
+    /// member is a *different* type — and rejecting it refuses the most common recursive
+    /// construct there is, which `docs/support-matrix.md` lists as supported.
+    ///
+    /// Then the reservation half of the cycle test, where the union has a sibling to meet the
+    /// member with (`has_sibling`). The document half answers only the
+    /// `#/components/schemas/…` spelling; a sub-file or remote member reference reaches here
+    /// still pointing at a placeholder, which no intersection can compose with. Reported with the
+    /// wording the other spellings use, because it is the same fact about the same document.
+    /// Without a sibling an ordinary recursive union still boxes its back-edge and generates, and
+    /// so does a member of a category a sibling that is a multi-category `type` array alone admits
+    /// ([`Self::kept_unmet`]).
+    fn check_member_cycle(
+        &mut self,
+        schema: &Schema,
+        member: &SchemaOr,
+        ty: Ty,
+        has_sibling: bool,
+    ) -> Option<()> {
+        if self.reservation_at(&schema.provenance) == Some(ty.id) {
+            return self.reject_union_member_is_the_union(schema);
+        }
+        if has_sibling && self.is_in_progress_root(ty.id) && !self.kept_unmet(schema, member) {
+            return self.reject_union_member_cycle(schema).map(|_| ());
+        }
+        Some(())
+    }
+
+    /// `met`, a branch's meet with the union's sibling, with an empty meet answered as the exact
+    /// null type (inserted under `hint`) where `null_matches`: `null` satisfies the branch and the
+    /// sibling alike ([`Self::null_admission`]), so the meet is `null` alone, as the same branch
+    /// written inline narrows to (#670, #674). A `$ref` to a union `null` matches through an
+    /// untyped branch of its own lowered non-null, which is how the lowered meet comes out empty.
+    fn met_or_null(
+        &mut self,
+        met: Result<Ty, NoMeet>,
+        null_matches: bool,
+        hint: &str,
+    ) -> Result<Ty, NoMeet> {
+        match met {
+            Err(NoMeet::Empty) if null_matches => {
+                Ok(self.insert_type(hint, TypeKind::Null, crate::ir::Docs::default(), None))
+            }
+            met => met,
+        }
+    }
+
+    /// Whether every one of `variants` is the exact null type.
+    pub(super) fn all_exact_null<'v>(
+        &self,
+        variants: impl IntoIterator<Item = &'v UnionVariant>,
+    ) -> bool {
+        variants
+            .into_iter()
+            .all(|variant| self.is_exact_null(variant.ty))
+    }
+
     /// [`Self::lower_union_with_sibling`] for a union with one real `member` beside its null-only
     /// ones: the member's type, met with the `sibling`, re-emitted under this schema's own name,
     /// `Option<T>` beside a `null` member, and no enum.
@@ -282,36 +392,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // which fails a `oneOf`'s exactly-one rule (#563, #622, #627).
         let null_twice =
             mode == UnionMode::OneOf && null_members + usize::from(null_matches_member) > 1;
-        // The sole member is the reservation *this* schema will occupy, so the union is the
-        // whole of itself: `Selfy = Selfy | null` describes nothing a decoder can terminate on,
-        // exactly as a direct recursive member does in a multi-member union. That path already
-        // refuses it, and this is the same shape written with fewer members beside it, so it
-        // gets the same code and the same wording rather than a second code chosen by member
-        // count. Asked before the reservation guards below, which would otherwise answer the
-        // narrower question first and hand one shape two codes again.
-        //
-        // The document-half guard (`member_closes_a_cycle`, in [`Self::lower_union_with_sibling`])
-        // runs before this collapse
-        // and would otherwise answer `E013` for this shape whenever the union carries sibling
-        // keywords. It excludes a member that is this union's own reservation
-        // (`member_is_this_union`), so the self-union reaches here and draws `E007` with or
-        // without siblings, and with one member or several.
-        // `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in
-        // `tests/frontend/recursion_reservations.rs` asserts the reported error codes are **exactly** `[E007]` on both its spellings.
-        if self.reservation_at(&schema.provenance) == Some(inner.id) {
-            return self.reject_union_member_is_the_union(schema);
-        }
-        // The reservation half of the cycle test, on the sole real member. The document half
-        // answers only the `#/components/schemas/…` spelling; a sub-file or remote member
-        // reference reaches here still pointing at a placeholder, and the intersection below
-        // cannot compose with one. Reported with the same wording the other two spellings use,
-        // because it is the same fact about the same document.
-        if sibling.is_some()
-            && self.is_in_progress_root(inner.id)
-            && !self.kept_unmet(schema, member)
-        {
-            return self.reject_union_member_cycle(schema);
-        }
+        self.check_member_cycle(schema, member, inner, sibling.is_some())?;
         // The member is some *other* type's still-open reservation — the cycle-closing
         // `$ref` of an ordinary recursive schema. Its kind may not be read: cloning a
         // `TypeKind::Reserved` inserts a second reservation nothing will ever `fill`, which
@@ -393,19 +474,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 schema,
                 unreached_message,
             )?;
-            // An empty lowered meet where `null` satisfies the member and the sibling alike
-            // ([`Self::null_admission`]) is `null` alone, as the multi-member path narrows such
-            // a branch (#670, #674): a `$ref` to a union `null` matches through an untyped
-            // branch of its own lowered non-null.
-            let met = match met {
-                Err(NoMeet::Empty) if null_matches_member => Ok(self.insert_type(
-                    &constrained_hint,
-                    TypeKind::Null,
-                    crate::ir::Docs::default(),
-                    None,
-                )),
-                met => met,
-            };
+            // As the multi-member path narrows such a branch.
+            let met = self.met_or_null(met, null_matches_member, &constrained_hint);
             let Ok(constrained) = met else {
                 // Neither side admits null and the non-null shapes do not meet, so nothing is
                 // left to collapse to. The terminal code matches the multi-variant path below,
@@ -444,7 +514,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut ty = self.reemit_meet(schema, hint, mark, kind);
         // The member's own lowering, which the re-emitted def replaced, is unused unless the
         // re-emitted kind reaches it or a memo holds it (#926).
-        self.elide_unused_union_lowering(member_from..mark);
+        self.elide_unused_lowering(member_from..mark);
         // The sibling meet narrowed the member to the exact null type beside a `null` member:
         // `null` matches both branches and fails exactly-one, and the member accepts nothing
         // else, so nothing satisfies the schema, as the multi-member path below rejects for
@@ -474,7 +544,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             real: ref real_members,
             mode,
             null_members,
-            null_from_type_array,
+            ..
         } = *members;
         let null_from_member = null_members > 0;
         // The union accepts `null` only through a branch `null` matches (#574): a `null` member,
@@ -484,61 +554,249 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // keywords admit it.
         let mut nullable = null_from_member;
 
-        // Lower every real variant first (their defs — especially `$ref` components — insert before
-        // the union def below), recording the `$ref` component name for tag/variant naming.
-        let mut variants: Vec<UnionVariant> = Vec::new();
-        let mut ref_names: Vec<Option<String>> = Vec::new();
-        // The real member each variant came from: sibling keywords can exclude a member, so a
-        // variant's position is not its member's.
-        let mut variant_members: Vec<usize> = Vec::new();
-        let mut used_hints: HashSet<String> = HashSet::new();
-        let mut reach = ScopeReach::default();
-        // The ids each member's sibling meet inserted. They interleave with the members' own
-        // lowered types, which stay, so a re-emit below elides the unused ones rather than popping.
-        let mut meet_inserts: Vec<std::ops::Range<u32>> = Vec::new();
-        // The members the sibling meet narrowed to the exact null type, each typed before it: an
-        // `anyOf` hoists them to its `Option` beside typed variants (#633). A branch that is the
-        // null type on its own (`const: null`) is not one of them.
-        let mut met_into_null: HashSet<usize> = HashSet::new();
-        // The members that are the exact null type on their own (`const: null`, `enum: [null]`),
-        // and that no sibling meet narrowed to it, with the ids each one's own lowering inserted:
-        // a `oneOf` drops them where `null` matches another branch too (#657).
-        let mut own_nulls: Vec<(usize, std::ops::Range<u32>)> = Vec::new();
-        // The ids each member's own lowering inserted, whether or not it stays a variant: a union
-        // left one variant re-emits that variant's kind, and leaves them unused unless it reaches
-        // them (#987).
-        let mut member_lowerings: Vec<std::ops::Range<u32>> = Vec::new();
         // Whether `null` satisfies a branch met with the sibling, by the one decision
         // ([`Self::null_admission`]): for a meet that lowered empty, and for the branches a
         // `oneOf` counts `null` in.
         let sibling_admission = self.union_sibling_null_admission(schema);
-        let null_survives = |ctx: &Self, member: &SchemaOr| {
-            ctx.branch_null_admission(member)
-                .and(sibling_admission)
-                .matches()
+        let MemberLowering {
+            mut variants,
+            hoisted_null,
+            meet_inserts,
+            met_into_null,
+            own_nulls,
+            member_lowerings,
+        } = self.lower_variant_members(schema, hint, members, sibling, sibling_admission)?;
+        // Hoist a variant's own nullability up to the union.
+        nullable = nullable || hoisted_null;
+        if variants.is_empty() {
+            // The same blind spot as the sole-member site above, on the pre-existing path: every
+            // REAL variant is impossible, but a null-only member's branch was stripped out before
+            // any of them were intersected, so it is not among the variants that just vanished.
+            // When the sibling admits null too, `null` still satisfies the whole schema and the
+            // exact JSON null type is the answer — the same type the all-null-members branch above
+            // returns for the same reason. Again only the MEMBER-derived flag can rescue: a
+            // `"null"` in the enclosing `type` array leaves nothing for `null` to match.
+            if null_from_member
+                && sibling.is_none_or(|sibling| self.refiner_accepts_null(sibling.refiner))
+            {
+                return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
+            }
+            return self.reject_branchless_union(
+                schema,
+                "union sibling constraints make every variant impossible",
+            );
+        }
+        // A `oneOf` admits `null` only where exactly one branch does (#563): `null` matches a
+        // `null` member, and a real branch wherever the one decision says `null` satisfies it met
+        // with the sibling ([`Self::null_admission`]) — one that states `null`, one the sibling
+        // meet narrowed to the exact null type (#645), an untyped object or array (#622), a nested
+        // union `null` matches (#628), and one of scalar keywords alone or that states nothing
+        // (#592). Two of them, whether or not any of the variants merge below, put `null` in two
+        // branches, which fails exactly-one. Decided here from the branches themselves, before a
+        // meet the union is held back for ([`Self::unmerged_union`]); the `null` that meet gives a
+        // branch is settled by the one decision after it ([`Self::settle_null_admission`]).
+        let null_branches = real_members
+            .iter()
+            .filter(|member| self.null_survives(member, sibling_admission))
+            .count()
+            + if sibling_admission.matches() {
+                null_members
+            } else {
+                0
+            };
+        let null_twice = mode == UnionMode::OneOf && null_branches > 1;
+        if null_twice {
+            nullable = false;
+        }
+        // The sibling meet left every one of several `oneOf` branches the exact null type:
+        // `type: [string, 'null']` beside untyped `items` branches, which constrain arrays alone,
+        // meets each of them in `null` only. `null` then matches every branch, which fails the
+        // exactly-one rule, so nothing satisfies the schema, and its `allOf` spelling (the `type`
+        // as a member beside the union) is rejected for it (#632). Merged below, the branches
+        // would be one `()` variant with `W001`, a type for a schema no value satisfies. The
+        // `anyOf` counterpart, which needs one match, is the null type below (#625). A `null`
+        // member is one more branch `null` matches, so a single variant met in `null` beside one
+        // is the same empty intersection.
+        if mode == UnionMode::OneOf
+            && sibling.is_some()
+            && variants.len() + null_members > 1
+            && self.all_exact_null(variants.iter().map(|variant| &variant.variant))
+        {
+            return self.reject_one_of_null_in_every_branch(schema);
+        }
+        // The meet left only some branches the exact null type: `type: [string, 'null']` beside
+        // an untyped `items` branch and a `{type: string}` one. Each such branch is a branch `null`
+        // matches, as a `null` member is, so the typed branches are the variants, as the `allOf`
+        // spelling lowers them. An `anyOf` hoists `null` to the union's `Option` (#633); a `oneOf`
+        // does too where that branch is the only one `null` matches, and otherwise `null` fails
+        // its exactly-one rule and the union admits no `null` (#645). Kept, each would be a `()`
+        // variant beside the typed ones — merged with `W001` where there are several — so one
+        // instance set would have two public types by spelling. Dropped here, before the merge
+        // below, so the branches are not reported as indistinguishable variants of an enum that
+        // does not have them. The dropped branches' meet inserts (their `…Constrained` aliases)
+        // are elided unless a surviving variant reaches them. A branch that is the null type on
+        // its own (`const: null`) stays the `()` variant it is with no sibling and in the `allOf`
+        // spelling, except where a `oneOf` drops it below (#657).
+        if variants
+            .iter()
+            .any(|variant| met_into_null.contains(&variant.member()))
+            && !self.all_exact_null(variants.iter().map(|variant| &variant.variant))
+        {
+            let dropped: Vec<usize> = variants
+                .iter()
+                .map(LoweredVariant::member)
+                .filter(|member| met_into_null.contains(member))
+                .collect();
+            variants.retain(|variant| !met_into_null.contains(&variant.member()));
+            nullable = !null_twice;
+            if variants.len() > 1 {
+                let roots: Vec<TypeId> = variants
+                    .iter()
+                    .map(|variant| variant.variant.ty.id)
+                    .collect();
+                let reached = reachable_types(&self.graph, &roots);
+                let inserts = dropped
+                    .iter()
+                    .filter_map(|&member| meet_inserts.get(member))
+                    .flat_map(|range| range.clone().map(TypeId));
+                self.elide_unreached(inserts, &reached);
+            }
+        }
+        // A `oneOf` branch that is the exact null type on its own (`const: null`, `enum: [null]`),
+        // where the count above finds another branch `null` matches, puts `null` in two branches.
+        // `null` fails exactly-one, and the branch accepts nothing else, so it accepts nothing the
+        // union does: it is no variant, and the other branches are, in the sibling spelling and in
+        // the `allOf` one, whose union member is lowered on its own. Kept, it would be a `()` arm
+        // that decodes the `null` the union refuses (#657). The types its own lowering inserted
+        // are elided unless something else names them: a `$ref`'d component stays. Only where
+        // another variant is left.
+        let is_own_null = |member: usize| own_nulls.iter().any(|(own, _)| *own == member);
+        if null_twice
+            && !own_nulls.is_empty()
+            && variants
+                .iter()
+                .any(|variant| !is_own_null(variant.member()))
+        {
+            variants.retain(|variant| !is_own_null(variant.member()));
+            self.elide_unused_lowerings(own_nulls.into_iter().map(|(_, lowered)| lowered));
+        }
+        // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
+        // by which variants decode. Variants that lower to the same generated type decode the same
+        // values, so every value one of them accepts fails exactly-one: branches of nothing but
+        // `required` beside `type: object` (#402), or bare ones that each lower to
+        // `serde_json::Value`. Two inline objects of one structure, or two string enums of one
+        // value set, are distinct generated items that decode the same values too (#492). They
+        // become one variant — the whole union is that type when every
+        // variant shares it, as the `$ref`-sibling collapse answers for the same branches — and
+        // the distinctions the generated type does not carry are reported, not dropped in silence.
+        // A discriminator tells such variants apart by tag, so it keeps them all; an `anyOf`
+        // decodes with any one match, so it does too. A `$ref`'s own `oneOf` sibling is collapsed
+        // by the `$ref` arm after the meet instead ([`Self::unmerged_union`]), and an `allOf`'s
+        // union member by the `allOf`'s scalar meet ([`Self::scalar_meet_union`], #678).
+        let held_for_scalar_meet = self.scalar_meet_union.as_ref() == Some(&schema.provenance);
+        if mode == UnionMode::OneOf
+            && schema.discriminator.is_none()
+            && !self.is_unmerged_union(&schema.provenance)
+            && !held_for_scalar_meet
+        {
+            self.merge_indistinguishable_variants(schema, &mut variants);
+        }
+        // The sibling meet left every branch the exact null type: `type: [string, 'null']` beside
+        // untyped `items` branches, which constrain arrays alone, meets each of them in `null`
+        // only. An `anyOf` needs one match, so `null` is the one value the union accepts and the
+        // union is the null type, as its `allOf` spelling (the `type` as a member beside the
+        // union) is (#625). Kept as an enum it would be a union of `()` variants beside a `String`
+        // constraint, which reads as a string-typed union.
+        if mode == UnionMode::AnyOf
+            && sibling.is_some()
+            && variants.len() > 1
+            && self.all_exact_null(variants.iter().map(|variant| &variant.variant))
+        {
+            variants.truncate(1);
+        }
+        if let [variant] = &variants[..] {
+            return self.lower_sole_variant(
+                schema,
+                hint,
+                variant.variant.ty,
+                nullable,
+                meet_inserts,
+                member_lowerings,
+            );
+        }
+
+        let strategy =
+            self.union_strategy(schema, &variants, mode, discriminator_members.as_ref())?;
+        // The member each variant came from, and every member it stands for.
+        let labels: Vec<usize> = variants.iter().map(LoweredVariant::member).collect();
+        let merged_members: Vec<Vec<usize>> = variants
+            .iter()
+            .map(|variant| variant.members.clone())
+            .collect();
+        let union = Union {
+            variants: variants
+                .into_iter()
+                .map(|variant| variant.variant)
+                .collect(),
+            strategy,
         };
+        // A `$ref`'s own `oneOf` sibling is reported by the `$ref` arm once the meet has made its
+        // branches what they are ([`Self::collapse_met_union`]), as its merge is. While an `allOf`
+        // gathers its members the report waits for its scalar meet, which may give a `Value`
+        // variant a type ([`Self::held_untyped_warnings`], #660).
+        if !self.is_unmerged_union(&schema.provenance) {
+            let untyped = self.untyped_one_of_variants(&union, &labels);
+            self.report_untyped_one_of(HeldUntypedWarning {
+                provenance: schema.provenance.clone(),
+                untyped,
+            });
+        }
+        let mut ty = self.insert_schema_type(schema, hint, TypeKind::Union(union));
+        self.union_variant_members.insert(ty.id, merged_members);
+        if held_for_scalar_meet {
+            self.scalar_meet_unmerged.insert(ty.id);
+        }
+        ty.nullable = nullable;
+        Some(ty)
+    }
+
+    /// Whether `null` satisfies the real `member` met with a sibling `null` satisfies as
+    /// `sibling_admission` says, by the one decision ([`Self::null_admission`]).
+    fn null_survives(&self, member: &SchemaOr, sibling_admission: NullAdmission) -> bool {
+        self.branch_null_admission(member)
+            .and(sibling_admission)
+            .matches()
+    }
+
+    /// [`Self::lower_union_variants`]' lowering of each real member as a variant, met with the
+    /// `sibling`: a member the meet excludes is no variant (`W011`), and the halves of the sibling
+    /// no branch reached are reported once every member is met. `sibling_admission` is what the
+    /// sibling holds `null` to. Every variant type inserts before the union def the caller
+    /// inserts. `None` where a member is refused.
+    fn lower_variant_members(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        members: &UnionMembers<'_>,
+        sibling: Option<UnionSibling>,
+        sibling_admission: NullAdmission,
+    ) -> Option<MemberLowering> {
+        let UnionMembers {
+            real: ref real_members,
+            mode,
+            null_from_type_array,
+            ..
+        } = *members;
+        let mut lowering = MemberLowering::default();
+        let mut used_hints: HashSet<String> = HashSet::new();
+        let mut reach = ScopeReach::default();
         for (index, member) in real_members.iter().enumerate() {
             let lowered_from = self.graph_mark();
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
             let lowered = lowered_from..self.graph_mark();
-            member_lowerings.push(lowered.clone());
-            // A variant that is a back-edge to *this* union — the member's type is the very
-            // reservation this schema will occupy — is the whole union, so it constrains nothing and
-            // cannot be decoded: the emitted `Deserialize` opens by re-entering itself on the same
-            // value, with no base case, and recurses until the stack is exhausted. It compiles, so
-            // nothing downstream can catch it; refusing here is the only place it can be caught.
-            //
-            // The test is against *this* schema's own reservation, not against any open one. Asking
-            // `is_in_progress_root(ty.id)` answers the strictly weaker "is the member any open
-            // reservation", which is true of every ordinary recursive schema whose union sits in a
-            // property: `Node.child: {oneOf: [{$ref: Node}, …]}` has a member pointing at `Node`'s
-            // reservation while the union being built is `Nodechild`. That decodes perfectly well —
-            // the member is a *different* type — and rejecting it refuses the most common recursive
-            // construct there is, which `docs/support-matrix.md` lists as supported.
-            if self.reservation_at(&schema.provenance) == Some(ty.id) {
-                return self.reject_union_member_is_the_union(schema);
-            }
+            lowering.member_lowerings.push(lowered.clone());
+            self.check_member_cycle(schema, member, ty, sibling.is_some())?;
             // A cycle-closing branch a multi-category `type` array alone admits meets that sibling
             // in itself: it is the variant it is without one.
             let sibling = if sibling.is_some()
@@ -549,13 +807,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             } else {
                 sibling
             };
-            // The reservation half of the cycle test again, on a multi-variant union. Same fact,
-            // same wording, same place in the order: before anything tries to intersect against the
-            // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
-            // `oneOf` still boxes its back-edge and generates.
-            if sibling.is_some() && self.is_in_progress_root(ty.id) {
-                return self.reject_union_member_cycle(schema);
-            }
             // Held back for a meet with nothing of its own to meet first, an untyped object branch
             // accepts `null` wherever what it is met with does (#567), as an untyped `allOf` member
             // does (#541): its non-null struct decides nothing. It accepts it here, so the meet
@@ -572,8 +823,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the branch's answer, which the `oneOf` reads after the meet
             // ([`Self::collapse_met_union`]) and the one decision settles (#597).
             if sibling.is_none()
-                && self.unmerged_union.as_ref() == Some(&schema.provenance)
-                && self.unmerged_union_meets_null
+                && self.unmerged_union_meets_null(&schema.provenance)
                 && self.branch_takes_conjunct_null(member, ty)
                 && (mode == UnionMode::AnyOf || self.branch_leaves_null_undecided(member, ty))
             {
@@ -602,15 +852,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if let Some(sibling) = sibling {
                 let mark = self.graph_mark();
                 let null_before = self.is_exact_null(ty);
+                let constrained_hint = format!("{hint}Variant{index}Constrained");
                 let met = self.meet_union_sibling(
                     schema,
                     ty,
                     sibling.refiner,
                     &mut reach,
-                    &format!("{hint}Variant{index}Constrained"),
+                    &constrained_hint,
                 );
-                meet_inserts.push(mark..self.graph_mark());
+                // The lowered meet is empty, but `null` satisfies the branch and the sibling
+                // alike: the branch is one `null` matches, not one the sibling excludes (#670).
+                let narrowed_to_null = matches!(met, Err(NoMeet::Empty))
+                    && self.null_survives(member, sibling_admission);
+                let met = self.met_or_null(met, narrowed_to_null, &constrained_hint);
+                // Every type this branch's meet inserted, the `null` it narrowed to included,
+                // elided with the branch once it is dropped.
+                lowering.meet_inserts.push(mark..self.graph_mark());
                 ty = match met {
+                    Ok(null) if narrowed_to_null => {
+                        lowering.met_into_null.insert(index);
+                        null
+                    }
                     // A branch already the exact null type (`const: null`) is narrowed by nothing
                     // the sibling admits `null` beside, so it stays its own `()` def; the meet's
                     // copy (`…Constrained`) would leave that def an unused alias beside it (#653).
@@ -625,28 +887,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     Ok(intersection) => {
                         if !null_before && self.is_exact_null(intersection) {
-                            met_into_null.insert(index);
+                            lowering.met_into_null.insert(index);
                         }
                         intersection
-                    }
-                    // The lowered meet is empty, but `null` satisfies the branch and the sibling
-                    // alike ([`Self::null_admission`]): a `$ref` to a union `null` matches through
-                    // an untyped branch of its own, which lowered non-null. The meet is `null`
-                    // alone, as the same branch written inline narrows to, so the branch is one
-                    // `null` matches, not one the sibling excludes (#670).
-                    Err(NoMeet::Empty) if null_survives(self, member) => {
-                        met_into_null.insert(index);
-                        let null = self.insert_type(
-                            &format!("{hint}Variant{index}Constrained"),
-                            TypeKind::Null,
-                            crate::ir::Docs::default(),
-                            None,
-                        );
-                        // One of this branch's meet inserts, elided with them once dropped.
-                        if let Some(inserts) = meet_inserts.last_mut() {
-                            inserts.end = self.graph_mark();
-                        }
-                        null
                     }
                     // A branch that is the exact null type on its own (`const: null`), beside a
                     // sibling that denies `null`, accepts nothing: it drops out unreported, as a
@@ -688,9 +931,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // outer `Option<Union>` (→ `None`), and the discriminated/disjoint dispatch below only
             // ever inspects non-null content — otherwise a variant like `{type: [string, null]}`
             // would be categorized `String` yet have no `null` arm in the custom `Deserialize`.
-            nullable = nullable || ty.nullable;
-            if !met_into_null.contains(&index) && self.is_exact_null(ty) {
-                own_nulls.push((index, lowered));
+            lowering.hoisted_null = lowering.hoisted_null || ty.nullable;
+            if !lowering.met_into_null.contains(&index) && self.is_exact_null(ty) {
+                lowering.own_nulls.push((index, lowered));
             }
             ty.nullable = false;
             let base_hint = ref_name
@@ -704,9 +947,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 name_hint = format!("{base_hint}{disambiguator}");
                 disambiguator += 1;
             }
-            variants.push(UnionVariant { name_hint, ty });
-            ref_names.push(ref_name);
-            variant_members.push(index);
+            lowering.variants.push(LoweredVariant {
+                variant: UnionVariant { name_hint, ty },
+                ref_name,
+                members: vec![index],
+            });
         }
 
         if let Some(sibling) = sibling {
@@ -714,285 +959,98 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 self.warn_unreached_union_sibling(schema, unreached_message(keywords));
             }
         }
-        if variants.is_empty() {
-            // The same blind spot as the sole-member site above, on the pre-existing path: every
-            // REAL variant is impossible, but a null-only member's branch was stripped out before
-            // any of them were intersected, so it is not among the variants that just vanished.
-            // When the sibling admits null too, `null` still satisfies the whole schema and the
-            // exact JSON null type is the answer — the same type the all-null-members branch above
-            // returns for the same reason. Again only the MEMBER-derived flag can rescue: a
-            // `"null"` in the enclosing `type` array leaves nothing for `null` to match.
-            if null_from_member
-                && sibling.is_none_or(|sibling| self.refiner_accepts_null(sibling.refiner))
-            {
-                return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
-            }
-            return self.reject_branchless_union(
-                schema,
-                "union sibling constraints make every variant impossible",
-            );
-        }
-        // A `oneOf` admits `null` only where exactly one branch does (#563): `null` matches a
-        // `null` member, and a real branch wherever the one decision says `null` satisfies it met
-        // with the sibling ([`Self::null_admission`]) — one that states `null`, one the sibling
-        // meet narrowed to the exact null type (#645), an untyped object or array (#622), a nested
-        // union `null` matches (#628), and one of scalar keywords alone or that states nothing
-        // (#592). Two of them, whether or not any of the variants merge below, put `null` in two
-        // branches, which fails exactly-one. Decided here from the branches themselves, before a
-        // meet the union is held back for ([`Self::unmerged_union`]); the `null` that meet gives a
-        // branch is settled by the one decision after it ([`Self::settle_null_admission`]).
-        let null_branches = real_members
-            .iter()
-            .filter(|member| null_survives(self, member))
-            .count()
-            + if sibling_admission.matches() {
-                null_members
-            } else {
-                0
-            };
-        let null_twice = mode == UnionMode::OneOf && null_branches > 1;
-        if null_twice {
-            nullable = false;
-        }
-        // The sibling meet left every one of several `oneOf` branches the exact null type:
-        // `type: [string, 'null']` beside untyped `items` branches, which constrain arrays alone,
-        // meets each of them in `null` only. `null` then matches every branch, which fails the
-        // exactly-one rule, so nothing satisfies the schema, and its `allOf` spelling (the `type`
-        // as a member beside the union) is rejected for it (#632). Merged below, the branches
-        // would be one `()` variant with `W001`, a type for a schema no value satisfies. The
-        // `anyOf` counterpart, which needs one match, is the null type below (#625). A `null`
-        // member is one more branch `null` matches, so a single variant met in `null` beside one
-        // is the same empty intersection.
-        if mode == UnionMode::OneOf
-            && sibling.is_some()
-            && variants.len() + null_members > 1
-            && variants
-                .iter()
-                .all(|variant| self.is_exact_null(variant.ty))
-        {
-            return self.reject_one_of_null_in_every_branch(schema);
-        }
-        // The meet left only some branches the exact null type: `type: [string, 'null']` beside
-        // an untyped `items` branch and a `{type: string}` one. Each such branch is a branch `null`
-        // matches, as a `null` member is, so the typed branches are the variants, as the `allOf`
-        // spelling lowers them. An `anyOf` hoists `null` to the union's `Option` (#633); a `oneOf`
-        // does too where that branch is the only one `null` matches, and otherwise `null` fails
-        // its exactly-one rule and the union admits no `null` (#645). Kept, each would be a `()`
-        // variant beside the typed ones — merged with `W001` where there are several — so one
-        // instance set would have two public types by spelling. Dropped here, before the merge
-        // below, so the branches are not reported as indistinguishable variants of an enum that
-        // does not have them. The dropped branches' meet inserts (their `…Constrained` aliases)
-        // are elided unless a surviving variant reaches them. A branch that is the null type on
-        // its own (`const: null`) stays the `()` variant it is with no sibling and in the `allOf`
-        // spelling, except where a `oneOf` drops it below (#657).
-        if variant_members
-            .iter()
-            .any(|member| met_into_null.contains(member))
-            && !variants
-                .iter()
-                .all(|variant| self.is_exact_null(variant.ty))
-        {
-            let dropped: Vec<usize> = variant_members
-                .iter()
-                .copied()
-                .filter(|member| met_into_null.contains(member))
-                .collect();
-            retain_variants(
-                &mut variants,
-                &mut ref_names,
-                &mut variant_members,
-                |_, member| !met_into_null.contains(&member),
-            );
-            nullable = !null_twice;
-            if variants.len() > 1 {
-                let roots: Vec<TypeId> = variants.iter().map(|variant| variant.ty.id).collect();
-                let reached = reachable_types(&self.graph, &roots);
-                let inserts = dropped
-                    .iter()
-                    .filter_map(|&member| meet_inserts.get(member))
-                    .flat_map(|range| range.clone().map(TypeId));
-                self.elide_unreached(inserts, &reached);
-            }
-        }
-        // A `oneOf` branch that is the exact null type on its own (`const: null`, `enum: [null]`),
-        // where the count above finds another branch `null` matches, puts `null` in two branches.
-        // `null` fails exactly-one, and the branch accepts nothing else, so it accepts nothing the
-        // union does: it is no variant, and the other branches are, in the sibling spelling and in
-        // the `allOf` one, whose union member is lowered on its own. Kept, it would be a `()` arm
-        // that decodes the `null` the union refuses (#657). The types its own lowering inserted
-        // are elided unless something else names them: a `$ref`'d component stays. Only where
-        // another variant is left.
-        let is_own_null = |member: &usize| own_nulls.iter().any(|(own, _)| own == member);
-        if null_twice
-            && !own_nulls.is_empty()
-            && variant_members.iter().any(|member| !is_own_null(member))
-        {
-            retain_variants(
-                &mut variants,
-                &mut ref_names,
-                &mut variant_members,
-                |_, member| !is_own_null(&member),
-            );
-            for (_, lowered) in own_nulls {
-                self.elide_unused_union_lowering(lowered);
-            }
-        }
-        // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
-        // by which variants decode. Variants that lower to the same generated type decode the same
-        // values, so every value one of them accepts fails exactly-one: branches of nothing but
-        // `required` beside `type: object` (#402), or bare ones that each lower to
-        // `serde_json::Value`. Two inline objects of one structure, or two string enums of one
-        // value set, are distinct generated items that decode the same values too (#492). They
-        // become one variant — the whole union is that type when every
-        // variant shares it, as the `$ref`-sibling collapse answers for the same branches — and
-        // the distinctions the generated type does not carry are reported, not dropped in silence.
-        // A discriminator tells such variants apart by tag, so it keeps them all; an `anyOf`
-        // decodes with any one match, so it does too. A `$ref`'s own `oneOf` sibling is collapsed
-        // by the `$ref` arm after the meet instead ([`Self::unmerged_union`]), and an `allOf`'s
-        // union member by the `allOf`'s scalar meet ([`Self::scalar_meet_union`], #678).
-        // The members each kept variant stands for, its own first: a merge folds several into one.
-        let mut merged_members: Vec<Vec<usize>> =
-            variant_members.iter().map(|&member| vec![member]).collect();
-        let held_for_scalar_meet = self.scalar_meet_union.as_ref() == Some(&schema.provenance);
-        if mode == UnionMode::OneOf
-            && schema.discriminator.is_none()
-            && self.unmerged_union.as_ref() != Some(&schema.provenance)
-            && !held_for_scalar_meet
-        {
-            merged_members = self.merge_indistinguishable_variants(
-                schema,
-                &mut variants,
-                &mut ref_names,
-                &mut variant_members,
-            );
-        }
-        // The sibling meet left every branch the exact null type: `type: [string, 'null']` beside
-        // untyped `items` branches, which constrain arrays alone, meets each of them in `null`
-        // only. An `anyOf` needs one match, so `null` is the one value the union accepts and the
-        // union is the null type, as its `allOf` spelling (the `type` as a member beside the
-        // union) is (#625). Kept as an enum it would be a union of `()` variants beside a `String`
-        // constraint, which reads as a string-typed union.
-        if mode == UnionMode::AnyOf
-            && sibling.is_some()
-            && variants.len() > 1
-            && variants
-                .iter()
-                .all(|variant| self.is_exact_null(variant.ty))
-        {
-            variants.truncate(1);
-            ref_names.truncate(1);
-            variant_members.truncate(1);
-            merged_members.truncate(1);
-        }
-        if variants.len() == 1 {
-            let mut inner = variants[0].ty;
-            // The one variant left is some type's still-open reservation: a `oneOf` that lists
-            // the same cycle-closing `$ref` more than once, merged above (#1152). Its kind may
-            // not be read, for the reason [`Self::lower_sole_union_member`] gives, so the
-            // position is answered as that path answers its reservation: the member's own `Ty`,
-            // boxed so the cycle has a finite size, with no def of its own. Where this union is
-            // itself the body of a reserved root, the caller lifts the last insert into that
-            // root, so a foreign id cannot be handed back, and the shape is refused as that path
-            // refuses it. A body whose members are bare `$ref`s to that one open target, directly
-            // or through bare aliases of it, is a nullable alias instead
-            // ([`Self::nullable_alias_back_edge`], #1176, #1189), so its outcome does not depend
-            // on which of them `components.schemas` declares first.
-            if self.is_reservation(inner.id) {
-                if self.reservation_at(&schema.provenance).is_some() {
-                    return self.reject_self_referential_union(
-                        schema,
-                        "this schema's whole body is a union whose members all lower to one \
-                         `$ref` that closes a reference cycle, so the schema names no shape of \
-                         its own and cannot be given a generated type",
-                    );
-                }
-                // Nothing names whatever the members' own lowerings or meets inserted: the type of
-                // a branch the sibling excludes, and the `null` a branch's meet narrowed it to.
-                // These two calls keep `TypeGraph::emitted` exact for the elisions lowering runs
-                // after this one, which read it for their roots
-                // ([`Self::elide_unused_union_lowering`]). The generated output is the same
-                // without them, because `elide_unreachable` withholds every type nothing reaches
-                // once lowering ends (#924), so an output fixture holds the types they elide out
-                // of the module but does not pin these calls (#1190):
-                // `a_one_of_repeating_a_cycle_closing_ref_drops_the_branches_its_sibling_excludes`
-                // in `tests/frontend/recursion_reservations.rs`.
-                self.elide_unreached(
-                    meet_inserts.into_iter().flatten().map(TypeId),
-                    &HashSet::new(),
-                );
-                for lowered in member_lowerings {
-                    self.elide_unused_union_lowering(lowered);
-                }
-                inner.nullable = inner.nullable || nullable;
-                inner.boxed = true;
-                return Some(inner);
-            }
-            let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
-            // The sole variant is re-emitted under this schema's name, so the meets' inserts —
-            // the surviving variant's `…Constrained` def, and whatever an excluded member's meet
-            // left — are unused unless `kind` reaches them (#462).
-            let reached = reachable_types(&self.graph, &kind_edges(&kind));
-            self.elide_unreached(meet_inserts.into_iter().flatten().map(TypeId), &reached);
-            let mut ty = self.insert_schema_type(schema, hint, kind);
-            // So is the sole variant's own type, whose kind the union now is, unless something
-            // else names it, as a union the one decision collapses to one variant leaves it
-            // ([`Self::settle_null_admission`]). So is every member's own lowering, the
-            // `…Variant<N>` types with whatever they built on the way (`…Item`), whether its
-            // member is the surviving variant, one the sibling excluded, or one the merge folded
-            // into it (#987).
-            self.elide_unused_union_lowering(inner.id.0..inner.id.0 + 1);
-            for lowered in member_lowerings {
-                self.elide_unused_union_lowering(lowered);
-            }
-            ty.nullable = inner.nullable || nullable;
-            ty.boxed = inner.boxed;
-            return Some(ty);
-        }
+        Some(lowering)
+    }
 
-        let strategy = self.union_strategy(
-            schema,
-            &variants,
-            &ref_names,
-            &variant_members,
-            mode,
-            discriminator_members.as_ref(),
-        )?;
-        let union = Union { variants, strategy };
-        // A `$ref`'s own `oneOf` sibling is reported by the `$ref` arm once the meet has made its
-        // branches what they are ([`Self::collapse_met_union`]), as its merge is. While an `allOf`
-        // gathers its members the report waits for its scalar meet, which may give a `Value`
-        // variant a type ([`Self::held_untyped_warnings`], #660).
-        if self.unmerged_union.as_ref() != Some(&schema.provenance) {
-            let untyped = self.untyped_one_of_variants(&union, &variant_members);
-            self.report_untyped_one_of(HeldUntypedWarning {
-                provenance: schema.provenance.clone(),
-                untyped,
-            });
+    /// [`Self::lower_union_variants`] left one variant, of type `inner`: the union is that
+    /// variant's type, re-emitted under this schema's name, `nullable` where the union admits
+    /// `null`. `meet_inserts` and `member_lowerings` are the ids the members' sibling meets and
+    /// own lowerings inserted, elided where the result no longer reaches them.
+    fn lower_sole_variant(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        mut inner: Ty,
+        nullable: bool,
+        meet_inserts: Vec<std::ops::Range<u32>>,
+        member_lowerings: Vec<std::ops::Range<u32>>,
+    ) -> Option<Ty> {
+        // The one variant left is some type's still-open reservation: a `oneOf` that lists
+        // the same cycle-closing `$ref` more than once, merged into one (#1152). Its kind may
+        // not be read, for the reason [`Self::lower_sole_union_member`] gives, so the
+        // position is answered as that path answers its reservation: the member's own `Ty`,
+        // boxed so the cycle has a finite size, with no def of its own. Where this union is
+        // itself the body of a reserved root, the caller lifts the last insert into that
+        // root, so a foreign id cannot be handed back, and the shape is refused as that path
+        // refuses it. A body whose members are bare `$ref`s to that one open target, directly
+        // or through bare aliases of it, is a nullable alias instead
+        // ([`Self::nullable_alias_back_edge`], #1176, #1189), so its outcome does not depend
+        // on which of them `components.schemas` declares first.
+        if self.is_reservation(inner.id) {
+            if self.reservation_at(&schema.provenance).is_some() {
+                return self.reject_self_referential_union(
+                    schema,
+                    "this schema's whole body is a union whose members all lower to one \
+                     `$ref` that closes a reference cycle, so the schema names no shape of \
+                     its own and cannot be given a generated type",
+                );
+            }
+            // Nothing names whatever the members' own lowerings or meets inserted: the type of
+            // a branch the sibling excludes, and the `null` a branch's meet narrowed it to.
+            // These two calls keep `TypeGraph::emitted` exact for the elisions lowering runs
+            // after this one, which read it for their roots
+            // ([`Self::elide_unused_lowering`]). The generated output is the same
+            // without them, because `elide_unreachable` withholds every type nothing reaches
+            // once lowering ends (#924), so an output fixture holds the types they elide out
+            // of the module but does not pin these calls (#1190):
+            // `a_one_of_repeating_a_cycle_closing_ref_drops_the_branches_its_sibling_excludes`
+            // in `tests/frontend/recursion_reservations.rs`.
+            self.elide_unreached(
+                meet_inserts.into_iter().flatten().map(TypeId),
+                &HashSet::new(),
+            );
+            self.elide_unused_lowerings(member_lowerings);
+            inner.nullable = inner.nullable || nullable;
+            inner.boxed = true;
+            return Some(inner);
         }
-        let mut ty = self.insert_schema_type(schema, hint, TypeKind::Union(union));
-        self.union_variant_members.insert(ty.id, merged_members);
-        if held_for_scalar_meet {
-            self.scalar_meet_unmerged.insert(ty.id);
-        }
-        ty.nullable = nullable;
+        let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
+        // The sole variant is re-emitted under this schema's name, so the meets' inserts —
+        // the surviving variant's `…Constrained` def, and whatever an excluded member's meet
+        // left — are unused unless `kind` reaches them (#462).
+        let reached = reachable_types(&self.graph, &kind_edges(&kind));
+        self.elide_unreached(meet_inserts.into_iter().flatten().map(TypeId), &reached);
+        let mut ty = self.insert_schema_type(schema, hint, kind);
+        // So is the sole variant's own type, whose kind the union now is, unless something
+        // else names it, as a union the one decision collapses to one variant leaves it
+        // ([`Self::settle_null_admission`]). So is every member's own lowering, the
+        // `…Variant<N>` types with whatever they built on the way (`…Item`), whether its
+        // member is the surviving variant, one the sibling excluded, or one the merge folded
+        // into it (#987).
+        self.elide_unused_lowering(inner.id.0..inner.id.0 + 1);
+        self.elide_unused_lowerings(member_lowerings);
+        ty.nullable = inner.nullable || nullable;
+        ty.boxed = inner.boxed;
         Some(ty)
     }
 
     /// How the enum of `variants` tells them apart: by the discriminator, where `schema` has one
     /// that dispatches them (`discriminator_members` is its resolution against the members),
     /// then by JSON category or a unique required key where they are disjoint, and otherwise by
-    /// trial matching under `mode`. `ref_names` and `variant_members` are aligned with
-    /// `variants`. Rejected (`E007`) where a `defaultMapping` names a member the sibling
-    /// keywords excluded, or a component member's own name selects another member.
+    /// trial matching under `mode`. Rejected (`E007`) where a `defaultMapping` names a member the
+    /// sibling keywords excluded, or a component member's own name selects another member.
     fn union_strategy(
         &mut self,
         schema: &Schema,
-        variants: &[UnionVariant],
-        ref_names: &[Option<String>],
-        variant_members: &[usize],
+        lowered: &[LoweredVariant],
         mode: UnionMode,
         discriminator_members: Option<&DiscriminatorMembers>,
     ) -> Option<UnionStrategy> {
+        let variants: Vec<UnionVariant> = lowered
+            .iter()
+            .map(|variant| variant.variant.clone())
+            .collect();
+        let variants = variants.as_slice();
         let strategy = if let (Some(discriminator), Some(resolved)) =
             (&schema.discriminator, discriminator_members)
         {
@@ -1003,7 +1061,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let default_variant = match resolved.default {
                 None => None,
                 Some(member) => {
-                    let Some(variant) = variant_members.iter().position(|&m| m == member) else {
+                    let Some(variant) = lowered
+                        .iter()
+                        .position(|variant| variant.member() == member)
+                    else {
                         return self.reject_unrepresentable_union(
                             schema,
                             "`discriminator.defaultMapping` names a member that the enclosing \
@@ -1015,9 +1076,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             };
             let mut discriminated = self.discriminated_strategy(
-                variants,
-                ref_names,
-                variant_members,
+                lowered,
                 &discriminator.property_name,
                 resolved,
                 default_variant,
@@ -1039,7 +1098,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     })
                     .collect();
                 let component = |index: usize| {
-                    ref_names[index]
+                    lowered[index]
+                        .ref_name
                         .as_deref()
                         .filter(|name| is_schema_component_name(name))
                 };
@@ -1054,7 +1114,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     return self.reject_unselectable_discriminated_variant(
                         schema,
                         discriminator,
-                        variant_members[index],
+                        lowered[index].member(),
                         &implicit,
                     );
                 }
@@ -1072,7 +1132,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if !unselectable.is_empty() {
                     let members: Vec<usize> = unselectable
                         .iter()
-                        .map(|&index| variant_members[index])
+                        .map(|&index| lowered[index].member())
                         .collect();
                     let dispatches = tags.iter().any(|accepted| !accepted.is_empty());
                     self.warn_untagged_discriminated_members(discriminator, &members, dispatches);
@@ -1212,45 +1272,47 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Merge the `oneOf` variants that decode the same values — that lower to the same generated
     /// type, or to distinct structs or string enums of one structure (#492,
-    /// [`TypeGraph::same_decoded_values`]) — into the first of them, keeping `ref_names` and
-    /// `variant_members` aligned with `variants`, and report the merge as
-    /// `W001` at the union. The union's `null` is not decided here: [`Self::lower_union_variants`]
-    /// counts the branches `null` matches before any merge, across the merged sets and the rest.
-    /// Returns the members each kept variant stands for, aligned with `variants`.
+    /// [`TypeGraph::same_decoded_values`]) — into the first of them, which then stands for the
+    /// members of every variant folded into it ([`LoweredVariant::members`]), and report the merge
+    /// as `W001` at the union. Each variant comes in standing for its own member alone. The
+    /// union's `null` is not decided here: [`Self::lower_union_variants`] counts the branches
+    /// `null` matches before any merge, across the merged sets and the rest.
     ///
     /// [`TypeGraph::same_decoded_values`]: crate::ir::TypeGraph::same_decoded_values
     fn merge_indistinguishable_variants(
         &mut self,
         schema: &Schema,
-        variants: &mut Vec<UnionVariant>,
-        ref_names: &mut Vec<Option<String>>,
-        variant_members: &mut Vec<usize>,
-    ) -> Vec<Vec<usize>> {
-        // Each kept variant, with the members merged into it.
-        let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
-        for (index, variant) in variants.iter().enumerate() {
-            let shared = groups.iter_mut().find(|(kept, _)| {
-                self.graph
-                    .same_decoded_values(variants[*kept].ty, variant.ty)
-            });
-            match shared {
-                Some((_, members)) => members.push(variant_members[index]),
-                None => groups.push((index, vec![variant_members[index]])),
-            }
-        }
-        if groups.len() == variants.len() {
-            return groups.into_iter().map(|(_, members)| members).collect();
-        }
-        let merged: Vec<&[usize]> = groups
-            .iter()
-            .map(|(_, members)| members.as_slice())
-            .collect();
-        self.warn_indistinguishable_branches(&schema.provenance, &merged);
-        let kept: HashSet<usize> = groups.iter().map(|(kept, _)| *kept).collect();
-        retain_variants(variants, ref_names, variant_members, |index, _| {
-            kept.contains(&index)
+        variants: &mut Vec<LoweredVariant>,
+    ) {
+        let groups = group_alike(variants, |kept, variant| {
+            self.graph
+                .same_decoded_values(kept.variant.ty, variant.variant.ty)
         });
-        groups.into_iter().map(|(_, members)| members).collect()
+        if groups.len() == variants.len() {
+            return;
+        }
+        let merged: Vec<Vec<usize>> = groups
+            .iter()
+            .map(|group| {
+                group
+                    .iter()
+                    .map(|&index| variants[index].member())
+                    .collect()
+            })
+            .collect();
+        let slices: Vec<&[usize]> = merged.iter().map(Vec::as_slice).collect();
+        self.warn_indistinguishable_branches(&schema.provenance, &slices);
+        let mut kept = groups.iter().map(|group| group[0]).peekable();
+        let mut merged = merged.into_iter();
+        let mut index = 0;
+        variants.retain_mut(|variant| {
+            let keep = kept.next_if_eq(&index).is_some();
+            index += 1;
+            if keep {
+                variant.members = merged.next().unwrap_or_default();
+            }
+            keep
+        });
     }
 
     /// Report, as `W001` at the `oneOf` written at `at`, that its real members merged into the
@@ -1318,26 +1380,73 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 }
 
-/// Keep the union variants for which `keep` holds of their position and the member they came
-/// from, in order, with `ref_names` and `variant_members` kept aligned with `variants`.
-fn retain_variants(
-    variants: &mut Vec<UnionVariant>,
-    ref_names: &mut Vec<Option<String>>,
-    variant_members: &mut Vec<usize>,
-    mut keep: impl FnMut(usize, usize) -> bool,
-) {
-    let kept: Vec<bool> = variant_members
-        .iter()
-        .enumerate()
-        .map(|(index, &member)| keep(index, member))
-        .collect();
-    fn retain<T>(items: &mut Vec<T>, kept: &[bool]) {
-        let mut kept = kept.iter();
-        items.retain(|_| kept.next().copied().unwrap_or(false));
+/// One variant of a union [`LowerCtx::lower_union_variants`] is lowering, beside what its
+/// dispatch and its reports read of the members it came from. Sibling keywords can exclude a
+/// member, and a merge folds several into one variant, so a variant's position is not its
+/// member's.
+pub(super) struct LoweredVariant {
+    /// The variant as the generated union carries it.
+    pub(super) variant: UnionVariant,
+    /// The `$ref` component name the member was written as, which names the variant and is its
+    /// implicit discriminator tag ([`LowerCtx::discriminated_strategy`]).
+    pub(super) ref_name: Option<String>,
+    /// The real members this variant stands for, its own first: a merge folds several into one
+    /// ([`LowerCtx::merge_indistinguishable_variants`]).
+    pub(super) members: Vec<usize>,
+}
+
+impl LoweredVariant {
+    /// The real member this variant came from.
+    pub(super) fn member(&self) -> usize {
+        self.members[0]
     }
-    retain(variants, &kept);
-    retain(ref_names, &kept);
-    retain(variant_members, &kept);
+}
+
+/// What [`LowerCtx::lower_variant_members`] made of a union's real members.
+#[derive(Default)]
+struct MemberLowering {
+    /// The variants, in member order: a member the sibling meet excludes is none.
+    variants: Vec<LoweredVariant>,
+    /// Whether any variant accepted `null` itself, before it was hoisted off the variant: a
+    /// `null` payload then resolves at the outer `Option<Union>` (→ `None`), and the
+    /// discriminated or disjoint dispatch only ever inspects non-null content.
+    hoisted_null: bool,
+    /// The ids each member's sibling meet inserted, in the order the members were met. They
+    /// interleave with the members' own lowered types, which stay, so a re-emit elides the
+    /// unused ones rather than popping.
+    meet_inserts: Vec<std::ops::Range<u32>>,
+    /// The members the sibling meet narrowed to the exact null type, each typed before it: an
+    /// `anyOf` hoists them to its `Option` beside typed variants (#633). A branch that is the
+    /// null type on its own (`const: null`) is not one of them.
+    met_into_null: HashSet<usize>,
+    /// The members that are the exact null type on their own (`const: null`, `enum: [null]`),
+    /// and that no sibling meet narrowed to it, with the ids each one's own lowering inserted: a
+    /// `oneOf` drops them where `null` matches another branch too (#657).
+    own_nulls: Vec<(usize, std::ops::Range<u32>)>,
+    /// The ids each member's own lowering inserted, whether or not it stays a variant: a union
+    /// left one variant re-emits that variant's kind, and leaves them unused unless it reaches
+    /// them (#987).
+    member_lowerings: Vec<std::ops::Range<u32>>,
+}
+
+/// `items` grouped first fit by `alike`: each group the positions of the items alike to its
+/// first item, which leads it, and the groups in the order of their first items. `alike` is asked
+/// of a group's first item and a later item, in that order.
+pub(super) fn group_alike<T>(
+    items: &[T],
+    mut alike: impl FnMut(&T, &T) -> bool,
+) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        match groups
+            .iter_mut()
+            .find(|group| alike(&items[group[0]], item))
+        {
+            Some(group) => group.push(index),
+            None => groups.push(vec![index]),
+        }
+    }
+    groups
 }
 
 /// A `W001` an inline `oneOf` raised for its variants that lower to `serde_json::Value`
@@ -1353,4 +1462,39 @@ pub(super) struct HeldUntypedWarning {
     pub(super) provenance: Provenance,
     /// Each `Value` variant's hint, beside its member position for the message.
     pub(super) untyped: Vec<(String, usize)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::group_alike;
+
+    /// Each item joins the first group whose first item it is alike to, asked in that order, and
+    /// otherwise opens a group of its own; nothing alike leaves every item alone, and every item
+    /// alike to the first leaves one group.
+    #[test]
+    fn group_alike_groups_first_fit_by_each_groups_first_item() {
+        let same_parity = |kept: &u32, item: &u32| kept % 2 == item % 2;
+        assert_eq!(
+            group_alike(&[1, 2, 3, 4, 6, 5], same_parity),
+            vec![vec![0, 2, 5], vec![1, 3, 4]]
+        );
+        assert_eq!(
+            group_alike(&[1, 2, 3], |_: &u32, _: &u32| false),
+            vec![vec![0], vec![1], vec![2]]
+        );
+        assert_eq!(
+            group_alike(&[1, 2, 3], |_: &u32, _: &u32| true),
+            vec![vec![0, 1, 2]]
+        );
+        assert!(group_alike(&[] as &[u32], |_: &u32, _: &u32| true).is_empty());
+        // Asked of a group's first item, then the later one: `kept < item` groups 3 with 1 and
+        // leaves 0 alone, where the reverse order would have grouped 0 with 1 instead.
+        let mut asked = Vec::new();
+        let groups = group_alike(&[1, 3, 0], |kept: &u32, item: &u32| {
+            asked.push((*kept, *item));
+            kept < item
+        });
+        assert_eq!(groups, vec![vec![0, 1], vec![2]]);
+        assert_eq!(asked, vec![(1, 3), (1, 0)]);
+    }
 }

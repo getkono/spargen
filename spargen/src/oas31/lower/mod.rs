@@ -258,7 +258,6 @@ fn lower_pass(
         xml: XmlRecords::default(),
         xml_holders: Vec::new(),
         unmerged_union: None,
-        unmerged_union_meets_null: false,
         held_untyped_warnings: None,
         scalar_meet_union: None,
         scalar_meet_unmerged: HashSet::new(),
@@ -644,12 +643,13 @@ struct LowerCtx<'a, 'doc> {
     /// caller collapses them after the meet ([`Self::collapse_met_union`]), where the branches'
     /// `null` is still visible, and merging untyped branches first would hide it behind
     /// `serde_json::Value`.
-    unmerged_union: Option<Provenance>,
-    /// Whether a conjunct [`Self::unmerged_union`] is met with admits `null`: the `$ref` target,
-    /// or the composition beside it. Only then does an untyped object branch of that union take
-    /// `null` from the meet (#567); where every conjunct is untyped, nothing admits it, and every
-    /// spelling keeps the non-null struct an untyped object lowers to.
-    unmerged_union_meets_null: bool,
+    ///
+    /// Beside the union's provenance, whether a conjunct it is met with admits `null`: the `$ref`
+    /// target, or the composition beside it. Only then does an untyped object branch of that union
+    /// take `null` from the meet (#567); where every conjunct is untyped, nothing admits it, and
+    /// every spelling keeps the non-null struct an untyped object lowers to. Set only through
+    /// [`Self::with_unmerged_union`], which restores the enclosing value.
+    unmerged_union: Option<(Provenance, bool)>,
     /// The `W001`s inline `oneOf`s raise for their `serde_json::Value` variants while an `allOf`
     /// gathers its members, held back where `Some` ([`HeldUntypedWarning`]). A union member the
     /// `allOf`'s scalar meet meets lowers on its own first, where a branch that states nothing

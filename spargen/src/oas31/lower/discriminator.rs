@@ -12,6 +12,7 @@ use crate::oas31::discriminator::{
 use crate::oas31::{Resolver, Schema, SchemaOr};
 
 use super::shape::schema_has_union;
+use super::union::LoweredVariant;
 use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -138,12 +139,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// starts with no `untagged` priority: the caller refuses a component variant left with no
     /// tag ([`Self::reject_unselectable_discriminated_variant`]) and decides how any other is
     /// reached.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn discriminated_strategy(
         &self,
-        variants: &[UnionVariant],
-        ref_names: &[Option<String>],
-        variant_members: &[usize],
+        lowered: &[LoweredVariant],
         tag_field: &str,
         discriminator: &DiscriminatorMembers,
         default_variant: Option<usize>,
@@ -151,7 +149,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ) -> Option<UnionStrategy> {
         let mut tags = Vec::new();
         let mut categories = Vec::new();
-        for ((variant, ref_name), member) in variants.iter().zip(ref_names).zip(variant_members) {
+        for lowered in lowered {
+            let (variant, member) = (&lowered.variant, lowered.member());
             if !matches!(self.kind_of(variant.ty.id), Some(TypeKind::Struct(_))) {
                 let category = self.json_category(variant.ty)?;
                 if category == JsonCategory::Object || categories.contains(&Some(category)) {
@@ -168,10 +167,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let mut accepted: Vec<String> = discriminator
                 .mapping
                 .iter()
-                .filter(|(_, named)| named == member)
+                .filter(|(_, named)| *named == member)
                 .map(|(tag, _)| tag.clone())
                 .collect();
-            let component = ref_name
+            let component = lowered
+                .ref_name
                 .as_deref()
                 .filter(|name| is_schema_component_name(name));
             // A member that is no component — inline, or a deeper pointer — has no implicit value
@@ -205,6 +205,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .zip(&categories)
             .map(|(accepted, category)| category.is_none() && accepted.is_empty())
             .collect();
+        let variants: Vec<&UnionVariant> = lowered.iter().map(|lowered| &lowered.variant).collect();
         let pinned: Vec<Option<String>> = variants
             .iter()
             .zip(&untagged_objects)
@@ -230,7 +231,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 || default_variant.is_some_and(|fallback| {
                     fallback != index
                         && categories[fallback].is_none()
-                        && self.admits_tag(&variants[fallback], tag_field, value)
+                        && self.admits_tag(variants[fallback], tag_field, value)
                 });
             if !claimed {
                 tags[index].push(value.clone());
