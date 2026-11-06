@@ -63,7 +63,7 @@ mise run powerset   # cargo hack: every feature combination, not just --all-feat
 mise run corpus-smoke  # pinned real-world specs
 mise run example    # both petstore examples over a local mock server
 mise run github-api # the full GitHub client: native strict clippy + wasm32
-mise run mutants    # cargo-mutants over support-runtime, ir/media.rs, ir/responses.rs, name/, compat/, diag/, source/{lock,sha256}.rs, oas31/lower/{shape,defaults}.rs, emit/, codegen/docs.rs and surface/mod.rs (weekly in CI)
+mise run mutants    # cargo-mutants over support-runtime, ir/{mod,media,responses,invariant}.rs, name/, compat/, diag/, runtime_contract/, cache.rs, source/{lock,sha256}.rs, oas31/media.rs, oas31/lower/{shape,defaults}.rs, emit/, codegen/{docs,dispatch,idents,ty}.rs and surface/mod.rs (weekly in CI)
 mise run deny       # supply-chain audit
 mise run deny-published  # advisory audit of the Cargo.lock the latest release ships
 mise run release-preview  # release-plz update in a scratch clone: the next release's CHANGELOG
