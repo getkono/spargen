@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/getkono/spargen/compare/spargen-macro-v0.6.0...spargen-macro-v0.7.0) - 2026-11-07
+
+### Added
+
+- *(codegen)* open a discriminated union to tags it does not list under open_unions ([#1246](https://github.com/getkono/spargen/pull/1246))
+
+### Other
+
+- bump the install lines to the released 0.6 minor ([#1240](https://github.com/getkono/spargen/pull/1240))
+
 ## [0.6.0](https://github.com/getkono/spargen/compare/spargen-macro-v0.5.0...spargen-macro-v0.6.0) - 2026-11-06
 
 ### Added
