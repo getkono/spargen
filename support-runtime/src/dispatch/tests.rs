@@ -1231,6 +1231,13 @@ fn append_query_joins_the_fragments_in_one_allocation() {
         store_info.count_total + 1,
         "append: {append_info:?}, store: {store_info:?}"
     );
+    // That one buffer is exactly the joined query's length: no byte reserved beyond it.
+    let joined = "limit=5&tags=a&tags=b&sort=name".len() as u64;
+    assert_eq!(
+        append_info.bytes_total,
+        store_info.bytes_total + joined,
+        "append: {append_info:?}, store: {store_info:?}"
+    );
 }
 
 #[test]

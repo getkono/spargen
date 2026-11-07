@@ -1055,6 +1055,14 @@ fn join_scalars_writes_unescaped_items_into_one_allocation() {
     });
     assert_eq!(joined.as_deref(), Some("blue,7,true,-1.5,,brown"));
     assert_eq!(info.count_total, 1, "{info:?}");
+    // The buffer is sized, and allocated once, at each item's longest unescaped rendering (a
+    // string's length, `false`'s five bytes for a bool, 24 for a number, none for `null`) plus
+    // one separator.
+    let sized = [4, 24, 5, 24, 0, 5]
+        .map(|hint: u64| hint + 1)
+        .iter()
+        .sum::<u64>();
+    assert_eq!(info.bytes_total, sized, "{info:?}");
 }
 
 #[test]
@@ -1068,6 +1076,10 @@ fn object_flat_writes_unescaped_members_into_one_allocation() {
     });
     assert_eq!(flat.as_deref(), Some("B%20150%20G%20200%20R%20100"));
     assert_eq!(info.count_total, 1, "{info:?}");
+    // Each member reserves its key, its value's longest unescaped rendering (24 for a number) and
+    // two separators.
+    let sized = 3 * (1 + 24 + 2 * "%20".len() as u64);
+    assert_eq!(info.bytes_total, sized, "{info:?}");
 }
 
 /// Escaping lengthens the rendering past the buffer's starting capacity, so the buffer grows;
