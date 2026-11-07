@@ -43,6 +43,9 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
     if let Some(open) = switch(args.open_narrowing, args.no_open_narrowing) {
         spec = spec.open_narrowing(open);
     }
+    if let Some(open) = switch(args.open_unions, args.no_open_unions) {
+        spec = spec.open_unions(open);
+    }
     for path in &args.omit_path {
         spec = spec.omit_rule(OmitRule::path(path.clone()));
     }
@@ -175,10 +178,13 @@ mod tests {
     /// when neither of its flags is given.
     #[test]
     fn each_switch_pair_overrides_the_config_file_either_way() {
-        let (_on, on) =
-            with_config("carve = true\nuuid = true\ntime = true\nopen_narrowing = true\n");
+        let (_on, on) = with_config(
+            "carve = true\nuuid = true\ntime = true\nopen_narrowing = true\nopen_unions = true\n",
+        );
         let (_off, off) =
-            with_config("carve = false\nuuid = false\ntime = false\nopen_narrowing = false\n");
+            with_config(
+            "carve = false\nuuid = false\ntime = false\nopen_narrowing = false\nopen_unions = false\n",
+        );
         let file_on = Spec::new(on.join("openapi.yaml"))
             .config_file(on.join("spargen.toml"))
             .unwrap();
@@ -195,7 +201,8 @@ mod tests {
                     "--no-carve",
                     "--no-uuid",
                     "--no-time",
-                    "--no-open-narrowing"
+                    "--no-open-narrowing",
+                    "--no-open-unions"
                 ]
             ),
             file_on
@@ -204,45 +211,61 @@ mod tests {
                 .uuid(false)
                 .time(false)
                 .open_narrowing(false)
+                .open_unions(false)
         );
         assert_eq!(
-            resolved(&off, &["--carve", "--uuid", "--time", "--open-narrowing"]),
+            resolved(
+                &off,
+                &[
+                    "--carve",
+                    "--uuid",
+                    "--time",
+                    "--open-narrowing",
+                    "--open-unions"
+                ]
+            ),
             file_off
                 .clone()
                 .carve(true)
                 .uuid(true)
                 .time(true)
                 .open_narrowing(true)
+                .open_unions(true)
         );
         // One flag of a pair moves only its own setting.
         assert_eq!(resolved(&off, &["--uuid"]), file_off.uuid(true));
     }
 
-    /// Each of the eight switch flags, alone, moves its own setting off the file's value and leaves
-    /// the other three where the file put them.
+    /// Each of the ten switch flags, alone, moves its own setting off the file's value and leaves
+    /// the other four where the file put them.
     #[test]
     fn each_switch_flag_moves_only_its_own_setting() {
-        let (_on, on) =
-            with_config("carve = true\nuuid = true\ntime = true\nopen_narrowing = true\n");
+        let (_on, on) = with_config(
+            "carve = true\nuuid = true\ntime = true\nopen_narrowing = true\nopen_unions = true\n",
+        );
         let (_off, off) =
-            with_config("carve = false\nuuid = false\ntime = false\nopen_narrowing = false\n");
+            with_config(
+            "carve = false\nuuid = false\ntime = false\nopen_narrowing = false\nopen_unions = false\n",
+        );
         let file = |dir: &Utf8PathBuf| {
             Spec::new(dir.join("openapi.yaml"))
                 .config_file(dir.join("spargen.toml"))
                 .unwrap()
         };
         type Moved = fn(Spec) -> Spec;
-        let rows: [(&str, &Utf8PathBuf, Moved); 8] = [
+        let rows: [(&str, &Utf8PathBuf, Moved); 10] = [
             ("--no-carve", &on, |spec| spec.carve(false)),
             ("--no-uuid", &on, |spec| spec.uuid(false)),
             ("--no-time", &on, |spec| spec.time(false)),
             ("--no-open-narrowing", &on, |spec| {
                 spec.open_narrowing(false)
             }),
+            ("--no-open-unions", &on, |spec| spec.open_unions(false)),
             ("--carve", &off, |spec| spec.carve(true)),
             ("--uuid", &off, |spec| spec.uuid(true)),
             ("--time", &off, |spec| spec.time(true)),
             ("--open-narrowing", &off, |spec| spec.open_narrowing(true)),
+            ("--open-unions", &off, |spec| spec.open_unions(true)),
         ];
         for (flag, dir, moved) in rows {
             let resolved = resolved(dir, &[flag]);
@@ -278,6 +301,8 @@ mod tests {
             "--no-time",
             "--open-narrowing",
             "--no-open-narrowing",
+            "--open-unions",
+            "--no-open-unions",
         ] {
             assert_eq!(ignored(&[flag]), [flag]);
         }
@@ -313,6 +338,7 @@ mod tests {
             ("--uuid", "--no-uuid"),
             ("--time", "--no-time"),
             ("--open-narrowing", "--no-open-narrowing"),
+            ("--open-unions", "--no-open-unions"),
         ] {
             let error = Cli::try_parse_from(["spargen", "check", "openapi.yaml", on, off])
                 .expect_err(&format!("`{on} {off}` must not parse"));

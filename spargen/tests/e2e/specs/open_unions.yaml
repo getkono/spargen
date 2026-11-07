@@ -1,0 +1,157 @@
+openapi: 3.1.0
+info: { title: Events, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      operationId: getEvent
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerEvent" }
+  /notices:
+    get:
+      operationId: getNotice
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notice" }
+  /memos:
+    get:
+      operationId: getMemo
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Memo" }
+  /envelopes:
+    get:
+      operationId: getEnvelope
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+  /holders:
+    get:
+      operationId: getHolder
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Holder" }
+  /shapes:
+    post:
+      operationId: postShape
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Shape" }
+      responses:
+        "204": { description: ok }
+components:
+  schemas:
+    # The shape from #1233: a discriminated union whose description promises new kinds.
+    ServerEvent:
+      description: New kinds may be added within v1; a client ignores kinds it does not know.
+      oneOf:
+        - $ref: "#/components/schemas/Tick"
+        - $ref: "#/components/schemas/Stop"
+      discriminator:
+        propertyName: kind
+        mapping:
+          tick: "#/components/schemas/Tick"
+          stop: "#/components/schemas/Stop"
+    Tick:
+      type: object
+      required: [kind, n]
+      properties:
+        kind: { type: string }
+        n: { type: integer }
+    Stop:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+    # An inline member no tag selects is tried before an unlisted tag reaches `Unknown`.
+    Notice:
+      oneOf:
+        - $ref: "#/components/schemas/Tick"
+        - type: object
+          required: [kind, note]
+          properties:
+            kind: { type: string }
+            note: { type: string }
+      discriminator:
+        propertyName: kind
+        mapping:
+          tick: "#/components/schemas/Tick"
+    # Two untagged members a payload can match at once: `oneOf` refuses that payload rather than
+    # taking it as an unknown kind.
+    Memo:
+      oneOf:
+        - $ref: "#/components/schemas/Tick"
+        - type: object
+          required: [kind, note]
+          properties:
+            kind: { type: string }
+            note: { type: string }
+        - type: object
+          required: [kind, body]
+          properties:
+            kind: { type: string }
+            body: { type: string }
+      discriminator:
+        propertyName: kind
+        mapping:
+          tick: "#/components/schemas/Tick"
+    # An open union nested in a union with no discriminator, beside a member that takes some of
+    # the payloads its `Unknown` would: that member wins, as it does with the nested union closed.
+    Envelope:
+      oneOf:
+        - $ref: "#/components/schemas/ServerEvent"
+        - $ref: "#/components/schemas/Aside"
+    Aside:
+      type: object
+      required: [kind, aside]
+      properties:
+        kind: { type: string }
+        aside: { type: integer }
+    # The open union one property down is not held back: its first member accepts every
+    # string-tagged `event`, so a payload the second member takes matches both.
+    Holder:
+      oneOf:
+        - type: object
+          required: [event]
+          properties:
+            event: { $ref: "#/components/schemas/ServerEvent" }
+        - type: object
+          required: [event]
+          properties:
+            event: { $ref: "#/components/schemas/Aside" }
+    # A member named `Unknown` keeps that name; the open variant takes the next one. Used in a
+    # request body, which an open union applies to as well.
+    Shape:
+      oneOf:
+        - $ref: "#/components/schemas/Circle"
+        - $ref: "#/components/schemas/Unknown"
+      discriminator:
+        propertyName: shape
+    Circle:
+      type: object
+      required: [shape, r]
+      properties:
+        shape: { type: string }
+        r: { type: number }
+    Unknown:
+      type: object
+      required: [shape]
+      properties:
+        shape: { type: string }

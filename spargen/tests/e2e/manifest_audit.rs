@@ -19,7 +19,7 @@ version = "0.0.0"
 bytes = "1.12.1"
 http = "1.4.2"
 http-body = "1.0.1"
-reqwest = { version = "0.12.28", default-features = false }
+reqwest = { version = "0.13.5", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -151,7 +151,7 @@ members = ["client"]
 bytes = "1.12.1"
 http = "1.4.2"
 http-body = "1.0.1"
-reqwest = { version = "0.12.28", default-features = false, features = ["stream"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["stream"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -230,7 +230,7 @@ components:
     let generated = preview.contents.expect("generated module");
     assert!(generated.contains("mod stream {"), "{generated}");
     assert!(
-        generated.contains("pub type Eventid = uuid::Uuid;"),
+        generated.contains("pub type EventId = uuid::Uuid;"),
         "{generated}"
     );
     // The root is part of the input set — an edit there changes what the audit sees.
@@ -1024,7 +1024,7 @@ uuid = ["dep:uuid"]
 bytes = "1.12.1"
 http = "1.4.2"
 http-body = "1.0.1"
-reqwest = { version = "0.12.28", default-features = false }
+reqwest = { version = "0.13.5", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -1136,7 +1136,7 @@ edition = "2021"
 bytes = "1.12.1"
 http = "1.4.2"
 http-body = "1.0.1"
-reqwest = {{ version = "0.12.28", default-features = false }}
+reqwest = {{ version = "0.13.5", default-features = false }}
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}
 serde_json = "1.0.151"

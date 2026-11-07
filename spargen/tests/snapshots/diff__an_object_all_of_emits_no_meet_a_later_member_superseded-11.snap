@@ -2,5 +2,5 @@
 source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
-minor|variant-added|ResponseBodyMember0innerkind|variant added: `Other(String)`, holding any unlisted value
+minor|variant-added|ResponseBodyMember0InnerKind|variant added: `Other(String)`, holding any unlisted value
 bump=minor

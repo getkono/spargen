@@ -1432,11 +1432,11 @@ paths:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        code.contains("pub struct RequestBodytyped(pub bytes::Bytes);"),
+        code.contains("pub struct RequestBodyTyped(pub bytes::Bytes);"),
         "{code}"
     );
     assert!(
-        code.contains("pub typed: Option<RequestBodytyped>,"),
+        code.contains("pub typed: Option<RequestBodyTyped>,"),
         "{code}"
     );
     assert!(code.contains("pub united: Option<"), "{code}");

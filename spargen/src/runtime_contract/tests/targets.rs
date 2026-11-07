@@ -372,7 +372,8 @@ fn a_below_floor_tokio_in_one_of_two_counting_tables_names_that_table() {
             format!(
                 "`tokio` version requirement `1.53.0` is outside the supported range >={floor}, \
                  <{ceiling}; use `{floor}` or a higher compatible caret requirement (in \
-                 `[target.'cfg(unix)'.dependencies]`)",
+                 `[target.'cfg(unix)'.dependencies]`); the requirement was checked, not a \
+                 lockfile, because {PUBLISHABLE}",
                 floor = TOKIO.floor,
                 ceiling = TOKIO.ceiling(),
             )

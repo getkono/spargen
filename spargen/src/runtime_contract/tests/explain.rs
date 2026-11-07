@@ -86,6 +86,10 @@ fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
         Unasserted::Rationale,
     );
     unasserted(
+        "because a published package's users resolve its requirements and not this lockfile",
+        Unasserted::Rationale,
+    );
+    unasserted(
         "Cargo resolves the declared range; Rust compilation then verifies the selected crates \
          expose the APIs and traits used by the generated client",
         Unasserted::Toolchain,
@@ -317,6 +321,76 @@ fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
     promises(
         "Inheriting a required crate therefore satisfies the audit",
         from_the_root,
+    );
+
+    // Which version is checked (#1235). An unpublished package's lockfile decides its versions:
+    // the standalone fixtures keep it beside the package's own manifest, the inherited one at
+    // the workspace root, and between them they pass a broad requirement the lockfile resolves
+    // above the floor and refuse one it resolves outside the range, holding the version the
+    // requirement selects when two are locked.
+    let locked: &[&str] = &[
+        "an_unpublished_package_is_held_to_the_version_its_lockfile_resolves",
+        "a_locked_version_outside_the_supported_range_names_the_lockfile_and_the_floor",
+        "the_locked_version_checked_is_the_one_the_requirement_selects",
+        "an_inherited_requirement_is_held_to_the_version_the_workspace_lockfile_resolves",
+    ];
+    promises(
+        "When the consuming package sets `publish = false` and a `Cargo.lock` sits at its \
+         workspace root (beside its own manifest when no workspace root is found), the version \
+         that lockfile resolves for each crate is held to the tested floor and the next breaking \
+         line instead of the requirement",
+        locked,
+    );
+    promises(
+        "a broad requirement such as `serde = \"1\"` passes when it resolves at or above the \
+         floor",
+        &[
+            "an_unpublished_package_is_held_to_the_version_its_lockfile_resolves",
+            "an_inherited_requirement_is_held_to_the_version_the_workspace_lockfile_resolves",
+        ],
+    );
+    promises(
+        "otherwise the requirement itself is checked",
+        &[
+            "a_publishable_package_has_its_requirement_checked_beside_a_lockfile",
+            "an_inherited_version_out_of_range_names_its_workspace_dependencies_entry",
+        ],
+    );
+    promises(
+        "as it is when that lockfile is missing, cannot be read, or locks no version of the crate \
+         the requirement matches for the package",
+        &["an_unpublished_package_without_a_usable_lock_has_its_requirement_checked"],
+    );
+    promises(
+        "The requirement is also checked for a package that lies under Cargo's `git/checkouts` \
+         or `registry/src` source cache",
+        &["an_unpublished_package_in_cargos_source_cache_has_its_requirement_checked"],
+    );
+    promises(
+        "or beside the `.cargo-checksum.json` of a `cargo vendor` or other directory source",
+        &["an_unpublished_package_in_a_directory_source_has_its_requirement_checked"],
+    );
+    promises(
+        "which Cargo builds as a dependency of another workspace with that workspace's lockfile",
+        &[
+            "an_unpublished_package_in_cargos_source_cache_has_its_requirement_checked",
+            "an_unpublished_package_in_a_directory_source_has_its_requirement_checked",
+        ],
+    );
+    // Each fixture below pins whole messages, the closing clause that says which version was
+    // checked and why included.
+    promises(
+        "Each version diagnostic says which of the two it checked and why",
+        &[
+            "a_locked_version_outside_the_supported_range_names_the_lockfile_and_the_floor",
+            "a_publishable_package_has_its_requirement_checked_beside_a_lockfile",
+            "an_unpublished_package_without_a_usable_lock_has_its_requirement_checked",
+        ],
+    );
+    promises(
+        "names the `[workspace.dependencies]` entry and the workspace manifest an inherited \
+         requirement is declared in",
+        &["an_inherited_version_out_of_range_names_its_workspace_dependencies_entry"],
     );
 
     // Coverage: the relation above made total. Every check so far is a substring test, so on

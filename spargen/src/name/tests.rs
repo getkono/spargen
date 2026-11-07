@@ -499,6 +499,38 @@ fn a_declared_root_document_schema_takes_a_type_name_from_a_synthesized_one() {
     assert_ne!(names.types[&synthesized].as_str(), "Text");
 }
 
+#[test]
+fn a_component_keeps_its_type_name_from_an_inline_type_spelling_it() {
+    // `Pet`'s `id` property hints `PetId`, which a component declares too. The inline pointer
+    // sorts before the component's (`/` before `I`), so only the declared-schema rank keeps the
+    // bare name with the component, in either insertion order.
+    for component_first in [false, true] {
+        let mut api = api(Vec::new(), false);
+        let def = |pointer: JsonPointer| TypeDef {
+            name_hint: "PetId".to_owned(),
+            kind: TypeKind::Primitive(Prim::String),
+            docs: Default::default(),
+            provenance: Provenance::new(pointer, None),
+            document: String::new(),
+        };
+        let schemas = JsonPointer::root().push("components").push("schemas");
+        let component = def(schemas.push("PetId"));
+        let inline = def(schemas.push("Pet").push("properties").push("id"));
+        let (component, inline) = if component_first {
+            let component = api.types.insert(component);
+            (component, api.types.insert(inline))
+        } else {
+            let inline = api.types.insert(inline);
+            (api.types.insert(component), inline)
+        };
+
+        let names = allocate(&api);
+
+        assert_eq!(names.types[&component].as_str(), "PetId");
+        assert_ne!(names.types[&inline].as_str(), "PetId");
+    }
+}
+
 /// Does `text` lex as exactly one Rust identifier token, spelled as itself? `Ident`'s
 /// `ToTokens` hands the text to `proc_macro2::Ident::new`, which panics on anything else.
 fn is_legal(text: &str) -> bool {
@@ -541,7 +573,7 @@ fn hint() -> impl proptest::strategy::Strategy<Value = String> {
             "", "type", "self", "Self", "super", "crate", "String", "Box", "Option", "Vec",
             "Default", "default", "Into", "new", "core", "inner", "with_credential", "params",
             "body", "path", "query", "url", "request", "cookies", "additional", "other",
-            "Other", "1a", "-", "requestOperation", "getV2", "get_v_2",
+            "Other", "unknown", "Unknown", "1a", "-", "requestOperation", "getV2", "get_v_2",
         ])
         .prop_map(str::to_owned),
     ]
@@ -562,6 +594,8 @@ enum Shape {
     },
     Union {
         hints: std::collections::BTreeSet<String>,
+        /// A discriminated union open to unlisted tags, which allocates one more variant.
+        open: bool,
     },
 }
 
@@ -599,7 +633,7 @@ fn definition() -> impl proptest::strategy::Strategy<Value = Definition> {
     let shape = prop_oneof![
         (hints(8), any::<bool>()).prop_map(|(fields, overflow)| Shape::Struct { fields, overflow }),
         (hints(8), any::<bool>()).prop_map(|(values, open)| Shape::Enum { values, open }),
-        hints(6).prop_map(|hints| Shape::Union { hints }),
+        (hints(6), any::<bool>()).prop_map(|(hints, open)| Shape::Union { hints, open }),
     ];
     (hint(), proptest::bool::weighted(0.2), shape).prop_map(|(hint, anonymous, shape)| Definition {
         hint,
@@ -696,17 +730,35 @@ fn synthetic_api(
                     Openness::Closed
                 },
             }),
-            Shape::Union { hints } => TypeKind::Union(Union {
+            // An open union is discriminated, each variant selected by its hint as its tag.
+            Shape::Union { hints, open } => TypeKind::Union(Union {
                 variants: hints
                     .iter()
                     .map(|hint| UnionVariant {
                         name_hint: hint.clone(),
                         ty: text,
-                        dispatch: VariantDispatch::Trial { priority: 0 },
+                        dispatch: if *open {
+                            VariantDispatch::Discriminated {
+                                tags: vec![hint.clone()],
+                                category: None,
+                                untagged: None,
+                            }
+                        } else {
+                            VariantDispatch::Trial { priority: 0 }
+                        },
                     })
                     .collect(),
-                strategy: UnionStrategy::Trial {
-                    mode: UnionMode::OneOf,
+                strategy: if *open {
+                    UnionStrategy::Discriminated {
+                        tag_field: "kind".to_owned(),
+                        default_variant: None,
+                        mode: UnionMode::OneOf,
+                        open: true,
+                    }
+                } else {
+                    UnionStrategy::Trial {
+                        mode: UnionMode::OneOf,
+                    }
                 },
             }),
         };
@@ -924,10 +976,16 @@ proptest::proptest! {
                     assert_scope(&format!("variants of {}", def.name_hint), variants, &[])?;
                 }
                 TypeKind::Union(union) => {
-                    let variants = union
+                    let variants: Vec<&Ident> = union
                         .variants
                         .iter()
-                        .map(|variant| &names.variants[&(id, variant.name_hint.clone())]);
+                        .map(|variant| &names.variants[&(id, variant.name_hint.clone())])
+                        .chain(names.open_variants.get(&id))
+                        .collect();
+                    prop_assert_eq!(
+                        variants.len(),
+                        union.variants.len() + usize::from(union.is_open())
+                    );
                     assert_scope(&format!("variants of {}", def.name_hint), variants, &[])?;
                 }
                 // `synthetic_api` builds no reservation, and `allocate` refuses one.

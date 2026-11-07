@@ -79,6 +79,13 @@ pub(crate) struct SpecArgs {
     /// `spargen.toml`.
     #[arg(long)]
     pub(crate) no_open_narrowing: bool,
+    /// Give every discriminated union without a `defaultMapping` an `Unknown { tag, value }`
+    /// variant, so a discriminator value the description does not list still decodes.
+    #[arg(long, conflicts_with = "no_open_unions")]
+    pub(crate) open_unions: bool,
+    /// Keep discriminated unions closed, overriding `open_unions = true` in `spargen.toml`.
+    #[arg(long)]
+    pub(crate) no_open_unions: bool,
     /// Omit a path item and every operation under it (repeatable), e.g. `--omit-path /pets/{id}`.
     #[arg(long = "omit-path", value_name = "PATH")]
     pub(crate) omit_path: Vec<String>,
@@ -113,6 +120,8 @@ impl SpecArgs {
             error_body_cap,
             open_narrowing,
             no_open_narrowing,
+            open_unions,
+            no_open_unions,
             omit_path,
             omit_operation,
             omit_component,
@@ -128,6 +137,8 @@ impl SpecArgs {
             (error_body_cap.is_some(), "--error-body-cap"),
             (*open_narrowing, "--open-narrowing"),
             (*no_open_narrowing, "--no-open-narrowing"),
+            (*open_unions, "--open-unions"),
+            (*no_open_unions, "--no-open-unions"),
             (!omit_path.is_empty(), "--omit-path"),
             (!omit_operation.is_empty(), "--omit-operation"),
             (!omit_component.is_empty(), "--omit-component"),

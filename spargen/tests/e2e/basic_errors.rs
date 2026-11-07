@@ -378,12 +378,19 @@ fn the_problem_reader_is_generic_over_every_error_shape() {
         detail: "dup".to_owned(),
     }));
     assert_eq!(detail(&api(reqwest::StatusCode::CONFLICT, shared)), Some("dup".to_owned()));
-    // The heterogeneous enum: a body with no `detail` member answers with the members it has.
+    // The heterogeneous enum: a body with no standard member answers with none, and its own
+    // members are extensions, read the same way as any other operation's.
     let multi = basic_client::GetMultiError::Status404(Box::new(
         basic_client::types::NotFoundError { reason: "gone".to_owned() },
     ));
     let problem = api(reqwest::StatusCode::NOT_FOUND, multi).problem().expect("an object body");
-    assert_eq!(problem, basic_client::ProblemDetails::default());
+    assert_eq!(
+        problem,
+        basic_client::ProblemDetails {
+            extensions: serde_json::Map::from_iter([("reason".to_owned(), "gone".into())]),
+            ..basic_client::ProblemDetails::default()
+        }
+    );
     // A documented bodyless status, a textual body, and a raw-bytes body have no members.
     let unit = api(reqwest::StatusCode::UNAUTHORIZED, basic_client::GetSharedError::Status401);
     assert!(unit.problem().is_none());

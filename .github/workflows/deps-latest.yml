@@ -1,0 +1,25 @@
+name: Latest dependency releases
+
+# AGENTS.md's "Releases" says why this runs weekly and before every release, and who answers a red
+# run. `release-plz.yml` calls it (`workflow_call`) as the job its release job needs.
+on:
+  schedule:
+    - cron: "37 4 * * 1"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deps-latest:
+    name: deps-latest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p spargen --test repo_gates supply_chain::runtime_requirements_admit_their_latest_release -- --exact --ignored --nocapture

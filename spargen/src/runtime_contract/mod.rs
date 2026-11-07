@@ -11,7 +11,8 @@
 //! - `requirements` — the tested dependency floors, what one lowered API requires, and the
 //!   requirement table both the audit and `spargen deps` read;
 //! - `target` — how a `[target.<key>.dependencies]` key is evaluated for the target being built;
-//! - `workspace` — locating the workspace root a `workspace = true` declaration inherits from;
+//! - `workspace` — locating the workspace root a `workspace = true` declaration inherits from, and
+//!   reading the `Cargo.lock` beside it;
 //! - `check` — the rules each dependency declaration is held to.
 
 mod check;
@@ -26,8 +27,9 @@ use crate::diag::Diagnostic;
 use crate::Code;
 
 use check::{
-    check_dependency, reads_underscore_default_features, DependencyCheck, WorkspaceOrigin,
+    check_dependency, reads_underscore_default_features, DependencyCheck, Versions, WorkspaceOrigin,
 };
+use integration::cargo_home;
 #[cfg(test)]
 pub(crate) use integration::rerun_if_changed_lines;
 pub(crate) use integration::{build_script_manifest, cargo_environment, print_rerun};
@@ -35,10 +37,15 @@ use requirements::requirement_table;
 pub(crate) use requirements::RuntimeRequirements;
 pub use requirements::{RequiredDependency, Requirements};
 use target::TargetContext;
-use workspace::{absolutized, workspace_root, WorkspaceRoot};
+use workspace::{
+    absolutized, foreign_source, lockfile_path, read_lock, unpublished, workspace_root, Lock,
+    WorkspaceRoot,
+};
 
 pub(crate) struct Audit {
     pub(crate) diagnostics: Vec<Diagnostic>,
+    /// Every file the audit read, for rebuild tracking: the consumer manifest, its workspace
+    /// manifest, and the `Cargo.lock` a `publish = false` package resolves with.
     pub(crate) manifests: Vec<Utf8PathBuf>,
 }
 
@@ -48,17 +55,20 @@ pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements
         manifest_path,
         requirements,
         &TargetContext::from_env(),
+        cargo_home().as_deref(),
         None,
     )
 }
 
-/// [`audit`] for an explicit target context, so no test has to mutate the process environment,
-/// and an explicit `ceiling` on the workspace-root walk (see [`workspace_root`]), so no test's
-/// outcome depends on the manifests that happen to sit above its temporary directory.
+/// [`audit`] for an explicit target context and Cargo home directory, so no test has to mutate
+/// the process environment, and an explicit `ceiling` on the workspace-root walk (see
+/// [`workspace_root`]), so no test's outcome depends on the manifests that happen to sit above its
+/// temporary directory.
 fn audit_in(
     manifest_path: &Utf8Path,
     requirements: &RuntimeRequirements,
     target: &TargetContext,
+    cargo_home: Option<&Utf8Path>,
     ceiling: Option<&Utf8Path>,
 ) -> Audit {
     let mut diagnostics = Vec::new();
@@ -122,6 +132,27 @@ fn audit_in(
     };
 
     let underscore_default_features = reads_underscore_default_features(&manifest, workspace);
+    // A `publish = false` package builds only with the versions its workspace's lockfile
+    // resolves, so that lockfile is read, and named to Cargo beside the manifests, whose edits it
+    // follows. A publishable one's users resolve its requirements themselves, so it is not, and
+    // neither is one in Cargo's source cache or in a directory source: that is a git, registry,
+    // or vendored dependency of another workspace, built with the other workspace's lockfile.
+    let lock = unpublished(&manifest, workspace).then(|| {
+        if let Some(source) = foreign_source(manifest_path, cargo_home) {
+            return Lock::Foreign(source);
+        }
+        let package = manifest
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str);
+        read_lock(lockfile_path(&root), package)
+    });
+    if let Some(path) = lock.as_ref().and_then(Lock::existing) {
+        manifests.push(path.to_path_buf());
+    }
+    let versions = lock
+        .as_ref()
+        .map_or(Versions::Publishable, Versions::Unpublished);
     for required in requirement_table(requirements) {
         if let Some(feature) = required.conditional {
             if !declares_feature(&manifest, feature) {
@@ -144,6 +175,7 @@ fn audit_in(
                 origin,
                 audited,
                 underscore_default_features,
+                versions,
             },
             target,
             &mut diagnostics,

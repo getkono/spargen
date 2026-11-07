@@ -85,13 +85,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// [`TypeGraph::pop_last`], also forgetting what lowering keyed by the popped id: the location
-    /// [`Self::meet_locations`] recorded for it and its [`Self::union_variant_members`] entry. The next
-    /// insert reuses that id for a type of its own, which would otherwise inherit both.
+    /// [`Self::meet_locations`] recorded for it, its [`Self::union_variant_members`] entry, and its
+    /// place in [`Self::reserved_types`]. The next insert reuses that id for a type of its own,
+    /// which would otherwise inherit all three.
     pub(super) fn pop_last_type(&mut self) -> Option<(TypeId, TypeDef)> {
         let popped = self.graph.pop_last();
         if let Some((id, _)) = &popped {
             self.meet_locations.remove(id);
             self.union_variant_members.remove(id);
+            self.reserved_types.remove(id);
         }
         popped
     }

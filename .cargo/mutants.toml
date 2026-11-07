@@ -73,11 +73,12 @@ exclude_re = [
   # The build-script environment readers: `spargen/src/cache.rs`, `cache_dir` (`OUT_DIR`), and
   # `spargen/src/runtime_contract/integration.rs`, `under_build_script` (`OUT_DIR` and
   # `CARGO_CFG_TARGET_ARCH`), `build_script_manifest` and `manifest_from_env`
-  # (`CARGO_MANIFEST_PATH` and `CARGO_MANIFEST_DIR`), and `print_rerun`, which writes its
-  # directives to standard output. A `--lib` test could observe them only by setting process-wide
-  # environment variables that every test running beside it reads, or by reading the output the
-  # test harness captures. Each is a reader over a pure function the unit tests pin
-  # (`manifest_from`, `resolve_cargo_environment`, `rerun_if_changed_lines`, and
+  # (`CARGO_MANIFEST_PATH` and `CARGO_MANIFEST_DIR`), `cargo_home` (`CARGO_HOME` and the home
+  # directory), and `print_rerun`, which writes its directives to standard output. A `--lib` test
+  # could observe them only by setting process-wide environment variables that every test running
+  # beside it reads, or by reading the output the test harness captures. Each is a reader over a
+  # pure function the unit tests pin (`manifest_from`, `resolve_cargo_environment`,
+  # `cargo_home_from`, `rerun_if_changed_lines`, and
   # `pipeline::generate_with_cache_dir`, which takes the cache directory as an argument), and
   # `spargen/tests/e2e/manifest_audit.rs` runs them from a real build script. Only the mutants the
   # suite misses are named: replacing `under_build_script` with `true` or its `&&` with `||`, or
@@ -87,5 +88,6 @@ exclude_re = [
   '^spargen/src/runtime_contract/integration\.rs:\d+:\d+: replace under_build_script -> bool with false$',
   '^spargen/src/runtime_contract/integration\.rs:\d+:\d+: replace build_script_manifest -> Option<Utf8PathBuf> with None$',
   '^spargen/src/runtime_contract/integration\.rs:\d+:\d+: replace manifest_from_env -> Option<Utf8PathBuf> with ',
+  '^spargen/src/runtime_contract/integration\.rs:\d+:\d+: replace cargo_home -> Option<Utf8PathBuf> with ',
   '^spargen/src/runtime_contract/integration\.rs:\d+:\d+: replace print_rerun with \(\)$',
 ]

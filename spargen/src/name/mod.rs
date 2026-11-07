@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use crate::ir::{AdditionalProps, Api, OperationId, TypeId, TypeKind};
 
+pub(crate) use casing::hint_segment;
 use casing::{to_pascal_case, to_snake_case};
 pub(crate) use ident::Ident;
 pub(crate) use keyword::{escape, IdentRole};
@@ -42,9 +43,11 @@ pub(crate) struct Names {
     pub(crate) struct_overflow: HashMap<TypeId, Ident>,
     /// Variant name per `(type, wire variant value)`.
     pub(crate) variants: HashMap<(TypeId, String), Ident>,
-    /// The variant holding any unlisted string, per open string enum. Allocated in the enum's
-    /// variant scope after every listed value, so a listed value keeps the name it has in the
-    /// closed enum, and one spelled `other` pushes this one to a disambiguated name instead.
+    /// The variant holding any unlisted string, per open string enum, and the one holding any
+    /// unlisted discriminator value, per open union. Allocated in the type's variant scope after
+    /// every listed variant, so a listed variant keeps the name it has in the closed type, and one
+    /// spelled `other` (`unknown` for a union) pushes this one to a disambiguated name instead. A
+    /// type id is either an enum or a union, so the two never collide.
     pub(crate) open_variants: HashMap<TypeId, Ident>,
     /// Builder type name per declared server, by index.
     pub(crate) servers: Vec<Ident>,
@@ -358,7 +361,10 @@ pub(crate) fn allocate(api: &Api) -> Names {
     // and reordering a mapping changes no schema. The contest is decided on each definition's own
     // `(document, pointer)` identity instead. A definition carrying none (the root document's own
     // pointer, which synthesized types fall back to) ranks after every definition that has one, so
-    // it can never take a name from a declared schema. The names the `types` module itself uses are
+    // it can never take a name from a declared schema. Next, a component schema
+    // (`/components/schemas/{name}`, in any document) or a whole sub-file schema ranks before an
+    // inline one, so a component keeps its bare name when an inline type's hint spells it too
+    // (`PetId` against `Pet`'s `id` property). The names the `types` module itself uses are
     // taken before any definition asks for one.
     let mut type_scope = Scope::default();
     for name in TYPES_MODULE_NAMES {
@@ -373,7 +379,12 @@ pub(crate) fn allocate(api: &Api) -> Names {
             RankedRequest {
                 hint: &def.name_hint,
                 provenance: pointer,
-                rank: (anonymous, def.document.as_str(), pointer.as_str()),
+                rank: (
+                    anonymous,
+                    !anonymous && !is_declared_schema(pointer),
+                    def.document.as_str(),
+                    pointer.as_str(),
+                ),
             }
         })
         .collect();
@@ -545,6 +556,12 @@ pub(crate) fn allocate(api: &Api) -> Names {
                         ),
                     );
                 }
+                if union.is_open() {
+                    names.open_variants.insert(
+                        id,
+                        scope.alloc("Unknown", IdentRole::Variant, &def.provenance.pointer),
+                    );
+                }
             }
             // Unreachable on a checked `Api`; see `TypeKind::Reserved`. Allocating nothing would
             // leave codegen to find a missing name far from the cause.
@@ -556,6 +573,15 @@ pub(crate) fn allocate(api: &Api) -> Names {
     }
 
     names
+}
+
+/// Whether a type's `pointer` is a declared schema's own: a component (`/components/schemas/{name}`)
+/// or a whole document (the empty pointer, which a sub-file schema carries), rather than a
+/// position inside one.
+fn is_declared_schema(pointer: &crate::diag::JsonPointer) -> bool {
+    let tokens = pointer.tokens();
+    tokens.is_empty()
+        || matches!(tokens.as_slice(), [components, schemas, _] if components == "components" && schemas == "schemas")
 }
 
 /// One ranked request per operation of `api`, asking for its entry of `hints` and ranked by its

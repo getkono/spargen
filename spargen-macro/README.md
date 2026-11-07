@@ -11,9 +11,9 @@ mod api {
 ```
 
 Keyed form, with every argument the macro accepts besides the spec path. The `spargen.toml`
-beside the spec is always discovered and applied first; the four switches override it in either
+beside the spec is always discovered and applied first; the five switches override it in either
 direction, the two caps replace its values, and `omit { ... }` adds rules to its `[[omit]]` rules.
-Each switch — `uuid`, `time`, `carve`, `open_narrowing` — takes `= true` or `= false`; written
+Each switch — `uuid`, `time`, `carve`, `open_narrowing`, `open_unions` — takes `= true` or `= false`; written
 alone it means `= true`, and `no_uuid` / `no_time` are shorthand for `uuid = false` /
 `time = false`. A switch or cap the macro is not given leaves the file's value, and one given
 twice is a compile error:
@@ -25,6 +25,7 @@ spargen_macro::generate_api!(
     time = false,
     carve = true,
     open_narrowing = true,
+    open_unions = true,
     error_body_cap = 65536,
     batch_cap = 100,
     omit {
@@ -48,7 +49,7 @@ same as the module written by
 
 ```toml
 [dependencies]
-spargen-macro = "0.5"
+spargen-macro = "0.6"
 # ...plus the audited crates this generated client uses at runtime. No spargen crate appears at
 # runtime. See spargen's runtime dependency contract for the exact floors and conditional features.
 ```

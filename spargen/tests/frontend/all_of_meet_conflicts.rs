@@ -40,7 +40,7 @@ fn a_re_emitted_union_meet_emits_no_meet_its_result_does_not_use() {
                     .find_map(|item| line.strip_prefix(item))
             })
             .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
-            .filter(|name| name.starts_with("Holderfield"))
+            .filter(|name| name.starts_with("HolderField"))
             .map(str::to_owned)
             .collect()
     }
@@ -49,34 +49,34 @@ fn a_re_emitted_union_meet_emits_no_meet_its_result_does_not_use() {
         (
             "sole non-null member",
             "{ oneOf: [{ $ref: '#/components/schemas/Pet' }, { type: 'null' }], required: [name] }",
-            &["Holderfield"],
-            "HolderfieldConstrained",
+            &["HolderField"],
+            "HolderFieldConstrained",
         ),
         (
             "sole non-null member whose meet builds a nested struct",
             "{ oneOf: [{ $ref: '#/components/schemas/Box' }, { type: 'null' }], \
              properties: { sub: { type: object, required: [q] } } }",
-            &["HolderfieldConstrainedsub", "Holderfield"],
-            "HolderfieldConstrained",
+            &["HolderFieldConstrainedSub", "HolderField"],
+            "HolderFieldConstrained",
         ),
         (
             "one member left by the siblings",
             "{ oneOf: [{ $ref: '#/components/schemas/Pet' }, { type: integer }], type: object, \
              required: [name] }",
-            &["Holderfield"],
-            "HolderfieldVariant0Constrained",
+            &["HolderField"],
+            "HolderFieldVariant0Constrained",
         ),
         (
             "$ref to a union with untyped siblings",
             "{ $ref: '#/components/schemas/Target', required: [name] }",
-            &["HolderfieldReferenceIntersectionVariant0", "Holderfield"],
-            "HolderfieldReferenceIntersection",
+            &["HolderFieldReferenceIntersectionVariant0", "HolderField"],
+            "HolderFieldReferenceIntersection",
         ),
     ];
     for (case, field, expected, discarded) in cases {
         let (report, code) = generate_with_code(&spec(field));
         assert_eq!(report.outcome(), Outcome::Generated, "{case}: {report:#?}");
-        // The `$ref` case's sibling keywords' own lowering (`HolderfieldConstraint`, and its
+        // The `$ref` case's sibling keywords' own lowering (`HolderFieldConstraint`, and its
         // field alias) is no input the result names either (#924).
         assert_eq!(
             field_types(&code),
@@ -950,7 +950,7 @@ fn a_meet_emits_no_intermediate_its_result_does_not_name() {
                  - {{ type: object, properties: {{ p: {{ type: string, maxLength: 3 }} }} }}\n"
             ),
             &["PetMember1p", "PetMember0", "PetMember1"],
-            &["Pet", "PetMember0p"],
+            &["Pet", "PetMember0P"],
         ),
         (
             "an `allOf` member `$ref` with a sibling property",
@@ -970,7 +970,7 @@ fn a_meet_emits_no_intermediate_its_result_does_not_name() {
                  Holder: {{ type: object, properties: {{ field: {{ $ref: '#/components/schemas/S', \
                  maxLength: 3 }} }} }}\n    S: {{ type: string }}\n"
             ),
-            &["HolderfieldConstraint"],
+            &["HolderFieldConstraint"],
             &["Holder", "S"],
         ),
     ];

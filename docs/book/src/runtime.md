@@ -118,7 +118,17 @@ It answers from whichever class carried a body:
 A member is `Some` only with the type RFC 9457 gives it (a string, or an integer HTTP status for
 `status`); `problem_type_or_blank()` applies the RFC's `about:blank` default for an absent `type`.
 The reader asserts nothing about whether the server meant the body as problem details: an object
-body answers with whichever of those member names it carries. Extension members are not read.
+body answers with whichever of those member names it carries. Every other member is an extension
+member, kept as JSON in `extensions` (a `serde_json::Map`), so a generic reader reaches one such as
+a validation problem's `errors` the same way across every operation:
+
+```rust
+fn validation_errors<E: api::ApiErrorProblem>(error: &api::Error<E>) -> Option<serde_json::Value> {
+    error.problem()?.extensions.remove("errors")
+}
+```
+
+A standard member carried with another type than the RFC gives it is in neither place.
 
 A description that narrows the problem `type` per status (`allOf: [$ref: Problem, {properties:
 {type: {const: …}}}]`) makes an unlisted `type` a decode failure by default, so it reaches the raw

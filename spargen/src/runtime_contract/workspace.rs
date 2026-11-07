@@ -1,6 +1,8 @@
-//! Locating the workspace manifest a `workspace = true` dependency inherits its declaration from.
+//! Locating the workspace manifest a `workspace = true` dependency inherits its declaration from,
+//! and the `Cargo.lock` Cargo writes beside it.
 
 use camino::{Utf8Path, Utf8PathBuf};
+use semver::Version;
 
 /// Which manifest a `workspace = true` dependency resolves its declaration against.
 ///
@@ -126,6 +128,188 @@ pub(super) fn workspace_root(
         searched_from: absolute,
         unreadable,
     }
+}
+
+/// Whether the audited package sets `publish = false`, so no registry user ever resolves its
+/// requirements and its workspace's `Cargo.lock` decides every version it builds with.
+///
+/// Cargo spells "never publish" as `publish = false` or as an empty registry list, `publish = []`;
+/// `publish.workspace = true` takes either from `[workspace.package]`. A list naming a registry,
+/// `publish = true`, or no `publish` at all leaves the package publishable.
+pub(super) fn unpublished(manifest: &toml::Value, workspace: Option<&toml::Value>) -> bool {
+    let never = |value: &toml::Value| match value {
+        toml::Value::Boolean(publish) => !publish,
+        toml::Value::Array(registries) => registries.is_empty(),
+        _ => false,
+    };
+    match manifest
+        .get("package")
+        .and_then(|package| package.get("publish"))
+    {
+        Some(publish) if publish.get("workspace").and_then(toml::Value::as_bool) == Some(true) => {
+            workspace
+                .and_then(|root| root.get("workspace"))
+                .and_then(|root| root.get("package"))
+                .and_then(|package| package.get("publish"))
+                .is_some_and(never)
+        }
+        Some(publish) => never(publish),
+        None => false,
+    }
+}
+
+/// The `Cargo.lock` Cargo resolves the audited package with: beside the workspace root's
+/// manifest, or beside the package's own when no workspace root was found, since such a package
+/// is the root of a workspace of its own.
+pub(super) fn lockfile_path(root: &WorkspaceRoot) -> Utf8PathBuf {
+    let manifest = match root {
+        WorkspaceRoot::SelfRooted(path) | WorkspaceRoot::Separate(path) => path,
+        WorkspaceRoot::NotFound { searched_from, .. } => searched_from,
+    };
+    manifest
+        .parent()
+        .unwrap_or_else(|| Utf8Path::new(""))
+        .join("Cargo.lock")
+}
+
+/// Where the audited package is built from when Cargo builds it as a dependency of another
+/// workspace, with that workspace's `Cargo.lock`, so that a lockfile committed in the package's
+/// own sources decides nothing.
+pub(super) enum ForeignSource {
+    /// The directory of Cargo's source cache the manifest lies in: `git/checkouts` (a git
+    /// dependency) or `registry/src` (a registry dependency) under Cargo's home.
+    Cache(Utf8PathBuf),
+    /// The package's own directory, which holds the `.cargo-checksum.json` Cargo requires of every
+    /// package in a directory source: a `cargo vendor` directory or another `[source]` replacement
+    /// of kind `directory`.
+    Directory(Utf8PathBuf),
+}
+
+/// The checksum file Cargo reads beside every package of a directory source, and refuses to build
+/// the package without. `cargo vendor` writes one into each crate it vendors.
+const DIRECTORY_SOURCE_CHECKSUM: &str = ".cargo-checksum.json";
+
+/// Where the audited package is built from, when that is a source Cargo builds only as a
+/// dependency of another workspace.
+///
+/// Cargo's source cache is `git/checkouts` or `registry/src` under `cargo_home`, compared
+/// component by component against the absolutized manifest path, and is checked first. A
+/// directory source is recognised by its [`DIRECTORY_SOURCE_CHECKSUM`] beside the manifest, which
+/// Cargo requires there whichever `.cargo/config.toml` declared the source.
+pub(super) fn foreign_source(
+    manifest_path: &Utf8Path,
+    cargo_home: Option<&Utf8Path>,
+) -> Option<ForeignSource> {
+    let manifest = absolutized(manifest_path);
+    let cache = cargo_home.and_then(|cargo_home| {
+        [["git", "checkouts"], ["registry", "src"]]
+            .into_iter()
+            .map(|[first, second]| cargo_home.join(first).join(second))
+            .find(|cache| manifest.starts_with(cache))
+    });
+    if let Some(cache) = cache {
+        return Some(ForeignSource::Cache(cache));
+    }
+    let package = manifest.parent()?;
+    package
+        .join(DIRECTORY_SOURCE_CHECKSUM)
+        .is_file()
+        .then(|| ForeignSource::Directory(package.to_path_buf()))
+}
+
+/// What the workspace's `Cargo.lock` says about the audited package's direct dependencies.
+pub(super) enum Lock {
+    /// The package is built from this source, as a dependency of a workspace whose own lockfile
+    /// resolves it, so no lockfile is read.
+    Foreign(ForeignSource),
+    /// No file exists at this path.
+    Absent(Utf8PathBuf),
+    /// The file exists, and could not be read or parsed or does not lock the audited package.
+    Unusable { path: Utf8PathBuf, reason: String },
+    /// The file locks the audited package, whose direct dependencies resolve to these versions:
+    /// every kind (normal, build and dev) under every target, as the lockfile does not tell them
+    /// apart.
+    Locked {
+        path: Utf8PathBuf,
+        dependencies: Vec<(String, Version)>,
+    },
+}
+
+impl Lock {
+    /// The lockfile's path, when a file exists there to be read: the one a rebuild has to watch.
+    pub(super) fn existing(&self) -> Option<&Utf8Path> {
+        match self {
+            Lock::Absent(_) | Lock::Foreign(_) => None,
+            Lock::Unusable { path, .. } | Lock::Locked { path, .. } => Some(path),
+        }
+    }
+}
+
+/// Read the lockfile at `path` for `package`, the audited package's name.
+///
+/// The audited package is the `[[package]]` entry of that name with no `source`, which is how a
+/// lockfile records a workspace member. Each of its `dependencies` is `name`, `name version`, or
+/// `name version (source)`; the bare form is written only when one version of `name` is locked,
+/// which is then read from that crate's own entry.
+pub(super) fn read_lock(path: Utf8PathBuf, package: Option<&str>) -> Lock {
+    if !path.is_file() {
+        return Lock::Absent(path);
+    }
+    match locked_dependencies(&path, package) {
+        Ok(dependencies) => Lock::Locked { path, dependencies },
+        Err(reason) => Lock::Unusable { path, reason },
+    }
+}
+
+fn locked_dependencies(
+    path: &Utf8Path,
+    package: Option<&str>,
+) -> Result<Vec<(String, Version)>, String> {
+    let contents = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let lock = toml::from_str::<toml::Value>(&contents).map_err(|error| {
+        let mut reason = error.to_string();
+        reason.truncate(reason.trim_end().len());
+        reason
+    })?;
+    let package = package.ok_or_else(|| "the audited manifest names no package".to_owned())?;
+    let packages = lock
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let field = |entry: &'_ toml::Value, key: &str| {
+        entry
+            .get(key)
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+    };
+    let audited = packages
+        .iter()
+        .find(|entry| {
+            field(entry, "name").as_deref() == Some(package) && entry.get("source").is_none()
+        })
+        .ok_or_else(|| format!("it locks no workspace package named `{package}`"))?;
+    let mut dependencies = Vec::new();
+    for dependency in audited
+        .get("dependencies")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+    {
+        let mut words = dependency.split_whitespace();
+        let Some(name) = words.next() else { continue };
+        let version = match words.next() {
+            Some(version) => Some(version.to_owned()),
+            None => packages
+                .iter()
+                .find(|entry| field(entry, "name").as_deref() == Some(name))
+                .and_then(|entry| field(entry, "version")),
+        };
+        if let Some(version) = version.and_then(|version| Version::parse(&version).ok()) {
+            dependencies.push((name.to_owned(), version));
+        }
+    }
+    Ok(dependencies)
 }
 
 /// `path` made absolute lexically, as [`workspace_root`] describes: any `..` is kept and nothing is

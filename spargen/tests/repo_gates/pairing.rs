@@ -98,7 +98,7 @@ struct GateWorkflow {
 /// Every workflow under `.github/workflows/` (`.yml` or `.yaml`) is one of these or one of
 /// [`NON_GATE_WORKFLOWS`]; an unclassified file fails, so a new workflow cannot run a gate no
 /// pairing sees.
-const GATE_WORKFLOWS: [GateWorkflow; 4] = [
+const GATE_WORKFLOWS: [GateWorkflow; 5] = [
     GateWorkflow {
         file: "ci.yml",
         on: "push:\n  branches: [master]\npull_request:\nworkflow_dispatch:",
@@ -135,14 +135,24 @@ const GATE_WORKFLOWS: [GateWorkflow; 4] = [
         concurrency: Some("group: mutants-${{ github.ref }}\ncancel-in-progress: false"),
         permissions: Some("contents: read"),
     },
+    // Weekly, on demand, and as the job every release waits on: `release-plz.yml` calls it
+    // (`every_release_waits_on_the_latest_release_check`), so `workflow_call:` is pinned too. No
+    // `concurrency:`: a called workflow's group would be taken inside the caller's run, and a
+    // cancelled check would hold the release back for no finding.
+    GateWorkflow {
+        file: "deps-latest.yml",
+        on: "schedule:\n  - cron: \"37 4 * * 1\"\nworkflow_dispatch:\nworkflow_call:",
+        concurrency: None,
+        permissions: Some("contents: read"),
+    },
 ];
 
 /// Workflows that gate nothing, each with why. None of their jobs is paired, so a gate added to
 /// one would run unseen: keep this list to workflows that are not gates by nature.
 const NON_GATE_WORKFLOWS: [(&str, &str); 1] = [(
     "release-plz.yml",
-    "publishes releases and maintains the release PR; it gates nothing a contributor could run \
-     first",
+    "publishes releases and maintains the release PR; the one gate its release waits on is \
+     `deps-latest.yml`, which it calls rather than copies, so that gate is paired there",
 )];
 
 /// The top-level keys a gate workflow may carry. `name` is cosmetic, `env` is held to
@@ -377,6 +387,13 @@ const PAIRINGS: &[Pairing] = &[
             CACHE,
             provision("uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-mutants@27.1.0"),
         ],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
+        workflow: "deps-latest.yml",
+        job: "deps-latest",
+        tasks: &["deps-latest"],
+        ci_only: &[CHECKOUT, STABLE, CACHE],
         ..PAIR
     }),
     Pairing::LocalOnly {
@@ -906,6 +923,41 @@ fn benchmarks_are_recorded_once_for_each_spargen_release() {
             );
         }
     }
+}
+
+#[test]
+fn every_release_waits_on_the_latest_release_check() {
+    // A release published while a runtime requirement rejects its crate's newest release forces
+    // every consumer of that release onto the older line (#1247). So `release-plz.yml`'s release
+    // job needs a job that calls `deps-latest.yml`, the gate workflow its PAIRINGS row holds to
+    // `mise run deps-latest`; a copy of its steps here would be a second gate nothing pairs.
+    let release = workflow("release-plz.yml");
+    let jobs = &release["jobs"];
+    assert_eq!(
+        jobs["deps-latest"],
+        yaml_document(
+            "name: Latest dependency releases\n\
+             uses: ./.github/workflows/deps-latest.yml\n\
+             permissions:\n  contents: read",
+            "the pinned latest-release check job",
+        ),
+        "`release-plz.yml`'s `deps-latest` job must call `deps-latest.yml`, unchanged"
+    );
+    assert_eq!(
+        jobs["release-plz-release"]["needs"].as_str(),
+        Some("deps-latest"),
+        "`release-plz.yml`'s release job must need the `deps-latest` job and nothing else, so a \
+         stale requirement holds every release back"
+    );
+    assert!(
+        jobs["release-plz-release"]["if"].is_badvalue(),
+        "an `if:` on the release job could run it past a failed `deps-latest` job"
+    );
+    let called = workflow("deps-latest.yml");
+    assert!(
+        workflow_triggers(&called["on"], "deps-latest.yml").contains_key("workflow_call"),
+        "`deps-latest.yml` must accept the `workflow_call` `release-plz.yml` makes"
+    );
 }
 
 #[test]

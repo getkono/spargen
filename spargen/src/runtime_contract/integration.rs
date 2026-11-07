@@ -1,6 +1,6 @@
 //! How a run integrates with Cargo: whether this process is a build script, the consuming
-//! package's manifest it names, the [`CargoIntegration`] policy resolved against both, and the
-//! `cargo:rerun-if-changed` lines.
+//! package's manifest it names, the [`CargoIntegration`] policy resolved against both, Cargo's
+//! home directory, and the `cargo:rerun-if-changed` lines.
 
 use camino::Utf8PathBuf;
 
@@ -8,12 +8,12 @@ use crate::diag::Diagnostic;
 use crate::{Build, CargoIntegration, Code, Severity};
 
 // Mutation testing: replacing `under_build_script` with `false`, `build_script_manifest` with
-// `None`, `manifest_from_env`, or `print_rerun` survives the unit tests and is declared in
-// `.cargo/mutants.toml` rather than killed. Their only input is the process-wide environment, or
+// `None`, `manifest_from_env`, `cargo_home`, or `print_rerun` survives the unit tests and is
+// declared in `.cargo/mutants.toml` rather than killed. Their only input is the process-wide environment, or
 // their only output standard output, which a unit test could set or read only under every test
 // running beside it. The decisions they feed are the pure functions below (`manifest_from`,
-// `resolve_cargo_environment`, `rerun_if_changed_lines`), which the unit tests pin, and
-// `spargen/tests/e2e/manifest_audit.rs` runs the readers from a real build script.
+// `resolve_cargo_environment`, `cargo_home_from`, `rerun_if_changed_lines`), which the unit
+// tests pin, and `spargen/tests/e2e/manifest_audit.rs` runs the readers from a real build script.
 
 /// Whether this process is an actual Cargo build script. Only there do `cargo:` directives reach
 /// Cargo and does the environment name the consuming package.
@@ -154,6 +154,31 @@ pub(super) fn manifest_from(
             .map(Utf8PathBuf::from)
             .map(|directory| directory.join("Cargo.toml"))
     })
+}
+
+/// Cargo's home directory, whose `git/checkouts` and `registry/src` hold the sources of the git and
+/// registry packages a build depends on: `CARGO_HOME` when it is set and not empty, otherwise
+/// `.cargo` in the user's home directory, as Cargo reads it. Decided by [`cargo_home_from`].
+// Mutation testing: an environment reader, declared in `.cargo/mutants.toml` with the others
+// named at the top of this file.
+pub(super) fn cargo_home() -> Option<Utf8PathBuf> {
+    cargo_home_from(std::env::var_os("CARGO_HOME"), std::env::home_dir())
+}
+
+/// [`cargo_home`] over the value of `CARGO_HOME` (`variable`) and the user's home directory
+/// (`home`). A relative `CARGO_HOME` is taken against the working directory, as Cargo takes it,
+/// and a directory whose path is not UTF-8 is `None`, since no UTF-8 manifest path lies under it.
+pub(super) fn cargo_home_from(
+    variable: Option<std::ffi::OsString>,
+    home: Option<std::path::PathBuf>,
+) -> Option<Utf8PathBuf> {
+    let directory = match variable.filter(|value| !value.is_empty()) {
+        Some(value) => std::path::PathBuf::from(value),
+        None => home?.join(".cargo"),
+    };
+    Utf8PathBuf::from_path_buf(directory)
+        .ok()
+        .map(|directory| super::workspace::absolutized(&directory))
 }
 
 /// Print [`rerun_if_changed_lines`] for `paths`: the one writer of `cargo:rerun-if-changed`

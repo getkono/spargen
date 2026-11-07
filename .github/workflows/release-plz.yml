@@ -4,9 +4,20 @@ on:
     branches:
       - master
 jobs:
+  # Every release waits on `deps-latest.yml`, called rather than copied so it runs exactly what
+  # `mise run deps-latest` runs: while a runtime requirement rejects its crate's newest release,
+  # the release job does not run and nothing publishes. Pinned by
+  # `every_release_waits_on_the_latest_release_check`.
+  deps-latest:
+    name: Latest dependency releases
+    uses: ./.github/workflows/deps-latest.yml
+    permissions:
+      contents: read
+
   # Release unpublished packages.
   release-plz-release:
     name: Release-plz release
+    needs: deps-latest
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -38,10 +38,10 @@ fn an_inline_member_pinning_its_tag_property_is_selected_by_that_value() {
     assert!(report.diagnostics().is_empty(), "{report:#?}");
     let arms = discriminated_arms(&code, "Config");
     let expected = [
-        ("ConfigVariant0", "webhook"),
-        ("ConfigVariant1", "apprise"),
-        ("ConfigVariant2", "email"),
-        ("ConfigVariant3", "ntfy"),
+        ("Webhook", "webhook"),
+        ("Apprise", "apprise"),
+        ("Email", "email"),
+        ("Ntfy", "ntfy"),
     ];
     assert_eq!(
         arms.decode,
@@ -59,6 +59,172 @@ fn an_inline_member_pinning_its_tag_property_is_selected_by_that_value() {
             .collect::<Vec<_>>(),
         "{code}"
     );
+}
+
+/// Issue #1232: an inline member its pinned tag selects is named from that tag, variant and
+/// struct alike (`Config::Webhook(ConfigWebhook)`), with its nested inline types under the same
+/// prefix (`ConfigWebhookUrl`), and its struct leaves out the tag property: the property admits
+/// one value, which the union writes back. A struct that denies unknown properties keeps the
+/// field, since the payload it is handed carries the tag. A member whose pinned tag starts with no
+/// ASCII letter, and one whose pin another member claims, keep the numbered name and the field.
+#[test]
+fn an_inline_member_selected_by_its_pinned_tag_is_named_from_it_and_leaves_the_tag_out() {
+    let spec = |members: &str| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths: {{}}\n\
+             components:\n  \
+             schemas:\n    \
+             Config:\n      \
+             oneOf:\n{members}      \
+             discriminator:\n        \
+             propertyName: type\n    \
+             Mail: {{ type: object, required: [type, to], properties: {{ type: {{ type: string }}, to: {{ type: string }} }} }}\n"
+        )
+    };
+    let webhook = "        - { type: object, required: [type, url], properties: { type: { const: webhook }, url: { type: string }, retry: { oneOf: [{ type: string }, { type: integer }] } } }\n";
+    let members = format!(
+        "{webhook}        \
+         - {{ type: object, required: [type, port], additionalProperties: false, properties: {{ type: {{ const: apprise }}, port: {{ type: integer }} }} }}\n        \
+         - {{ type: object, required: [type, to], properties: {{ type: {{ const: 2fa }}, to: {{ type: string }} }} }}\n        \
+         - {{ type: object, required: [type, to], properties: {{ type: {{ const: Mail }}, to: {{ type: string }} }} }}\n        \
+         - {{ $ref: '#/components/schemas/Mail' }}\n"
+    );
+    let (report, code) = generate_with_code(&spec(&members));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let arms = discriminated_arms(&code, "Config");
+    assert_eq!(
+        arms.encode,
+        [
+            ("Webhook", Some("webhook")),
+            ("Apprise", Some("apprise")),
+            ("ConfigVariant2", Some("2fa")),
+            ("ConfigVariant3", None),
+            ("Mail", Some("Mail")),
+        ]
+        .iter()
+        .map(|(variant, tag)| ((*variant).to_owned(), tag.map(str::to_owned)))
+        .collect::<Vec<_>>(),
+        "{code}"
+    );
+    let types = types_module(&code);
+    assert!(
+        types.contains("Webhook(Box<ConfigWebhook>),")
+            && types.contains("Apprise(Box<ConfigApprise>),"),
+        "{types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "ConfigWebhook"),
+        ["url", "retry"],
+        "{types}"
+    );
+    // A nested inline union keeps the tag's prefix, for its type and its own variants.
+    assert!(types.contains("pub enum ConfigWebhookRetry {"), "{types}");
+    assert_eq!(
+        alias_target(&types, "ConfigWebhookUrl").as_deref(),
+        Some("String"),
+        "{types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "ConfigApprise"),
+        ["r#type", "port"],
+        "a struct denying unknown properties keeps its tag: {types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "ConfigVariant2"),
+        ["r#type", "to"],
+        "a numbered variant keeps its tag: {types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "ConfigVariant3"),
+        ["r#type", "to"],
+        "an untagged variant keeps its tag: {types}"
+    );
+    assert!(!types.contains("ConfigVariant0"), "{types}");
+}
+
+/// Issue #1245: the rename #1232 makes touches only the types the inline member itself lowers. A
+/// declared component the member reaches keeps its name, and so do the inline types nested in it,
+/// even where that name starts with the member's numbered hint (`SrcVariant0Uri`) and the
+/// component is first lowered while the member is.
+#[test]
+fn a_component_named_like_a_numbered_variant_keeps_its_name() {
+    let spec = "openapi: 3.1.0\n\
+                info: { title: T, version: 1.0.0 }\n\
+                paths: {}\n\
+                components:\n  \
+                schemas:\n    \
+                Src:\n      \
+                oneOf:\n        \
+                - { type: object, required: [type, uri], properties: { type: { const: magnet }, uri: { $ref: '#/components/schemas/SrcVariant0Uri' }, note: { type: string } } }\n        \
+                - { type: object, required: [type, path], properties: { type: { const: file }, path: { type: string } } }\n      \
+                discriminator:\n        \
+                propertyName: type\n    \
+                SrcVariant0Uri: { type: object, required: [href], properties: { href: { type: string }, rel: { oneOf: [{ type: string }, { type: integer }] } } }\n";
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    assert!(
+        types.contains("Magnet(Box<SrcMagnet>),") && types.contains("File(Box<SrcFile>),"),
+        "{types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "SrcMagnet"),
+        ["uri", "note"],
+        "{types}"
+    );
+    assert!(
+        types.contains("pub uri: SrcVariant0Uri,"),
+        "the member's field still names the component: {types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "SrcVariant0Uri"),
+        ["href", "rel"],
+        "{types}"
+    );
+    assert!(types.contains("pub enum SrcVariant0UriRel {"), "{types}");
+    assert!(!types.contains("SrcMagnetUri"), "{types}");
+}
+
+/// The bundle-target half of [`a_component_named_like_a_numbered_variant_keeps_its_name`]: the
+/// schema the pinned `magnet` member first lowers is declared in `lib.yaml`, not the root, and its
+/// name hint still starts with `SrcVariant0`. A bundle target is a declared schema shared by every
+/// use, so it and its nested inline union keep their names while the member is still renamed.
+#[test]
+fn a_bundle_target_named_like_a_numbered_variant_keeps_its_name() {
+    let root = "openapi: 3.1.0\n\
+                info: { title: T, version: 1.0.0 }\n\
+                paths: {}\n\
+                components:\n  \
+                schemas:\n    \
+                Src:\n      \
+                oneOf:\n        \
+                - { type: object, required: [type, uri], properties: { type: { const: magnet }, uri: { $ref: './lib.yaml#/components/schemas/SrcVariant0Uri' }, note: { type: string } } }\n        \
+                - { type: object, required: [type, path], properties: { type: { const: file }, path: { type: string } } }\n      \
+                discriminator:\n        \
+                propertyName: type\n";
+    let lib = "components:\n  \
+               schemas:\n    \
+               SrcVariant0Uri: { type: object, required: [href], properties: { href: { type: string }, rel: { oneOf: [{ type: string }, { type: integer }] } } }\n";
+    let (report, _, code) = generate_and_check_files(&[("openapi.yaml", root), ("lib.yaml", lib)]);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    assert!(
+        types.contains("Magnet(Box<SrcMagnet>),") && types.contains("File(Box<SrcFile>),"),
+        "{types}"
+    );
+    assert!(
+        types.contains("pub uri: SrcVariant0Uri,"),
+        "the member's field still names the bundle target: {types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "SrcVariant0Uri"),
+        ["href", "rel"],
+        "{types}"
+    );
+    assert!(types.contains("pub enum SrcVariant0UriRel {"), "{types}");
+    assert!(!types.contains("SrcMagnetUri"), "{types}");
 }
 
 /// The pinned value of #1001 selects a member only where it is the one value every payload the
@@ -91,31 +257,31 @@ fn a_tag_property_that_pins_no_free_value_leaves_the_member_untagged() {
             "optional",
             "{ type: object, required: [port], properties: { type: { const: apprise }, port: { type: integer } } }",
             "",
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
         (
             "nullable",
             "{ type: object, required: [type, port], properties: { type: { type: [string, 'null'], enum: [apprise, null] }, port: { type: integer } } }",
             "",
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
         (
             "several values",
             "{ type: object, required: [type, port], properties: { type: { enum: [apprise, gotify] }, port: { type: integer } } }",
             "",
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
         (
             "a component's tag",
             "{ type: object, required: [type, port], properties: { type: { const: Mail }, port: { type: integer } } }",
             "",
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
         (
             "a mapping key",
             "{ type: object, required: [type, port], properties: { type: { const: apprise }, port: { type: integer } } }",
             "        mapping:\n          apprise: Mail\n",
-            &[("ConfigVariant0", "webhook"), ("Mail", "apprise|Mail")][..],
+            &[("Mail", "apprise|Mail"), ("Webhook", "webhook")][..],
         ),
         (
             "another member's pin",
@@ -144,7 +310,7 @@ fn a_tag_property_that_pins_no_free_value_leaves_the_member_untagged() {
             "an undeclared tag property on a closed object",
             "{ type: object, required: [port], properties: { port: { type: integer } }, additionalProperties: false }",
             "",
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
     ] {
         let spec = union(second, mapping);
@@ -217,7 +383,7 @@ fn a_default_mapping_member_admitting_a_pinned_value_claims_it() {
             "a closed set without the pin",
             "{ enum: [Mail] }",
             false,
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
     ] {
         let spec = spec(mail_tag);
@@ -335,4 +501,48 @@ fn an_untagged_discriminated_member_keeps_the_tag_dispatch_of_the_tagged_ones() 
             "{applicator}\n{flat}"
         );
     }
+}
+
+/// The tag property a pinned variant leaves out (#1232) is still its pin to a later meet: a
+/// union of pinned branches met with a constraint on the tag (`allOf: [{$ref: Src}, {properties:
+/// {kind: {const: file}}}]`) excludes the branch the constraint rules out (`W011`), and the one
+/// left generates a struct carrying the met tag, while `Src`'s own structs still leave it out.
+#[test]
+fn a_meet_constraining_the_tag_excludes_the_pinned_branch_it_rules_out() {
+    let spec = "openapi: 3.1.0\n\
+info: { title: T, version: 1.0.0 }\n\
+paths: {}\n\
+components:\n  \
+schemas:\n    \
+Src:\n      \
+oneOf:\n        \
+- { type: object, required: [kind, uri], properties: { kind: { const: magnet }, uri: { type: string } } }\n        \
+- { type: object, required: [kind, path], properties: { kind: { const: file }, path: { type: string } } }\n      \
+discriminator: { propertyName: kind }\n    \
+Narrow:\n      \
+allOf:\n        \
+- { $ref: '#/components/schemas/Src' }\n        \
+- { properties: { kind: { const: file } } }\n";
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let w011: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::DeclarationHasNoEffect)
+        .collect();
+    assert_eq!(w011.len(), 1, "{report:#?}");
+    assert!(
+        w011[0].message.contains("union member 0 cannot satisfy"),
+        "{report:#?}"
+    );
+    let types = types_module(&code);
+    assert!(types.contains("pub struct Narrow {"), "{types}");
+    assert_eq!(
+        declared_fields(&types, "Narrow"),
+        ["kind", "path"],
+        "{types}"
+    );
+    assert_eq!(declared_fields(&types, "SrcMagnet"), ["uri"], "{types}");
+    assert_eq!(declared_fields(&types, "SrcFile"), ["path"], "{types}");
+    assert!(!types.contains("SrcMagnetKind"), "{types}");
 }

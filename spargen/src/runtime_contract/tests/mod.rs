@@ -85,7 +85,7 @@ version = "0.0.0"
 bytes = "1.12.1"
 http = "1.4.2"
 http-body = "1.0.1"
-reqwest = { version = "0.12.28", default-features = false }
+reqwest = { version = "0.13.5", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -114,6 +114,41 @@ fn core_entry(key: &str) -> (&'static str, &'static str) {
         .nth(1)
         .unwrap_or_else(|| panic!("CORE_MANIFEST's `{key}` entry pins a quoted version"));
     (line, version)
+}
+
+/// A `Cargo.lock` locking the workspace package `package` with each of `CORE_MANIFEST`'s seven
+/// crates as a direct dependency, at the version `CORE_MANIFEST` pins unless `locked` names
+/// another for it.
+///
+/// Each dependency is written in the bare `name` form, which Cargo uses when only one version of
+/// the crate is locked; `extra` is appended verbatim, for a fixture that locks a second version.
+fn core_lock(package: &str, locked: &[(&str, &str)], extra: &str) -> String {
+    let crates = core_workspace_dependencies()
+        .lines()
+        .filter_map(|line| line.split_once(" = "))
+        .map(|(key, _)| {
+            let version = locked
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map_or_else(|| core_entry(key).1, |(_, version)| *version);
+            (key, version)
+        })
+        .collect::<Vec<_>>();
+    let mut lock = format!(
+        "version = 4\n\n[[package]]\nname = \"{package}\"\nversion = \"0.0.0\"\ndependencies = [\n"
+    );
+    for (name, _) in &crates {
+        lock.push_str(&format!(" \"{name}\",\n"));
+    }
+    lock.push_str("]\n");
+    for (name, version) in &crates {
+        lock.push_str(&format!(
+            "\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\nsource = \
+             \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+        ));
+    }
+    lock.push_str(extra);
+    lock
 }
 
 const CORE_INHERITED: &str = "\
@@ -193,6 +228,12 @@ impl Sandbox {
         self.root.as_std_path()
     }
 
+    /// The Cargo home directory every audit through this sandbox is given: `cargo-home` inside
+    /// it, so which manifests count as Cargo's source cache never depends on the host's own.
+    fn cargo_home(&self) -> Utf8PathBuf {
+        self.root.join("cargo-home")
+    }
+
     /// [`audit`], bounded by this sandbox.
     fn audit(&self, manifest_path: &Utf8Path, requirements: &RuntimeRequirements) -> Audit {
         self.audit_in(manifest_path, requirements, &TargetContext::from_env())
@@ -238,7 +279,13 @@ impl Sandbox {
         requirements: &RuntimeRequirements,
         target: &TargetContext,
     ) -> Audit {
-        audit_in(manifest_path, requirements, target, Some(&self.root))
+        audit_in(
+            manifest_path,
+            requirements,
+            target,
+            Some(&self.cargo_home()),
+            Some(&self.root),
+        )
     }
 }
 
@@ -398,6 +445,35 @@ fn the_build_script_manifest_is_the_manifest_path_else_cargo_toml_in_the_manifes
     assert_eq!(
         manifest_from(Err(NotPresent), Err(NotUnicode("/work/\u{fffd}".into()))),
         None
+    );
+}
+
+#[test]
+fn cargos_home_is_cargo_home_else_dot_cargo_in_the_home_directory() {
+    let home = || Some(std::path::PathBuf::from("/home/user"));
+    // `CARGO_HOME` wins whenever it is set and not empty.
+    assert_eq!(
+        cargo_home_from(Some("/opt/cargo".into()), home()),
+        Some(Utf8PathBuf::from("/opt/cargo"))
+    );
+    assert_eq!(
+        cargo_home_from(Some("/opt/cargo".into()), None),
+        Some(Utf8PathBuf::from("/opt/cargo"))
+    );
+    // Otherwise `.cargo` in the home directory, and with neither, nothing.
+    for unset in [None, Some("".into())] {
+        assert_eq!(
+            cargo_home_from(unset.clone(), home()),
+            Some(Utf8PathBuf::from("/home/user/.cargo"))
+        );
+        assert_eq!(cargo_home_from(unset, None), None);
+    }
+    // A relative `CARGO_HOME` is taken against the working directory, as Cargo takes it, since
+    // the manifest paths it is compared with are absolute.
+    let working = Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap()).unwrap();
+    assert_eq!(
+        cargo_home_from(Some("cargo".into()), home()),
+        Some(working.join("cargo"))
     );
 }
 

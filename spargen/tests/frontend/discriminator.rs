@@ -711,7 +711,7 @@ fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag
             "both inline, one pinned",
             github,
             "union member 1 is no schema component",
-            &[("PetVariant0", "completed")][..],
+            &[("Completed", "completed")][..],
         ),
         (
             "both inline",

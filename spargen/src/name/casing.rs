@@ -22,6 +22,18 @@ pub(crate) fn to_pascal_case(raw: &str) -> String {
         .collect()
 }
 
+/// `segment` as a name hint appends it to a parent hint (`{hint}{segment}`): its first character
+/// uppercased when that is an ASCII lowercase letter, so [`to_pascal_case`]'s segmentation reads it
+/// as a word of its own (`ServerEvent` + `kind` → `ServerEventKind`) instead of folding it into the
+/// parent's last word (`ServerEventkind`). Every other character is kept as written.
+pub(crate) fn hint_segment(segment: &str) -> String {
+    let mut chars = segment.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// Convert `raw` to `snake_case` (for fields, methods, modules).
 pub(crate) fn to_snake_case(raw: &str) -> String {
     let words = words(raw);
@@ -63,7 +75,7 @@ fn words(raw: &str) -> Vec<String> {
 mod tests {
     use proptest::prelude::*;
 
-    use super::{to_pascal_case, to_snake_case, words};
+    use super::{hint_segment, to_pascal_case, to_snake_case, words};
 
     #[test]
     fn segmentation_splits_on_separators_and_camel_boundaries() {
@@ -129,6 +141,28 @@ mod tests {
             assert_eq!(to_pascal_case(raw), *pascal, "to_pascal_case({raw:?})");
             assert_eq!(to_snake_case(raw), *snake, "to_snake_case({raw:?})");
         }
+    }
+
+    /// An appended segment starts a word of its own, so a lowercase property name after a parent
+    /// hint is capitalised in the type name it seeds (#1232); anything else is kept as written.
+    #[test]
+    fn a_hint_segment_starts_a_word_of_its_own() {
+        for (segment, expected, joined) in [
+            ("kind", "Kind", "ServerEventKind"),
+            ("petId", "PetId", "ServerEventPetId"),
+            ("Kind", "Kind", "ServerEventKind"),
+            ("_links", "_links", "ServerEventLinks"),
+            ("2fa", "2fa", "ServerEvent2fa"),
+            ("", "", "ServerEvent"),
+        ] {
+            assert_eq!(hint_segment(segment), expected, "hint_segment({segment:?})");
+            assert_eq!(
+                to_pascal_case(&format!("ServerEvent{}", hint_segment(segment))),
+                joined,
+                "joined {segment:?}"
+            );
+        }
+        assert_eq!(to_pascal_case("ServerEventkind"), "ServerEventkind");
     }
 
     proptest! {

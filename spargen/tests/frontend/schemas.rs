@@ -744,7 +744,7 @@ components:
         .collect();
     assert_eq!(
         deprecated,
-        ["pub struct Item {", "pub type Itemlegacy = String;"],
+        ["pub struct Item {", "pub type ItemLegacy = String;"],
         "only the items whose schema says `deprecated`, no field of a deprecated object: {code}"
     );
 }

@@ -398,7 +398,7 @@ fn an_all_of_emits_no_meet_its_result_does_not_use() {
         ] {
             let source = generated_source(&kind_meeting(&order), open);
             assert!(
-                !source.contains("pub enum ResponseBodykindIntersection"),
+                !source.contains("pub enum ResponseBodyKindIntersection"),
                 "open: {open}, {order:?} emits a superseded meet:\n{source}"
             );
         }
@@ -407,14 +407,14 @@ fn an_all_of_emits_no_meet_its_result_does_not_use() {
             "{ type: array, items: { enum: [x, y] } }",
         ]);
         let source = generated_source(&arrays, open);
-        let item = "ResponseBodykindIntersection1Item";
+        let item = "ResponseBodyKindIntersection1Item";
         assert!(
             source.contains(&format!("pub enum {item} {{"))
-                && source.contains(&format!("pub type ResponseBodykind = Vec<{item}>;")),
+                && source.contains(&format!("pub type ResponseBodyKind = Vec<{item}>;")),
             "open: {open}, the array's meet keeps its item set:\n{source}"
         );
         assert!(
-            !source.contains("pub type ResponseBodykindIntersection1 "),
+            !source.contains("pub type ResponseBodyKindIntersection1 "),
             "open: {open}, the array's superseded meet is emitted:\n{source}"
         );
     }
@@ -502,7 +502,7 @@ fn an_object_all_of_emits_no_meet_a_later_member_superseded() {
                 // first pair's meet is superseded.
                 assert!(
                     source
-                        .matches("pub struct ResponseBodyinnerIntersection")
+                        .matches("pub struct ResponseBodyInnerIntersection")
                         .count()
                         == usize::from(nested),
                     "{case}, open: {open} emits a superseded struct meet:\n{source}"

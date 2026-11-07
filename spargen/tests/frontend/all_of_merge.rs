@@ -73,16 +73,16 @@ components:
         .expect("Derived is a struct")..];
     assert_eq!(
         field_type(derived, "pub id:").as_deref(),
-        Some("Baseid"),
+        Some("BaseId"),
         "{types}"
     );
     assert_eq!(
         field_type(derived, "pub extra:").as_deref(),
-        Some("Option<DerivedMember1extra>"),
+        Some("Option<DerivedMember1Extra>"),
         "{types}"
     );
     assert_eq!(
-        alias_target(&types, "DerivedMember1extra").as_deref(),
+        alias_target(&types, "DerivedMember1Extra").as_deref(),
         Some("i64"),
         "{types}"
     );

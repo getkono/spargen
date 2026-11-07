@@ -575,6 +575,91 @@ fn open_narrowing_is_a_flag_and_a_config_key() {
     assert_eq!(mistyped.status.code(), Some(3), "{mistyped:?}");
 }
 
+/// A discriminated union: closed, a decode failure on a tag it does not list; under
+/// `open_unions`, an `Unknown { tag, value }` variant, which `diff` reports as a variant added.
+#[cfg(feature = "cli")]
+const DISCRIMINATED: &str = r##"
+openapi: 3.1.0
+info: { title: Events, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      operationId: getEvent
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Event" }
+components:
+  schemas:
+    Event:
+      oneOf: [{ $ref: "#/components/schemas/Tick" }, { $ref: "#/components/schemas/Stop" }]
+      discriminator: { propertyName: kind }
+    Tick:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+    Stop:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+"##;
+
+#[cfg(feature = "cli")]
+#[test]
+fn open_unions_is_a_flag_and_a_config_key() {
+    // What it changes in emitted code is pinned by
+    // `open_unions_decodes_an_unlisted_tag_into_the_unknown_variant` in `e2e/open_unions.rs`.
+    // Here the change is read off `diff`, as for `open_narrowing` above.
+    let temp = tempfile::tempdir().unwrap();
+    let (closed_dir, open_dir) = (temp.path().join("closed"), temp.path().join("open"));
+    std::fs::create_dir_all(&closed_dir).unwrap();
+    std::fs::create_dir_all(&open_dir).unwrap();
+    let (closed, open) = (
+        closed_dir.join("openapi.yaml"),
+        open_dir.join("openapi.yaml"),
+    );
+    std::fs::write(&closed, DISCRIMINATED).unwrap();
+    std::fs::write(&open, DISCRIMINATED).unwrap();
+
+    let same = diff(temp.path(), &closed, &open, &["--format", "json"]);
+    assert!(same.status.success(), "{same:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&same.stdout).trim_end(),
+        r#"{"changes":[],"bump":"patch"}"#,
+        "without a config the two sides are the same surface"
+    );
+
+    std::fs::write(open_dir.join("spargen.toml"), "open_unions = true\n").unwrap();
+    let key = diff(temp.path(), &closed, &open, &["--format", "json"]);
+    assert!(key.status.success(), "{key:?}");
+    let key = String::from_utf8_lossy(&key.stdout);
+    assert!(
+        key.contains(r#""kind":"variant-added""#) && key.contains("Unknown"),
+        "the new side's config opens its union: {key}"
+    );
+
+    let flag = diff(
+        temp.path(),
+        &closed,
+        &open,
+        &["--open-unions", "--format", "json"],
+    );
+    assert!(flag.status.success(), "{flag:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&flag.stdout).trim_end(),
+        r#"{"changes":[],"bump":"patch"}"#,
+        "the flag opens the old side's union as well"
+    );
+
+    std::fs::write(open_dir.join("spargen.toml"), "open_unions = 1\n").unwrap();
+    let mistyped = check(temp.path(), &open, &[]);
+    assert_eq!(mistyped.status.code(), Some(3), "{mistyped:?}");
+}
+
 // --- Precedence ---------------------------------------------------------------------------------
 //
 // `spargen/src/cli/config.rs` states the contract: "defaults < `spargen.toml` < CLI flags", an
@@ -925,6 +1010,7 @@ fn the_getters_read_back_the_defaults() {
     assert_eq!(spec.batch_cap_count(), 100);
     assert!(!spec.carve_enabled());
     assert!(!spec.open_narrowing_enabled());
+    assert!(!spec.open_unions_enabled());
     assert!(spec.config_files().is_empty());
     assert_eq!(
         spec.build("out.rs").cargo_integration(),
@@ -954,7 +1040,8 @@ fn the_getters_read_back_what_the_setters_wrote() {
         .error_body_cap(11)
         .batch_cap(7)
         .carve(true)
-        .open_narrowing(true);
+        .open_narrowing(true)
+        .open_unions(true);
     assert!(!spec.uuid_enabled());
     assert!(!spec.time_enabled());
     assert_eq!(spec.omissions().rules, [rule, appended]);
@@ -962,6 +1049,7 @@ fn the_getters_read_back_what_the_setters_wrote() {
     assert_eq!(spec.batch_cap_count(), 7);
     assert!(spec.carve_enabled());
     assert!(spec.open_narrowing_enabled());
+    assert!(spec.open_unions_enabled());
     for integration in [
         spargen::CargoIntegration::Required,
         spargen::CargoIntegration::Off,

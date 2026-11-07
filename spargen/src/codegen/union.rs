@@ -4,7 +4,8 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::ir::{
-    DisjointFeature, JsonCategory, Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch,
+    DisjointFeature, JsonCategory, Ty, TypeGraph, TypeKind, Union, UnionMode, UnionStrategy,
+    UnionVariant, VariantDispatch,
 };
 use crate::name::Names;
 
@@ -13,12 +14,15 @@ use super::ty::boxed_ty_tokens;
 /// Emit the enum for union definition `id`, one boxed payload variant per union variant, with the
 /// `Deserialize` / `Serialize` impls of its strategy: by discriminator (a unique JSON category for
 /// a non-object variant, then the tag, then a trial of the variants no tag selects, then the
-/// `defaultMapping` variant), by a statically disjoint feature, or by trying each variant's
-/// schema. `docs` and `deprecated` are the definition's own attributes.
+/// `defaultMapping` variant, or for an open union the `Unknown` variant), by a statically disjoint
+/// feature, or by trying each variant's schema. `docs` and `deprecated` are the definition's own
+/// attributes; `types` is read for which variants are themselves open unions, whose `Unknown` a
+/// trial takes only when no variant matches.
 pub(super) fn emit_union(
     id: crate::ir::TypeId,
     ident: &crate::name::Ident,
     union: &Union,
+    types: &TypeGraph,
     names: &Names,
     docs: TokenStream,
     deprecated: Option<TokenStream>,
@@ -36,8 +40,10 @@ pub(super) fn emit_union(
             tag_field,
             default_variant,
             mode,
+            open,
         } => {
             let decl = union_enum_decl(id, ident, union, names, &docs, &deprecated);
+            let unknown = open.then(|| open_variant_ident(names, id));
             let category_arms = union.variants.iter().filter_map(|variant| {
                 let category = discriminated_dispatch(variant).category?;
                 let variant_ident = union_variant_ident(names, id, variant);
@@ -77,6 +83,13 @@ pub(super) fn emit_union(
                     ),
                 }
             });
+            // An open union writes an unknown payload back as it arrived, its own tag kept; the
+            // tag is inserted only into a value constructed without it.
+            let unknown_ser_arm = unknown.map(|unknown| {
+                quote! {
+                    #ident::#unknown { tag, value } => (value.clone(), Some(tag.as_str())),
+                }
+            });
             let missing_tag = format!(
                 "missing discriminator field `{tag_field}` for union {}",
                 ident.as_str()
@@ -96,10 +109,6 @@ pub(super) fn emit_union(
                 Some(fallback) => fallback.clone(),
                 None => quote! { Err(serde::de::Error::custom(#missing_tag)) },
             };
-            let unknown_tag_arm = match &fallback {
-                Some(fallback) => fallback.clone(),
-                None => quote! { Err(serde::de::Error::custom(#unknown_tag)) },
-            };
             // Variants no tag selects are tried by their own schemas — with the source
             // applicator's semantics, as `Trial` tries them — before the absent or
             // unrecognized tag falls through to `defaultMapping` or the error. A tag that
@@ -111,18 +120,65 @@ pub(super) fn emit_union(
                     let priority = discriminated_dispatch(variant).untagged?;
                     let variant_ident = union_variant_ident(names, id, variant);
                     let ty = boxed_ty_tokens(variant.ty, names, false);
-                    Some(trial_attempt_tokens(ident, variant_ident, &ty, priority))
+                    let unknown = open_member_unknown_test(types, names, variant.ty);
+                    Some(trial_attempt_tokens(
+                        ident,
+                        variant_ident,
+                        &ty,
+                        priority,
+                        unknown.as_ref(),
+                    ))
                 })
                 .collect();
+            // `open_unions`: an unrecognized tag is kept, with the payload, in `Unknown`, but only
+            // for a payload no untagged variant matched: a `oneOf` payload two of them take is a
+            // decode failure, not an unknown kind. Lowering never opens a union that has a
+            // fallback.
+            let unknown_tag_arm = match (&fallback, unknown) {
+                (Some(fallback), _) => fallback.clone(),
+                (None, Some(unknown)) if attempts.is_empty() => {
+                    quote! { Ok(#ident::#unknown { tag, value }) }
+                }
+                (None, Some(unknown)) => {
+                    let ambiguous = format!(
+                        "data matched more than one untagged variant of union {}",
+                        ident.as_str()
+                    );
+                    quote! {
+                        if match_count == 0 {
+                            Ok(#ident::#unknown { tag, value })
+                        } else {
+                            Err(serde::de::Error::custom(#ambiguous))
+                        }
+                    }
+                }
+                (None, None) => quote! { Err(serde::de::Error::custom(#unknown_tag)) },
+            };
+            let fallback_member = union.variants.iter().any(|variant| {
+                discriminated_dispatch(variant).untagged.is_some()
+                    && open_member_unknown_test(types, names, variant.ty).is_some()
+            });
             let untagged_trial = |otherwise: TokenStream| {
                 if attempts.is_empty() {
                     return otherwise;
                 }
                 let valid = trial_match_rule_tokens(*mode);
+                let fallback_decl = fallback_member.then(unknown_fallback_decl_tokens);
+                let otherwise = if fallback_member {
+                    quote! {
+                        match unknown_fallback {
+                            Some(fallback) if match_count == 0 => Ok(fallback),
+                            _ => #otherwise,
+                        }
+                    }
+                } else {
+                    otherwise
+                };
                 quote! {
                     {
                         let mut match_count = 0_usize;
                         let mut selected: Option<(u32, Self)> = None;
+                        #fallback_decl
                         #(#attempts)*
                         match selected {
                             Some((_, selected)) if #valid => Ok(selected),
@@ -164,6 +220,7 @@ pub(super) fn emit_union(
                     {
                         let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                             #(#ser_arms)*
+                            #unknown_ser_arm
                         };
                         if let Some(tag) = tag {
                             let serde_json::Value::Object(map) = &mut value else {
@@ -246,7 +303,8 @@ pub(super) fn emit_union(
                 };
                 let variant_ident = union_variant_ident(names, id, variant);
                 let ty = boxed_ty_tokens(variant.ty, names, false);
-                trial_attempt_tokens(ident, variant_ident, &ty, priority)
+                let unknown = open_member_unknown_test(types, names, variant.ty);
+                trial_attempt_tokens(ident, variant_ident, &ty, priority, unknown.as_ref())
             });
             let ser_arms = union.variants.iter().map(|variant| {
                 let variant_ident = union_variant_ident(names, id, variant);
@@ -256,12 +314,29 @@ pub(super) fn emit_union(
                     }
                 }
             });
+            let fallback_member = union
+                .variants
+                .iter()
+                .any(|variant| open_member_unknown_test(types, names, variant.ty).is_some());
+            // A value an open member decodes only as its `Unknown` is held to the same rule on
+            // serialize as on decode: it counts only when no variant matches outright.
             let validations = union.variants.iter().map(|variant| {
                 let ty = boxed_ty_tokens(variant.ty, names, false);
-                quote! {
-                    if serde_json::from_value::<#ty>(value.clone()).is_ok() {
-                        match_count += 1;
-                    }
+                match open_member_unknown_test(types, names, variant.ty) {
+                    Some(unknown) => quote! {
+                        if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
+                            if #unknown {
+                                unknown_match = true;
+                            } else {
+                                match_count += 1;
+                            }
+                        }
+                    },
+                    None => quote! {
+                        if serde_json::from_value::<#ty>(value.clone()).is_ok() {
+                            match_count += 1;
+                        }
+                    },
                 }
             });
             let expected = match mode {
@@ -278,6 +353,21 @@ pub(super) fn emit_union(
                 "serialized value must match {expected} typed variant of union {}",
                 ident.as_str()
             );
+            let fallback_decl = fallback_member.then(unknown_fallback_decl_tokens);
+            let fallback_arm = fallback_member.then(|| {
+                quote! {
+                    else if match_count == 0 {
+                        unknown_fallback.ok_or_else(|| serde::de::Error::custom(#de_error))
+                    }
+                }
+            });
+            let unknown_match_decl =
+                fallback_member.then(|| quote! { let mut unknown_match = false; });
+            let ser_valid = if fallback_member {
+                quote! { #ser_valid || (match_count == 0 && unknown_match) }
+            } else {
+                ser_valid
+            };
             quote! {
                 #decl
 
@@ -289,12 +379,13 @@ pub(super) fn emit_union(
                         let value = serde_json::Value::deserialize(deserializer)?;
                         let mut match_count = 0_usize;
                         let mut selected: Option<(u32, Self)> = None;
+                        #fallback_decl
                         #(#attempts)*
                         if #de_valid {
                             selected
                                 .map(|(_, value)| value)
                                 .ok_or_else(|| serde::de::Error::custom(#de_error))
-                        } else {
+                        } #fallback_arm else {
                             Err(serde::de::Error::custom(#de_error))
                         }
                     }
@@ -309,6 +400,7 @@ pub(super) fn emit_union(
                             #(#ser_arms),*
                         };
                         let mut match_count = 0_usize;
+                        #unknown_match_decl
                         #(#validations)*
                         if #ser_valid {
                             value.serialize(serializer)
@@ -357,8 +449,8 @@ fn discriminated_dispatch(variant: &UnionVariant) -> Discriminated<'_> {
 }
 
 /// The union enum's declaration, `docs` and `deprecated` first, one variant per
-/// [`union_variant_defs`] entry. Every strategy declares the same enum and differs only in the
-/// serde impls beside it.
+/// [`union_variant_defs`] entry, then, for an open union, the `Unknown { tag, value }` variant.
+/// Every strategy declares the same enum and differs only in the serde impls beside it.
 fn union_enum_decl(
     id: crate::ir::TypeId,
     ident: &crate::name::Ident,
@@ -368,14 +460,47 @@ fn union_enum_decl(
     deprecated: &Option<TokenStream>,
 ) -> TokenStream {
     let variant_defs = union_variant_defs(id, union, names);
+    let unknown = match &union.strategy {
+        UnionStrategy::Discriminated {
+            tag_field,
+            open: true,
+            ..
+        } => {
+            let unknown = open_variant_ident(names, id);
+            let doc = format!(
+                "A payload whose `{tag_field}` names a kind this description does not list. \
+                 Decoding produces it only for a value no other variant takes."
+            );
+            let tag_doc = format!("The `{tag_field}` value the payload carries.");
+            Some(quote! {
+                #[doc = #doc]
+                #unknown {
+                    #[doc = #tag_doc]
+                    tag: String,
+                    /// The whole payload, as it arrived.
+                    value: serde_json::Value,
+                },
+            })
+        }
+        _ => None,
+    };
     quote! {
         #docs
         #deprecated
         #[derive(Debug, Clone)]
         pub enum #ident {
             #(#variant_defs)*
+            #unknown
         }
     }
+}
+
+/// The identifier `name` allocated for open union `id`'s `Unknown` variant.
+fn open_variant_ident(names: &Names, id: crate::ir::TypeId) -> &crate::name::Ident {
+    names
+        .open_variants
+        .get(&id)
+        .expect("open union variant name allocated")
 }
 
 /// The expression decoding the buffered `value` into `variant_ident`'s payload, as the
@@ -432,24 +557,72 @@ fn json_category_predicate(category: &JsonCategory) -> TokenStream {
 /// tie). The emitted block expects `value`, `match_count`, and `selected: Option<(u32, Self)>` in
 /// scope. `Trial` tries every variant through it, and `Discriminated` its untagged variants, so
 /// the two strategies share one selection rule.
+///
+/// `unknown` is [`open_member_unknown_test`] for a variant that is itself an open union: a value
+/// it decodes only as its `Unknown` is not counted as a match but kept, the first such one, in
+/// `unknown_fallback` ([`unknown_fallback_decl_tokens`]), which the trial takes only when no
+/// variant matched. Counting it would let an open member's catch-all overlap every other object
+/// variant, and fail a `oneOf` that decodes with the member closed.
 fn trial_attempt_tokens(
     ident: &crate::name::Ident,
     variant_ident: &crate::name::Ident,
     ty: &TokenStream,
     priority: u32,
+    unknown: Option<&TokenStream>,
 ) -> TokenStream {
-    quote! {
-        if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
-            match_count += 1;
-            let replace = match &selected {
-                Some((selected_priority, _)) => #priority > *selected_priority,
-                None => true,
-            };
-            if replace {
-                selected = Some((#priority, #ident::#variant_ident(inner)));
-            }
+    let count = quote! {
+        match_count += 1;
+        let replace = match &selected {
+            Some((selected_priority, _)) => #priority > *selected_priority,
+            None => true,
+        };
+        if replace {
+            selected = Some((#priority, #ident::#variant_ident(inner)));
         }
+    };
+    match unknown {
+        Some(unknown) => quote! {
+            if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
+                if #unknown {
+                    if unknown_fallback.is_none() {
+                        unknown_fallback = Some(#ident::#variant_ident(inner));
+                    }
+                } else {
+                    #count
+                }
+            }
+        },
+        None => quote! {
+            if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
+                #count
+            }
+        },
     }
+}
+
+/// The declaration of the `unknown_fallback` a trial with an open-union variant keeps
+/// ([`trial_attempt_tokens`]).
+fn unknown_fallback_decl_tokens() -> TokenStream {
+    quote! { let mut unknown_fallback: Option<Self> = None; }
+}
+
+/// For a union variant of type `ty` that is itself an open union, the test that its decoded
+/// payload `inner` (`Box<T>`, or `Option<Box<T>>` when nullable) is that union's `Unknown`;
+/// `None` for any other variant type.
+fn open_member_unknown_test(types: &TypeGraph, names: &Names, ty: Ty) -> Option<TokenStream> {
+    let TypeKind::Union(union) = &types.get(ty.id)?.kind else {
+        return None;
+    };
+    if !union.is_open() {
+        return None;
+    }
+    let member = names.types.get(&ty.id).expect("type name allocated");
+    let unknown = open_variant_ident(names, ty.id);
+    Some(if ty.nullable {
+        quote! { matches!(inner.as_deref(), Some(#member::#unknown { .. })) }
+    } else {
+        quote! { matches!(*inner, #member::#unknown { .. }) }
+    })
 }
 
 /// The condition a trial's `match_count` must meet for the union's applicator: exactly one

@@ -108,6 +108,16 @@ echo "auditing the Cargo.lock published in spargen $version"
   "cargo deny --manifest-path target/deny-published/spargen/Cargo.toml --config deny.toml --all-features --locked check advisories",
 ]
 
+[tasks.deps-latest]
+# Judges each runtime requirement (the `[workspace.dependencies]` entries `support-runtime` names,
+# and the generated-client floors in `spargen/src/runtime_contract/requirements.rs`) against its
+# crate's newest stable release on the crates.io sparse index. It reads the manifests and changes
+# nothing. A requirement that rejects that release fails the run; one that admits it from an older
+# floor prints a notice. AGENTS.md's "Releases" says when it runs and who answers a red run.
+# Needs curl and network access, so the test is ignored by `mise run test`.
+description = "Check each runtime dependency requirement against its crate's latest crates.io release (needs curl)"
+run = "cargo test -p spargen --test repo_gates supply_chain::runtime_requirements_admit_their_latest_release -- --exact --ignored --nocapture"
+
 [tasks.release-preview]
 # `release-plz update` has no dry-run mode, so it runs in a clone under `target/` on a fresh local
 # branch (it refuses a detached HEAD), and skips LFS smudging, which would fetch from a checkout that
