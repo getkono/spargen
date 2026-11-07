@@ -78,6 +78,14 @@ applied to each request as it is sent, and an operation returning an `EventStrea
 it, since a stream may rightly stay open indefinitely. An event stream whose server sends nothing for longer than
 `read_timeout` still fails with `Error::Timeout`, which a reconnect policy may answer.
 
+`Client::with_timeout(Option<Duration>)` (and `BlockingClient::with_timeout`) sets the total
+`timeout` of the client value it returns, so one call can have a deadline of its own without an
+async timer: `client.clone().with_timeout(Some(UPLOAD)).add_torrent(&request).await`. An elapsed
+one is `Error::Timeout(TimeoutKind::Total)`. `None` sets no total bound of the client's own;
+the connect and read timeouts still apply, and so does a total timeout configured on a
+`reqwest::Client` injected with `with_client`, which reqwest lets a request shorten or lengthen
+but not lift. An operation returning an `EventStream` is exempt, as it is from `timeout`.
+
 `Client::with_client` and `Client::with_backend` run on the default configuration, whose total
 `timeout` is none, and leave connecting and reading to what they were given: the caller's
 `reqwest::Client` keeps its own timeouts, and a backend bounds requests however it bounds them.

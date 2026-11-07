@@ -84,7 +84,9 @@ the version it emits, and the idioms spargen handles.
 
 - `Client::new(base_url)` / `Client::with_client(reqwest::Client, base_url)` — the injected
   client is the extension point for TLS choice, proxies, and timeouts. `Client` is `Debug` and
-  `Clone`.
+  `Clone`. `Client::with_timeout(Option<Duration>)` gives a derived client value its own total
+  timeout (`client.clone().with_timeout(Some(UPLOAD))`), elapsing as
+  `Error::Timeout(TimeoutKind::Total)`; an `EventStream` operation is exempt from it.
 - One `async` method per operation: required parameters positional, optional parameters in a
   per-operation `…Params` struct deriving `Default`, `Result<ResponseValue<T>, Error<E>>` out.
   String parameters and the params bundle take `impl Into<…>`, so `client.get_pet("1")` and
