@@ -162,7 +162,9 @@ which leaves the example lockfiles' `spargen` stamp stale: the rewrite a local `
 - No spargen crate may ever appear in a consumer's runtime graph; `spargen-macro` and everything
   it reaches are host/build-time only.
 - Generated code never silently degrades a typed schema to `serde_json::Value`, and every spec
-  construct is supported, warned, or rejected — no fourth, silent behavior. A new warning or
+  construct is supported, warned, or rejected — no fourth, silent behavior. The one `Value` a typed
+  schema yields is opt-in and explicit: under `open_unions`, a discriminated union's `Unknown {
+  tag, value }` variant, which holds only a payload no listed variant claims. A new warning or
   rejection code gets a stable code in `diag`, an entry in `docs/errors.md`, a cell in
   `docs/support-matrix.md`, and a fixture in `spargen/tests/frontend/`, in the same commit; tests
   keyed on the code enforce the last three. A case added under an existing code moves none of
