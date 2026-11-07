@@ -22,7 +22,8 @@ pub(super) fn blocking_cfg() -> TokenStream {
 /// current-thread tokio runtime and drives each async operation to completion with `block_on`,
 /// compiled under [`blocking_cfg`]. Each method is a shim over the async client's method, so the
 /// request building and dispatch are the async client's. Its constructors are the async client's
-/// `new`, `with_default_server` (when a server is declared), `with_client` and `with_backend`, and
+/// `new`, `with_config`, `with_default_server` (when a server is declared), `with_client` and
+/// `with_backend`, and
 /// its `with_credential` carries the async client's documentation, declared schemes included.
 ///
 /// A `BlockingClient` must not be built or used from inside another async runtime (tokio's
@@ -89,16 +90,28 @@ pub(super) fn emit_blocking_client(
             #[forbid(unsafe_code)]
             #[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
             impl BlockingClient {
-            /// Build a blocking client over a fresh default `reqwest::Client`.
+            /// Build a blocking client on the default `ClientConfig`, as `Client::new` does.
             pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
                 let inner = Client::new(base_url)?;
                 let runtime = new_runtime()?;
                 Ok(Self { inner, runtime })
             }
 
+            /// Build a blocking client whose `ClientConfig` is the default one as `configure`
+            /// leaves it, as `Client::with_config` does.
+            pub fn with_config(
+                base_url: &str,
+                configure: impl FnOnce(&mut support::ClientConfig),
+            ) -> Result<Self, support::Error<std::convert::Infallible>> {
+                let inner = Client::with_config(base_url, configure)?;
+                let runtime = new_runtime()?;
+                Ok(Self { inner, runtime })
+            }
+
             #default_server
 
-            /// Build a blocking client over a caller-supplied `reqwest::Client`.
+            /// Build a blocking client over a caller-supplied `reqwest::Client`, whose own
+            /// timeouts apply.
             pub fn with_client(
                 client: reqwest::Client,
                 base_url: &str,

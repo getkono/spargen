@@ -393,6 +393,7 @@ mod support {
         use std::collections::HashMap;
         use std::convert::Infallible;
         use std::sync::Arc;
+        use std::time::Duration;
         use reqwest::Url;
         use super::{Credential, Error, HttpBackend, LinkPaginator, ReqwestBackend};
         /// Client-wide configuration.
@@ -431,12 +432,50 @@ mod support {
             /// fails to decode is reported as [`Error::Decode`] retaining the whole frame, uncapped by
             /// `max_error_body`, with `truncated` unset.
             pub max_stream_frame: usize,
+            /// How long establishing a connection may take — name resolution, the TCP handshake and TLS —
+            /// before the request fails with [`Error::Timeout`] (default 30 s; `None` waits as long as
+            /// the operating system does).
+            ///
+            /// It is read once, when [`ClientCore::with_config`] or [`ClientCore::new`] builds the
+            /// `reqwest::Client`, so changing it through [`ClientCore::config_mut`] afterwards changes
+            /// nothing. A client injected with [`ClientCore::with_client`] keeps its own connect timeout
+            /// instead, and a backend installed with [`ClientCore::with_backend`] executes requests on its
+            /// own terms. reqwest's `fetch` backend has no connect timeout, so on `wasm32` it is ignored.
+            pub connect_timeout: Option<Duration>,
+            /// How long a read on an established connection may wait for its next bytes — the response
+            /// head, or the next chunk of a body, a streamed one included — before the request fails with
+            /// [`Error::Timeout`] (default 5 min; `None` waits indefinitely). Each read that arrives
+            /// restarts it, so it bounds a stall, not the length of a response. An event stream whose
+            /// server sends nothing, not even a comment or heartbeat, for longer than this fails with
+            /// [`Error::Timeout`], which a reconnect policy may answer by resuming it.
+            ///
+            /// It is read when the `reqwest::Client` is built and applies where it applies, exactly as
+            /// [`Self::connect_timeout`] describes; reqwest's `fetch` backend has no read timeout
+            /// either, so on `wasm32` it is ignored.
+            pub read_timeout: Option<Duration>,
+            /// How long one non-streaming request may take in total, from connecting until its whole
+            /// response body has been read, before it fails with [`Error::Timeout`] (default `None`: no
+            /// total bound, only the connect and read timeouts).
+            ///
+            /// It is read each time [`super::send`] sends a request, so changing it through
+            /// [`ClientCore::config_mut`] applies from the next request on, whichever constructor built
+            /// the core, and it is honoured on `wasm32` too. It travels on the request itself: a request
+            /// built with its own `reqwest::RequestBuilder::timeout` keeps that one,
+            /// [`ReqwestBackend`] enforces it, and a caller-supplied [`HttpBackend`] that runs the
+            /// request on a `reqwest::Client` enforces it as well. A streaming response is exempt,
+            /// because a stream may rightly stay open indefinitely: an operation returning an
+            /// `EventStream` sends its request with [`super::send_streaming`], which never applies it, and
+            /// each reconnect resends that same request.
+            pub timeout: Option<Duration>,
         }
         impl Default for ClientConfig {
             fn default() -> Self {
                 Self {
                     max_error_body: 64 * 1024,
                     max_stream_frame: 16 * 1024 * 1024,
+                    connect_timeout: Some(Duration::from_secs(30)),
+                    read_timeout: Some(Duration::from_secs(5 * 60)),
+                    timeout: None,
                 }
             }
         }
@@ -459,34 +498,55 @@ mod support {
             credentials: HashMap<String, Credential>,
         }
         impl ClientCore {
-            /// Build a core with a default `reqwest::Client` and the given base URL. Returns a
-            /// request-construction error if the base URL is invalid.
+            /// Build a core with the default [`ClientConfig`] and the given base URL, as
+            /// [`Self::with_config`] does.
             pub fn new(base_url: &str) -> Result<Self, Error<Infallible>> {
-                Self::with_client(reqwest::Client::new(), base_url)
+                Self::with_config(base_url, ClientConfig::default())
+            }
+            /// Build a core with the given base URL and configuration on a `reqwest::Client` built from
+            /// `config`'s [connect](ClientConfig::connect_timeout) and
+            /// [read](ClientConfig::read_timeout) timeouts, which both builds requests and, wrapped in
+            /// the default [`ReqwestBackend`], executes them. Returns a request-construction error if the
+            /// base URL is invalid or reqwest cannot build the client (its TLS backend fails to
+            /// initialise).
+            pub fn with_config(
+                base_url: &str,
+                config: ClientConfig,
+            ) -> Result<Self, Error<Infallible>> {
+                let client = http_client(&config)?;
+                let backend = Arc::new(ReqwestBackend::new(client.clone()));
+                Self::assemble(client, backend, base_url, config)
             }
             /// Build a core with a caller-supplied `reqwest::Client` — the injection point for TLS backend,
             /// proxies, and timeouts. The client both builds requests and, wrapped in the default
-            /// [`ReqwestBackend`], executes them.
+            /// [`ReqwestBackend`], executes them, so its own connect and read timeouts apply instead of
+            /// [`ClientConfig::connect_timeout`] and [`ClientConfig::read_timeout`];
+            /// [`ClientConfig::timeout`] still applies to each request [`super::send`] sends.
             pub fn with_client(
                 client: reqwest::Client,
                 base_url: &str,
             ) -> Result<Self, Error<Infallible>> {
                 let backend = Arc::new(ReqwestBackend::new(client.clone()));
-                Self::assemble(client, backend, base_url)
+                Self::assemble(client, backend, base_url, ClientConfig::default())
             }
             /// Build a core with a caller-supplied transport [`HttpBackend`] — the injection point for
             /// retry, middleware, or an entirely non-reqwest transport. Requests are still BUILT on a
-            /// default `reqwest::Client`; only the execute step goes through `backend`.
+            /// `reqwest::Client` configured as [`Self::new`]'s is; only the execute step goes through
+            /// `backend`, so connecting and reading are bounded however `backend` bounds them.
+            /// [`ClientConfig::timeout`] travels on each request [`super::send`] sends, for a backend that
+            /// runs it on a `reqwest::Client` to enforce.
             pub fn with_backend(
                 backend: Arc<dyn HttpBackend>,
                 base_url: &str,
             ) -> Result<Self, Error<Infallible>> {
-                Self::assemble(reqwest::Client::new(), backend, base_url)
+                let config = ClientConfig::default();
+                Self::assemble(http_client(&config)?, backend, base_url, config)
             }
             fn assemble(
                 http: reqwest::Client,
                 backend: Arc<dyn HttpBackend>,
                 base_url: &str,
+                config: ClientConfig,
             ) -> Result<Self, Error<Infallible>> {
                 let base_url = Url::parse(base_url)
                     .map_err(Error::request_construction)?;
@@ -494,7 +554,7 @@ mod support {
                     http,
                     backend,
                     base_url,
-                    config: ClientConfig::default(),
+                    config,
                     credentials: HashMap::new(),
                 })
             }
@@ -539,6 +599,27 @@ mod support {
             pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
                 LinkPaginator::new(self.clone(), first)
             }
+        }
+        /// The `reqwest::Client` a core builds for itself, with `config`'s connect and read timeouts.
+        /// reqwest's `fetch` backend has neither, so on `wasm32` `config` is not read.
+        fn http_client(
+            config: &ClientConfig,
+        ) -> Result<reqwest::Client, Error<Infallible>> {
+            let builder = reqwest::Client::builder();
+            #[cfg(not(target_arch = "wasm32"))]
+            let builder = {
+                let mut builder = builder;
+                if let Some(timeout) = config.connect_timeout {
+                    builder = builder.connect_timeout(timeout);
+                }
+                if let Some(timeout) = config.read_timeout {
+                    builder = builder.read_timeout(timeout);
+                }
+                builder
+            };
+            #[cfg(target_arch = "wasm32")]
+            let _ = config;
+            builder.build().map_err(Error::request_construction)
         }
     }
     mod dispatch {
@@ -686,7 +767,25 @@ mod support {
         /// off `wasm32`; a URL that is not a valid URI is refused first, as
         /// [`Error::RequestConstruction`]. The backend reports failures as a [`super::TransportError`]
         /// carrying its taxonomy class, which picks the variant here. Non-generic.
+        ///
+        /// A request that carries no total timeout of its own is given the core's
+        /// [`super::ClientConfig::timeout`], read now, which bounds it until its whole response body has
+        /// been read. An operation whose success response is a stream sends with [`send_streaming`]
+        /// instead.
         pub async fn send(
+            core: &ClientCore,
+            mut request: Request,
+        ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
+            if request.timeout().is_none() {
+                *request.timeout_mut() = core.config().timeout;
+            }
+            send_streaming(core, request).await
+        }
+        /// [`send`] for a request whose success response is read as a stream (an `EventStream`): the
+        /// core's [`super::ClientConfig::timeout`] is not applied, because a stream may rightly stay open
+        /// indefinitely. A total timeout the request carries itself still applies, and the client's
+        /// connect and read timeouts bound it as they bound every request. Non-generic.
+        pub async fn send_streaming(
             core: &ClientCore,
             request: Request,
         ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
@@ -4120,12 +4219,29 @@ mod support {
         }
         /// A request reqwest built, as the seam carries it. A URL that is not a valid URI is refused here
         /// as reqwest refuses it at `execute`, as a builder-kind error.
+        ///
+        /// The request's total timeout crosses with it: off `wasm32` reqwest keeps it among the request's
+        /// extensions, which the conversion carries; on `wasm32` it is a field the conversion drops, so it
+        /// is carried as a [`FetchTimeout`] extension, which [`request_into_reqwest`] reads back.
         pub(crate) fn request_from_reqwest(
             request: reqwest::Request,
         ) -> Result<http::Request<HttpBody>, reqwest::Error> {
+            #[cfg(target_arch = "wasm32")]
+            let timeout = request.timeout().copied();
             let request = http::Request::<reqwest::Body>::try_from(request)?;
-            Ok(request.map(HttpBody::from_reqwest_request))
+            #[allow(unused_mut)]
+            let mut request = request.map(HttpBody::from_reqwest_request);
+            #[cfg(target_arch = "wasm32")]
+            if let Some(timeout) = timeout {
+                request.extensions_mut().insert(FetchTimeout(timeout));
+            }
+            Ok(request)
         }
+        /// A request's total timeout as it crosses the seam on `wasm32`, where reqwest's own request
+        /// keeps it outside the extensions its conversion carries.
+        #[cfg(target_arch = "wasm32")]
+        #[derive(Clone, Copy, Debug)]
+        struct FetchTimeout(std::time::Duration);
         /// A copy of `request` to send again, its method, URI, version, headers, extensions and body
         /// alike; `None` when its body is a stream, which can be read only once.
         pub(crate) fn try_clone_request(
@@ -4145,9 +4261,22 @@ mod support {
             request: http::Request<HttpBody>,
         ) -> Result<reqwest::Request, TransportError> {
             let (parts, body) = request.into_parts();
+            #[cfg(target_arch = "wasm32")]
+            let timeout = parts
+                .extensions
+                .get::<FetchTimeout>()
+                .map(|timeout| timeout.0);
             let body = body.into_reqwest()?;
-            reqwest::Request::try_from(http::Request::from_parts(parts, body))
-                .map_err(TransportError::from_reqwest)
+            #[allow(unused_mut)]
+            let mut request = reqwest::Request::try_from(
+                    http::Request::from_parts(parts, body),
+                )
+                .map_err(TransportError::from_reqwest)?;
+            #[cfg(target_arch = "wasm32")]
+            if timeout.is_some() {
+                *request.timeout_mut() = timeout;
+            }
+            Ok(request)
         }
         /// A response reqwest received, as the seam carries it. Off `wasm32` the body is reqwest's own,
         /// read as it arrives; on `wasm32` it is the `fetch` response's, read whole unless `EventStream`
@@ -5588,7 +5717,7 @@ mod support {
         build_url_on, build_url_with_query_string_on, classify_error,
         classify_error_bytes, classify_error_text, classify_with, decode_success,
         decode_success_bytes, decode_success_text, decode_success_with, decode_text_body,
-        send, unexpected_status, StatusSpec,
+        send, send_streaming, unexpected_status, StatusSpec,
     };
     pub use error::{
         ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError,
@@ -9251,10 +9380,28 @@ pub struct Client {
 #[forbid(unsafe_code)]
 #[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
 impl Client {
+    /// Build a client on the default `ClientConfig`: a 30 s connect timeout, a 5 min read
+    /// (stall) timeout, and no total timeout. [`Self::with_config`] changes any of them.
     pub fn new(
         base_url: &str,
     ) -> Result<Self, support::Error<std::convert::Infallible>> {
-        Self::with_client(reqwest::Client::new(), base_url)
+        Self::with_config(base_url, |_| {})
+    }
+    /// Build a client whose `ClientConfig` is the default one as `configure` leaves it —
+    /// where the connect, read and total timeouts are tightened or loosened. Its
+    /// `reqwest::Client` is built from the connect and read timeouts as they are when
+    /// `configure` returns.
+    pub fn with_config(
+        base_url: &str,
+        configure: impl FnOnce(&mut support::ClientConfig),
+    ) -> Result<Self, support::Error<std::convert::Infallible>> {
+        let mut config = support::ClientConfig {
+            max_error_body: 65536usize,
+            ..support::ClientConfig::default()
+        };
+        configure(&mut config);
+        let core = support::ClientCore::with_config(base_url, config)?;
+        Ok(Self { core })
     }
     /// Build a client on the first server the specification declares, with every server
     /// variable at its declared default.
@@ -9264,6 +9411,9 @@ impl Client {
     > {
         Self::new(&servers::default_url())
     }
+    /// Build a client over a caller-supplied `reqwest::Client`, which both builds and
+    /// sends requests: your client's timeouts apply instead of `ClientConfig`'s connect
+    /// and read timeouts.
     pub fn with_client(
         client: reqwest::Client,
         base_url: &str,
@@ -9274,7 +9424,8 @@ impl Client {
     }
     /// Build a client over a caller-supplied transport backend — the injection point for
     /// retry, middleware, or a non-reqwest transport. Requests are still built on a default
-    /// `reqwest::Client`; only the execute step goes through the backend.
+    /// `reqwest::Client`; only the execute step goes through the backend, so connecting
+    /// and reading are bounded however the backend bounds them.
     pub fn with_backend(
         backend: std::sync::Arc<dyn support::HttpBackend>,
         base_url: &str,
@@ -11861,7 +12012,7 @@ Response `409`: binary error*/
         let mut request = self.core.http().request(reqwest::Method::GET, url);
         let request = request.build().map_err(support::Error::request_construction)?;
         let reconnect_request = request.try_clone();
-        let response = support::send(&self.core, request)
+        let response = support::send_streaming(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
@@ -11903,7 +12054,7 @@ Response `409`: binary error*/
         let mut request = self.core.http().request(reqwest::Method::GET, url);
         let request = request.build().map_err(support::Error::request_construction)?;
         let reconnect_request = request.try_clone();
-        let response = support::send(&self.core, request)
+        let response = support::send_streaming(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
@@ -11946,7 +12097,7 @@ Response `409`: binary error*/
         let mut request = self.core.http().request(reqwest::Method::GET, url);
         let request = request.build().map_err(support::Error::request_construction)?;
         let reconnect_request = request.try_clone();
-        let response = support::send(&self.core, request)
+        let response = support::send_streaming(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
@@ -13074,11 +13225,21 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         clippy::result_large_err
     )]
     impl BlockingClient {
-        /// Build a blocking client over a fresh default `reqwest::Client`.
+        /// Build a blocking client on the default `ClientConfig`, as `Client::new` does.
         pub fn new(
             base_url: &str,
         ) -> Result<Self, support::Error<std::convert::Infallible>> {
             let inner = Client::new(base_url)?;
+            let runtime = new_runtime()?;
+            Ok(Self { inner, runtime })
+        }
+        /// Build a blocking client whose `ClientConfig` is the default one as `configure`
+        /// leaves it, as `Client::with_config` does.
+        pub fn with_config(
+            base_url: &str,
+            configure: impl FnOnce(&mut support::ClientConfig),
+        ) -> Result<Self, support::Error<std::convert::Infallible>> {
+            let inner = Client::with_config(base_url, configure)?;
             let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
@@ -13092,7 +13253,8 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
-        /// Build a blocking client over a caller-supplied `reqwest::Client`.
+        /// Build a blocking client over a caller-supplied `reqwest::Client`, whose own
+        /// timeouts apply.
         pub fn with_client(
             client: reqwest::Client,
             base_url: &str,

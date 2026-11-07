@@ -162,6 +162,7 @@ impl ResponseHeaderNames {
 /// list to exactly the methods it emits.
 pub(crate) const CLIENT_METHODS: &[&str] = &[
     "new",
+    "with_config",
     "with_default_server",
     "with_client",
     "with_backend",

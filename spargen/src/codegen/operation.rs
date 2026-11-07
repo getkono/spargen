@@ -96,6 +96,13 @@ pub(super) fn emit_operation(
     let (success_decode, reconnect_request_init) =
         success_decode_tokens(operation, api, names, bindings, success_ty, error_ident);
     let url_accessor = emit_operation_url(operation_names, sig, &url_building);
+    // A streaming success response is exempt from the client's total timeout, which would cut a
+    // long-lived stream off; `send_streaming` is `send` without it.
+    let send = if operation.responses.stream_success().is_some() {
+        quote! { support::send_streaming }
+    } else {
+        quote! { support::send }
+    };
 
     quote! {
         #attrs
@@ -120,7 +127,7 @@ pub(super) fn emit_operation(
                 .build()
                 .map_err(support::Error::request_construction)?;
             #reconnect_request_init
-            let response = support::send(&self.core, #request_binding)
+            let response = #send(&self.core, #request_binding)
                 .await
                 .map_err(support::Error::widen)?;
             if response.status().is_success() {
