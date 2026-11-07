@@ -244,14 +244,21 @@ fn the_macro_preview_emits_the_module_generate_writes() {
         preview.report
     );
     let contents = preview.contents.expect("a generated module");
-    // The non-default cap reaches both client constructors that set it (`with_client` and
-    // `with_backend`), so the parity below compares a module that carries it.
+    // The non-default cap reaches every client constructor that sets it: `with_config` (which
+    // `new` builds through) as the `ClientConfig` field it starts from, and `with_client` and
+    // `with_backend` through `config_mut`, so the parity below compares a module that carries it.
+    assert_eq!(
+        contents.matches("max_error_body: 4096usize,").count(),
+        1,
+        "the configured error_body_cap must reach `with_config`'s starting config"
+    );
     assert_eq!(
         contents.matches("max_error_body = 4096usize;").count(),
         2,
-        "the configured error_body_cap must reach every constructor"
+        "the configured error_body_cap must reach `with_client` and `with_backend`"
     );
     assert!(!contents.contains("max_error_body = 65536usize"));
+    assert!(!contents.contains("max_error_body: 65536usize"));
     // `generate` adds only the build cache's two digest lines above the rendered module.
     let mut lines = written.splitn(3, '\n');
     assert!(lines.next().unwrap().starts_with("// input-sha256: "));
