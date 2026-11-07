@@ -1826,7 +1826,7 @@ dependencies = [
 
 [[package]]
 name = "spargen"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "camino",
  "cfg-expr",
@@ -1856,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "spargen-macro"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1905,7 +1905,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "support-runtime"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "allocation-counter",
  "bytes",
