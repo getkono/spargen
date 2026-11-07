@@ -282,7 +282,7 @@ paths:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        code.contains("pub struct RequestBodyimage(pub bytes::Bytes);"),
+        code.contains("pub struct RequestBodyImage(pub bytes::Bytes);"),
         "{code}"
     );
     assert!(
