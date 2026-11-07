@@ -308,7 +308,7 @@ mod support {
                 AuthKind::ApiKeyQuery(name) => {
                     match token {
                         Some(token) => {
-                            Ok(request.query(&[(name, token.expose_secret())]))
+                            append_query_pair(request, name, token.expose_secret())
                         }
                         None => {
                             Err(credential_mismatch(scheme.name, "apiKey", credential))
@@ -327,6 +327,21 @@ mod support {
                     }
                 }
             }
+        }
+        /// Append `name=value` to the request URL's query, `application/x-www-form-urlencoded` as reqwest's
+        /// `RequestBuilder::query` encodes it, after whatever query the URL already carries. Written
+        /// against the built request because `query` needs reqwest's `query` feature, which would add
+        /// `serde_urlencoded` to every consumer's graph. A builder that already failed reports that
+        /// failure here, as the request-construction error `build` would have raised.
+        fn append_query_pair(
+            request: RequestBuilder,
+            name: &str,
+            value: &str,
+        ) -> Result<RequestBuilder, Error<Infallible>> {
+            let (client, request) = request.build_split();
+            let mut request = request.map_err(Error::request_construction)?;
+            request.url_mut().query_pairs_mut().append_pair(name, value);
+            Ok(RequestBuilder::from_parts(client, request))
         }
         /// Add `name=value` to the request's one `Cookie` header. RFC 6265 §5.4 allows a user agent a
         /// single `Cookie` header, and `RequestBuilder::header` appends a second, so the cookie joins any
