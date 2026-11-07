@@ -2,7 +2,9 @@ use crate::tests::{core, poll_ready, response, Chunk, Chunks};
 use crate::{ClientCore, RequestError};
 use bytes::Bytes;
 
-use super::{build_url_on, build_url_with_query_string_on, is_dot_segment, StatusSpec};
+use super::{
+    append_query, build_url_on, build_url_with_query_string_on, is_dot_segment, StatusSpec,
+};
 
 fn core_at(base: &str) -> ClientCore {
     ClientCore::new(base).unwrap()
@@ -1209,4 +1211,39 @@ proptest::proptest! {
             proptest::prop_assert_eq!(single_line(error), Ok(()));
         }
     }
+}
+
+/// `append_query` builds the joined query in one buffer: one allocation beyond what `Url` itself
+/// spends storing that same query, where joining the fragments and then formatting them after the
+/// URL's existing query took two.
+#[test]
+fn append_query_joins_the_fragments_in_one_allocation() {
+    let base = reqwest::Url::parse("https://example.com/pets?limit=5").unwrap();
+    let fragments = ["tags=a", "tags=b", "sort=name"].map(String::from);
+    let mut appended = base.clone();
+    let append_info = allocation_counter::measure(|| append_query(&mut appended, &fragments));
+    let mut stored = base.clone();
+    let store_info =
+        allocation_counter::measure(|| stored.set_query(Some("limit=5&tags=a&tags=b&sort=name")));
+    assert_eq!(appended.as_str(), stored.as_str());
+    assert_eq!(
+        append_info.count_total,
+        store_info.count_total + 1,
+        "append: {append_info:?}, store: {store_info:?}"
+    );
+    // That one buffer is exactly the joined query's length: no byte reserved beyond it.
+    let joined = "limit=5&tags=a&tags=b&sort=name".len() as u64;
+    assert_eq!(
+        append_info.bytes_total,
+        store_info.bytes_total + joined,
+        "append: {append_info:?}, store: {store_info:?}"
+    );
+}
+
+#[test]
+fn append_query_leaves_the_url_alone_without_fragments() {
+    let mut url = reqwest::Url::parse("https://example.com/pets?limit=5").unwrap();
+    let info = allocation_counter::measure(|| append_query::<String>(&mut url, &[]));
+    assert_eq!(url.as_str(), "https://example.com/pets?limit=5");
+    assert_eq!(info.count_total, 0, "{info:?}");
 }

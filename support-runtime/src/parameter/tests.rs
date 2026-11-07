@@ -1040,3 +1040,69 @@ proptest::proptest! {
         }
     }
 }
+
+/// A join whose items need no escaping fills the one buffer it starts with: one allocation,
+/// whatever the item count, where collecting each item into a `Vec<String>` and joining it took
+/// one per item, one for the `Vec` and one for the join.
+#[test]
+fn join_scalars_writes_unescaped_items_into_one_allocation() {
+    let Value::Array(values) = serde_json::json!(["blue", 7, true, -1.5, null, "brown"]) else {
+        unreachable!()
+    };
+    let mut joined = None;
+    let info = allocation_counter::measure(|| {
+        joined = Some(join_scalars(values.iter(), ",", U).unwrap());
+    });
+    assert_eq!(joined.as_deref(), Some("blue,7,true,-1.5,,brown"));
+    assert_eq!(info.count_total, 1, "{info:?}");
+    // The buffer is sized, and allocated once, at each item's longest unescaped rendering (a
+    // string's length, `false`'s five bytes for a bool, 24 for a number, none for `null`) plus
+    // one separator.
+    let sized = [4, 24, 5, 24, 0, 5]
+        .map(|hint: u64| hint + 1)
+        .iter()
+        .sum::<u64>();
+    assert_eq!(info.bytes_total, sized, "{info:?}");
+}
+
+#[test]
+fn object_flat_writes_unescaped_members_into_one_allocation() {
+    let Value::Object(values) = object() else {
+        unreachable!()
+    };
+    let mut flat = None;
+    let info = allocation_counter::measure(|| {
+        flat = Some(object_flat(&values, "%20", U).unwrap());
+    });
+    assert_eq!(flat.as_deref(), Some("B%20150%20G%20200%20R%20100"));
+    assert_eq!(info.count_total, 1, "{info:?}");
+    // Each member reserves its key, its value's longest unescaped rendering (24 for a number) and
+    // two separators.
+    let sized = 3 * (1 + 24 + 2 * "%20".len() as u64);
+    assert_eq!(info.bytes_total, sized, "{info:?}");
+}
+
+/// Escaping lengthens the rendering past the buffer's starting capacity, so the buffer grows;
+/// each growth at least doubles it, so the count stays far below one allocation per item.
+#[test]
+fn join_scalars_and_object_flat_grow_one_buffer_when_items_need_escaping() {
+    let values: Vec<Value> = (0..64).map(|_| Value::from("a b")).collect();
+    let members: Map<String, Value> = (0..64)
+        .map(|index| (format!("k {index:02}"), Value::from("a b")))
+        .collect();
+    let mut joined = None;
+    let mut flat = None;
+    let joined_info = allocation_counter::measure(|| {
+        joined = Some(join_scalars(values.iter(), ",", U).unwrap());
+    });
+    let flat_info = allocation_counter::measure(|| {
+        flat = Some(object_flat(&members, ",", U).unwrap());
+    });
+    assert_eq!(joined, Some(vec!["a%20b"; 64].join(",")));
+    assert!(flat
+        .as_deref()
+        .unwrap()
+        .starts_with("k%2000,a%20b,k%2001,a%20b,"));
+    assert!(joined_info.count_total <= 2, "{joined_info:?}");
+    assert!(flat_info.count_total <= 2, "{flat_info:?}");
+}

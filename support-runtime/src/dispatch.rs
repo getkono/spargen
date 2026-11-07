@@ -111,19 +111,31 @@ fn base_for(core: &ClientCore, server: Option<&str>) -> Result<Url, Error<Infall
     }
 }
 
-/// Append pre-encoded fragments to a URL, preserving any query the base URL already carried.
-fn append_query(url: &mut Url, query: &[String]) {
-    if !query.is_empty() {
-        append_query_text(url, &query.join("&"));
+/// Append pre-encoded fragments to a URL, `&`-joined after any non-empty query the URL already
+/// carried. The new query is written into one buffer of exactly its length, and an empty `query`
+/// leaves the URL as it was.
+fn append_query<S: AsRef<str>>(url: &mut Url, query: &[S]) {
+    if query.is_empty() {
+        return;
     }
-}
-
-/// Append pre-encoded query text to a URL, after an `&` where it already carries a non-empty query.
-fn append_query_text(url: &mut Url, text: &str) {
-    let joined = match url.query() {
-        Some(existing) if !existing.is_empty() => format!("{existing}&{text}"),
-        _ => text.to_owned(),
-    };
+    let existing = url.query().filter(|existing| !existing.is_empty());
+    let capacity = existing.map_or(0, |existing| existing.len() + 1)
+        + query
+            .iter()
+            .map(|fragment| fragment.as_ref().len())
+            .sum::<usize>()
+        + (query.len() - 1);
+    let mut joined = String::with_capacity(capacity);
+    if let Some(existing) = existing {
+        joined.push_str(existing);
+        joined.push('&');
+    }
+    for (index, fragment) in query.iter().enumerate() {
+        if index > 0 {
+            joined.push('&');
+        }
+        joined.push_str(fragment.as_ref());
+    }
     url.set_query(Some(&joined));
 }
 
@@ -143,7 +155,7 @@ pub fn build_url_with_query_string_on(
     url.set_query(None);
     append_query(&mut url, query);
     if let Some(query_string) = query_string {
-        append_query_text(&mut url, query_string);
+        append_query(&mut url, &[query_string]);
     }
     Ok(url)
 }
