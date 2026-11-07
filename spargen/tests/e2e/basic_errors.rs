@@ -147,6 +147,25 @@ fn without_credential_unregisters_a_scheme_on_a_derived_client() {
     }
 }
 
+// Issue #1234: `with_timeout` sets the total timeout of the client value it derives, which `send`
+// reads per request, and leaves the client it was cloned from as it was; `None` clears a total
+// timeout `with_config` set.
+#[test]
+fn with_timeout_sets_the_total_timeout_of_a_derived_client() {
+    let base = basic_client::Client::new("http://127.0.0.1:1").unwrap();
+    let upload = base.clone().with_timeout(Some(std::time::Duration::from_secs(300)));
+    assert_eq!(base.core().config().timeout, None);
+    assert_eq!(upload.core().config().timeout, Some(std::time::Duration::from_secs(300)));
+
+    let bounded = basic_client::Client::with_config("http://127.0.0.1:1", |config| {
+        config.timeout = Some(std::time::Duration::from_secs(15));
+    })
+    .unwrap();
+    let unbounded = bounded.clone().with_timeout(None);
+    assert_eq!(bounded.core().config().timeout, Some(std::time::Duration::from_secs(15)));
+    assert_eq!(unbounded.core().config().timeout, None);
+}
+
 // The reason the payload is `Vec<Vec<&str>>` and not the flat `Vec<&str>` the issue proposed: an
 // alternative is a conjunction, and flattening loses which schemes must be presented *together*.
 // This is the only place a generated client is driven to produce that shape. It also pins the two

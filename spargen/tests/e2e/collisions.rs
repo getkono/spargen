@@ -93,6 +93,8 @@ paths:
     get: { operationId: withCredential, responses: { "204": { description: ok } } }
   /without-credential:
     get: { operationId: withoutCredential, responses: { "204": { description: ok } } }
+  /with-timeout:
+    get: { operationId: withTimeout, responses: { "204": { description: ok } } }
   /inner:
     get: { operationId: inner, responses: { "204": { description: ok } } }
 components:
@@ -166,6 +168,7 @@ fn reserved_spellings_compile_together() {
         "core",
         "with_credential",
         "without_credential",
+        "with_timeout",
         "inner",
     ] {
         assert!(

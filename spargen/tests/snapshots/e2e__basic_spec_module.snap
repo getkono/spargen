@@ -459,7 +459,8 @@ mod support {
             ///
             /// It is read each time [`super::send`] sends a request, so changing it through
             /// [`ClientCore::config_mut`] applies from the next request on, whichever constructor built
-            /// the core, and it is honoured on `wasm32` too. It travels on the request itself: a request
+            /// the core, and it is honoured on `wasm32` too. A generated client's `with_timeout` sets it
+            /// on the client value it returns, which is how one call gets a deadline of its own. It travels on the request itself: a request
             /// built with its own `reqwest::RequestBuilder::timeout` keeps that one,
             /// [`ReqwestBackend`] enforces it, and a caller-supplied [`HttpBackend`] that runs the
             /// request on a `reqwest::Client` enforces it as well. A streaming response is exempt,
@@ -9477,6 +9478,20 @@ impl Client {
         self.core.remove_credential(scheme);
         self
     }
+    /// Set the total timeout of every call made through this client value, replacing
+    /// `ClientConfig::timeout` from `with_config` (or the default, none): a call that has
+    /// not read its whole response within it fails with
+    /// `Error::Timeout(TimeoutKind::Total)`. `None` sets no total bound of this client's
+    /// own; the connect and read timeouts still apply, and so does a total timeout set on
+    /// a `reqwest::Client` injected with `with_client`, which a request cannot lift. An
+    /// operation returning an `EventStream` is exempt, as it is from
+    /// `ClientConfig::timeout`, since a stream may rightly stay open indefinitely. Derive
+    /// a client for a different deadline: `client.clone().with_timeout(Some(duration))`.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.core.config_mut().timeout = timeout;
+        self
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn read_file(
@@ -13314,6 +13329,15 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         #[must_use]
         pub fn without_credential(mut self, scheme: &str) -> Self {
             self.inner = self.inner.without_credential(scheme);
+            self
+        }
+        /// Set the total timeout of every call made through this client value (mirrors the
+        /// async client's `with_timeout`): an elapsed one is
+        /// `Error::Timeout(TimeoutKind::Total)`, `None` sets no total bound of its own, and
+        /// an operation returning an `EventStream` is exempt.
+        #[must_use]
+        pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+            self.inner = self.inner.with_timeout(timeout);
             self
         }
         ///Response `204`: No Content

@@ -126,6 +126,96 @@ fn an_elapsed_total_timeout_is_classified_as_total() {
     server.join().unwrap();
 }
 
+/// Accept one connection on a fresh listener and hold it open without answering until the client
+/// hangs up, so the only way a call against it ends is a timeout.
+fn serve_silence() -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 2048];
+        while stream.read(&mut buf).map(|read| read > 0).unwrap_or(false) {}
+    });
+    (format!("http://{addr}"), server)
+}
+
+// Issue #1234: `with_timeout` bounds every call of the client value it derives, and an elapsed one
+// is `TimeoutKind::Total` like any other total timeout — on a client `new` built, and over a
+// longer total timeout an injected `reqwest::Client` carries, which the request's own overrides.
+#[test]
+fn with_timeout_bounds_each_call_as_a_total_timeout() {
+    let (base, server) = serve_silence();
+    let client = basic_client::BlockingClient::new(&base)
+        .unwrap()
+        .with_timeout(Some(std::time::Duration::from_millis(200)));
+    let outcome = client.get_multi();
+    drop(client);
+    match outcome {
+        Err(basic_client::Error::Timeout(kind)) => {
+            assert_eq!(kind, basic_client::TimeoutKind::Total);
+        }
+        other => panic!("expected a total timeout, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_silence();
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let client = basic_client::BlockingClient::with_client(http, &base)
+        .unwrap()
+        .with_timeout(Some(std::time::Duration::from_millis(200)));
+    let started = std::time::Instant::now();
+    let outcome = client.get_multi();
+    drop(client);
+    match outcome {
+        Err(basic_client::Error::Timeout(kind)) => {
+            assert_eq!(kind, basic_client::TimeoutKind::Total);
+        }
+        other => panic!("expected a total timeout, got {other:?}"),
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    server.join().unwrap();
+}
+
+// `with_timeout(None)` lifts the total timeout `with_config` set: a response slower than that
+// configured bound still arrives.
+#[test]
+fn with_timeout_none_lifts_the_configured_total_timeout() {
+    use std::io::Write;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 2048];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buf).unwrap();
+            assert!(read > 0, "the client hung up before sending its request");
+            request.extend_from_slice(&buf[..read]);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let body = br#"{"ok":"yes"}"#;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+    });
+
+    let client = basic_client::BlockingClient::with_config(&format!("http://{addr}"), |config| {
+        config.timeout = Some(std::time::Duration::from_millis(200));
+    })
+    .unwrap()
+    .with_timeout(None);
+    assert_eq!(client.core().config().timeout, None);
+    let response = client.get_multi().expect("no total timeout cuts the slow response off");
+    assert_eq!(response.status(), 200);
+    server.join().unwrap();
+}
+
 #[test]
 fn typed_parameters_follow_openapi_wire_rules() {
     let (base, server) = serve_no_content();

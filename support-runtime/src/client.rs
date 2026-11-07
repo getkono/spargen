@@ -70,7 +70,8 @@ pub struct ClientConfig {
     ///
     /// It is read each time [`crate::send`] sends a request, so changing it through
     /// [`ClientCore::config_mut`] applies from the next request on, whichever constructor built
-    /// the core, and it is honoured on `wasm32` too. It travels on the request itself: a request
+    /// the core, and it is honoured on `wasm32` too. A generated client's `with_timeout` sets it
+    /// on the client value it returns, which is how one call gets a deadline of its own. It travels on the request itself: a request
     /// built with its own `reqwest::RequestBuilder::timeout` keeps that one,
     /// [`ReqwestBackend`] enforces it, and a caller-supplied [`HttpBackend`] that runs the
     /// request on a `reqwest::Client` enforces it as well. A streaming response is exempt,
