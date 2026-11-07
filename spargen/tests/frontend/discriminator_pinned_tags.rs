@@ -187,6 +187,46 @@ fn a_component_named_like_a_numbered_variant_keeps_its_name() {
     assert!(!types.contains("SrcMagnetUri"), "{types}");
 }
 
+/// The bundle-target half of [`a_component_named_like_a_numbered_variant_keeps_its_name`]: the
+/// schema the pinned `magnet` member first lowers is declared in `lib.yaml`, not the root, and its
+/// name hint still starts with `SrcVariant0`. A bundle target is a declared schema shared by every
+/// use, so it and its nested inline union keep their names while the member is still renamed.
+#[test]
+fn a_bundle_target_named_like_a_numbered_variant_keeps_its_name() {
+    let root = "openapi: 3.1.0\n\
+                info: { title: T, version: 1.0.0 }\n\
+                paths: {}\n\
+                components:\n  \
+                schemas:\n    \
+                Src:\n      \
+                oneOf:\n        \
+                - { type: object, required: [type, uri], properties: { type: { const: magnet }, uri: { $ref: './lib.yaml#/components/schemas/SrcVariant0Uri' }, note: { type: string } } }\n        \
+                - { type: object, required: [type, path], properties: { type: { const: file }, path: { type: string } } }\n      \
+                discriminator:\n        \
+                propertyName: type\n";
+    let lib = "components:\n  \
+               schemas:\n    \
+               SrcVariant0Uri: { type: object, required: [href], properties: { href: { type: string }, rel: { oneOf: [{ type: string }, { type: integer }] } } }\n";
+    let (report, _, code) = generate_and_check_files(&[("openapi.yaml", root), ("lib.yaml", lib)]);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    assert!(
+        types.contains("Magnet(Box<SrcMagnet>),") && types.contains("File(Box<SrcFile>),"),
+        "{types}"
+    );
+    assert!(
+        types.contains("pub uri: SrcVariant0Uri,"),
+        "the member's field still names the bundle target: {types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "SrcVariant0Uri"),
+        ["href", "rel"],
+        "{types}"
+    );
+    assert!(types.contains("pub enum SrcVariant0UriRel {"), "{types}");
+    assert!(!types.contains("SrcMagnetUri"), "{types}");
+}
+
 /// The pinned value of #1001 selects a member only where it is the one value every payload the
 /// member accepts carries, and nothing else claims it. A tag property that is optional, nullable,
 /// or admits several values pins nothing; a value a `mapping` key, another member's tag, or another
