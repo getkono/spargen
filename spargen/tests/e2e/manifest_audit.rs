@@ -1316,7 +1316,7 @@ paths:
 
 /// A union met with an `allOf`'s other members is lowered on its own first, and the branch the
 /// meet drops is withheld from the output (#561). A `format: date`, `format: uuid` or
-/// `contentEncoding` bytes branch that only that withheld lowering holds is no type of the client,
+/// `format: binary` bytes branch that only that withheld lowering holds is no type of the client,
 /// so it declares neither the `time` nor the `uuid` dependency nor the `bytes` `serde` feature, and
 /// embeds no RFC 3339 newtype. Each spec's control keeps the branch, so the same spelling is shown
 /// to reach the requirement.
@@ -1348,7 +1348,7 @@ components:
     }
     let date = "{ type: string, format: date }";
     let uuid = "{ type: string, format: uuid }";
-    let bytes = "{ type: string, contentEncoding: base64 }";
+    let bytes = "{ type: string, format: binary }";
     for (branch, needle) in [(date, "time ="), (uuid, "uuid ="), (bytes, "\"serde\"")] {
         // The control: met with an object, the object branch survives the meet.
         let kept = spec(branch, "{ type: object }");

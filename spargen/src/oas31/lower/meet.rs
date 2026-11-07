@@ -325,14 +325,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the enclosing position's answer holds.
             (TypeKind::Union(union), _) => self.intersect_with_union(a, union, b, hint),
             (_, TypeKind::Union(union)) => self.intersect_with_union(b, union, a, hint),
-            (TypeKind::Bytes, TypeKind::Bytes) => Ok(non_nullable(a)),
+            // `contentEncoding: base64` fixes the value's text form, which `format: binary` leaves
+            // open, so the base64 side is the meet, as it is when both sit on one schema.
+            (TypeKind::Bytes(_), TypeKind::Bytes(crate::ir::BytesEncoding::Base64)) => {
+                Ok(non_nullable(b))
+            }
+            (TypeKind::Bytes(_), TypeKind::Bytes(_)) => Ok(non_nullable(a)),
             // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
             // string conjoined with it is the binary content: `{$ref: Data, format: binary}` over a
             // string `Data` lowers exactly as the inline `{type: string, format: binary}` does. Only
             // the unformatted string: `uuid` and the date formats carry a decoded representation of
             // their own that `Bytes` cannot also be, so that pair is unrepresentable (`no_meet`).
-            (TypeKind::Bytes, TypeKind::Primitive(Prim::String)) => Ok(non_nullable(a)),
-            (TypeKind::Primitive(Prim::String), TypeKind::Bytes) => Ok(non_nullable(b)),
+            (TypeKind::Bytes(_), TypeKind::Primitive(Prim::String)) => Ok(non_nullable(a)),
+            (TypeKind::Primitive(Prim::String), TypeKind::Bytes(_)) => Ok(non_nullable(b)),
             _ => Err(no_meet(a_kind, b_kind)),
         }
     }
@@ -583,7 +588,7 @@ pub(super) enum NoMeet {
 pub(super) fn value_category(kind: &TypeKind) -> Option<JsonCategory> {
     match kind {
         TypeKind::Primitive(primitive) => Some(primitive_category(*primitive)),
-        TypeKind::Bytes => Some(JsonCategory::String),
+        TypeKind::Bytes(_) => Some(JsonCategory::String),
         TypeKind::Enum(enumeration) => Some(repr_category(enumeration.repr)),
         TypeKind::Array(_) | TypeKind::Tuple(_) => Some(JsonCategory::Array),
         TypeKind::Struct(_) => Some(JsonCategory::Object),

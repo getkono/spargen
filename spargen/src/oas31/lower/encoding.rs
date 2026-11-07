@@ -499,7 +499,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// How a property's value is rendered into bytes, from its lowered type alone.
     fn natural_codec(&self, ty: Ty) -> MediaType {
         match self.kind_of(ty.id) {
-            Some(TypeKind::Bytes) => MediaType::OctetStream,
+            Some(TypeKind::Bytes(_)) => MediaType::OctetStream,
             Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => MediaType::Text,
             // Encodings are lowered per operation, after every component the body reaches is
             // filled, so this is not expected. Were it reached, JSON is the codec that renders any
@@ -513,7 +513,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The Encoding Object's default `contentType` for a property, from its lowered type.
     fn default_content_type(&self, ty: Ty) -> String {
         match self.kind_of(ty.id) {
-            Some(TypeKind::Bytes) => "application/octet-stream".to_owned(),
+            Some(TypeKind::Bytes(_)) => "application/octet-stream".to_owned(),
             Some(TypeKind::Struct(_)) | Some(TypeKind::Union(_)) | Some(TypeKind::Any) => {
                 "application/json".to_owned()
             }

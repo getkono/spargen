@@ -51,9 +51,9 @@ paths:
               schema: { type: string }
 "##;
 
-/// A body in XML, a sequential response, and a date-time field: every conditionally embedded runtime
-/// module and every conditional re-export is emitted. `{collisions}` is replaced with operations
-/// whose IDs would name an error type after a root re-export.
+/// A body in XML, a sequential response, a date-time field and a base64 field: every conditionally
+/// embedded runtime module and every conditional re-export is emitted. `{collisions}` is replaced
+/// with operations whose IDs would name an error type after a root re-export.
 const FULL_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: Full, version: 1.0.0 }
@@ -99,6 +99,7 @@ components:
       required: [at]
       properties:
         at: { type: string, format: date-time }
+        blob: { type: string, contentEncoding: base64 }
 "##;
 
 /// Generate `spec` and parse the emitted module.

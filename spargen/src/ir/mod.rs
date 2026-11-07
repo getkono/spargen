@@ -36,9 +36,10 @@ pub(crate) use responses::{
     SuccessShape,
 };
 pub(crate) use types::{
-    AdditionalProps, DefaultValue, DisjointFeature, Field, FieldDefault, JsonCategory, Openness,
-    Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef, TypeId, TypeKind,
-    Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch, XmlField,
+    AdditionalProps, BytesEncoding, DefaultValue, DisjointFeature, Field, FieldDefault,
+    JsonCategory, Openness, Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty,
+    TypeDef, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch,
+    XmlField,
 };
 
 /// The whole lowered API: the single artifact frontends produce and backends consume.
@@ -67,6 +68,8 @@ pub(crate) struct RuntimeFeatures {
     pub(crate) streams: bool,
     /// The RFC 3339 `Date`/`DateTime` newtypes: [`Api::uses_time`], with the `time` mapping on.
     pub(crate) time: bool,
+    /// The `contentEncoding: base64` codec: [`Api::uses_base64`].
+    pub(crate) base64: bool,
 }
 
 impl Api {
@@ -78,7 +81,17 @@ impl Api {
             xml: self.uses_xml(),
             streams: self.uses_streams(),
             time: time_mapping && self.uses_time(),
+            base64: self.uses_base64(),
         }
+    }
+
+    /// Whether the types the output carries contain a `contentEncoding: base64` definition, each
+    /// emitted as a newtype whose serde form the embedded `base64` runtime module writes and reads.
+    /// An [elided](TypeGraph::elide) definition is no type of the output, so it counts for nothing.
+    pub(crate) fn uses_base64(&self) -> bool {
+        self.types.emitted().any(|(_, definition)| {
+            matches!(definition.kind, TypeKind::Bytes(BytesEncoding::Base64))
+        })
     }
 
     /// Whether any operation uses an `application/xml` / `text/xml` request or response body. Drives
@@ -122,10 +135,12 @@ impl Api {
             .any(|operation| operation.responses.stream_success().is_some())
     }
 
-    /// Whether generated code serializes or deserializes a `bytes` value through serde: a model
-    /// field, additional-properties value or union variant containing one, a JSON `content`
-    /// parameter containing one, or a serde-encoded body (JSON, form, XML or a sequential stream)
-    /// containing one other than a whole non-streaming `bytes` body, which is sent and read raw.
+    /// Whether generated code serializes or deserializes a `bytes` value through `bytes`' own serde
+    /// impls: a model field, additional-properties value or union variant containing one, a JSON
+    /// `content` parameter containing one, or a serde-encoded body (JSON, form, XML or a
+    /// sequential stream) containing one other than a whole non-streaming `bytes` body, which is
+    /// sent and read raw. Only raw bytes count: a `contentEncoding: base64` value is a newtype
+    /// whose serde impls are the embedded base64 codec's ([`Api::uses_base64`]).
     /// Drives the `serde` feature of the `bytes` requirement. Only the models the output carries
     /// count: an [elided](TypeGraph::elide) definition is none of them (#723).
     pub(crate) fn uses_bytes_serde(&self) -> bool {
@@ -169,7 +184,7 @@ impl Api {
             && (media.stream_framing().is_some()
                 || !matches!(
                     self.types.get(id).map(|definition| &definition.kind),
-                    Some(TypeKind::Bytes)
+                    Some(TypeKind::Bytes(_))
                 ))
             && contains_bytes(&self.types, id, &mut BTreeSet::new())
     }
@@ -192,7 +207,10 @@ fn contains_bytes(types: &TypeGraph, id: TypeId, visiting: &mut BTreeSet<TypeId>
         return false;
     }
     let contains = match types.get(id).map(|definition| &definition.kind) {
-        Some(TypeKind::Bytes) => true,
+        Some(TypeKind::Bytes(BytesEncoding::Raw)) => true,
+        // A base64 newtype's serde impls call the embedded codec over the bytes, never `bytes`'
+        // own (#1230).
+        Some(TypeKind::Bytes(BytesEncoding::Base64)) => false,
         Some(TypeKind::Struct(object)) => {
             object
                 .fields
@@ -344,7 +362,7 @@ mod tests {
     }
 
     fn bytes(api: &mut Api) -> Ty {
-        insert(api, TypeKind::Bytes)
+        insert(api, TypeKind::Bytes(super::BytesEncoding::Raw))
     }
 
     fn string(api: &mut Api) -> Ty {
@@ -747,9 +765,84 @@ mod tests {
                     },
                     false,
                 ),
+                (
+                    "a model field of base64 bytes, whose newtype is serialized by the codec",
+                    |api| {
+                        let item = base64(api);
+                        object(api, item, AdditionalProps::Allow);
+                    },
+                    false,
+                ),
+                (
+                    "a JSON request body over an array of base64 bytes",
+                    |api| {
+                        let item = base64(api);
+                        let ty = insert(api, TypeKind::Array(Box::new(item)));
+                        request(api, MediaType::Json, ty);
+                    },
+                    false,
+                ),
+                (
+                    "an event stream of base64 items",
+                    |api| {
+                        let ty = base64(api);
+                        respond(api, OK, MediaType::EventStream, ty);
+                    },
+                    false,
+                ),
             ],
             Api::uses_bytes_serde,
         );
+    }
+
+    /// The base64 codec is embedded exactly when a base64 definition the output carries exists,
+    /// wherever it sits; raw bytes and an elided base64 definition do not embed it.
+    #[test]
+    fn uses_base64_follows_the_table() {
+        check(
+            &[
+                ("no type", |_| {}, false),
+                (
+                    "raw bytes",
+                    |api| {
+                        let item = bytes(api);
+                        object(api, item, AdditionalProps::Allow);
+                    },
+                    false,
+                ),
+                (
+                    "a base64 definition referenced by nothing",
+                    |api| {
+                        base64(api);
+                    },
+                    true,
+                ),
+                (
+                    "a model field of base64 bytes",
+                    |api| {
+                        let item = base64(api);
+                        object(api, item, AdditionalProps::Allow);
+                    },
+                    true,
+                ),
+                (
+                    "an elided base64 definition",
+                    |api| {
+                        let ty = base64(api);
+                        api.types.elide(ty.id);
+                    },
+                    false,
+                ),
+            ],
+            Api::uses_base64,
+        );
+        let mut api = api();
+        base64(&mut api);
+        assert!(api.runtime_features(false).base64);
+    }
+
+    fn base64(api: &mut Api) -> Ty {
+        insert(api, TypeKind::Bytes(super::BytesEncoding::Base64))
     }
 
     fn parameter(ty: Ty, style: ParamStyle) -> Parameter {

@@ -26,7 +26,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// lowering inserted and nothing else reaches, so it is not emitted as a public type nothing
     /// refers to (#927); a component the parameter `$ref`s stays, since its memo holds it.
     fn remap_binary_param(&mut self, ty: Ty, hint: &str, mark: u32) -> Ty {
-        if matches!(self.kind_of(ty.id), Some(TypeKind::Bytes)) {
+        if matches!(self.kind_of(ty.id), Some(TypeKind::Bytes(_))) {
             let lowered = mark..self.graph_mark();
             self.elide_unused_lowering(lowered);
             let mut remapped = self.insert_type(
@@ -756,7 +756,7 @@ impl StyleDomain {
             TypeKind::Reserved
             | TypeKind::Primitive(_)
             | TypeKind::Enum(_)
-            | TypeKind::Bytes
+            | TypeKind::Bytes(_)
             | TypeKind::Never
             | TypeKind::Any => false,
         }
@@ -781,7 +781,7 @@ fn parameter_shape_supported_inner(
         return false;
     };
     let supported = match &definition.kind {
-        TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Bytes | TypeKind::Null => true,
+        TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Bytes(_) | TypeKind::Null => true,
         TypeKind::Array(item) if !scalar_only => {
             parameter_shape_supported_inner(graph, **item, true, visiting)
         }

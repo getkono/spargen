@@ -1405,8 +1405,9 @@ paths:
 fn a_nullable_byte_string_keeps_its_null_outside_a_raw_body() {
     // `type: [string, 'null']` with `format: binary` or `contentEncoding: base64` is `bytes::Bytes`
     // that also admits `null`, exactly as the union spelling is. Where the value is a JSON member,
-    // or a multipart part, `null` has a representation, so the field is `Option<bytes::Bytes>` —
-    // it used to be plain `Bytes`, which rejects the very `null` the schema allows.
+    // or a multipart part, `null` has a representation, so the field is an `Option` — it used to
+    // be plain `Bytes`, which rejects the very `null` the schema allows. A base64 member is the
+    // newtype that writes and reads the base64 text (#1230).
     let (report, code) = generate_with_code(
         r#"
 openapi: 3.1.0
@@ -1431,7 +1432,7 @@ paths:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        code.contains("pub type RequestBodyTyped = bytes::Bytes;"),
+        code.contains("pub struct RequestBodyTyped(pub bytes::Bytes);"),
         "{code}"
     );
     assert!(

@@ -249,7 +249,7 @@ pub(super) fn kind_edges(kind: &TypeKind) -> Vec<TypeId> {
         TypeKind::Reserved
         | TypeKind::Primitive(_)
         | TypeKind::Enum(_)
-        | TypeKind::Bytes
+        | TypeKind::Bytes(_)
         | TypeKind::Null
         | TypeKind::Never
         | TypeKind::Any => Vec::new(),

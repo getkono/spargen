@@ -5,8 +5,8 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::ir::{
-    AdditionalProps, Api, Emission, Field, ScalarRepr, ScalarValue, Ty, TypeDef, TypeGraph,
-    TypeKind,
+    AdditionalProps, Api, BytesEncoding, Emission, Field, ScalarRepr, ScalarValue, Ty, TypeDef,
+    TypeGraph, TypeKind,
 };
 use crate::name::Names;
 
@@ -290,6 +290,7 @@ fn emit_type_def(
             }
         }
         Emission::Union(union) => emit_union(id, ident, union, types, names, docs, deprecated),
+        Emission::Base64 => emit_base64_newtype(ident, docs, deprecated),
         // An array or tuple that reaches itself again through aliases alone cannot be an alias:
         // rustc expands an alias eagerly, so `pub type Node = Vec<Node>;` is a cycle (`E0391`). A
         // transparent newtype is nominal, which stops the expansion, and keeps the same wire form.
@@ -306,6 +307,61 @@ fn emit_type_def(
         Emission::Alias => {
             let ty = type_kind_tokens(&def.kind, names, options);
             quote! { #docs #deprecated pub type #ident = #ty; }
+        }
+    }
+}
+
+/// Emit a `contentEncoding: base64` schema: a newtype over `bytes::Bytes` whose serde form is the
+/// base64 string the embedded runtime's codec writes and reads (#1230), so the value is that text
+/// wherever a serde-encoded body carries it. It `Deref`s to the bytes and converts with `From` in
+/// both directions; a multipart part and a raw body take the bytes themselves.
+fn emit_base64_newtype(
+    ident: &crate::name::Ident,
+    docs: TokenStream,
+    deprecated: Option<TokenStream>,
+) -> TokenStream {
+    quote! {
+        #docs
+        #deprecated
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+        pub struct #ident(pub bytes::Bytes);
+
+        impl std::ops::Deref for #ident {
+            type Target = bytes::Bytes;
+
+            fn deref(&self) -> &bytes::Bytes {
+                &self.0
+            }
+        }
+
+        impl From<bytes::Bytes> for #ident {
+            fn from(bytes: bytes::Bytes) -> Self {
+                #ident(bytes)
+            }
+        }
+
+        impl From<#ident> for bytes::Bytes {
+            fn from(value: #ident) -> Self {
+                value.0
+            }
+        }
+
+        impl serde::Serialize for #ident {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                super::support::serialize_base64(&self.0, serializer)
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for #ident {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                super::support::deserialize_base64(deserializer).map(#ident)
+            }
         }
     }
 }
@@ -462,7 +518,7 @@ fn type_kind_tokens(kind: &TypeKind, names: &Names, options: &CodegenOptions) ->
             // parenthesized `T` that decodes from a bare scalar instead of a one-element array.
             quote! { (#(#items,)*) }
         }
-        TypeKind::Bytes => quote! { bytes::Bytes },
+        TypeKind::Bytes(BytesEncoding::Raw) => quote! { bytes::Bytes },
         TypeKind::Null => quote! { () },
         TypeKind::Any => quote! { serde_json::Value },
         // Unreachable on a checked `Api`; see `TypeKind::Reserved`.
@@ -471,7 +527,11 @@ fn type_kind_tokens(kind: &TypeKind, names: &Names, options: &CodegenOptions) ->
                 "a reservation reached codegen; `check_invariants` should have rejected it"
             )
         }
-        TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Never | TypeKind::Union(_) => {
+        TypeKind::Struct(_)
+        | TypeKind::Enum(_)
+        | TypeKind::Never
+        | TypeKind::Union(_)
+        | TypeKind::Bytes(BytesEncoding::Base64) => {
             unreachable!("named definitions emitted separately")
         }
     }

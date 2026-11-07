@@ -236,7 +236,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             TypeKind::Reserved => return Err(NoMeet::Unrepresentable),
             TypeKind::Primitive(_)
             | TypeKind::Enum(_)
-            | TypeKind::Bytes
+            | TypeKind::Bytes(_)
             | TypeKind::Null
             | TypeKind::Never => None,
         };

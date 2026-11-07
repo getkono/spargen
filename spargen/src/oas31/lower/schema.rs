@@ -3,8 +3,8 @@
 
 use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{
-    Docs, JsonCategory, Openness, Prim, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef,
-    TypeKind,
+    BytesEncoding, Docs, JsonCategory, Openness, Prim, ScalarEnum, ScalarRepr, ScalarValue, Struct,
+    Ty, TypeDef, TypeKind,
 };
 use crate::oas31::{JsonType, RefOr, Schema, SchemaOr, ValidationKeywords};
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
@@ -372,15 +372,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         // A binary payload — `contentEncoding: base64` or `format: binary` (the OpenAPI file/upload
-        // marker) — lowers to raw `bytes::Bytes` rather than a `String`, so a multipart file part
-        // carries bytes and a byte body is not misdecoded as UTF-8. A `"null"` in the type array
+        // marker) — lowers to `bytes::Bytes` rather than a `String`, so a multipart file part
+        // carries bytes and a byte body is not misdecoded as UTF-8. `contentEncoding: base64` also
+        // fixes how a serde-encoded body spells the value, a base64 string, so it wins over
+        // `format: binary` beside it (#1230). A `"null"` in the type array
         // (`type: [string, 'null']`) makes it nullable exactly as the `oneOf [.., null]` spelling
-        // is, so both spellings reach the raw-body gates, and a JSON member becomes
-        // `Option<bytes::Bytes>`, rather than the `null` being dropped here.
-        if schema.content_encoding.as_deref() == Some("base64")
-            || schema.format.as_deref() == Some("binary")
-        {
-            let mut ty = self.insert_schema_type(schema, hint, TypeKind::Bytes);
+        // is, so both spellings reach the raw-body gates, and a JSON member becomes an `Option`,
+        // rather than the `null` being dropped here.
+        let encoding = if schema.content_encoding.as_deref() == Some("base64") {
+            Some(BytesEncoding::Base64)
+        } else {
+            (schema.format.as_deref() == Some("binary")).then_some(BytesEncoding::Raw)
+        };
+        if let Some(encoding) = encoding {
+            let mut ty = self.insert_schema_type(schema, hint, TypeKind::Bytes(encoding));
             ty.nullable = schema.types.types.contains(&JsonType::Null);
             return Some(ty);
         }

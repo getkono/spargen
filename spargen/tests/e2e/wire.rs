@@ -1,7 +1,7 @@
 //! Values on the wire: dates, a per-operation server override, an operation's URL accessor against
-//! the request it describes, RFC 6570 multipart parts, CBOR bodies, an explicit `null` content
-//! parameter, cookie parameters and cookie credentials in one `Cookie` header, and the mock
-//! server's reading of a chunked request body.
+//! the request it describes, RFC 6570 multipart parts, CBOR bodies, `contentEncoding: base64`
+//! content, an explicit `null` content parameter, cookie parameters and cookie credentials in one
+//! `Cookie` header, and the mock server's reading of a chunked request body.
 
 use super::*;
 
@@ -107,6 +107,182 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
     assert_eq!(decoded.at.to_string(), "2024-02-29T01:02:03.5+05:30");
     // The newtype is transparent: `time`'s API is one deref away.
     assert_eq!(decoded.at.year(), 2024);
+}
+"##;
+
+/// A `contentEncoding: base64` value: a component, an array item, a nullable member and a union
+/// variant inside a JSON body, and a multipart part.
+const BASE64_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: Base64, version: 1.0.0 }
+paths:
+  /torrents:
+    post:
+      operationId: addTorrent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TorrentSource' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TorrentSource' }
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/Upload' }
+      responses:
+        '204': { description: ok }
+components:
+  schemas:
+    Metainfo:
+      type: string
+      contentEncoding: base64
+      contentMediaType: application/x-bittorrent
+    TorrentSource:
+      type: object
+      required: [data, note]
+      properties:
+        data: { $ref: '#/components/schemas/Metainfo' }
+        pieces: { type: array, items: { $ref: '#/components/schemas/Metainfo' } }
+        note: { type: [string, 'null'], contentEncoding: base64 }
+        either: { oneOf: [{ $ref: '#/components/schemas/Metainfo' }, { type: integer }] }
+    Upload:
+      type: object
+      required: [file]
+      properties:
+        file: { $ref: '#/components/schemas/Metainfo' }
+"##;
+
+/// `contentEncoding: base64` must reach the wire as base64 text wherever a JSON body carries it
+/// (#1230). `bytes::Bytes`' own serde form is a sequence of numbers, so a member typed `Bytes`
+/// alone compiled and then sent `[100,52,…]`, which a conforming server rejects. A multipart part
+/// carries the octets themselves, as before.
+#[test]
+fn base64_content_reaches_the_wire_as_base64_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", BASE64_SPEC);
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "base64_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        generated.contains("pub struct Metainfo(pub bytes::Bytes);"),
+        "a base64 component must be the base64 newtype: {generated}"
+    );
+    assert!(
+        generated.contains("pub use base64::{deserialize_base64, serialize_base64};"),
+        "the base64 codec must be embedded for a spec that uses it"
+    );
+
+    write_fixture_test(&out, "base64", BASE64_WIRE_TEST);
+
+    let status = fixture_cargo(&out)
+        .args(["test", "--features", "blocking", "--test", "base64"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the base64 wire round-trip must pass");
+}
+
+const BASE64_WIRE_TEST: &str = r##"#![cfg(feature = "blocking")]
+
+mod common;
+
+use base64_client::types;
+
+#[test]
+fn json_members_are_base64_strings_in_both_directions() {
+    let (base, server) = common::serve_once(
+        "application/json",
+        "200 OK",
+        br#"{"data":"ZDQ6aW5mb2U=","pieces":["AAE=","/w"],"note":null,"either":"aGk="}"#,
+    );
+    let client = base64_client::BlockingClient::new(&base).unwrap();
+
+    let source = types::TorrentSource {
+        data: bytes::Bytes::from_static(b"d4:infoe").into(),
+        pieces: Some(vec![
+            types::Metainfo(bytes::Bytes::from_static(&[0, 1])),
+            types::Metainfo(bytes::Bytes::from_static(&[0xff])),
+        ]),
+        note: Some(bytes::Bytes::from_static(b"hi").into()),
+        either: None,
+    };
+    let response = client.add_torrent(&source).expect("add_torrent round-trips");
+
+    let request = server.join().unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({ "data": "ZDQ6aW5mb2U=", "pieces": ["AAE=", "/w=="], "note": "aGk=" }),
+        "base64 members must serialize as padded standard base64 strings"
+    );
+
+    let decoded = response.into_inner();
+    assert_eq!(&decoded.data[..], b"d4:infoe");
+    let pieces: Vec<&[u8]> = decoded
+        .pieces
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|piece| &piece[..])
+        .collect();
+    assert_eq!(pieces, [&[0u8, 1][..], &[0xff][..]], "an unpadded item decodes too");
+    assert!(decoded.note.is_none());
+    // The union's base64 variant decodes the string, and writes the same text back.
+    assert_eq!(
+        serde_json::to_value(decoded.either.as_ref().unwrap()).unwrap(),
+        serde_json::json!("aGk=")
+    );
+}
+
+#[test]
+fn a_member_that_is_not_base64_text_is_a_decode_error() {
+    let (base, server) = common::serve_once(
+        "application/json",
+        "200 OK",
+        br#"{"data":[100,52],"note":null}"#,
+    );
+    let client = base64_client::BlockingClient::new(&base).unwrap();
+    let source = types::TorrentSource {
+        data: bytes::Bytes::new().into(),
+        pieces: None,
+        note: None,
+        either: None,
+    };
+    assert!(client.add_torrent(&source).is_err());
+    server.join().unwrap();
+}
+
+#[test]
+fn a_multipart_part_carries_the_octets_themselves() {
+    let (base, server) = common::serve_no_content();
+    let client = base64_client::BlockingClient::new(&base).unwrap();
+    let upload = types::Upload {
+        file: bytes::Bytes::from_static(b"d4:infoe").into(),
+    };
+    client.upload(&upload).expect("upload sends");
+
+    let request = server.join().unwrap();
+    let body = &request.body;
+    assert!(
+        body.windows(8).any(|window| window == b"d4:infoe"),
+        "the part must carry the raw bytes: {}",
+        String::from_utf8_lossy(body)
+    );
+    assert!(
+        !String::from_utf8_lossy(body).contains("ZDQ6aW5mb2U="),
+        "the part must not carry base64 text"
+    );
 }
 "##;
 

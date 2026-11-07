@@ -43,7 +43,7 @@ pub(super) fn boxed_ty_tokens(ty: Ty, names: &Names, qualified: bool) -> TokenSt
 pub(super) fn is_bytes_ty(api: &Api, ty: Ty) -> bool {
     matches!(
         api.types.get(ty.id).map(|definition| &definition.kind),
-        Some(TypeKind::Bytes)
+        Some(TypeKind::Bytes(_))
     )
 }
 
@@ -191,7 +191,10 @@ mod tests {
     /// Only a `Bytes` definition takes the raw byte codec; a type the graph does not hold does not.
     #[test]
     fn only_a_bytes_definition_is_a_bytes_body() {
-        let (api, _, ids) = api_with(vec![TypeKind::Bytes, TypeKind::Primitive(Prim::String)]);
+        let (api, _, ids) = api_with(vec![
+            TypeKind::Bytes(crate::ir::BytesEncoding::Raw),
+            TypeKind::Primitive(Prim::String),
+        ]);
         assert!(super::is_bytes_ty(&api, ty(ids[0], false, false)));
         assert!(!super::is_bytes_ty(&api, ty(ids[1], false, false)));
         assert!(!super::is_bytes_ty(&api, ty(TypeId(99), false, false)));

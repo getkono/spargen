@@ -25,6 +25,9 @@
 // large and is passed by value rather than boxed.
 #![allow(clippy::result_large_err)]
 mod auth;
+// The `contentEncoding: base64` codec needs no dependency beyond `bytes` and `serde`; a generated
+// client embeds this module only when a schema it emits carries that keyword.
+mod base64;
 // The blocking facade owns a current-thread tokio runtime, so it pulls in the optional `tokio`
 // dependency and is compiled only under the `blocking` feature on a non-`wasm32` target, the same
 // `cfg` a generated client gates its embedded copy on: nothing tokio-related is referenced unless
@@ -64,6 +67,7 @@ pub use auth::{
     attach_auth, AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString,
     TokenFuture, TokenProvider,
 };
+pub use base64::{deserialize_base64, serialize_base64};
 #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
 pub use blocking::BlockingRuntime;
 pub use client::{ClientConfig, ClientCore};

@@ -4,7 +4,8 @@ use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{
-    Docs, MediaType, Prim, RequestBody, ScalarRepr, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+    BytesEncoding, Docs, MediaType, Prim, RequestBody, ScalarRepr, Ty, TypeDef, TypeGraph, TypeId,
+    TypeKind,
 };
 use crate::oas31::media::{
     classify_media_range, media_essence, media_essence_is_suffix_range, media_object_is_opaque,
@@ -114,10 +115,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 )
                 .emit(self.diags);
         }
+        let mark = self.graph_mark();
         let ty = object
             .schema
             .as_ref()
-            .and_then(|schema| self.lower_schema_ref(schema, "RequestBody"));
+            .and_then(|schema| self.lower_schema_ref(schema, "RequestBody"))
+            .map(|ty| self.raw_body_bytes(ty, "RequestBody", &body.provenance, mark));
         if let Some(schema) = object.schema.as_ref() {
             self.warn_structural_default_ref(schema, "a request body schema");
         }
@@ -236,7 +239,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return (!declared_but_unlowerable).then(|| {
                 self.insert_type(
                     hint,
-                    TypeKind::Bytes,
+                    TypeKind::Bytes(BytesEncoding::Raw),
                     Docs::default(),
                     Some(provenance.clone()),
                 )
@@ -261,7 +264,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .pop_last_type()
                 .expect("a definition was just observed");
             let id = self.graph.insert(TypeDef {
-                kind: TypeKind::Bytes,
+                kind: TypeKind::Bytes(BytesEncoding::Raw),
                 ..definition
             });
             debug_assert_eq!(id, ty.id, "popping and reinserting reuses the dense id");
@@ -269,10 +272,57 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         Some(self.insert_type(
             hint,
-            TypeKind::Bytes,
+            TypeKind::Bytes(BytesEncoding::Raw),
             Docs::default(),
             Some(provenance.clone()),
         ))
+    }
+
+    /// A whole non-streaming body's type, with a `contentEncoding: base64` definition taken as raw
+    /// bytes: the emitter sends and decodes a whole `bytes` body verbatim whatever the media, so the
+    /// body is `bytes::Bytes` itself rather than the base64 newtype a serde-encoded position takes
+    /// (#1230). `check_invariants` holds every non-streaming body to that.
+    ///
+    /// An inline definition only this body holds is retyped in place, keeping its name; a
+    /// component (or any definition lowered before `mark`) keeps its base64 type for its other
+    /// uses, and the body takes a raw definition of its own, eliding what this lowering inserted
+    /// and nothing else reaches.
+    pub(super) fn raw_body_bytes(
+        &mut self,
+        ty: Ty,
+        hint: &str,
+        provenance: &crate::diag::Provenance,
+        mark: u32,
+    ) -> Ty {
+        if !matches!(
+            self.graph.get(ty.id).map(|definition| &definition.kind),
+            Some(TypeKind::Bytes(BytesEncoding::Base64))
+        ) {
+            return ty;
+        }
+        if ty.id.0 >= mark && self.graph.last_id() == Some(ty.id) && !self.is_component_root(ty.id)
+        {
+            let (_, definition) = self
+                .pop_last_type()
+                .expect("a definition was just observed");
+            let id = self.graph.insert(TypeDef {
+                kind: TypeKind::Bytes(BytesEncoding::Raw),
+                ..definition
+            });
+            debug_assert_eq!(id, ty.id, "popping and reinserting reuses the dense id");
+            return Ty { id, ..ty };
+        }
+        self.elide_unused_lowering(mark..self.graph_mark());
+        let raw = self.insert_type(
+            hint,
+            TypeKind::Bytes(BytesEncoding::Raw),
+            Docs::default(),
+            Some(provenance.clone()),
+        );
+        Ty {
+            nullable: ty.nullable,
+            ..raw
+        }
     }
 
     /// Whether `ty`'s definition is raw `bytes::Bytes`, which the emitter sends and decodes
@@ -280,7 +330,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     pub(super) fn is_bytes(&self, ty: Ty) -> bool {
         matches!(
             self.graph.get(ty.id).map(|definition| &definition.kind),
-            Some(TypeKind::Bytes)
+            Some(TypeKind::Bytes(_))
         )
     }
 
@@ -317,7 +367,7 @@ fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {
         }
         let supported = match graph.get(ty.id).map(|definition| &definition.kind) {
             Some(TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date))
-            | Some(TypeKind::Bytes)
+            | Some(TypeKind::Bytes(_))
             | Some(TypeKind::Any) => true,
             Some(TypeKind::Enum(enumeration)) => enumeration.repr == ScalarRepr::String,
             Some(TypeKind::Union(union)) => union

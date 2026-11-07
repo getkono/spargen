@@ -63,8 +63,8 @@ pub(crate) enum TypeKind {
     Array(Box<Ty>),
     /// A fixed-length heterogeneous tuple (`prefixItems`).
     Tuple(Vec<Ty>),
-    /// Raw bytes (`octet-stream` / `contentEncoding: base64`).
-    Bytes,
+    /// Binary content, held as `bytes::Bytes`, and how a serde-encoded body spells it.
+    Bytes(BytesEncoding),
     /// The exact JSON `null` value (emitted as Rust's unit type, whose serde form is `null`).
     Null,
     /// An uninhabited schema used inside a container when an item intersection is empty. For
@@ -88,6 +88,19 @@ pub(crate) enum TypeKind {
     /// arm names `Reserved` above it, which
     /// `every_type_kind_match_states_its_answer_for_a_reservation` in this module holds.
     Reserved,
+}
+
+/// How a [`TypeKind::Bytes`] value is written where a serde codec (JSON, XML, a form body, a
+/// sequential stream's items) carries it. A whole raw body is the octets themselves under either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BytesEncoding {
+    /// `format: binary`, an untyped octet-stream body, or no schema: `bytes::Bytes` itself, which
+    /// a serde codec writes as a sequence of numbers.
+    Raw,
+    /// `contentEncoding: base64`: a string of RFC 4648 base64 text, emitted as a newtype over
+    /// `bytes::Bytes` that the embedded `base64` runtime module (de)serializes. A whole non-streaming
+    /// body never carries it: lowering takes such a body raw, and `check_invariants` holds that.
+    Base64,
 }
 
 /// A `oneOf`/`anyOf` union lowered to a Rust enum. Never `serde(untagged)` and never degraded to
