@@ -46,6 +46,7 @@ toml = "0.8"
 # it is spelled. Default features stay off: the builtin target database needs no `target-lexicon`.
 cfg-expr = { version = "0.20.9", default-features = false }
 proptest = "1.11"
+allocation-counter = "0.8.1"
 tempfile = "3.10"
 insta = "1.43"
 sha2 = "0.10"

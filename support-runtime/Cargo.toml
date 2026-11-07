@@ -52,3 +52,7 @@ serde = { workspace = true, features = ["derive"] }
 # Test-only: the percent-encoding and dot-segment laws are checked as properties over their input
 # space. A dev-dependency never reaches the embedded runtime or a consumer's graph.
 proptest.workspace = true
+# Test-only: counts the heap allocations parameter and query serialisation make, which is the
+# evidence their single-buffer joins stay single-buffer. It installs a counting global allocator
+# in the test binary alone (the `unsafe` it needs is its own; this crate forbids `unsafe`).
+allocation-counter.workspace = true

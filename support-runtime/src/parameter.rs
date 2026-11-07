@@ -10,6 +10,7 @@
 //! assembled here rather than through `url`'s `query_pairs_mut`, which would encode both alike.
 
 use std::fmt;
+use std::fmt::Write as _;
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -130,11 +131,18 @@ impl From<serde_json::Error> for ParameterError {
 ///
 /// Encoding operates on UTF-8 bytes, so one multi-byte character yields one triple per byte.
 pub fn encode(value: &str, encoding: PercentEncoding) -> String {
+    let mut out = String::with_capacity(value.len());
+    encode_into(&mut out, value, encoding);
+    out
+}
+
+/// As [`encode`], appending to `out` instead of returning a new string.
+fn encode_into(out: &mut String, value: &str, encoding: PercentEncoding) {
     if encoding == PercentEncoding::Passthrough {
-        return value.to_owned();
+        out.push_str(value);
+        return;
     }
     let bytes = value.as_bytes();
-    let mut out = String::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
@@ -164,7 +172,6 @@ pub fn encode(value: &str, encoding: PercentEncoding) -> String {
         }
         index += 1;
     }
-    out
 }
 
 /// Whether `byte` is emitted literally under `encoding`.
@@ -607,30 +614,50 @@ fn empty_as_undefined(value: Value) -> Value {
     }
 }
 
+/// The scalars `values` yields, each rendered under `encoding`, `separator`-joined into one
+/// string. Every item is written straight into that one buffer, which starts with room for the
+/// unencoded rendering, so a value that needs no escaping is joined in a single allocation.
 fn join_scalars<'a>(
-    values: impl Iterator<Item = &'a Value>,
+    values: impl Iterator<Item = &'a Value> + Clone,
     separator: &str,
     encoding: PercentEncoding,
 ) -> Result<String, ParameterError> {
-    values
-        .map(|value| scalar(value, encoding))
-        .collect::<Result<Vec<_>, ParameterError>>()
-        .map(|parts| parts.join(separator))
+    let capacity = values
+        .clone()
+        .map(|value| scalar_len_hint(value) + separator.len())
+        .sum::<usize>();
+    let mut out = String::with_capacity(capacity);
+    for (index, value) in values.enumerate() {
+        if index > 0 {
+            out.push_str(separator);
+        }
+        push_scalar(&mut out, value, encoding)?;
+    }
+    Ok(out)
 }
 
 /// An object's members as `key,value` alternating in one `separator`-joined value: the
-/// `explode: false` shape every style but `deepObject` shares.
+/// `explode: false` shape every style but `deepObject` shares. As [`join_scalars`], the members
+/// are written into one buffer sized for their unencoded rendering.
 fn object_flat(
     values: &Map<String, Value>,
     separator: &str,
     encoding: PercentEncoding,
 ) -> Result<String, ParameterError> {
-    let mut parts = Vec::with_capacity(values.len() * 2);
-    for (key, value) in values {
-        parts.push(encode(key, encoding));
-        parts.push(scalar(value, encoding)?);
+    let capacity = values
+        .iter()
+        .map(|(key, value)| key.len() + scalar_len_hint(value) + 2 * separator.len())
+        .sum::<usize>();
+    let mut out = String::with_capacity(capacity);
+    for (index, (key, value)) in values.iter().enumerate() {
+        if index > 0 {
+            out.push_str(separator);
+        }
+        encode_into(&mut out, key, encoding);
+        out.push_str(separator);
+        push_scalar(&mut out, value, encoding)?;
     }
-    Ok(parts.join(separator))
+    Ok(out)
 }
 
 /// An object's members as one `key=value` fragment each: the `explode: true` shape, which each
@@ -652,12 +679,41 @@ fn object_pairs(
 }
 
 fn scalar(value: &Value, encoding: PercentEncoding) -> Result<String, ParameterError> {
+    let mut out = String::with_capacity(scalar_len_hint(value));
+    push_scalar(&mut out, value, encoding)?;
+    Ok(out)
+}
+
+/// Append the rendering of one scalar `value` to `out`.
+fn push_scalar(
+    out: &mut String,
+    value: &Value,
+    encoding: PercentEncoding,
+) -> Result<(), ParameterError> {
     match value {
-        Value::Null => Ok(String::new()),
-        Value::Bool(value) => Ok(value.to_string()),
-        Value::Number(value) => Ok(value.to_string()),
-        Value::String(value) => Ok(encode(value, encoding)),
-        Value::Array(_) | Value::Object(_) => Err(ParameterError::NestedValue),
+        Value::Null => {}
+        Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+        // `Number`'s `Display` formats on the stack, so writing it allocates nothing beyond `out`.
+        Value::Number(value) => {
+            // Writing to a `String` cannot fail.
+            let _ = write!(out, "{value}");
+        }
+        Value::String(value) => encode_into(out, value, encoding),
+        Value::Array(_) | Value::Object(_) => return Err(ParameterError::NestedValue),
+    }
+    Ok(())
+}
+
+/// The length of `value`'s rendering before percent-encoding, which can only lengthen it: the
+/// capacity a buffer starts with so a value that needs no escaping fills it without growing.
+fn scalar_len_hint(value: &Value) -> usize {
+    match value {
+        Value::Null | Value::Array(_) | Value::Object(_) => 0,
+        Value::Bool(_) => "false".len(),
+        // The longest `Number` rendering: `-9223372036854775808`, or an `f64` such as
+        // `-2.2250738585072014e-308`.
+        Value::Number(_) => 24,
+        Value::String(value) => value.len(),
     }
 }
 
