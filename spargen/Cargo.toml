@@ -53,7 +53,11 @@ prettyplease = { workspace = true }
 clap = { workspace = true, optional = true }
 # Remote-fetch (feature-gated): the ONLY networked path, used by `spargen lock` to vendor
 # remote `$ref`s. Not in the runtime graph of generated output — this is the generator only.
-reqwest = { workspace = true, features = [
+# Its own requirement rather than the workspace's: generated clients move with the workspace
+# entry, while this fetcher stays on the 0.12 line, whose `rustls-tls` selects ring and the
+# bundled `webpki-roots` the floors below and `tests/tls_strictness.rs` pin (0.13's `rustls`
+# selects aws-lc-rs and the platform verifier instead).
+reqwest = { version = "0.12.28", default-features = false, features = [
     "blocking",
     "rustls-tls",
 ], optional = true }

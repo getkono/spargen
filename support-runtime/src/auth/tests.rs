@@ -214,6 +214,54 @@ fn attaches_api_key_query_from_first_satisfiable_alternative() {
     assert_eq!(request.url().query(), Some("api_key=k3y"));
 }
 
+/// The key joins the query the operation already built, form-encoded as reqwest's
+/// `RequestBuilder::query` encoded it.
+#[test]
+fn a_query_api_key_joins_the_existing_query_form_encoded() {
+    let mut core = core();
+    core.set_credential("key", Credential::ApiKey(SecretString::from("a b&c=d+é")));
+    let request = core
+        .http()
+        .request(reqwest::Method::GET, "https://example.com/op?page=2");
+    let request = poll_ready(attach_auth(
+        &core,
+        request,
+        &[&[AuthScheme {
+            name: "key",
+            kind: AuthKind::ApiKeyQuery("api key"),
+        }]],
+    ))
+    .unwrap()
+    .build()
+    .unwrap();
+    assert_eq!(
+        request.url().query(),
+        Some("page=2&api+key=a+b%26c%3Dd%2B%C3%A9")
+    );
+}
+
+/// As for a cookie apiKey: a failed builder's error reaches the caller as a request-construction
+/// error rather than being lost while the query is appended.
+#[test]
+fn a_query_api_key_on_a_failed_builder_reports_request_construction() {
+    let mut core = core();
+    core.set_credential("key", Credential::ApiKey(SecretString::from("k3y")));
+    let request = core.http().request(reqwest::Method::GET, "not a url");
+    let error = poll_ready(attach_auth(
+        &core,
+        request,
+        &[&[AuthScheme {
+            name: "key",
+            kind: AuthKind::ApiKeyQuery("api_key"),
+        }]],
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn empty_alternative_marks_security_optional() {
     let core = core();
