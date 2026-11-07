@@ -1,8 +1,11 @@
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use secrecy::SecretString;
 
 use super::{ClientConfig, ClientCore};
 use crate::tests::poll_ready;
-use crate::{send, Credential, Error};
+use crate::{send, send_streaming, Credential, Error, ExecuteFuture, HttpBackend, HttpBody};
 
 #[test]
 fn an_invalid_base_url_is_a_request_construction_error() {
@@ -123,4 +126,144 @@ fn http_returns_the_injected_client_with_its_configuration() {
     assert!(injected.contains("7s"), "{injected}");
     let default = format!("{:?}", reqwest::Client::new());
     assert!(!default.contains("7s"), "{default}");
+}
+
+/// Issue #1130: the default client bounds connecting and stalled reads, and sets no total bound,
+/// so a long download or upload is not cut off by default.
+#[test]
+fn the_default_timeouts_are_a_30_s_connect_a_5_min_read_and_no_total() {
+    let config = ClientConfig::default();
+    assert_eq!(config.connect_timeout, Some(Duration::from_secs(30)));
+    assert_eq!(config.read_timeout, Some(Duration::from_secs(300)));
+    assert_eq!(config.timeout, None);
+    let core = ClientCore::new("https://example.com").unwrap();
+    assert_eq!(core.config().connect_timeout, config.connect_timeout);
+    assert_eq!(core.config().read_timeout, config.read_timeout);
+    assert_eq!(core.config().timeout, None);
+}
+
+/// The client a core builds for itself carries the configured read timeout, and one built on
+/// `with_config` the caller's. reqwest's `Debug` of a client prints its read timeout and only when
+/// one is set; its connect timeout is printed nowhere, so this is the one observable without I/O.
+#[test]
+fn the_built_client_carries_the_configured_read_timeout() {
+    let default = format!(
+        "{:?}",
+        ClientCore::new("https://example.com").unwrap().http()
+    );
+    assert!(default.contains("read_timeout: 300s"), "{default}");
+
+    let config = ClientConfig {
+        read_timeout: Some(Duration::from_secs(7)),
+        ..ClientConfig::default()
+    };
+    let core = ClientCore::with_config("https://example.com", config).unwrap();
+    let configured = format!("{:?}", core.http());
+    assert!(configured.contains("read_timeout: 7s"), "{configured}");
+    assert_eq!(core.config().read_timeout, Some(Duration::from_secs(7)));
+
+    let config = ClientConfig {
+        read_timeout: None,
+        ..ClientConfig::default()
+    };
+    let core = ClientCore::with_config("https://example.com", config).unwrap();
+    let unbounded = format!("{:?}", core.http());
+    assert!(!unbounded.contains("read_timeout"), "{unbounded}");
+
+    // `with_backend` builds requests on a client configured as `new`'s is.
+    let core = ClientCore::with_backend(Recorder::new(), "https://example.com").unwrap();
+    let building = format!("{:?}", core.http());
+    assert!(building.contains("read_timeout: 300s"), "{building}");
+}
+
+/// `with_client` keeps the caller's client as it is: none of the configured timeouts is added to
+/// it.
+#[test]
+fn with_client_adds_no_timeout_to_the_injected_client() {
+    let core = ClientCore::with_client(reqwest::Client::new(), "https://example.com").unwrap();
+    let injected = format!("{:?}", core.http());
+    assert!(!injected.contains("timeout"), "{injected}");
+}
+
+/// A transport that answers `204` and records the total timeout each request carries across the
+/// seam, read back the way `ReqwestBackend` reads it.
+#[derive(Debug, Default)]
+struct Recorder {
+    timeouts: Mutex<Vec<Option<Duration>>>,
+}
+
+impl Recorder {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn timeouts(&self) -> Vec<Option<Duration>> {
+        self.timeouts.lock().unwrap().clone()
+    }
+}
+
+impl HttpBackend for Recorder {
+    fn execute(&self, request: http::Request<HttpBody>) -> ExecuteFuture<'_> {
+        let request = reqwest::Request::try_from(request.map(|_| reqwest::Body::from("")))
+            .expect("the seam's request converts back");
+        self.timeouts
+            .lock()
+            .unwrap()
+            .push(request.timeout().copied());
+        Box::pin(async {
+            Ok(http::Response::builder()
+                .status(204)
+                .body(HttpBody::empty())
+                .expect("valid synthetic response"))
+        })
+    }
+}
+
+fn get(core: &ClientCore) -> reqwest::Request {
+    core.http()
+        .get("https://example.com/x")
+        .build()
+        .expect("a valid request")
+}
+
+/// `send` gives a request the core's total timeout as it is when the request is sent, so a
+/// change through `config_mut` applies from the next request on, and it reaches a caller-supplied
+/// backend on the request itself. A request carrying a timeout of its own keeps it.
+#[test]
+fn send_applies_the_configured_total_timeout_read_at_send_time() {
+    let backend = Recorder::new();
+    let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
+    poll_ready(send(&core, get(&core))).unwrap();
+
+    core.config_mut().timeout = Some(Duration::from_secs(9));
+    poll_ready(send(&core, get(&core))).unwrap();
+
+    let mut own = get(&core);
+    *own.timeout_mut() = Some(Duration::from_secs(2));
+    poll_ready(send(&core, own)).unwrap();
+
+    assert_eq!(
+        backend.timeouts(),
+        [
+            None,
+            Some(Duration::from_secs(9)),
+            Some(Duration::from_secs(2))
+        ]
+    );
+}
+
+/// A streaming response is exempt from the total timeout: `send_streaming` never applies the
+/// core's, and a request's own still crosses unchanged.
+#[test]
+fn send_streaming_leaves_the_configured_total_timeout_off() {
+    let backend = Recorder::new();
+    let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
+    core.config_mut().timeout = Some(Duration::from_secs(9));
+    poll_ready(send_streaming(&core, get(&core))).unwrap();
+
+    let mut own = get(&core);
+    *own.timeout_mut() = Some(Duration::from_secs(2));
+    poll_ready(send_streaming(&core, own)).unwrap();
+
+    assert_eq!(backend.timeouts(), [None, Some(Duration::from_secs(2))]);
 }
