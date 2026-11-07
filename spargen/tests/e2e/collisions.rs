@@ -79,6 +79,8 @@ paths:
                   extra: { type: object, additionalProperties: { type: string } }
   /new:
     get: { operationId: new, responses: { "204": { description: ok } } }
+  /with-config:
+    get: { operationId: withConfig, responses: { "204": { description: ok } } }
   /with-default-server:
     get: { operationId: withDefaultServer, responses: { "204": { description: ok } } }
   /with-client:
@@ -157,6 +159,7 @@ fn reserved_spellings_compile_together() {
     }
     for method in [
         "new",
+        "with_config",
         "with_default_server",
         "with_client",
         "with_backend",

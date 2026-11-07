@@ -466,12 +466,32 @@ impl http_body::Body for FetchBody {
 
 /// A request reqwest built, as the seam carries it. A URL that is not a valid URI is refused here
 /// as reqwest refuses it at `execute`, as a builder-kind error.
+///
+/// The request's total timeout crosses with it: off `wasm32` reqwest keeps it among the request's
+/// extensions, which the conversion carries; on `wasm32` it is a field the conversion drops, so it
+/// is carried as a `FetchTimeout` extension, which [`request_into_reqwest`] reads back.
 pub(crate) fn request_from_reqwest(
     request: reqwest::Request,
 ) -> Result<http::Request<HttpBody>, reqwest::Error> {
+    #[cfg(target_arch = "wasm32")]
+    let timeout = request.timeout().copied();
     let request = http::Request::<reqwest::Body>::try_from(request)?;
-    Ok(request.map(HttpBody::from_reqwest_request))
+    #[allow(unused_mut)]
+    let mut request = request.map(HttpBody::from_reqwest_request);
+    #[cfg(target_arch = "wasm32")]
+    if let Some(timeout) = timeout {
+        request.extensions_mut().insert(FetchTimeout(timeout));
+    }
+    Ok(request)
 }
+
+/// A request's total timeout as it crosses the seam on `wasm32`, where reqwest's own request
+/// keeps it outside the extensions its conversion carries.
+// Mutation testing: `FetchTimeout` and the steps that carry it are compiled only for `wasm32`,
+// so no native test reaches them, as `FetchBody`'s note says.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Debug)]
+struct FetchTimeout(std::time::Duration);
 
 /// A copy of `request` to send again, its method, URI, version, headers, extensions and body
 /// alike; `None` when its body is a stream, which can be read only once.
@@ -493,9 +513,20 @@ fn request_into_reqwest(
     request: http::Request<HttpBody>,
 ) -> Result<reqwest::Request, TransportError> {
     let (parts, body) = request.into_parts();
+    #[cfg(target_arch = "wasm32")]
+    let timeout = parts
+        .extensions
+        .get::<FetchTimeout>()
+        .map(|timeout| timeout.0);
     let body = body.into_reqwest()?;
-    reqwest::Request::try_from(http::Request::from_parts(parts, body))
-        .map_err(TransportError::from_reqwest)
+    #[allow(unused_mut)]
+    let mut request = reqwest::Request::try_from(http::Request::from_parts(parts, body))
+        .map_err(TransportError::from_reqwest)?;
+    #[cfg(target_arch = "wasm32")]
+    if timeout.is_some() {
+        *request.timeout_mut() = timeout;
+    }
+    Ok(request)
 }
 
 /// A response reqwest received, as the seam carries it. Off `wasm32` the body is reqwest's own,

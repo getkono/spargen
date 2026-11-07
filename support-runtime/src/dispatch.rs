@@ -154,7 +154,26 @@ pub fn build_url_with_query_string_on(
 /// off `wasm32`; a URL that is not a valid URI is refused first, as
 /// [`Error::RequestConstruction`]. The backend reports failures as a [`crate::TransportError`]
 /// carrying its taxonomy class, which picks the variant here. Non-generic.
+///
+/// A request that carries no total timeout of its own is given the core's
+/// [`crate::ClientConfig::timeout`], read now, which bounds it until its whole response body has
+/// been read. An operation whose success response is a stream sends with [`send_streaming`]
+/// instead.
 pub async fn send(
+    core: &ClientCore,
+    mut request: Request,
+) -> Result<http::Response<HttpBody>, Error<Infallible>> {
+    if request.timeout().is_none() {
+        *request.timeout_mut() = core.config().timeout;
+    }
+    send_streaming(core, request).await
+}
+
+/// [`send`] for a request whose success response is read as a stream (an `EventStream`): the
+/// core's [`crate::ClientConfig::timeout`] is not applied, because a stream may rightly stay open
+/// indefinitely. A total timeout the request carries itself still applies, and the client's
+/// connect and read timeouts bound it as they bound every request. Non-generic.
+pub async fn send_streaming(
     core: &ClientCore,
     request: Request,
 ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
