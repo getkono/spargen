@@ -291,9 +291,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// A variant qualifies when its member is an inline schema (no `$ref`), its one tag is the
     /// value its own required tag property pins ([`Self::pinned_tag`]), and its payload is a def
     /// that member's lowering or sibling meet inserted under the member's numbered hint
-    /// (`{hint}Variant{N}`), so no component or other shared type is touched. Every def that
-    /// lowering inserted under that hint is renamed onto `{hint}{Tag}` (the variant's struct,
-    /// its nested inline types, and a `…Constrained` meet alike), and the variant is named from
+    /// (`{hint}Variant{N}`). Every def that lowering inserted under that hint, outside the body
+    /// of a reservation it opened ([`Self::reserved_types`]), is renamed onto `{hint}{Tag}` (the
+    /// variant's struct, its nested inline types, and a `…Constrained` meet alike): a component,
+    /// remote or bundle target first lowered there keeps its name, and so do its own inline
+    /// types, though their names start with that hint (#1245). The variant is named from
     /// the tag itself. A tag that does not start with an ASCII letter, or that another variant's
     /// hint already spells, keeps the numbered name.
     ///
@@ -351,9 +353,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .flat_map(Clone::clone)
             .map(TypeId)
             .filter(|id| {
-                self.graph
-                    .get(*id)
-                    .is_some_and(|def| def.name_hint.starts_with(&numbered))
+                !self.reserved_types.contains(id)
+                    && self
+                        .graph
+                        .get(*id)
+                        .is_some_and(|def| def.name_hint.starts_with(&numbered))
             })
             .collect();
             if !fresh.contains(&variant.ty.id) {
