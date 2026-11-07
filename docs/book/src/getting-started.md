@@ -168,6 +168,9 @@ assert_eq!(pet.status, types::Status::Available);
 Key points of the surface:
 
 - `Client::new(base_url)` / `Client::with_client(reqwest::Client, base_url)`.
+  `client.clone().with_timeout(Some(duration))` derives a client whose calls each fail with
+  `Error::Timeout(TimeoutKind::Total)` past that deadline (an `EventStream` operation excepted);
+  the runtime guide's [Timeouts](./runtime.md#timeouts) section states every bound.
 - One `async` method per operation returning `Result<ResponseValue<T>, Error<E>>`;
   `.into_inner()` unwraps the decoded body. Required string parameters take `impl Into<String>`
   and the `…Params` bundle takes `impl Into<Option<…>>`, so `None`, `Some(params)`, and `params`

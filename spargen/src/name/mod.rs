@@ -169,6 +169,7 @@ pub(crate) const CLIENT_METHODS: &[&str] = &[
     "core",
     "with_credential",
     "without_credential",
+    "with_timeout",
     "inner",
 ];
 

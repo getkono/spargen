@@ -159,6 +159,16 @@ pub(super) fn emit_blocking_client(
                 self
             }
 
+            /// Set the total timeout of every call made through this client value (mirrors the
+            /// async client's `with_timeout`): an elapsed one is
+            /// `Error::Timeout(TimeoutKind::Total)`, `None` sets no total bound of its own, and
+            /// an operation returning an `EventStream` is exempt.
+            #[must_use]
+            pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+                self.inner = self.inner.with_timeout(timeout);
+                self
+            }
+
                 #(#methods)*
             }
         }

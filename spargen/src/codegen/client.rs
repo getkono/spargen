@@ -213,6 +213,21 @@ pub(super) fn emit_client(
                 self
             }
 
+            /// Set the total timeout of every call made through this client value, replacing
+            /// `ClientConfig::timeout` from `with_config` (or the default, none): a call that has
+            /// not read its whole response within it fails with
+            /// `Error::Timeout(TimeoutKind::Total)`. `None` sets no total bound of this client's
+            /// own; the connect and read timeouts still apply, and so does a total timeout set on
+            /// a `reqwest::Client` injected with `with_client`, which a request cannot lift. An
+            /// operation returning an `EventStream` is exempt, as it is from
+            /// `ClientConfig::timeout`, since a stream may rightly stay open indefinitely. Derive
+            /// a client for a different deadline: `client.clone().with_timeout(Some(duration))`.
+            #[must_use]
+            pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+                self.core.config_mut().timeout = timeout;
+                self
+            }
+
             #(#methods)*
         }
     }
