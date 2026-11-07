@@ -1158,3 +1158,279 @@ fn the_all_features_workspace_graph_carries_a_tls_stack() {
          gate's stated rationale no longer hold"
     );
 }
+
+/// Where a runtime requirement is declared: the workspace manifest's shared table, for every
+/// dependency `support-runtime` names, and the generated-client floors `spargen deps` prints and
+/// the `E023` audit checks.
+const WORKSPACE_REQUIREMENTS: &str = "Cargo.toml `[workspace.dependencies]`";
+const CLIENT_FLOORS: &str = "spargen/src/runtime_contract/requirements.rs";
+
+/// Every runtime requirement, by crate name, with each place that declares it and what it
+/// requires there. Read from the files, not restated: a dependency the runtime gains is checked
+/// from the commit that adds it.
+fn runtime_requirements() -> BTreeMap<String, BTreeMap<&'static str, String>> {
+    let mut requirements: BTreeMap<String, BTreeMap<&'static str, String>> = BTreeMap::new();
+
+    let root: toml::Table = toml::from_str(&read("Cargo.toml")).expect("Cargo.toml parses");
+    let shared = root["workspace"]["dependencies"]
+        .as_table()
+        .expect("Cargo.toml carries `[workspace.dependencies]`");
+    let runtime: toml::Table = toml::from_str(&read("support-runtime/Cargo.toml"))
+        .expect("support-runtime/Cargo.toml parses");
+    let runtime_dependencies = runtime["dependencies"]
+        .as_table()
+        .expect("support-runtime/Cargo.toml carries `[dependencies]`");
+    for (name, entry) in runtime_dependencies {
+        let inherited = entry.get("workspace").and_then(toml::Value::as_bool) == Some(true);
+        assert!(
+            inherited,
+            "support-runtime/Cargo.toml declares `{name}` without `workspace = true`; this check \
+             reads each runtime requirement from `[workspace.dependencies]`"
+        );
+        let declared = shared
+            .get(name)
+            .unwrap_or_else(|| panic!("`{name}` is not in `[workspace.dependencies]`"));
+        let version = declared
+            .as_str()
+            .or_else(|| declared.get("version").and_then(toml::Value::as_str))
+            .unwrap_or_else(|| panic!("`[workspace.dependencies]` gives `{name}` no version"));
+        requirements
+            .entry(name.clone())
+            .or_default()
+            .insert(WORKSPACE_REQUIREMENTS, version.to_owned());
+    }
+
+    for line in read(CLIENT_FLOORS).lines() {
+        let Some((_, call)) = line.split_once("Dependency::new(\"") else {
+            continue;
+        };
+        let quoted: Vec<&str> = call.split('"').collect();
+        let [name, _, floor, ..] = quoted.as_slice() else {
+            panic!(
+                "`{CLIENT_FLOORS}` calls `Dependency::new` without a quoted name and floor: {line}"
+            );
+        };
+        requirements
+            .entry((*name).to_owned())
+            .or_default()
+            .insert(CLIENT_FLOORS, (*floor).to_owned());
+    }
+    requirements
+}
+
+/// How a requirement stands against its crate's newest stable release.
+#[derive(Debug, PartialEq)]
+enum Freshness {
+    /// Its floor is the newest release.
+    Latest,
+    /// It admits the newest release, from an older floor: raising the floor is a patch release's
+    /// worth of change, and the run only says so.
+    FloorBehind,
+    /// It rejects the newest release (a new major, or a new minor of a `0.x` line), so every
+    /// consumer of a release carrying it is held on the older line: the run fails.
+    MajorBehind,
+}
+
+/// Judges a caret requirement (`1.4.2`, `^0.12`) against `latest`. Any other operator, or a floor
+/// newer than every release, is an error: there is no floor to compare, or the requirement can
+/// never resolve.
+fn freshness(requirement: &str, latest: &semver::Version) -> Result<Freshness, String> {
+    let bare = requirement.strip_prefix('^').unwrap_or(requirement);
+    let mut parts: Vec<&str> = bare.split('.').collect();
+    if parts.len() > 3 || !parts.iter().all(|part| part.parse::<u64>().is_ok()) {
+        return Err(format!(
+            "`{requirement}` is not a caret requirement of up to three numeric parts"
+        ));
+    }
+    parts.resize(3, "0");
+    let floor = semver::Version::parse(&parts.join("."))
+        .map_err(|error| format!("`{requirement}`: {error}"))?;
+    if floor > *latest {
+        return Err(format!(
+            "`{requirement}` names a floor newer than the latest release {latest}"
+        ));
+    }
+    let admitted = semver::VersionReq::parse(requirement)
+        .map_err(|error| format!("`{requirement}`: {error}"))?
+        .matches(latest);
+    Ok(if !admitted {
+        Freshness::MajorBehind
+    } else if floor == *latest {
+        Freshness::Latest
+    } else {
+        Freshness::FloorBehind
+    })
+}
+
+/// The path of `name`'s file in the crates.io index, as the registry lays it out.
+fn index_path(name: &str) -> String {
+    let name = name.to_ascii_lowercase();
+    match name.len() {
+        0 => panic!("a crate name is never empty"),
+        1 => format!("1/{name}"),
+        2 => format!("2/{name}"),
+        3 => format!("3/{}/{name}", &name[..1]),
+        _ => format!("{}/{}/{name}", &name[..2], &name[2..4]),
+    }
+}
+
+/// The newest version an index file lists that is neither yanked nor a pre-release: the one
+/// `cargo add` would pick, and the one a consumer starting today would choose.
+fn latest_release(index: &str) -> Option<semver::Version> {
+    index
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let entry: serde_json::Value =
+                serde_json::from_str(line).expect("each index line is a JSON object");
+            let yanked = entry["yanked"].as_bool().unwrap_or(false);
+            let version = semver::Version::parse(entry["vers"].as_str()?).ok()?;
+            (!yanked && version.pre.is_empty()).then_some(version)
+        })
+        .max()
+}
+
+#[test]
+fn a_requirement_is_stale_only_when_it_rejects_the_latest_release() {
+    let version = |text: &str| semver::Version::parse(text).expect("a fixture version");
+    for (requirement, latest, expected) in [
+        ("1.4.2", "1.4.2", Freshness::Latest),
+        ("^1.4.2", "1.4.2", Freshness::Latest),
+        ("1.4.2", "1.5.0", Freshness::FloorBehind),
+        ("1.0", "1.0.229", Freshness::FloorBehind),
+        ("0.12.28", "0.12.30", Freshness::FloorBehind),
+        ("0.12.28", "0.13.0", Freshness::MajorBehind),
+        ("0.0.3", "0.0.4", Freshness::MajorBehind),
+        ("1.53.3", "2.0.0", Freshness::MajorBehind),
+    ] {
+        assert_eq!(
+            freshness(requirement, &version(latest)),
+            Ok(expected),
+            "`{requirement}` against {latest}"
+        );
+    }
+    for (requirement, latest) in [
+        (">=1.0", "1.2.0"),
+        ("~1.4", "1.4.9"),
+        ("1.4.2-rc.1", "1.4.2"),
+        ("1.5.0", "1.4.9"),
+    ] {
+        assert!(
+            freshness(requirement, &version(latest)).is_err(),
+            "`{requirement}` against {latest} has no floor to judge, or never resolves"
+        );
+    }
+}
+
+#[test]
+fn the_latest_release_is_the_newest_stable_unyanked_version() {
+    assert_eq!(
+        [
+            index_path("A"),
+            index_path("io"),
+            index_path("syn"),
+            index_path("serde_json")
+        ],
+        ["1/a", "2/io", "3/s/syn", "se/rd/serde_json"],
+        "the index lays a crate out by its lowercased name's length and leading letters"
+    );
+    let index = concat!(
+        r#"{"name":"x","vers":"0.12.9","yanked":false}"#,
+        "\n",
+        r#"{"name":"x","vers":"0.13.1","yanked":true}"#,
+        "\n",
+        r#"{"name":"x","vers":"0.14.0-rc.1","yanked":false}"#,
+        "\n",
+        r#"{"name":"x","vers":"0.13.0","yanked":false}"#,
+        "\n",
+    );
+    assert_eq!(
+        latest_release(index),
+        Some(semver::Version::new(0, 13, 0)),
+        "a yanked version and a pre-release are skipped, and the order of lines does not matter"
+    );
+    assert_eq!(latest_release(""), None);
+}
+
+#[test]
+fn the_latest_release_check_reads_every_runtime_requirement() {
+    let requirements = runtime_requirements();
+    let runtime: toml::Table = toml::from_str(&read("support-runtime/Cargo.toml"))
+        .expect("support-runtime/Cargo.toml parses");
+    for name in runtime["dependencies"]
+        .as_table()
+        .expect("support-runtime/Cargo.toml carries `[dependencies]`")
+        .keys()
+    {
+        assert!(
+            requirements[name].contains_key(WORKSPACE_REQUIREMENTS),
+            "the check reads no workspace requirement for the runtime's `{name}`"
+        );
+    }
+    // The floors are what a consumer's manifest must meet; `uuid`, which generated models name
+    // but the runtime does not carry, is read from them alone.
+    for name in ["reqwest", "serde", "tokio", "uuid"] {
+        assert!(
+            requirements
+                .get(name)
+                .is_some_and(|sources| sources.contains_key(CLIENT_FLOORS)),
+            "the check reads no generated-client floor for `{name}` from `{CLIENT_FLOORS}`"
+        );
+    }
+    for (name, sources) in &requirements {
+        for (source, requirement) in sources {
+            assert!(
+                freshness(requirement, &semver::Version::new(u64::MAX, 0, 0)).is_ok(),
+                "{source} requires `{name} {requirement}`, which the check cannot judge"
+            );
+        }
+    }
+}
+
+/// The run behind `mise run deps-latest` and the `deps-latest` job every release waits on (#1247).
+/// It reads the manifests and the crates.io sparse index, and writes nothing.
+#[test]
+#[ignore = "reads the crates.io index over the network; run by the deps-latest gate"]
+fn runtime_requirements_admit_their_latest_release() {
+    let mut stale = Vec::new();
+    for (name, sources) in runtime_requirements() {
+        let url = format!("https://index.crates.io/{}", index_path(&name));
+        let output = std::process::Command::new("curl")
+            .args(["-sSfL", "--retry", "3", "-A"])
+            .arg("getkono/spargen deps-latest (https://github.com/getkono/spargen)")
+            .arg(&url)
+            .output()
+            .unwrap_or_else(|error| panic!("cannot run curl: {error}"));
+        assert!(
+            output.status.success(),
+            "curl {url} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let index = String::from_utf8(output.stdout).expect("the index is UTF-8");
+        let latest =
+            latest_release(&index).unwrap_or_else(|| panic!("`{name}` has no stable release"));
+        for (source, requirement) in sources {
+            match freshness(&requirement, &latest) {
+                Ok(Freshness::Latest) => {
+                    println!("{name} {requirement} ({source}) is the latest release");
+                }
+                Ok(Freshness::FloorBehind) => println!(
+                    "::notice title=deps-latest {name}::{source} requires `{name} {requirement}`, \
+                     which admits the latest release {latest} from an older floor; raise the \
+                     floor and cut a patch release"
+                ),
+                Ok(Freshness::MajorBehind) => stale.push(format!(
+                    "{source} requires `{name} {requirement}`, which rejects the latest release \
+                     {latest}"
+                )),
+                Err(error) => stale.push(format!("{source} requires `{name}`: {error}")),
+            }
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "runtime requirements behind their crate's latest release; every release waits until \
+         they move (AGENTS.md, \"Releases\"):\n{}",
+        stale.join("\n")
+    );
+}
