@@ -469,7 +469,7 @@ impl http_body::Body for FetchBody {
 ///
 /// The request's total timeout crosses with it: off `wasm32` reqwest keeps it among the request's
 /// extensions, which the conversion carries; on `wasm32` it is a field the conversion drops, so it
-/// is carried as a [`FetchTimeout`] extension, which [`request_into_reqwest`] reads back.
+/// is carried as a `FetchTimeout` extension, which [`request_into_reqwest`] reads back.
 pub(crate) fn request_from_reqwest(
     request: reqwest::Request,
 ) -> Result<http::Request<HttpBody>, reqwest::Error> {
