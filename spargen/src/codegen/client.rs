@@ -137,12 +137,34 @@ pub(super) fn emit_client(
         #[forbid(unsafe_code)]
         #[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
         impl Client {
+            /// Build a client on the default `ClientConfig`: a 30 s connect timeout, a 5 min read
+            /// (stall) timeout, and no total timeout. [`Self::with_config`] changes any of them.
             pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
-                Self::with_client(reqwest::Client::new(), base_url)
+                Self::with_config(base_url, |_| {})
+            }
+
+            /// Build a client whose `ClientConfig` is the default one as `configure` leaves it —
+            /// where the connect, read and total timeouts are tightened or loosened. Its
+            /// `reqwest::Client` is built from the connect and read timeouts as they are when
+            /// `configure` returns.
+            pub fn with_config(
+                base_url: &str,
+                configure: impl FnOnce(&mut support::ClientConfig),
+            ) -> Result<Self, support::Error<std::convert::Infallible>> {
+                let mut config = support::ClientConfig {
+                    max_error_body: #error_body_cap,
+                    ..support::ClientConfig::default()
+                };
+                configure(&mut config);
+                let core = support::ClientCore::with_config(base_url, config)?;
+                Ok(Self { core })
             }
 
             #default_server
 
+            /// Build a client over a caller-supplied `reqwest::Client`, which both builds and
+            /// sends requests: your client's timeouts apply instead of `ClientConfig`'s connect
+            /// and read timeouts.
             pub fn with_client(
                 client: reqwest::Client,
                 base_url: &str,
@@ -154,7 +176,8 @@ pub(super) fn emit_client(
 
             /// Build a client over a caller-supplied transport backend — the injection point for
             /// retry, middleware, or a non-reqwest transport. Requests are still built on a default
-            /// `reqwest::Client`; only the execute step goes through the backend.
+            /// `reqwest::Client`; only the execute step goes through the backend, so connecting
+            /// and reading are bounded however the backend bounds them.
             pub fn with_backend(
                 backend: std::sync::Arc<dyn support::HttpBackend>,
                 base_url: &str,

@@ -79,6 +79,7 @@ fn w009_count(report: &Report) -> usize {
 /// stale copy fails the assertions rather than loosening them.
 const FIXED_CLIENT_METHODS: &[&str] = &[
     "new",
+    "with_config",
     "with_default_server",
     "with_client",
     "with_backend",

@@ -60,6 +60,30 @@ are themselves `HttpBackend`s that wrap an inner backend, so they compose by nes
 requests are still built on a default `reqwest::Client`, and only the execute step goes through the
 backend.
 
+## Timeouts
+
+`Client::new` bounds how long a request may wait, through three `ClientConfig` fields whose
+defaults are deliberately generous, for an application to tighten or loosen:
+
+| Field | Default | Bounds |
+| --- | --- | --- |
+| `connect_timeout` | 30 s | name resolution, the TCP handshake and TLS |
+| `read_timeout` | 5 min | each wait for the next bytes of a response, a stream's included; every read restarts it |
+| `timeout` | none | one non-streaming request, from connecting until its whole body has been read |
+
+Each one that elapses fails the request with `Error::Timeout`, which is transient. Set them with
+`Client::with_config(base_url, |config| { … })`, which hands the configuration over before the
+client's `reqwest::Client` is built from the connect and read timeouts. The total `timeout` is
+applied to each request as it is sent, and an operation returning an `EventStream` never applies
+it, since a stream may rightly stay open indefinitely. An event stream whose server sends nothing for longer than
+`read_timeout` still fails with `Error::Timeout`, which a reconnect policy may answer.
+
+`Client::with_client` and `Client::with_backend` run on the default configuration, whose total
+`timeout` is none, and leave connecting and reading to what they were given: the caller's
+`reqwest::Client` keeps its own timeouts, and a backend bounds requests however it bounds them.
+On `wasm32`, reqwest's `fetch` backend has no connect or read timeout, so only the total `timeout`
+applies there.
+
 ## Retry
 
 `RetryBackend` wraps any inner `HttpBackend` and re-executes a request per a caller-supplied
