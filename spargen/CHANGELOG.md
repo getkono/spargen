@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/getkono/spargen/compare/spargen-v0.6.0...spargen-v0.7.0) - 2026-11-07
+
+### Added
+
+- *(codegen)* [**breaking**] emit Client::with_timeout for a per-client-value total timeout ([#1255](https://github.com/getkono/spargen/pull/1255))
+- *(runtime)* [**breaking**] bound the default client's connect and read time, with an opt-in total timeout ([#1254](https://github.com/getkono/spargen/pull/1254))
+- *(codegen)* open a discriminated union to tags it does not list under open_unions ([#1246](https://github.com/getkono/spargen/pull/1246))
+- *(codegen)* [**breaking**] name inline discriminated variants from their pinned tag ([#1243](https://github.com/getkono/spargen/pull/1243))
+- *(runtime_contract)* check locked versions for an unpublished package ([#1237](https://github.com/getkono/spargen/pull/1237))
+- *(runtime)* [**breaking**] read RFC 9457 extension members into ProblemDetails::extensions ([#1236](https://github.com/getkono/spargen/pull/1236))
+
+### Fixed
+
+- *(codegen)* [**breaking**] serialize contentEncoding: base64 members as base64 strings ([#1238](https://github.com/getkono/spargen/pull/1238))
+- *(oas31)* leave declared components out of the pinned-variant rename ([#1252](https://github.com/getkono/spargen/pull/1252))
+- *(runtime_contract)* check the requirement of a package from a directory source ([#1244](https://github.com/getkono/spargen/pull/1244))
+
+### Other
+
+- *(runtime)* join parameter and query fragments in one buffer ([#1256](https://github.com/getkono/spargen/pull/1256))
+- *(runtime)* [**breaking**] move the reqwest requirement to 0.13 and quick-xml to 0.42 ([#1253](https://github.com/getkono/spargen/pull/1253))
+- qualify E007 and the never-Value claims for open_unions' Unknown variant ([#1251](https://github.com/getkono/spargen/pull/1251))
+- *(deps)* hold releases on runtime requirements behind their latest release ([#1249](https://github.com/getkono/spargen/pull/1249))
+
 ## [0.6.0](https://github.com/getkono/spargen/compare/spargen-v0.5.0...spargen-v0.6.0) - 2026-11-06
 
 ### Added

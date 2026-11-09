@@ -19,7 +19,7 @@ freestanding either way.
 
 ```toml
 [build-dependencies]
-spargen = { version = "0.6", features = ["remote-fetch"] }
+spargen = { version = "0.7", features = ["remote-fetch"] }
 ```
 
 `reqwest` is an optional dependency of the crate, and `remote-fetch` is the only feature that
