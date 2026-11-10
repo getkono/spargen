@@ -330,6 +330,62 @@ fn an_operation_method_keeps_a_spelling_a_url_accessor_wants() {
     }
 }
 
+/// Issue #1263: an operation whose success is one raw binary body gets a `{method}_stream` twin,
+/// which yields, in either listing order, to an operation already spelling it; an operation with
+/// any other success gets none.
+#[test]
+fn a_binary_success_twin_yields_to_a_method_spelling_it() {
+    use crate::ir::{BytesEncoding, Response, StatusSpec};
+    for twin_first in [false, true] {
+        let mut api = api(Vec::new(), false);
+        let bytes = api.types.insert(TypeDef {
+            name_hint: "Blob".to_owned(),
+            kind: TypeKind::Bytes(BytesEncoding::Raw),
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
+        });
+        api.operations[0].responses.by_status = vec![(
+            StatusSpec::Exact(200),
+            Response {
+                body: Some(Ty {
+                    id: bytes,
+                    nullable: false,
+                    boxed: false,
+                }),
+                media: Some(MediaType::OctetStream),
+                stream: None,
+                accept: None,
+                headers: Vec::new(),
+            },
+        )];
+        let mut spelled = api.operations[0].clone();
+        spelled.id = OperationId("getItemStream".to_owned());
+        spelled.responses.by_status.clear();
+        spelled.provenance = Provenance::new(
+            JsonPointer::root()
+                .push("paths")
+                .push("/items/{id}/stream")
+                .push("get"),
+            None,
+        );
+        if twin_first {
+            api.operations.insert(0, spelled);
+        } else {
+            api.operations.push(spelled);
+        }
+        let names = allocate(&api);
+        let record = |id: &str| &names.operations[&OperationId(id.to_owned())];
+        assert_eq!(record("getItemStream").method.as_str(), "get_item_stream");
+        assert!(record("getItemStream").byte_stream.is_none());
+        let twin = record("getItem").byte_stream.as_ref().unwrap().as_str();
+        assert!(
+            twin.len() > "get_item_stream".len() && twin.starts_with("get_item_stream_"),
+            "{twin}"
+        );
+    }
+}
+
 /// A keyword operation's method is raw (`r#type`); its accessor is spelled from the bare
 /// keyword, which `_url` makes an ordinary identifier.
 #[test]
@@ -910,7 +966,8 @@ proptest::proptest! {
             records
                 .iter()
                 .map(|record| &record.method)
-                .chain(records.iter().map(|record| &record.url_accessor)),
+                .chain(records.iter().map(|record| &record.url_accessor))
+                .chain(records.iter().filter_map(|record| record.byte_stream.as_ref())),
             super::CLIENT_METHODS,
         )?;
         let enum_successes = api
@@ -1096,7 +1153,11 @@ proptest::proptest! {
                 .operations
                 .iter()
                 .map(|(id, record)| {
-                    let methods = (record.method.clone(), record.url_accessor.clone());
+                    let methods = (
+                        record.method.clone(),
+                        record.url_accessor.clone(),
+                        record.byte_stream.clone(),
+                    );
                     let types = (
                         record.params_struct.clone(),
                         record.error.clone(),
