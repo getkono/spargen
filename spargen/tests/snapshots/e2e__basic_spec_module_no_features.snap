@@ -7714,55 +7714,55 @@ pub mod types {
     pub type Filter = i64;
     pub type Type = String;
     pub type ResponseBody = String;
-    pub type RequestBodyFileBb3f81ea = bytes::Bytes;
-    pub type RequestBodyCaption = String;
-    pub type RequestBodyCount = i64;
-    pub type RequestBodyTagsItemDdafbaaa = String;
-    pub type RequestBodyTags0d6778a5 = Vec<RequestBodyTagsItemDdafbaaa>;
+    pub type UploadFileBodyFile = bytes::Bytes;
+    pub type UploadFileBodyCaption = String;
+    pub type UploadFileBodyCount = i64;
+    pub type UploadFileBodyTagsItem = String;
+    pub type UploadFileBodyTags = Vec<UploadFileBodyTagsItem>;
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct RequestBodyE12d70b5 {
+    pub struct UploadFileBody {
         #[serde(rename = "file")]
-        pub file: RequestBodyFileBb3f81ea,
+        pub file: UploadFileBodyFile,
         #[serde(rename = "caption")]
-        pub caption: RequestBodyCaption,
+        pub caption: UploadFileBodyCaption,
         #[serde(
             rename = "count",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub count: Option<RequestBodyCount>,
+        pub count: Option<UploadFileBodyCount>,
         #[serde(
             rename = "tags",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub tags: Option<RequestBodyTags0d6778a5>,
+        pub tags: Option<UploadFileBodyTags>,
     }
     pub type Token84222325 = String;
     pub type Cursor84222325 = String;
-    pub type RequestBody43755b84 = bytes::Bytes;
+    pub type PostRawBody = bytes::Bytes;
     pub type Cursor842223252 = String;
     #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-    pub struct RequestBodyDigest(pub bytes::Bytes);
-    impl std::ops::Deref for RequestBodyDigest {
+    pub struct PostNullableBytesBodyDigest(pub bytes::Bytes);
+    impl std::ops::Deref for PostNullableBytesBodyDigest {
         type Target = bytes::Bytes;
         fn deref(&self) -> &bytes::Bytes {
             &self.0
         }
     }
-    impl From<bytes::Bytes> for RequestBodyDigest {
+    impl From<bytes::Bytes> for PostNullableBytesBodyDigest {
         fn from(bytes: bytes::Bytes) -> Self {
-            RequestBodyDigest(bytes)
+            PostNullableBytesBodyDigest(bytes)
         }
     }
-    impl From<RequestBodyDigest> for bytes::Bytes {
-        fn from(value: RequestBodyDigest) -> Self {
+    impl From<PostNullableBytesBodyDigest> for bytes::Bytes {
+        fn from(value: PostNullableBytesBodyDigest) -> Self {
             value.0
         }
     }
-    impl serde::Serialize for RequestBodyDigest {
+    impl serde::Serialize for PostNullableBytesBodyDigest {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
@@ -7770,33 +7770,34 @@ pub mod types {
             super::support::serialize_base64(&self.0, serializer)
         }
     }
-    impl<'de> serde::Deserialize<'de> for RequestBodyDigest {
+    impl<'de> serde::Deserialize<'de> for PostNullableBytesBodyDigest {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
         {
-            super::support::deserialize_base64(deserializer).map(RequestBodyDigest)
+            super::support::deserialize_base64(deserializer)
+                .map(PostNullableBytesBodyDigest)
         }
     }
     #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-    pub struct RequestBodyPrevious(pub bytes::Bytes);
-    impl std::ops::Deref for RequestBodyPrevious {
+    pub struct PostNullableBytesBodyPrevious(pub bytes::Bytes);
+    impl std::ops::Deref for PostNullableBytesBodyPrevious {
         type Target = bytes::Bytes;
         fn deref(&self) -> &bytes::Bytes {
             &self.0
         }
     }
-    impl From<bytes::Bytes> for RequestBodyPrevious {
+    impl From<bytes::Bytes> for PostNullableBytesBodyPrevious {
         fn from(bytes: bytes::Bytes) -> Self {
-            RequestBodyPrevious(bytes)
+            PostNullableBytesBodyPrevious(bytes)
         }
     }
-    impl From<RequestBodyPrevious> for bytes::Bytes {
-        fn from(value: RequestBodyPrevious) -> Self {
+    impl From<PostNullableBytesBodyPrevious> for bytes::Bytes {
+        fn from(value: PostNullableBytesBodyPrevious) -> Self {
             value.0
         }
     }
-    impl serde::Serialize for RequestBodyPrevious {
+    impl serde::Serialize for PostNullableBytesBodyPrevious {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
@@ -7804,20 +7805,21 @@ pub mod types {
             super::support::serialize_base64(&self.0, serializer)
         }
     }
-    impl<'de> serde::Deserialize<'de> for RequestBodyPrevious {
+    impl<'de> serde::Deserialize<'de> for PostNullableBytesBodyPrevious {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
         {
-            super::support::deserialize_base64(deserializer).map(RequestBodyPrevious)
+            super::support::deserialize_base64(deserializer)
+                .map(PostNullableBytesBodyPrevious)
         }
     }
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct RequestBody4fcf0620 {
+    pub struct PostNullableBytesBody {
         #[serde(rename = "digest")]
-        pub digest: Option<RequestBodyDigest>,
+        pub digest: Option<PostNullableBytesBodyDigest>,
         #[serde(rename = "previous")]
-        pub previous: Option<RequestBodyPrevious>,
+        pub previous: Option<PostNullableBytesBodyPrevious>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
     pub struct ResponseBodyDigest(pub bytes::Bytes);
@@ -7858,25 +7860,25 @@ pub mod types {
         #[serde(rename = "digest")]
         pub digest: Option<ResponseBodyDigest>,
     }
-    pub type RequestBodyFile = bytes::Bytes;
-    pub type RequestBodyThumb = bytes::Bytes;
+    pub type PostNullablePartsBodyFile = bytes::Bytes;
+    pub type PostNullablePartsBodyThumb = bytes::Bytes;
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct RequestBody20d50470 {
+    pub struct PostNullablePartsBody {
         #[serde(rename = "file")]
-        pub file: Option<RequestBodyFile>,
+        pub file: Option<PostNullablePartsBodyFile>,
         #[serde(rename = "thumb", default, skip_serializing_if = "Option::is_none")]
-        pub thumb: Option<RequestBodyThumb>,
+        pub thumb: Option<PostNullablePartsBodyThumb>,
     }
     pub type ResponseBody4555dd31 = String;
     pub type ResponseBodyE2c17756 = String;
     pub type ResponseBody959d8757 = bytes::Bytes;
-    pub type RequestBodyF467ae99 = bytes::Bytes;
+    pub type PutRangedBody = bytes::Bytes;
     pub type ResponseBody8dacd797 = bytes::Bytes;
     pub type HeaderContentRange = String;
     pub type Id = String;
     pub type ResponseBodyCd395900 = bytes::Bytes;
     pub type Id4f0a4fba = String;
-    pub type RequestBody = bytes::Bytes;
+    pub type PutArtworkBody = bytes::Bytes;
     pub type ResponseBodyD00b95d0 = String;
     pub type ResponseBody4450a524 = String;
     pub type ResponseBody6bf58d24 = bytes::Bytes;
@@ -7895,50 +7897,50 @@ pub mod types {
     pub type Reserved = String;
     pub type Text = String;
     pub type XText = String;
-    pub type RequestBodyName = String;
-    pub type RequestBodyTagsItem = String;
-    pub type RequestBodyTags = Vec<RequestBodyTagsItem>;
+    pub type SubmitFormBodyName = String;
+    pub type SubmitFormBodyTagsItem = String;
+    pub type SubmitFormBodyTags = Vec<SubmitFormBodyTagsItem>;
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct RequestBody75618f63 {
+    pub struct SubmitFormBody {
         #[serde(rename = "name")]
-        pub name: RequestBodyName,
+        pub name: SubmitFormBodyName,
         #[serde(rename = "tags")]
-        pub tags: RequestBodyTags,
+        pub tags: SubmitFormBodyTags,
         #[serde(rename = "blob")]
         pub blob: DeepFilter,
     }
-    pub type RequestBodyA = String;
-    pub type RequestBodyAdditional = String;
+    pub type SubmitFormAdditionalBodyA = String;
+    pub type SubmitFormAdditionalBodyAdditional = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct RequestBody3c5761a3 {
+    pub struct SubmitFormAdditionalBody {
         #[serde(rename = "a")]
-        pub a: RequestBodyA,
+        pub a: SubmitFormAdditionalBodyA,
         #[serde(flatten)]
-        pub additional: BTreeMap<String, RequestBodyAdditional>,
+        pub additional: BTreeMap<String, SubmitFormAdditionalBodyAdditional>,
     }
-    pub type RequestBodyAF8000e9c = String;
-    pub type RequestBodyAdditionalAba279dd = String;
+    pub type SubmitNullableFormAdditionalBodyA = String;
+    pub type SubmitNullableFormAdditionalBodyAdditional = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct RequestBodyE2940da4 {
+    pub struct SubmitNullableFormAdditionalBody {
         #[serde(
             rename = "a",
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
-        pub a: Option<RequestBodyAF8000e9c>,
+        pub a: Option<SubmitNullableFormAdditionalBodyA>,
         #[serde(flatten)]
-        pub additional: BTreeMap<String, RequestBodyAdditionalAba279dd>,
+        pub additional: BTreeMap<String, SubmitNullableFormAdditionalBodyAdditional>,
     }
-    pub type RequestBodyCaption820ffb52 = String;
-    pub type RequestBodyAdditionalItem = i64;
-    pub type RequestBodyAdditionalB504903e = Vec<RequestBodyAdditionalItem>;
+    pub type UploadAdditionalBodyCaption = String;
+    pub type UploadAdditionalBodyAdditionalItem = i64;
+    pub type UploadAdditionalBodyAdditional = Vec<UploadAdditionalBodyAdditionalItem>;
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct RequestBody1654af29 {
+    pub struct UploadAdditionalBody {
         #[serde(rename = "caption")]
-        pub caption: RequestBodyCaption820ffb52,
+        pub caption: UploadAdditionalBodyCaption,
         #[serde(flatten)]
-        pub additional: BTreeMap<String, RequestBodyAdditionalB504903e>,
+        pub additional: BTreeMap<String, UploadAdditionalBodyAdditional>,
     }
     pub type HeaderXTraceIds = Vec<Mode>;
     pub type ResponseBody2a32723f = String;
@@ -10953,7 +10955,7 @@ Response `409`: Conflict*/
     #[inline]
     pub async fn upload_file(
         &self,
-        body: &types::RequestBodyE12d70b5,
+        body: &types::UploadFileBody,
     ) -> Result<support::ResponseValue<()>, support::Error<UploadFileError>> {
         let mut path = "/upload".to_owned();
         let mut query: Vec<String> = Vec::new();
@@ -11108,7 +11110,7 @@ Response `409`: Conflict*/
     #[inline]
     pub async fn post_raw(
         &self,
-        body: &types::RequestBody43755b84,
+        body: &types::PostRawBody,
     ) -> Result<support::ResponseValue<()>, support::Error<PostRawError>> {
         let mut path = "/raw".to_owned();
         let mut query: Vec<String> = Vec::new();
@@ -11144,7 +11146,7 @@ Response `409`: Conflict*/
     pub async fn post_nullable_bytes(
         &self,
         params: impl Into<Option<PostNullableBytesParams>>,
-        body: &types::RequestBody4fcf0620,
+        body: &types::PostNullableBytesBody,
     ) -> Result<
         support::ResponseValue<types::ResponseBody8899a140>,
         support::Error<PostNullableBytesError>,
@@ -11216,7 +11218,7 @@ Response `409`: Conflict*/
     #[inline]
     pub async fn post_nullable_parts(
         &self,
-        body: &types::RequestBody20d50470,
+        body: &types::PostNullablePartsBody,
     ) -> Result<support::ResponseValue<()>, support::Error<PostNullablePartsError>> {
         let mut path = "/nullable-parts".to_owned();
         let mut query: Vec<String> = Vec::new();
@@ -11382,7 +11384,7 @@ Response `409`: Conflict*/
     #[inline]
     pub async fn put_ranged(
         &self,
-        body: &types::RequestBodyF467ae99,
+        body: &types::PutRangedBody,
     ) -> Result<
         support::ResponseValue<types::ResponseBody8dacd797>,
         support::Error<PutRangedError>,
@@ -11481,7 +11483,7 @@ Response `409`: Conflict*/
     pub async fn put_artwork(
         &self,
         id: impl Into<types::Id4f0a4fba>,
-        body: &types::RequestBody,
+        body: &types::PutArtworkBody,
     ) -> Result<support::ResponseValue<()>, support::Error<PutArtworkError>> {
         let id: types::Id4f0a4fba = id.into();
         let mut path = "/artwork/{id}".to_owned();
@@ -12377,7 +12379,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn submit_form(
         &self,
-        body: &types::RequestBody75618f63,
+        body: &types::SubmitFormBody,
     ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormError>> {
         let mut path = "/forms".to_owned();
         let mut query: Vec<String> = Vec::new();
@@ -12434,7 +12436,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn submit_form_additional(
         &self,
-        body: &types::RequestBody3c5761a3,
+        body: &types::SubmitFormAdditionalBody,
     ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormAdditionalError>> {
         let mut path = "/forms/additional".to_owned();
         let mut query: Vec<String> = Vec::new();
@@ -12486,7 +12488,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn submit_nullable_form_additional(
         &self,
-        body: &Option<types::RequestBodyE2940da4>,
+        body: &Option<types::SubmitNullableFormAdditionalBody>,
     ) -> Result<
         support::ResponseValue<()>,
         support::Error<SubmitNullableFormAdditionalError>,
@@ -12544,7 +12546,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn upload_additional(
         &self,
-        body: &types::RequestBody1654af29,
+        body: &types::UploadAdditionalBody,
     ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
         let mut path = "/upload/additional".to_owned();
         let mut query: Vec<String> = Vec::new();
@@ -13592,7 +13594,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn upload_file(
             &self,
-            body: &types::RequestBodyE12d70b5,
+            body: &types::UploadFileBody,
         ) -> Result<support::ResponseValue<()>, support::Error<UploadFileError>> {
             self.runtime.block_on(self.inner.upload_file(body))
         }
@@ -13625,7 +13627,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn post_raw(
             &self,
-            body: &types::RequestBody43755b84,
+            body: &types::PostRawBody,
         ) -> Result<support::ResponseValue<()>, support::Error<PostRawError>> {
             self.runtime.block_on(self.inner.post_raw(body))
         }
@@ -13641,7 +13643,7 @@ Response `409`: Conflict*/
         pub fn post_nullable_bytes(
             &self,
             params: impl Into<Option<PostNullableBytesParams>>,
-            body: &types::RequestBody4fcf0620,
+            body: &types::PostNullableBytesBody,
         ) -> Result<
             support::ResponseValue<types::ResponseBody8899a140>,
             support::Error<PostNullableBytesError>,
@@ -13660,7 +13662,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn post_nullable_parts(
             &self,
-            body: &types::RequestBody20d50470,
+            body: &types::PostNullablePartsBody,
         ) -> Result<support::ResponseValue<()>, support::Error<PostNullablePartsError>> {
             self.runtime.block_on(self.inner.post_nullable_parts(body))
         }
@@ -13726,7 +13728,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn put_ranged(
             &self,
-            body: &types::RequestBodyF467ae99,
+            body: &types::PutRangedBody,
         ) -> Result<
             support::ResponseValue<types::ResponseBody8dacd797>,
             support::Error<PutRangedError>,
@@ -13764,7 +13766,7 @@ Response `409`: Conflict*/
         pub fn put_artwork(
             &self,
             id: impl Into<types::Id4f0a4fba>,
-            body: &types::RequestBody,
+            body: &types::PutArtworkBody,
         ) -> Result<support::ResponseValue<()>, support::Error<PutArtworkError>> {
             self.runtime.block_on(self.inner.put_artwork(id, body))
         }
@@ -14006,7 +14008,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_form(
             &self,
-            body: &types::RequestBody75618f63,
+            body: &types::SubmitFormBody,
         ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormError>> {
             self.runtime.block_on(self.inner.submit_form(body))
         }
@@ -14021,7 +14023,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_form_additional(
             &self,
-            body: &types::RequestBody3c5761a3,
+            body: &types::SubmitFormAdditionalBody,
         ) -> Result<
             support::ResponseValue<()>,
             support::Error<SubmitFormAdditionalError>,
@@ -14039,7 +14041,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_nullable_form_additional(
             &self,
-            body: &Option<types::RequestBodyE2940da4>,
+            body: &Option<types::SubmitNullableFormAdditionalBody>,
         ) -> Result<
             support::ResponseValue<()>,
             support::Error<SubmitNullableFormAdditionalError>,
@@ -14057,7 +14059,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn upload_additional(
             &self,
-            body: &types::RequestBody1654af29,
+            body: &types::UploadAdditionalBody,
         ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
             self.runtime.block_on(self.inner.upload_additional(body))
         }
