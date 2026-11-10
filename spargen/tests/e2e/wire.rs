@@ -1,7 +1,8 @@
 //! Values on the wire: dates, a per-operation server override, an operation's URL accessor against
 //! the request it describes, RFC 6570 multipart parts, CBOR bodies, `contentEncoding: base64`
 //! content, an explicit `null` content parameter, cookie parameters and cookie credentials in one
-//! `Cookie` header, and the mock server's reading of a chunked request body.
+//! `Cookie` header, unsigned integers in parameters, headers and bodies, and the mock server's
+//! reading of a chunked request body.
 
 use super::*;
 
@@ -941,6 +942,115 @@ fn every_cookie_rides_in_one_header() {
         .status()
         .unwrap();
     assert!(status.success(), "every cookie must share one header");
+}
+
+/// The unsigned formats on the wire (#1261): a `uint64` path parameter, a `uint32` query
+/// parameter and a `uint16` header parameter are sent as decimal, a `uint8` response header is
+/// read back from decimal, and a `uint64` body member above `i64::MAX` decodes while a negative
+/// one is a decode error.
+#[test]
+fn unsigned_integers_reach_the_wire_as_decimal_in_both_directions() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r##"
+openapi: 3.1.0
+info: { title: Unsigned, version: 1.0.0 }
+paths:
+  /counters/{id}:
+    get:
+      operationId: getCounter
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, format: uint64 } }
+        - { name: limit, in: query, schema: { type: integer, format: uint32 } }
+        - { name: X-Page, in: header, required: true, schema: { type: integer, format: uint16 } }
+      responses:
+        "200":
+          description: ok
+          headers:
+            X-Remaining:
+              required: true
+              schema: { type: integer, format: uint8 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Counter' }
+components:
+  schemas:
+    Counter:
+      type: object
+      required: [count]
+      properties:
+        count: { type: integer, format: uint64 }
+"##,
+    );
+    let out = temp.path().join("client");
+    let report = generate_fixture_crate(&spec, &out, "unsigned_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+
+    write_fixture_test(
+        &out,
+        "unsigned",
+        r##"#![cfg(feature = "blocking")]
+
+mod common;
+
+use common::header;
+
+#[test]
+fn unsigned_values_are_decimal_on_the_wire() {
+    let (base, server) = common::serve_one(common::response(
+        "200 OK",
+        &[("content-type", "application/json"), ("x-remaining", "255")],
+        br#"{"count":18446744073709551615}"#,
+    ));
+    let client = unsigned_client::BlockingClient::new(&base).unwrap();
+    let params = unsigned_client::GetCounterParams::default().limit(u32::MAX);
+    let response = client
+        .get_counter(u64::MAX, u16::MAX, Some(params))
+        .expect("the call round-trips");
+
+    let request = server.join().unwrap();
+    assert_eq!(
+        request.line(),
+        "GET /counters/18446744073709551615?limit=4294967295 HTTP/1.1"
+    );
+    assert_eq!(header(&request.head, "x-page"), ["65535"], "{}", request.head);
+
+    let headers =
+        unsigned_client::GetCounterStatus200Headers::from_response(&response).unwrap();
+    let remaining: u8 = headers.x_remaining;
+    assert_eq!(remaining, u8::MAX);
+    let count: u64 = response.into_inner().count;
+    assert_eq!(count, u64::MAX);
+
+    assert!(serde_json::from_str::<unsigned_client::types::Counter>(r#"{"count":-1}"#).is_err());
+}
+"##,
+    );
+
+    let status = fixture_cargo(&out)
+        .args(["test", "--features", "blocking", "--test", "unsigned"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "unsigned values must be decimal on the wire"
+    );
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-targets",
+            "--features",
+            "blocking",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the unsigned fixture must lint clean");
 }
 
 /// The mock server ends a chunked request body at its zero-size chunk's trailer section, read
