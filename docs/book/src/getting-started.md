@@ -66,7 +66,9 @@ mod api {
 The include site needs no lint attribute either. Each generated top-level item allows the lints
 that judge what the spec chose or where you put the module (`missing_docs`, `unreachable_pub`,
 `dead_code`, `clippy::pedantic`, `clippy::nursery`), and the spec's prose is rewritten so rustdoc's
-link and HTML lints find nothing in it (`Spec::verbatim_docs(true)` keeps it as written).
+link and HTML lints find nothing in it (`Spec::verbatim_docs(true)` keeps it as written). An
+`#[expect(…)]` of any of those lints left at an existing include site is now unfulfilled, which
+`deny(warnings)` turns into an error: drop it, or the whole attribute.
 
 Your `[dependencies]` provide the runtime set the generated code needs. The
 [petstore `Cargo.toml`](https://github.com/getkono/spargen/blob/master/examples/petstore/Cargo.toml)
