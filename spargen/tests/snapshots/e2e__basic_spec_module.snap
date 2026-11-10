@@ -1414,8 +1414,9 @@ mod support {
         /// past it is [`Error::BodyTooLarge`], before `decode` runs.
         ///
         /// Generated code for a multi-status success enum calls it from the arm whose selector matched,
-        /// with a `decode` that builds that arm's variant. `decode` receives the `Bytes` itself so a raw
-        /// binary variant keeps it without a copy.
+        /// with a `decode` that builds that arm's variant from the `Bytes` it receives. An arm whose variant
+        /// holds a raw binary body reads it through [`decode_success_bytes`] instead, within the binary
+        /// default where the call set no limit.
         pub async fn decode_success_with<T>(
             core: &ClientCore,
             response: Response,
@@ -4086,8 +4087,8 @@ mod support {
         /// A raw binary success body read as it arrives, which a binary operation's `_stream` twin
         /// returns in place of the whole `Bytes` its buffered method reads.
         ///
-        /// [`Self::next`] yields the body a chunk at a time, and [`Self::collect_bounded`] reads the rest
-        /// of it into one `Bytes` within a limit the caller names; no collector reads it without one.
+        /// [`Self::next`] yields the body a chunk at a time, and [`Self::collect_bounded`], its only
+        /// collector, reads the rest of it into one `Bytes` within a limit the caller names.
         /// [`Self::into_body`] hands the body over as an [`HttpBody`], an `http_body::Body`, for a reader
         /// of the caller's own. Dropping it abandons the rest of the body.
         pub struct ByteStream {

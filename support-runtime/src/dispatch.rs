@@ -331,8 +331,9 @@ where
 /// past it is [`Error::BodyTooLarge`], before `decode` runs.
 ///
 /// Generated code for a multi-status success enum calls it from the arm whose selector matched,
-/// with a `decode` that builds that arm's variant. `decode` receives the `Bytes` itself so a raw
-/// binary variant keeps it without a copy.
+/// with a `decode` that builds that arm's variant from the `Bytes` it receives. An arm whose variant
+/// holds a raw binary body reads it through [`decode_success_bytes`] instead, within the binary
+/// default where the call set no limit.
 pub async fn decode_success_with<T>(
     core: &ClientCore,
     response: Response,

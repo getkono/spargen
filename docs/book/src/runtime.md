@@ -368,7 +368,7 @@ without bound. Each such operation also has a `{method}_stream` twin returning
 `ResponseValue<ByteStream>`, the body handed over unread: `next()` yields it chunk by chunk,
 `collect_bounded(limit)` reads the rest whole within a limit of the caller's choosing (a
 `Content-Length` past it refused unread), and `into_body()` hands over the `HttpBody` for a reader
-of the caller's own. The runtime offers no collector without a limit. Like an `EventStream`, the
+of the caller's own. `collect_bounded` is its only collector. Like an `EventStream`, the
 twin is exempt from the total timeout and the body limits; the connect and read timeouts still
 apply. Its errors are `Error<Infallible>`, which `Error::widen` turns into the operation's.
 

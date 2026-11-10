@@ -58,8 +58,8 @@ impl<T> ResponseValue<T> {
 /// A raw binary success body read as it arrives, which a binary operation's `_stream` twin
 /// returns in place of the whole `Bytes` its buffered method reads.
 ///
-/// [`Self::next`] yields the body a chunk at a time, and [`Self::collect_bounded`] reads the rest
-/// of it into one `Bytes` within a limit the caller names; no collector reads it without one.
+/// [`Self::next`] yields the body a chunk at a time, and [`Self::collect_bounded`], its only
+/// collector, reads the rest of it into one `Bytes` within a limit the caller names.
 /// [`Self::into_body`] hands the body over as an [`HttpBody`], an `http_body::Body`, for a reader
 /// of the caller's own. Dropping it abandons the rest of the body.
 pub struct ByteStream {

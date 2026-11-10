@@ -1433,7 +1433,7 @@ fn max_body_replaces_the_configured_success_limit() {
 
 /// With no limit set anywhere, a success body within the binary default is read whole, as before.
 #[test]
-fn a_success_body_is_unbounded_by_default() {
+fn a_success_body_is_read_whole_within_the_binary_default() {
     let backend = Canned::answering([Chunks::repeat(1024, 64).into_response(200)]);
     let core = core_with(backend, crate::RequestOptions::default());
     assert_eq!(send_and_read(&core).unwrap().into_inner().len(), 64 * 1024);
