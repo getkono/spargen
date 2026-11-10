@@ -5,6 +5,7 @@
 //! reading of a chunked request body.
 
 use super::*;
+use spargen::DateTimeBackend;
 
 /// `format: date-time` and `format: date` must reach the wire as RFC 3339 strings.
 ///
@@ -107,6 +108,187 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
     assert_eq!(decoded.day.to_string(), "2024-02-29");
     assert_eq!(decoded.at.to_string(), "2024-02-29T01:02:03.5+05:30");
     // The newtype is transparent: `time`'s API is one deref away.
+    assert_eq!(decoded.at.year(), 2024);
+}
+"##;
+
+/// The `jiff` and `chrono` backends put the same RFC 3339 bytes on the wire as `time`, in a
+/// request body, a response body and two query parameters, through the newtypes over their own
+/// crate's types. The fixture crate declares the backend's crate at the floor `spargen deps` states
+/// for it, and no `time`; the generated module, its embedded `rfc3339` codec included, passes
+/// clippy with warnings denied.
+#[test]
+fn every_typed_backend_puts_rfc3339_on_the_wire() {
+    for (backend, crate_name, inner, test) in [
+        (
+            DateTimeBackend::Jiff,
+            "jiff",
+            "pub struct DateTime(pub jiff::Timestamp)",
+            JIFF_DATE_WIRE_TEST,
+        ),
+        (
+            DateTimeBackend::Chrono,
+            "chrono",
+            "pub struct DateTime(pub chrono::DateTime<chrono::FixedOffset>)",
+            CHRONO_DATE_WIRE_TEST,
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let spec = write_spec(temp.path(), "openapi.yaml", DATE_SPEC);
+        let out = temp.path().join("client");
+        let name = format!("dates_{crate_name}_client");
+        let report = generate_configured_fixture_crate(&spec, &out, &name, "2021", |spec: Spec| {
+            spec.datetime(backend)
+        });
+        assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+        let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+        assert!(
+            generated.contains("pub type EventAt = DateTime;")
+                && generated.contains("pub type EventDay = Date;"),
+            "{backend}: the date properties resolve to the RFC 3339 newtypes"
+        );
+        assert!(generated.contains(inner), "{backend}: {inner}");
+        assert!(
+            [
+                "time::OffsetDateTime",
+                "time::Month",
+                "time::format_description"
+            ]
+            .iter()
+            .all(|path| !generated.contains(path)),
+            "{backend}: the module must not name the `time` crate"
+        );
+
+        // The backend's crate replaces `time` in the fixture manifest, at its stated floor.
+        let floor = spargen::requirements(&Spec::new(spec.clone()).datetime(backend))
+            .expect("spec lowers")
+            .0
+            .dependencies
+            .into_iter()
+            .find(|dependency| dependency.name == crate_name)
+            .unwrap_or_else(|| panic!("{backend}: `{crate_name}` is required"))
+            .manifest_line();
+        let manifest_path = out.join("Cargo.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        let time_line = manifest
+            .lines()
+            .find(|line| line.starts_with("time = "))
+            .expect("the fixture manifest declares time")
+            .to_owned();
+        std::fs::write(&manifest_path, manifest.replace(&time_line, &floor)).unwrap();
+
+        write_fixture_test(&out, "dates", &test.replace("dates_client", &name));
+        let status = fixture_cargo(&out)
+            .args(["test", "--features", "blocking", "--test", "dates"])
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "{backend}: the date-time wire round-trip must pass"
+        );
+        let status = fixture_cargo(&out)
+            .args(["clippy", "--all-features", "--", "-D", "warnings"])
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "{backend}: the generated module must pass clippy"
+        );
+    }
+}
+
+const JIFF_DATE_WIRE_TEST: &str = r##"#![cfg(feature = "blocking")]
+
+mod common;
+
+#[test]
+fn dates_are_rfc3339_on_the_wire_in_both_directions() {
+    let (base, server) = common::serve_once(
+        "application/json",
+        "200 OK",
+        br#"{"at":"2024-02-29T01:02:03.5+05:30","day":"2024-02-29"}"#,
+    );
+    let client = dates_client::BlockingClient::new(&base).unwrap();
+
+    let at = dates_client::DateTime(jiff::Timestamp::from_second(1_700_000_000).unwrap());
+    let day = dates_client::Date(jiff::civil::date(2023, 11, 14));
+    let event = dates_client::types::Event { at, day };
+
+    let params = dates_client::CreateEventParams::default().since(at).on(day);
+    let response = client
+        .create_event(Some(params), &event)
+        .expect("create_event round-trips");
+
+    let request = server.join().unwrap();
+    let request_line = request.line();
+    assert!(
+        request_line.contains("since=2023-11-14T22%3A13%3A20Z"),
+        "date-time query parameter must be RFC 3339: {request_line}"
+    );
+    assert!(
+        request_line.contains("on=2023-11-14"),
+        "date query parameter must be a full-date: {request_line}"
+    );
+    let body = String::from_utf8_lossy(&request.body);
+    assert_eq!(body, r#"{"at":"2023-11-14T22:13:20Z","day":"2023-11-14"}"#);
+
+    // A `Timestamp` holds no offset: the instant survives, normalized to UTC.
+    let decoded = response.into_inner();
+    assert_eq!(decoded.day.to_string(), "2024-02-29");
+    assert_eq!(decoded.at.to_string(), "2024-02-28T19:32:03.5Z");
+    // The newtype is transparent: `jiff`'s API is one deref away.
+    assert_eq!(decoded.at.as_second(), 1_709_148_723);
+    assert_eq!(decoded.day.year(), 2024);
+}
+"##;
+
+const CHRONO_DATE_WIRE_TEST: &str = r##"#![cfg(feature = "blocking")]
+
+use chrono::Datelike;
+
+mod common;
+
+#[test]
+fn dates_are_rfc3339_on_the_wire_in_both_directions() {
+    let (base, server) = common::serve_once(
+        "application/json",
+        "200 OK",
+        br#"{"at":"2024-02-29T01:02:03.5+05:30","day":"2024-02-29"}"#,
+    );
+    let client = dates_client::BlockingClient::new(&base).unwrap();
+
+    let at = dates_client::DateTime(
+        chrono::DateTime::from_timestamp(1_700_000_000, 0)
+            .unwrap()
+            .fixed_offset(),
+    );
+    let day = dates_client::Date(chrono::NaiveDate::from_ymd_opt(2023, 11, 14).unwrap());
+    let event = dates_client::types::Event { at, day };
+
+    let params = dates_client::CreateEventParams::default().since(at).on(day);
+    let response = client
+        .create_event(Some(params), &event)
+        .expect("create_event round-trips");
+
+    let request = server.join().unwrap();
+    let request_line = request.line();
+    assert!(
+        request_line.contains("since=2023-11-14T22%3A13%3A20Z"),
+        "date-time query parameter must be RFC 3339: {request_line}"
+    );
+    assert!(
+        request_line.contains("on=2023-11-14"),
+        "date query parameter must be a full-date: {request_line}"
+    );
+    let body = String::from_utf8_lossy(&request.body);
+    assert_eq!(body, r#"{"at":"2023-11-14T22:13:20Z","day":"2023-11-14"}"#);
+
+    // Decoding: an offset and a subsecond survive the round trip as the server wrote them.
+    let decoded = response.into_inner();
+    assert_eq!(decoded.day.to_string(), "2024-02-29");
+    assert_eq!(decoded.at.to_string(), "2024-02-29T01:02:03.5+05:30");
+    // The newtype is transparent: `chrono`'s API is one deref away.
     assert_eq!(decoded.at.year(), 2024);
 }
 "##;

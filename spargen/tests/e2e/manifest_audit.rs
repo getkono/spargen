@@ -130,6 +130,82 @@ components:
     assert!(!messages.contains("tokio"), "{messages}");
 }
 
+/// The audit requires the crate the selected date-time backend wraps, and only it: a manifest that
+/// declares only the core crates is told it needs `jiff` or `chrono` (never `time`) for an API with
+/// a `date-time`, and is accepted once it declares the line `spargen deps` prints for the same
+/// spec. The `String` backend requires no date-time crate.
+#[test]
+fn the_manifest_audit_requires_the_selected_datetime_crate() {
+    const CORE: &str = r#"[package]
+name = "datetime-consumer"
+version = "0.0.0"
+
+[dependencies]
+bytes = "1.12.1"
+http = "1.4.2"
+http-body = "1.0.1"
+reqwest = { version = "0.13.5", default-features = false }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+"#;
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = temp.path().join("Cargo.toml");
+    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+    std::fs::write(
+        &spec,
+        r#"openapi: 3.1.0
+info: { title: Dates, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Timestamp: { type: string, format: date-time }
+    Day: { type: string, format: date }
+"#,
+    )
+    .unwrap();
+    let audit = |backend: spargen::DateTimeBackend, manifest_text: &str| {
+        std::fs::write(&manifest, format!("{manifest_text}\n[workspace]\n")).unwrap();
+        let preview = spargen::__private::preview_for_macro(
+            &Spec::new(spec.clone()).datetime(backend),
+            manifest.to_str().unwrap(),
+        );
+        preview
+            .report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Code::RuntimeDependencyContract)
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    for backend in [
+        spargen::DateTimeBackend::Jiff,
+        spargen::DateTimeBackend::Chrono,
+    ] {
+        let messages = audit(backend, CORE);
+        assert!(
+            messages.contains(&format!("requires `{backend}`")),
+            "{messages}"
+        );
+        assert!(!messages.contains("`time`"), "{messages}");
+
+        let line = spargen::requirements(&Spec::new(spec.clone()).datetime(backend))
+            .expect("spec lowers")
+            .0
+            .dependencies
+            .into_iter()
+            .find(|dependency| dependency.name == backend.as_str())
+            .expect("the backend's crate is required")
+            .manifest_line();
+        let messages = audit(backend, &format!("{CORE}{line}\n"));
+        assert!(messages.is_empty(), "{backend}: {messages}");
+    }
+    let messages = audit(spargen::DateTimeBackend::String, CORE);
+    assert!(messages.is_empty(), "{messages}");
+}
+
 /// The report behind #71, end to end: a workspace root declaring `futures-core` and `uuid` under
 /// `[workspace.dependencies]`, a member inheriting them with `{ workspace = true }`, and a 3.2
 /// document with one `text/event-stream` operation and a `format: uuid` field. The report said
