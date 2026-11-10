@@ -437,8 +437,8 @@ mod support {
             /// It is read once, when [`ClientCore::with_config`] or [`ClientCore::new`] builds the
             /// `reqwest::Client`, so changing it through [`ClientCore::config_mut`] afterwards changes
             /// nothing. A client injected with [`ClientCore::with_client`] keeps its own connect timeout
-            /// instead, and a backend installed with [`ClientCore::with_backend`] executes requests on its
-            /// own terms. reqwest's `fetch` backend has no connect timeout, so on `wasm32` it is ignored.
+            /// instead, and a backend installed with [`ClientCore::with_backend`] or
+            /// [`ClientCore::with_client_and_backend`] executes requests on its own terms. reqwest's `fetch` backend has no connect timeout, so on `wasm32` it is ignored.
             pub connect_timeout: Option<Duration>,
             /// How long a read on an established connection may wait for its next bytes — the response
             /// head, or the next chunk of a body, a streamed one included — before the request fails with
@@ -485,7 +485,7 @@ mod support {
         ///
         /// Request building stays on a concrete `reqwest::Client`; only the execute step is routed through
         /// the backend (see [`super::send`]). `new`/`with_client` install the default [`ReqwestBackend`];
-        /// `with_backend` plugs a caller-supplied transport.
+        /// `with_backend` plugs a caller-supplied transport, and `with_client_and_backend` takes both.
         ///
         /// The generated `Client` wraps one of these and documents its own constructors; each of its
         /// operation methods delegates to the shared dispatch routines.
@@ -535,12 +535,30 @@ mod support {
             /// `backend`, so connecting and reading are bounded however `backend` bounds them.
             /// [`ClientConfig::timeout`] travels on each request [`super::send`] sends, for a backend that
             /// runs it on a `reqwest::Client` to enforce.
+            ///
+            /// Each call builds that request-building `reqwest::Client`, TLS initialisation included;
+            /// [`Self::with_client_and_backend`] takes one the caller already has instead.
             pub fn with_backend(
                 backend: Arc<dyn HttpBackend>,
                 base_url: &str,
             ) -> Result<Self, Error<Infallible>> {
-                let config = ClientConfig::default();
-                Self::assemble(http_client(&config)?, backend, base_url, config)
+                let client = http_client(&ClientConfig::default())?;
+                Self::with_client_and_backend(client, backend, base_url)
+            }
+            /// Build a core with both a caller-supplied `reqwest::Client`, which BUILDS requests, and a
+            /// caller-supplied transport [`HttpBackend`], which EXECUTES them; nothing is built besides,
+            /// so several cores can share one client and one backend. Only the execute step goes through
+            /// `backend`, so connecting and reading are bounded however `backend` bounds them, and
+            /// timeouts configured on `client` itself apply only where `backend` runs requests on it. The
+            /// configuration is the default [`ClientConfig`]; [`ClientConfig::timeout`] travels on each
+            /// request [`super::send`] sends, as [`Self::with_backend`] describes. Returns a
+            /// request-construction error if the base URL is invalid.
+            pub fn with_client_and_backend(
+                client: reqwest::Client,
+                backend: Arc<dyn HttpBackend>,
+                base_url: &str,
+            ) -> Result<Self, Error<Infallible>> {
+                Self::assemble(client, backend, base_url, ClientConfig::default())
             }
             fn assemble(
                 http: reqwest::Client,
@@ -569,6 +587,17 @@ mod support {
             /// The base URL.
             pub fn base_url(&self) -> &Url {
                 &self.base_url
+            }
+            /// Replace the base URL every later request is resolved against, keeping the client, backend,
+            /// configuration and credentials. Returns a request-construction error, leaving the base URL
+            /// as it was, if `base_url` is invalid.
+            pub fn set_base_url(
+                &mut self,
+                base_url: &str,
+            ) -> Result<(), Error<Infallible>> {
+                self.base_url = Url::parse(base_url)
+                    .map_err(Error::request_construction)?;
+                Ok(())
             }
             /// The injected HTTP client used to BUILD requests.
             pub fn http(&self) -> &reqwest::Client {
@@ -9285,12 +9314,30 @@ impl Client {
     /// Build a client over a caller-supplied transport backend — the injection point for
     /// retry, middleware, or a non-reqwest transport. Requests are still built on a default
     /// `reqwest::Client`; only the execute step goes through the backend, so connecting
-    /// and reading are bounded however the backend bounds them.
+    /// and reading are bounded however the backend bounds them. Each call builds that
+    /// `reqwest::Client`; [`Self::with_client_and_backend`] takes one you already have.
     pub fn with_backend(
         backend: std::sync::Arc<dyn support::HttpBackend>,
         base_url: &str,
     ) -> Result<Self, support::Error<std::convert::Infallible>> {
         let mut core = support::ClientCore::with_backend(backend, base_url)?;
+        core.config_mut().max_error_body = 65536usize;
+        Ok(Self { core })
+    }
+    /// Build a client over both a caller-supplied `reqwest::Client`, which builds
+    /// requests, and a caller-supplied transport backend, which executes them; nothing
+    /// else is built, so many clients can share one of each. Connecting and reading are
+    /// bounded however the backend bounds them.
+    pub fn with_client_and_backend(
+        client: reqwest::Client,
+        backend: std::sync::Arc<dyn support::HttpBackend>,
+        base_url: &str,
+    ) -> Result<Self, support::Error<std::convert::Infallible>> {
+        let mut core = support::ClientCore::with_client_and_backend(
+            client,
+            backend,
+            base_url,
+        )?;
         core.config_mut().max_error_body = 65536usize;
         Ok(Self { core })
     }
@@ -9350,6 +9397,17 @@ impl Client {
     pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
         self.core.config_mut().timeout = timeout;
         self
+    }
+    /// Repoint this client value at another base URL, keeping its `reqwest::Client`,
+    /// transport backend, configuration and credentials, so nothing is rebuilt: derive one
+    /// with `client.clone().with_base_url(url)?`. Fails with `Error::RequestConstruction`
+    /// if `base_url` is not a valid URL.
+    pub fn with_base_url(
+        mut self,
+        base_url: &str,
+    ) -> Result<Self, support::Error<std::convert::Infallible>> {
+        self.core.set_base_url(base_url)?;
+        Ok(self)
     }
     ///Response `204`: No Content
     #[inline]
@@ -13146,6 +13204,17 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
+        /// Build a blocking client over a caller-supplied `reqwest::Client` and transport
+        /// backend, as `Client::with_client_and_backend` does.
+        pub fn with_client_and_backend(
+            client: reqwest::Client,
+            backend: std::sync::Arc<dyn support::HttpBackend>,
+            base_url: &str,
+        ) -> Result<Self, support::Error<std::convert::Infallible>> {
+            let inner = Client::with_client_and_backend(client, backend, base_url)?;
+            let runtime = new_runtime()?;
+            Ok(Self { inner, runtime })
+        }
         /// Borrow the wrapped async client.
         pub fn inner(&self) -> &Client {
             &self.inner
@@ -13198,6 +13267,15 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
             self.inner = self.inner.with_timeout(timeout);
             self
+        }
+        /// Repoint this client at another base URL, keeping everything else (mirrors the
+        /// async client's `with_base_url`).
+        pub fn with_base_url(
+            mut self,
+            base_url: &str,
+        ) -> Result<Self, support::Error<std::convert::Infallible>> {
+            self.inner = self.inner.with_base_url(base_url)?;
+            Ok(self)
         }
         ///Response `204`: No Content
         #[inline]

@@ -57,8 +57,11 @@ failures exactly as executing on the client directly always has. On `wasm32` it 
 `fetch` backend, which sends no streaming request body. The retry and middleware adapters below
 are themselves `HttpBackend`s that wrap an inner backend, so they compose by nesting.
 `Client::with_backend(backend, base_url)` takes the outermost one as an `Arc<dyn HttpBackend>`;
-requests are still built on a default `reqwest::Client`, and only the execute step goes through the
-backend.
+requests are still built on a default `reqwest::Client`, which each call builds, and only the
+execute step goes through the backend. `Client::with_client_and_backend(client, backend, base_url)`
+takes both pieces instead, so clients that share one `reqwest::Client` and one backend build
+neither. `client.clone().with_base_url(url)?` derives a client value repointed at another base
+URL, keeping its `reqwest::Client`, backend, configuration and credentials.
 
 ## Timeouts
 
@@ -86,7 +89,8 @@ the connect and read timeouts still apply, and so does a total timeout configure
 `reqwest::Client` injected with `with_client`, which reqwest lets a request shorten or lengthen
 but not lift. An operation returning an `EventStream` is exempt, as it is from `timeout`.
 
-`Client::with_client` and `Client::with_backend` run on the default configuration, whose total
+`Client::with_client`, `Client::with_backend` and `Client::with_client_and_backend` run on the
+default configuration, whose total
 `timeout` is none, and leave connecting and reading to what they were given: the caller's
 `reqwest::Client` keeps its own timeouts, and a backend bounds requests however it bounds them.
 On `wasm32`, reqwest's `fetch` backend has no connect or read timeout, so only the total `timeout`
