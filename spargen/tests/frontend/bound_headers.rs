@@ -124,6 +124,41 @@ fn a_binding_no_operation_declares_is_rejected() {
     assert!(code.is_empty(), "nothing is written: {code}");
 }
 
+/// A binding is matched after every omit and keep rule applies: `X-Trace` is declared only by
+/// `listItems`, so omitting that operation, or keeping only `getStatus`, leaves the binding
+/// matching nothing, and it is rejected with `E026` by `check` and `generate` alike. The same
+/// binding without either rule generates.
+#[test]
+fn a_binding_only_an_omitted_or_unkept_operation_declares_is_rejected() {
+    let bound = tempfile::tempdir().unwrap();
+    let (report, _) = generate_spec_with_code(versioned_spec(&bound).bind_header("X-Trace"));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    // Each rejected run gets a directory of its own, so no earlier run's output is read back.
+    let (omitted_dir, unkept_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let omitted = versioned_spec(&omitted_dir)
+        .bind_header("X-Trace")
+        .omit_rule(spargen::OmitRule::operation(
+            spargen::OmitMethod::Get,
+            "/items",
+        ));
+    let unkept = versioned_spec(&unkept_dir)
+        .bind_header("X-Trace")
+        .keep_operation(spargen::OmitMethod::Get, "/status");
+    for spec in [omitted, unkept] {
+        let (generated, checked, code) = generate_and_check_spec(spec);
+        for report in [&generated, &checked] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert_eq!(
+                messages_for(report, Code::BoundHeaderNotDeclared),
+                ["the header binding `X-Trace` matches no header parameter any operation declares"],
+                "{report:#?}"
+            );
+        }
+        assert!(code.is_empty(), "nothing is written: {code}");
+    }
+}
+
 /// A header parameter the specification says to ignore (`W011`) is never sent, so binding it
 /// binds nothing and is rejected with `E026` too.
 #[test]
