@@ -51,7 +51,8 @@ Options:
 `--carve`/`--no-carve`, `--uuid`/`--no-uuid`, `--time`/`--no-time` and
 `--open-narrowing`/`--no-open-narrowing`, `--open-unions`/`--no-open-unions`,
 `--verbatim-docs`/`--no-verbatim-docs`, `--error-body-cap`, `--batch-cap`, and the repeatable
-`--omit-path`, `--omit-operation`, `--omit-component`, `--omit-pointer` and `--keep-operation`. The
+`--omit-path`, `--omit-operation`, `--omit-component`, `--omit-pointer`, `--keep-operation` and
+`--bind-header`. The
 group mirrors the setter list on `spargen::Spec` and the keys of [`spargen.toml`](#spargentoml-reference). `lock`
 fetches every remote `$ref` the spec reaches whatever the omit and keep rules and switches say, so of the
 group it reads only `--config` and `--batch-cap` (and the file's `batch_cap`); the rest are
@@ -61,8 +62,9 @@ accepted there and have no effect.
 
 Each spec is resolved as built-in defaults, then its `spargen.toml` (the `--config` path, or the
 file beside the spec when there is one), then the flags. `--error-body-cap` and `--batch-cap`
-replace the file's value. The `--omit-*` flags add rules to the file's `[[omit]]` rules, and `--keep-operation` to its
-`[[keep]]` rules, rather than replacing them. Each switch pair sets its setting in either direction, so `--no-carve`
+replace the file's value. The `--omit-*` flags add rules to the file's `[[omit]]` rules,
+`--keep-operation` to its `[[keep]]` rules, and `--bind-header` to its `bind_headers`, rather
+than replacing them. Each switch pair sets its setting in either direction, so `--no-carve`
 overrides `carve = true` in the file and `--uuid` overrides `uuid = false`; with neither flag of a
 pair given, the file's value stands, and giving both is rejected by argument parsing (exit status
 `2`). `diff` resolves each of its two specs this way on its own: absent `--config`, each side
@@ -82,6 +84,7 @@ error_body_cap = 65536  # default 64 KiB
 open_narrowing = false  # default false; open a response body's string `enum`/`const` narrowings
 open_unions = false     # default false; give a discriminated union an `Unknown { tag, value }` variant
 verbatim_docs = false   # default false; carry the spec's prose into rustdoc as written
+bind_headers = []       # default none; header parameters bound once on the client
 ```
 
 `error_body_cap` sets the generated client's `ClientConfig::max_error_body`, whose emitted doc
@@ -93,7 +96,10 @@ discriminator value no variant lists decodes into the `Unknown` variant instead 
 union with a 3.2 `defaultMapping` keeps its fallback), `verbatim_docs` on `Spec::verbatim_docs`
 (by default the spec's `summary`, `description` and `title` text is rewritten so rustdoc has
 nothing to report at the `include!` site: an intra-doc link such as ``[`crate::serve`]`` becomes
-its text, a bare URL is wrapped in `<…>`, and an HTML tag nothing closes has its `<` escaped), and the `[[omit]]` and `[[keep]]` rules the file may
+its text, a bare URL is wrapped in `<…>`, and an HTML tag nothing closes has its `<` escaped),
+`bind_headers` on `Spec::bind_header` (each named header parameter, matched in any letter case,
+is no argument of any operation; the generated `with_bound_header(name, value)` sets the value
+every operation declaring it sends, and a name no operation declares is `E026`), and the `[[omit]]` and `[[keep]]` rules the file may
 also carry under [keep rules](./compatibility.md#keep-rules-allow-list) and [`spargen.toml` and the analysis CLI](./compatibility.md#spargentoml-and-the-analysis-cli).
 An unknown key is a configuration error (exit status `3`).
 

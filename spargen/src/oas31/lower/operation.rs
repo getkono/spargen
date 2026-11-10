@@ -7,7 +7,8 @@ use indexmap::IndexMap;
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{
-    Docs, Method, Operation, OperationId, ParamLoc, PathSegment, SchemeId, SecuritySchemeDef,
+    BoundHeader, Docs, Method, Operation, OperationId, ParamLoc, PathSegment, SchemeId,
+    SecuritySchemeDef,
 };
 use crate::name::synth_operation_id;
 use crate::oas31::{OperationObject, ParameterObject, PathItem, ResponseObject};
@@ -69,9 +70,27 @@ pub(super) fn lower_operation(
             merged_parameters.insert(key, parameter);
         }
     }
+    let mut bound_headers = Vec::new();
     for parameter in merged_parameters.values() {
+        let mark = ctx.graph_mark();
         if let Some(parameter) = ctx.lower_parameter(parameter) {
-            params.push(parameter);
+            // A header the build binds on the client is checked and lowered like any other, then
+            // taken out of the arguments: its value is the client's, sent as written, so the
+            // types its schema lowered to are elided unless something else names them.
+            let bound = parameter.location == ParamLoc::Header
+                && ctx
+                    .bind_headers
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&parameter.name));
+            if bound {
+                bound_headers.push(BoundHeader {
+                    name: parameter.name,
+                    required: parameter.required,
+                });
+                ctx.elide_unused_lowering(mark..ctx.graph_mark());
+            } else {
+                params.push(parameter);
+            }
         }
     }
     let placeholders: HashSet<&str> = path_template
@@ -243,6 +262,7 @@ pub(super) fn lower_operation(
         },
         server,
         provenance: operation.provenance.clone(),
+        bound_headers,
     }
 }
 

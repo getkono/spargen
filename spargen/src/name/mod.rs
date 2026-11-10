@@ -157,8 +157,9 @@ impl ResponseHeaderNames {
 /// per operation. Operation method names are allocated after these are reserved, so an
 /// `operationId` that spells one of them (`withCredential`, `new`, …) is disambiguated instead of
 /// emitting a duplicate definition. `with_default_server` is emitted only when the specification
-/// declares a server and `inner` only on `BlockingClient`; both are reserved unconditionally, so
-/// an operation's method name does not change when a server is added. `codegen`'s tests hold this
+/// declares a server, `with_bound_header` only when the build binds a header, and `inner` only on
+/// `BlockingClient`; all three are reserved unconditionally, so an operation's method name does
+/// not change when a server or a binding is added. `codegen`'s tests hold this
 /// list to exactly the methods it emits.
 pub(crate) const CLIENT_METHODS: &[&str] = &[
     "new",
@@ -170,6 +171,7 @@ pub(crate) const CLIENT_METHODS: &[&str] = &[
     "core",
     "with_credential",
     "without_credential",
+    "with_bound_header",
     "with_timeout",
     "with_options",
     "with_base_url",

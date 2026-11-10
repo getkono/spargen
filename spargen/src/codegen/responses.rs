@@ -648,6 +648,7 @@ mod tests {
             docs: Docs::default(),
             server: None,
             provenance: Provenance::new(JsonPointer::root(), None),
+            bound_headers: Vec::new(),
         };
         Api {
             info: Info {

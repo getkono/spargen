@@ -261,9 +261,27 @@ fn lower_bundle(
     let options = oas31::LowerOptions {
         open_narrowing: spec.open_narrowing,
         open_unions: spec.open_unions,
+        bind_headers: &spec.bind_headers,
     };
     let api = oas31::lower(&document, &resolver, diags, options).map_err(|_| ())?;
     ir::check_invariants(&api, diags);
+    if diags.has_errors() {
+        return Err(());
+    }
+
+    // Lowering bound each header the spec names, so no argument, field or binding is named for
+    // one; a binding no operation's header parameter matched is reported against `paths`, where
+    // the operations it searched are declared.
+    for name in api.unmatched_bindings(&spec.bind_headers) {
+        Diagnostic::error(
+            Code::BoundHeaderNotDeclared,
+            diag::Provenance::new(diag::JsonPointer::root().push("paths"), None),
+        )
+        .message(format!(
+            "the header binding `{name}` matches no header parameter any operation declares"
+        ))
+        .emit(diags);
+    }
     if diags.has_errors() {
         return Err(());
     }

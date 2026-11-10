@@ -88,6 +88,7 @@ fn api(params: Vec<Parameter>, body: bool) -> Api {
                     .push("get"),
                 None,
             ),
+            bound_headers: Vec::new(),
         }],
         types,
         security_schemes: IndexMap::new(),

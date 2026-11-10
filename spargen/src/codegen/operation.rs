@@ -4,7 +4,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::ir::{Api, MediaType, Operation, ParamLoc, Ty, TypeKind};
+use crate::ir::{Api, BoundHeader, MediaType, Operation, ParamLoc, Ty, TypeKind};
 use crate::name::{Names, OperationNames};
 
 use super::body::{accept_tokens, body_send_tokens};
@@ -67,6 +67,7 @@ pub(super) fn emit_operation(
             quote! { #request_binding = #request_binding.header(#name, #value); }
         },
     );
+    let bound_headers = bound_header_statements(operation, request_binding);
     let has_cookies = operation
         .params
         .iter()
@@ -119,6 +120,7 @@ pub(super) fn emit_operation(
                 .map_err(support::Error::widen)?;
             let mut #request_binding = self.core.http().request(#reqwest_method, #url_binding);
             #(#headers)*
+            #(#bound_headers)*
             #cookie_init
             #(#cookies)*
             #cookie_attach
@@ -142,6 +144,43 @@ pub(super) fn emit_operation(
 
         #url_accessor
     }
+}
+
+/// The statements sending each of `operation`'s bound headers ([`Operation::bound_headers`]) from
+/// the value the client binds to it, as written: a required one fails the call before anything is
+/// sent, as `RequestError::MissingBoundParameter`, while no value is bound; an optional one is
+/// left off.
+fn bound_header_statements(
+    operation: &Operation,
+    request_binding: &crate::name::Ident,
+) -> Vec<TokenStream> {
+    operation
+        .bound_headers
+        .iter()
+        .map(|header: &BoundHeader| {
+            let name = &header.name;
+            if header.required {
+                quote! {
+                    match self.core.bound_header(#name) {
+                        Some(value) => {
+                            #request_binding = #request_binding.header(#name, value);
+                        }
+                        None => {
+                            return Err(support::Error::RequestConstruction(
+                                support::RequestError::MissingBoundParameter { name: #name },
+                            ));
+                        }
+                    }
+                }
+            } else {
+                quote! {
+                    if let Some(value) = self.core.bound_header(#name) {
+                        #request_binding = #request_binding.header(#name, value);
+                    }
+                }
+            }
+        })
+        .collect()
 }
 
 /// Emit one operation's URL accessor on `Client`, built by the operation method's own
@@ -392,6 +431,7 @@ impl OperationSig {
         // Required parameters are positional method arguments with no attribute slot of their
         // own, so a required parameter's deprecation and `default` are surfaced in the method
         // rustdoc instead, in the order an optional parameter's `…Params` field carries them.
+        // A bound header is no argument at all, so the rustdoc says where its value comes from.
         let param_docs = operation
             .params
             .iter()
@@ -406,6 +446,18 @@ impl OperationSig {
                     .map(|default| format!("Parameter `{}` default: `{default}`.", param.name));
                 deprecated.into_iter().chain(default)
             })
+            .chain(operation.bound_headers.iter().map(|header| {
+                let requirement = if header.required {
+                    "required, failing the call while none is bound"
+                } else {
+                    "optional, left off while none is bound"
+                };
+                format!(
+                    "Header `{}` is sent from the value bound with `with_bound_header` \
+                     ({requirement}).",
+                    header.name
+                )
+            }))
             .map(|note| {
                 let note = normalize_rustdoc(&note);
                 quote! { #[doc = #note] }

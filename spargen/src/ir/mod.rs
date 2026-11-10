@@ -28,8 +28,8 @@ pub(crate) use media::{
     BodyEncoding, EncodingMode, Framing, MediaType, PropertyEncoding, RequestBody,
 };
 pub(crate) use operation::{
-    Delimiter, Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment,
-    PathTemplate,
+    BoundHeader, Delimiter, Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter,
+    PathSegment, PathTemplate,
 };
 pub(crate) use responses::{
     ApiErrorBodyImpl, ErrorShape, HeaderShape, Response, ResponseHeader, Responses, StatusSpec,
@@ -303,10 +303,10 @@ pub(crate) struct Docs {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdditionalProps, Api, BodyEncoding, Field, Info, MediaType, Method, Operation, OperationId,
-        ParamLoc, ParamStyle, Parameter, PathTemplate, Prim, PropertyName, RequestBody, Response,
-        Responses, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeKind, Union, UnionMode,
-        UnionStrategy, UnionVariant, VariantDispatch,
+        AdditionalProps, Api, BodyEncoding, BoundHeader, Field, Info, MediaType, Method, Operation,
+        OperationId, ParamLoc, ParamStyle, Parameter, PathTemplate, Prim, PropertyName,
+        RequestBody, Response, Responses, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeKind,
+        Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch,
     };
     use crate::diag::{JsonPointer, Provenance};
 
@@ -340,6 +340,7 @@ mod tests {
                 docs: Default::default(),
                 server: None,
                 provenance: Provenance::new(JsonPointer::root(), None),
+                bound_headers: Vec::new(),
             }],
             types: TypeGraph::default(),
             security_schemes: Default::default(),
@@ -857,5 +858,35 @@ mod tests {
             deprecated: false,
             default_display: None,
         }
+    }
+
+    /// `unmatched_bindings` returns, in the order given, each binding no operation's bound
+    /// headers hold, matched in any letter case, and `binds_headers` holds exactly while some
+    /// operation sends a bound header.
+    #[test]
+    fn unmatched_bindings_are_the_ones_no_operation_bound() {
+        let mut api = api();
+        assert!(!api.binds_headers());
+        let bindings = [
+            "x-API-version".to_owned(),
+            "X-Missing".to_owned(),
+            "X-Tenant".to_owned(),
+        ];
+        assert_eq!(api.unmatched_bindings(&bindings), bindings.each_ref());
+
+        let mut second = api.operations[0].clone();
+        second.id = OperationId("getItem".to_owned());
+        second.bound_headers.push(BoundHeader {
+            name: "X-Tenant".to_owned(),
+            required: false,
+        });
+        api.operations[0].bound_headers.push(BoundHeader {
+            name: "X-Api-Version".to_owned(),
+            required: true,
+        });
+        api.operations.push(second);
+        assert!(api.binds_headers());
+        assert_eq!(api.unmatched_bindings(&bindings), ["X-Missing"]);
+        assert!(api.unmatched_bindings(&[]).is_empty());
     }
 }

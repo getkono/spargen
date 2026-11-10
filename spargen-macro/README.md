@@ -14,7 +14,9 @@ Keyed form, with every argument the macro accepts besides the spec path. The `sp
 beside the spec is always discovered and applied first; the six switches override it in either
 direction, the two caps replace its values, `omit { ... }` adds rules to its `[[omit]]` rules, and
 `keep { ... }` adds operations to its `[[keep]]` allow-list (once any is kept, every other
-operation, and every component the kept ones do not reach, is omitted).
+operation, and every component the kept ones do not reach, is omitted), and each
+`bind_header = "..."` adds a header to its `bind_headers`, bound once on the client rather than
+taken at every call.
 Each switch — `uuid`, `time`, `carve`, `open_narrowing`, `open_unions`, `verbatim_docs` — takes `= true` or `= false`; written
 alone it means `= true`, and `no_uuid` / `no_time` are shorthand for `uuid = false` /
 `time = false`. A switch or cap the macro is not given leaves the file's value, and one given
@@ -41,7 +43,8 @@ spargen_macro::generate_api!(
     keep {
         get "/pets";
         post "/pets";
-    }
+    },
+    bind_header = "X-Api-Version",
 );
 ```
 

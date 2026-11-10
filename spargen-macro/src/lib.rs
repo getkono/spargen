@@ -66,6 +66,8 @@ struct Args {
     omit: spargen::Omit,
     /// The operations a `keep { … }` block names, in the order it names them.
     keep: Vec<(spargen::OmitMethod, String)>,
+    /// The header names each `bind_header = "…"` argument binds, in the order given.
+    bind_headers: Vec<String>,
 }
 
 /// Parse the switch `key` into `slot`. Its own key takes `= true` or `= false`, and alone means
@@ -121,6 +123,7 @@ impl Parse for Args {
         let mut batch_cap = None;
         let mut omit = spargen::Omit::default();
         let mut keep = Vec::new();
+        let mut bind_headers = Vec::new();
 
         while !input.is_empty() {
             if input.peek(LitStr) {
@@ -162,13 +165,18 @@ impl Parse for Args {
                         braced!(body in input);
                         keep.extend(parse_method_paths(&body)?);
                     }
+                    "bind_header" => {
+                        input.parse::<Token![=]>()?;
+                        bind_headers.push(input.parse::<LitStr>()?.value());
+                    }
                     other => {
                         return Err(syn::Error::new(
                             key.span(),
                             format!(
                                 "unknown argument `{other}`; expected a spec path or one of: \
                                  uuid, no_uuid, time, no_time, carve, open_narrowing, \
-                                 open_unions, verbatim_docs, error_body_cap, batch_cap, omit, keep"
+                                 open_unions, verbatim_docs, error_body_cap, batch_cap, omit, keep, \
+                                 bind_header"
                             ),
                         ));
                     }
@@ -196,6 +204,7 @@ impl Parse for Args {
             batch_cap,
             omit,
             keep,
+            bind_headers,
         })
     }
 }
@@ -274,7 +283,8 @@ fn tracking(preview: &spargen::__private::MacroPreview) -> proc_macro2::TokenStr
 
 /// Apply the macro arguments over `discovered`, the `Spec` the config file beside the spec yields.
 /// A switch overrides the file in whichever direction it was given; an argument the macro was not
-/// given leaves the config file's value in place, and omit rules are appended to the file's own.
+/// given leaves the config file's value in place, and omit rules and header bindings are appended
+/// to the file's own.
 fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
     let mut config = discovered;
     if let Some(uuid) = args.uuid {
@@ -300,6 +310,9 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
     }
     for (method, path) in &args.keep {
         config = config.keep_operation(*method, path.clone());
+    }
+    for name in &args.bind_headers {
+        config = config.bind_header(name.clone());
     }
     if let Some(cap) = args.error_body_cap {
         config = config.error_body_cap(cap);
