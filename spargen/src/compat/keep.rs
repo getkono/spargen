@@ -193,6 +193,11 @@ impl<'a> Reach<'a> {
             queue: Vec::new(),
         };
         let root = bundle.root_id();
+        // The document-level `security` is a requirement list itself, not an object carrying one,
+        // so `walk` over its children would never read its scheme names.
+        if let Some(requirements) = bundle.root().get("security") {
+            reach.requirements(root, requirements);
+        }
         if let Some(object) = bundle.root().as_object() {
             for (key, value) in object.iter() {
                 if key.name != "components" {
@@ -232,16 +237,8 @@ impl<'a> Reach<'a> {
                         self.follow(target, file);
                     }
                 }
-                if let Some(requirements) = value.get("security").and_then(SpannedValue::as_array) {
-                    for requirement in requirements.iter().filter_map(SpannedValue::as_object) {
-                        for (scheme, _) in requirement.iter() {
-                            if scheme.name.contains('#') {
-                                self.follow(&scheme.name, file);
-                            } else {
-                                self.reach_root_component("securitySchemes", &scheme.name);
-                            }
-                        }
-                    }
+                if let Some(requirements) = value.get("security") {
+                    self.requirements(file, requirements);
                 }
                 for (_, child) in object.iter() {
                     self.walk(file, child);
@@ -253,6 +250,23 @@ impl<'a> Reach<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Reach the scheme each Security Requirement of `requirements`, which lies in `file`, names:
+    /// a root `securitySchemes` component by name, or what a URI-shaped name resolves to.
+    fn requirements(&mut self, file: FileId, requirements: &'a SpannedValue) {
+        let Some(requirements) = requirements.as_array() else {
+            return;
+        };
+        for requirement in requirements.iter().filter_map(SpannedValue::as_object) {
+            for (scheme, _) in requirement.iter() {
+                if scheme.name.contains('#') {
+                    self.follow(&scheme.name, file);
+                } else {
+                    self.reach_root_component("securitySchemes", &scheme.name);
+                }
+            }
         }
     }
 
@@ -442,6 +456,39 @@ components:
             ["get", "put"]
         );
         assert!(keys(&bundle, "/components/schemas").is_empty());
+    }
+
+    /// A document-level `security` requirement reaches its scheme, so a kept operation inheriting
+    /// it keeps the scheme it needs.
+    #[test]
+    fn a_root_security_requirement_keeps_its_scheme() {
+        let mut bundle = bundle_of(
+            r##"
+openapi: 3.1.0
+info: { title: t, version: 1.0.0 }
+security: [{ key: [] }]
+paths:
+  /pets:
+    get: { responses: { "204": { description: ok } } }
+  /owners:
+    get:
+      security: [{ other: [] }]
+      responses: { "204": { description: ok } }
+components:
+  securitySchemes:
+    key: { type: apiKey, in: header, name: X-Key }
+    other: { type: apiKey, in: header, name: X-Other }
+"##,
+        );
+        let mut diags = Diagnostics::default();
+        let _ = keep(vec![KeepRule::operation(OmitMethod::Get, "/pets")])
+            .apply(&mut bundle, &mut diags);
+        assert!(!diags.has_errors(), "{:?}", diags.items());
+        assert_eq!(keys(&bundle, "/components/securitySchemes"), ["key"]);
+        assert_eq!(
+            omitted(&diags),
+            ["/paths/~1owners", "/components/securitySchemes/other"]
+        );
     }
 
     /// Omit rules apply on top of keep rules: a kept operation an omit rule removes is gone, and

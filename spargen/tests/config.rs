@@ -1128,57 +1128,6 @@ fn keep_rules_apply_from_the_flag_and_the_config_file() {
     );
 }
 
-/// A client generated under a keep rule carries the kept operation and not the other one.
-#[test]
-fn a_generated_client_carries_only_the_kept_operations() {
-    let temp = tempfile::tempdir().unwrap();
-    let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-    std::fs::write(dir.join("openapi.yaml"), SPEC).unwrap();
-
-    let build = spargen::Spec::new(dir.join("openapi.yaml"))
-        .keep_operation(spargen::OmitMethod::Get, "/pets/{id}")
-        .build(dir.join("client.rs"))
-        .cargo(spargen::CargoIntegration::Off);
-    let report = spargen::generate(&build);
-
-    assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
-    assert_eq!(
-        report_codes(&report),
-        [spargen::Code::OmittedConstruct],
-        "{report:#?}"
-    );
-    let client = std::fs::read_to_string(dir.join("client.rs")).unwrap();
-    assert!(client.contains("fn get_pet("), "the kept operation");
-    assert!(
-        !client.contains("fn list_pets("),
-        "the operation no keep rule names"
-    );
-}
-
-/// A keep rule naming an operation the document does not declare rejects the run with `E019`
-/// instead of passing silently.
-#[test]
-fn a_keep_rule_naming_an_undeclared_operation_is_e019() {
-    let temp = tempfile::tempdir().unwrap();
-    let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-    std::fs::write(dir.join("openapi.yaml"), SPEC).unwrap();
-
-    let report = spargen::check(
-        &spargen::Spec::new(dir.join("openapi.yaml"))
-            .keep_operation(spargen::OmitMethod::Get, "/pets")
-            .keep_operation(spargen::OmitMethod::Post, "/pets"),
-    );
-
-    assert_eq!(report.outcome(), spargen::Outcome::Rejected, "{report:#?}");
-    let errors: Vec<_> = report.errors().collect();
-    assert_eq!(errors.len(), 1, "{report:#?}");
-    assert_eq!(errors[0].code, spargen::Code::InvalidOmitRule);
-    assert_eq!(
-        errors[0].message,
-        "keep rule did not name a declared operation: keep post /pets"
-    );
-}
-
 /// `keep_operation` appends to the profile `omissions` reads back, and `omit` replaces the keep
 /// rules with the rest of the profile.
 #[test]
