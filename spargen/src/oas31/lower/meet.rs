@@ -621,9 +621,17 @@ pub(super) fn same_ty(left: Ty, right: Ty) -> bool {
 }
 
 fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
-    use Prim::{Bool, Date, DateTime, String, Uuid, F64, I32, I64};
+    use Prim::{Bool, Date, DateTime, String, Uuid, F64, I32, I64, U16, U32, U64, U8};
     Some(match (left, right) {
         (Bool, Bool) => Bool,
+        // Two unsigned widths meet at the narrower one; an unsigned width meets a signed integer or
+        // `number` at the unsigned one, whose format excludes the negatives the other admits.
+        (U8, U8 | U16 | U32 | U64) | (U16 | U32 | U64, U8) => U8,
+        (U16, U16 | U32 | U64) | (U32 | U64, U16) => U16,
+        (U32, U32 | U64) | (U64, U32) => U32,
+        (U64, U64) => U64,
+        (unsigned @ (U8 | U16 | U32 | U64), I32 | I64 | F64)
+        | (I32 | I64 | F64, unsigned @ (U8 | U16 | U32 | U64)) => unsigned,
         (I32, I32 | I64 | F64) | (I64 | F64, I32) => I32,
         (I64, I64 | F64) | (F64, I64) => I64,
         (F64, F64) => F64,
@@ -641,7 +649,9 @@ fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
 fn primitive_category(primitive: Prim) -> JsonCategory {
     match primitive {
         Prim::Bool => JsonCategory::Boolean,
-        Prim::I32 | Prim::I64 | Prim::F64 => JsonCategory::Number,
+        Prim::I32 | Prim::I64 | Prim::U8 | Prim::U16 | Prim::U32 | Prim::U64 | Prim::F64 => {
+            JsonCategory::Number
+        }
         Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date => JsonCategory::String,
     }
 }

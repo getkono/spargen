@@ -266,6 +266,27 @@ fn representable_default(raw: &RawDefault, kind: Option<&TypeKind>) -> Option<De
             Some(DefaultValue::Int(*value))
         }
         (RawDefault::Int(value), TypeKind::Primitive(Prim::I64)) => Some(DefaultValue::Int(*value)),
+        // The unsigned widths take the same check, so a negative default, or one past the width,
+        // is reported rather than rendered. A literal above `i64::MAX` never classifies as
+        // `RawDefault::Int`, so a `uint64` default up there is reported too.
+        (RawDefault::Int(value), TypeKind::Primitive(Prim::U8)) if u8::try_from(*value).is_ok() => {
+            Some(DefaultValue::Int(*value))
+        }
+        (RawDefault::Int(value), TypeKind::Primitive(Prim::U16))
+            if u16::try_from(*value).is_ok() =>
+        {
+            Some(DefaultValue::Int(*value))
+        }
+        (RawDefault::Int(value), TypeKind::Primitive(Prim::U32))
+            if u32::try_from(*value).is_ok() =>
+        {
+            Some(DefaultValue::Int(*value))
+        }
+        (RawDefault::Int(value), TypeKind::Primitive(Prim::U64))
+            if u64::try_from(*value).is_ok() =>
+        {
+            Some(DefaultValue::Int(*value))
+        }
         (RawDefault::Int(value), TypeKind::Primitive(Prim::F64)) => {
             Some(DefaultValue::Float(*value as f64))
         }

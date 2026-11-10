@@ -100,7 +100,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             Some(TypeKind::Tuple(items)) => 900 + items.len() as u32,
             Some(TypeKind::Array(item)) => 800 + self.type_specificity(**item, visiting) / 10,
+            // Integers rank by the values they admit, fewest first; at one width the unsigned type
+            // ranks above the signed one.
+            Some(TypeKind::Primitive(Prim::U8)) => 780,
+            Some(TypeKind::Primitive(Prim::U16)) => 740,
+            Some(TypeKind::Primitive(Prim::U32)) => 710,
             Some(TypeKind::Primitive(Prim::I32)) => 700,
+            Some(TypeKind::Primitive(Prim::U64)) => 660,
             Some(TypeKind::Primitive(Prim::I64)) => 650,
             Some(TypeKind::Primitive(Prim::Uuid | Prim::DateTime | Prim::Date)) => 600,
             Some(

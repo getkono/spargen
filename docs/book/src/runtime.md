@@ -250,6 +250,10 @@ Numeric and boolean types map from `type` and `format` alone, with no knob:
 | Schema | Rust |
 | --- | --- |
 | `type: integer, format: int32` | `i32` |
+| `type: integer, format: uint8` | `u8` |
+| `type: integer, format: uint16` | `u16` |
+| `type: integer, format: uint32` | `u32` |
+| `type: integer, format: uint64` | `u64` |
 | `type: integer` (any other or absent `format`, including `int64`) | `i64` |
 | `type: number` (any `format`, including `float` and `double`) | `f64` |
 | `type: boolean` | `bool` |
@@ -259,6 +263,14 @@ Numeric and boolean types map from `type` and `format` alone, with no knob:
 registered format "strictly OPTIONAL" and lets a tool "default back to the `type` alone", and a
 narrower float would round-trip fewer values than the wire carries. An unrecognized `format` is a
 JSON Schema annotation, not an assertion, so it is likewise carried into the base type.
+
+The unsigned formats map to the unsigned type of their width, so a `uint64` above `i64::MAX`
+decodes and a negative value is a decode error. Through 0.7 they lowered to `i64`, so a description
+that uses them generates a different field type than it did then, which `spargen diff` classifies
+as major. Parameters and headers of an unsigned type are written and read as decimal, like the
+signed ones. An unsigned field's `default` is applied only within its width; a negative one, or one
+past the width, is documented and reported as `W005`. An `allOf` that meets an unsigned width with a
+signed integer or a `number` keeps the unsigned type, and two unsigned widths meet at the narrower.
 
 A finite `f64` read from a `simple`-style response header is exactly the value the server wrote:
 its text is parsed with the standard library's correctly rounding parser. A JSON body (and a

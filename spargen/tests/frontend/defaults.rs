@@ -843,6 +843,66 @@ components:
     );
 }
 
+/// Issue #1261: an unsigned field's default takes its width's range check. One in range is applied
+/// as an unsuffixed literal of the unsigned type; a negative one, one past the width, and a
+/// `uint64` default above `i64::MAX` (which no integer default reaches) fire W005 and stay
+/// rustdoc-only.
+#[test]
+fn an_unsigned_default_is_applied_only_within_its_width() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Thing:
+      type: object
+      properties:
+        tiny: { type: integer, format: uint8, default: 255 }
+        tiny_over: { type: integer, format: uint8, default: 256 }
+        small: { type: integer, format: uint16, default: 65535 }
+        small_over: { type: integer, format: uint16, default: 65536 }
+        medium: { type: integer, format: uint32, default: 4294967295 }
+        medium_over: { type: integer, format: uint32, default: 4294967296 }
+        large: { type: integer, format: uint64, default: 9223372036854775807 }
+        large_negative: { type: integer, format: uint64, default: -1 }
+        large_huge: { type: integer, format: uint64, default: 18446744073709551615 }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let mut pointers: Vec<String> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+        .map(|d| d.pointer.to_string())
+        .collect();
+    pointers.sort_unstable();
+    assert_eq!(
+        pointers,
+        [
+            "/components/schemas/Thing/properties/large_huge",
+            "/components/schemas/Thing/properties/large_negative",
+            "/components/schemas/Thing/properties/medium_over",
+            "/components/schemas/Thing/properties/small_over",
+            "/components/schemas/Thing/properties/tiny_over",
+        ],
+        "{report:#?}"
+    );
+    let body = types_module(&code);
+    for literal in ["255", "65535", "4294967295", "9223372036854775807"] {
+        assert!(
+            body.contains(&format!("Some({literal})")),
+            "`{literal}` is not applied: {body}"
+        );
+    }
+    for literal in ["256", "65536", "4294967296", "-1", "18446744073709551615"] {
+        assert!(
+            !body.contains(&format!("Some({literal})")),
+            "`{literal}` is applied: {body}"
+        );
+    }
+}
+
 /// The scalar defaults decided by the less-travelled arms: an integer and a boolean `enum`, whose
 /// member is applied as the variant's wire value, and a literal above `i64::MAX`, which is a
 /// `number` field's float and no `integer` field's value (it is not wrapped into an `i64`).
