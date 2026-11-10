@@ -11,16 +11,19 @@
 //!
 //! The same knobs can be read from a config file, which is available to `build.rs`, the
 //! `generate_api!` macro, and the CLI alike — the file is parsed here, in the library, so the
-//! three cannot drift. Its keys other than `[[omit]]`, with their defaults, are listed once, in
-//! the CLI reference's
+//! three cannot drift. Its keys other than `[[omit]]` and `[[keep]]`, with their defaults, are
+//! listed once, in the CLI reference's
 //! [`spargen.toml` reference](https://github.com/getkono/spargen/blob/master/docs/book/src/cli.md#spargentoml-reference);
-//! one `[[omit]]` rule of each kind, and how a rule's kind is told apart, are shown once, in the
+//! one `[[omit]]` rule of each kind, how a rule's kind is told apart, and a `[[keep]]` entry are
+//! shown once, in the
 //! [compatibility guide](https://github.com/getkono/spargen/blob/master/docs/compatibility.md#spargentoml-and-the-analysis-cli).
+
+use std::borrow::Cow;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::codegen::DEFAULT_ERROR_BODY_CAP;
-use crate::compat::{Omit, OmitRule, UnknownOmitToken};
+use crate::compat::{KeepRule, Omit, OmitMethod, OmitRule, UnknownOmitToken};
 
 /// The default cap on diagnostics collected before batching stops.
 const DEFAULT_BATCH_CAP: usize = 100;
@@ -87,8 +90,9 @@ impl Spec {
         self.time
     }
 
-    /// The compatibility omissions, in chained order: [`omit`](Self::omit) replaces the set, and
-    /// [`omit_rule`](Self::omit_rule) and each applied config file append to it.
+    /// The compatibility omissions and keep rules, in chained order: [`omit`](Self::omit) replaces
+    /// the set, and [`omit_rule`](Self::omit_rule), [`keep_operation`](Self::keep_operation) and
+    /// each applied config file append to it.
     pub fn omissions(&self) -> &Omit {
         &self.omit
     }
@@ -152,6 +156,28 @@ impl Spec {
     /// Add one omission to the existing set.
     pub fn omit_rule(mut self, rule: OmitRule) -> Self {
         self.omit.rules.push(rule);
+        self
+    }
+
+    /// Keep one operation: once any keep rule is set, every operation no keep rule names is
+    /// omitted, and so is every component of the root document the kept operations do not reach.
+    /// Omit rules still apply on top. A keep rule naming an operation the document does not declare
+    /// fails generation with `E019`. Keep rules are part of the [`Omit`] profile, so
+    /// [`omit`](Self::omit) replaces them too; call this after it.
+    ///
+    /// ```no_run
+    /// use spargen::OmitMethod;
+    ///
+    /// let spec = spargen::Spec::new("api/openapi.yaml")
+    ///     .keep_operation(OmitMethod::Get, "/v1/sync")
+    ///     .keep_operation(OmitMethod::Get, "/v1/blob/{address}");
+    /// ```
+    pub fn keep_operation(
+        mut self,
+        method: OmitMethod,
+        path: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        self.omit.keep.push(KeepRule::operation(method, path));
         self
     }
 
@@ -242,7 +268,7 @@ impl Spec {
     }
 
     /// Apply a `spargen.toml` over this spec. The file must exist; every key it sets overrides
-    /// what is already on the spec, and its `[[omit]]` rules are appended.
+    /// what is already on the spec, and its `[[omit]]` and `[[keep]]` rules are appended.
     ///
     /// Call this *before* any setter that must win over the file — `Spec` setters apply in
     /// chained order, so last write wins.
@@ -322,6 +348,17 @@ impl Spec {
                 ))
             })?;
             self.omit.rules.push(rule);
+        }
+        for (index, entry) in file.keep.iter().enumerate() {
+            let method = entry.method.parse().map_err(|error: UnknownOmitToken| {
+                ConfigError::new(format!(
+                    "invalid config file `{path}`: keep rule #{}: {error}",
+                    index + 1
+                ))
+            })?;
+            self.omit
+                .keep
+                .push(KeepRule::operation(method, entry.path.clone()));
         }
         Ok(self)
     }
@@ -437,6 +474,16 @@ struct FileConfig {
     features: Option<toml::Value>,
     #[serde(default)]
     omit: Vec<OmitToml>,
+    #[serde(default)]
+    keep: Vec<KeepToml>,
+}
+
+/// A `[[keep]]` entry: one operation, by `method` and `path`, both required.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeepToml {
+    method: String,
+    path: String,
 }
 
 /// An `[[omit]]` entry. The rule kind is discriminated by which fields are present (TOML has no
@@ -642,6 +689,56 @@ mod tests {
             spec.omit.rules,
             vec![OmitRule::path("/first"), OmitRule::path("/second")]
         );
+    }
+
+    /// Each `[[keep]]` entry appends one kept operation after the setters' own, and leaves the omit
+    /// rules alone.
+    #[test]
+    fn toml_keep_entries_append_kept_operations() {
+        let spec = Spec::new("openapi.yaml")
+            .keep_operation(OmitMethod::Get, "/first")
+            .apply_config(
+                "[[keep]]\nmethod = \"POST\"\npath = \"/second\"\n\n[[keep]]\nmethod = \"get\"\npath = \"/v1/*\"\n",
+                Utf8Path::new("c.toml"),
+            )
+            .unwrap();
+        assert_eq!(
+            spec.omit.keep,
+            vec![
+                KeepRule::operation(OmitMethod::Get, "/first"),
+                KeepRule::operation(OmitMethod::Post, "/second"),
+                KeepRule::operation(OmitMethod::Get, "/v1/*"),
+            ]
+        );
+        assert!(spec.omit.rules.is_empty());
+        assert!(!spec.omit.is_empty());
+    }
+
+    /// A `[[keep]]` entry with a method the parser does not know names the entry and every
+    /// accepted method; one missing a key, or carrying one it does not take, is rejected.
+    #[test]
+    fn a_malformed_keep_entry_is_rejected() {
+        assert_eq!(
+            apply("[[keep]]\nmethod = \"fetch\"\npath = \"/pets\"\n")
+                .unwrap_err()
+                .to_string(),
+            "invalid config file `spargen.toml`: keep rule #1: unknown HTTP method: `fetch`; \
+             expected one of get/put/post/delete/options/head/patch/trace/query"
+        );
+        for (entry, key) in [
+            ("[[keep]]\nmethod = \"get\"\n", "missing field `path`"),
+            ("[[keep]]\npath = \"/pets\"\n", "missing field `method`"),
+            (
+                "[[keep]]\nmethod = \"get\"\npath = \"/pets\"\nname = \"X\"\n",
+                "unknown field `name`",
+            ),
+        ] {
+            let error = apply(entry).unwrap_err().to_string();
+            assert!(
+                error.starts_with("invalid config file `spargen.toml`: ") && error.contains(key),
+                "{entry}: {error}"
+            );
+        }
     }
 
     #[test]

@@ -74,6 +74,43 @@ impl OmitRule {
     }
 }
 
+/// One allow-list entry. Once a profile holds any keep rule, every operation no keep rule names
+/// is omitted, and every root-document component the remaining document does not reach is omitted
+/// with it; the profile's [`OmitRule`]s still apply on top. A keep rule must name at least one
+/// operation the document declares, or generation fails with `E019`.
+///
+/// The `path` is read as an [`OmitRule::Operation`]'s is: exact, unless it carries a glob
+/// metacharacter, with a backslash escaping one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum KeepRule {
+    /// Keep a single operation (or, as a glob, every operation its path pattern matches).
+    Operation {
+        /// HTTP method.
+        method: OmitMethod,
+        /// OAS path template.
+        path: Cow<'static, str>,
+    },
+}
+
+impl KeepRule {
+    /// Keep a single operation.
+    pub fn operation(method: OmitMethod, path: impl Into<Cow<'static, str>>) -> Self {
+        Self::Operation {
+            method,
+            path: path.into(),
+        }
+    }
+
+    pub(super) fn describe(&self) -> String {
+        match self {
+            KeepRule::Operation { method, path } => {
+                format!("keep {} {path}", method.as_oas_key())
+            }
+        }
+    }
+}
+
 /// A string that names no known omit component kind or HTTP method. Its message names the
 /// rejected token and one canonical spelling of every value the parser accepts, so
 /// `generate_api!`, the command line, and `spargen.toml` answer a mistyped token with the same

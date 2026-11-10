@@ -1086,3 +1086,58 @@ fn every_applied_config_file_is_listed_in_the_order_applied() {
         }]
     );
 }
+
+// --- Keep (allow-list) rules ---------------------------------------------------------------------
+
+/// `--keep-operation` and a `[[keep]]` entry each narrow the spec to the operation they name: the
+/// other path is the one construct omitted.
+#[cfg(feature = "cli")]
+#[test]
+fn keep_rules_apply_from_the_flag_and_the_config_file() {
+    let (temp, spec) = workspace();
+    let output = check(
+        temp.path(),
+        &spec,
+        &["--keep-operation", "get /pets", "--format", "json"],
+    );
+    assert_eq!(omitted_pointers(&output), ["/paths/~1pets~1{id}"]);
+
+    std::fs::write(
+        temp.path().join("spargen.toml"),
+        "[[keep]]\nmethod = \"get\"\npath = \"/pets/{id}\"\n",
+    )
+    .unwrap();
+    let output = check(temp.path(), &spec, &["--format", "json"]);
+    assert_eq!(omitted_pointers(&output), ["/paths/~1pets"]);
+
+    // The flag adds to the file's rule, so both operations are kept and nothing is omitted.
+    let output = check(
+        temp.path(),
+        &spec,
+        &["--keep-operation", "get /pets", "--format", "json"],
+    );
+    assert!(omitted_pointers(&output).is_empty());
+
+    let bad = check(temp.path(), &spec, &["--keep-operation", "get"]);
+    assert_eq!(bad.status.code(), Some(3), "{bad:?}");
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains(
+            "--keep-operation `get`: missing path; expected `METHOD /path` (e.g. `get /pets`)"
+        ),
+        "{bad:?}"
+    );
+}
+
+/// `keep_operation` appends to the profile `omissions` reads back, and `omit` replaces the keep
+/// rules with the rest of the profile.
+#[test]
+fn keep_operation_reads_back_and_omit_replaces_it() {
+    let get = spargen::KeepRule::operation(spargen::OmitMethod::Get, "/pets");
+    let spec = spargen::Spec::new("openapi.yaml")
+        .keep_operation(spargen::OmitMethod::Post, "/dropped")
+        .omit(spargen::Omit::default())
+        .keep_operation(spargen::OmitMethod::Get, "/pets");
+    assert_eq!(spec.omissions().keep, [get]);
+    assert!(spec.omissions().rules.is_empty());
+    assert!(!spec.omissions().is_empty());
+}

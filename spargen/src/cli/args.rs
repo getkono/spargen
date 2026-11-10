@@ -98,6 +98,10 @@ pub(crate) struct SpecArgs {
     /// Omit an RFC 6901 pointer (repeatable), e.g. `--omit-pointer "[file#]/pointer"`.
     #[arg(long = "omit-pointer", value_name = "[file#]/pointer")]
     pub(crate) omit_pointer: Vec<String>,
+    /// Keep one operation and omit every other (repeatable), e.g. `--keep-operation "get /pets"`.
+    /// Components the kept operations do not reach are omitted too.
+    #[arg(long = "keep-operation", value_name = "METHOD /path")]
+    pub(crate) keep_operation: Vec<String>,
 }
 
 impl SpecArgs {
@@ -126,6 +130,7 @@ impl SpecArgs {
             omit_operation,
             omit_component,
             omit_pointer,
+            keep_operation,
         } = self;
         [
             (*carve, "--carve"),
@@ -143,6 +148,7 @@ impl SpecArgs {
             (!omit_operation.is_empty(), "--omit-operation"),
             (!omit_component.is_empty(), "--omit-component"),
             (!omit_pointer.is_empty(), "--omit-pointer"),
+            (!keep_operation.is_empty(), "--keep-operation"),
         ]
         .into_iter()
         .filter_map(|(given, flag)| given.then_some(flag))

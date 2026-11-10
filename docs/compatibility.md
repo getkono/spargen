@@ -45,6 +45,54 @@ let spec = spargen::Spec::new("api/openapi.yaml").omit(spargen::omit! {
 });
 ```
 
+## Keep rules (allow-list)
+
+To generate a client for a few operations of a large description, name the operations to keep
+rather than omitting everything else:
+
+```rust
+use spargen::OmitMethod;
+
+let spec = spargen::Spec::new("api/openapi.yaml")
+    .keep_operation(OmitMethod::Get, "/v1/sync")
+    .keep_operation(OmitMethod::Get, "/v1/blob/{address}")
+    .keep_operation(OmitMethod::Post, "/v1/federation/capabilities/refresh");
+```
+
+Once any keep rule is present:
+
+- every operation no keep rule names is omitted: a `paths` entry with no kept operation is removed
+  whole, the other methods of an entry are removed one by one, and so are its OpenAPI 3.2
+  `additionalOperations`, which no keep rule names;
+- the `webhooks` are omitted;
+- every component of the root document that nothing left in the document reaches is omitted. Reach
+  follows `$ref`s (across files), `discriminator` mapping values, and the scheme names of security
+  requirements, through every component it reaches; a component is kept or removed whole;
+- each removed construct is reported via `W009`, as an omit rule's are.
+
+A keep rule's path is read as an operation omit rule's is: exact, or a glob when it carries a
+metacharacter. Keep rules are resolved against the document as written, before any omit rule
+applies: a keep rule that names no declared operation (an exact one that operation, a glob one at
+least one) fails generation with `E019`, rather than passing silently. Omit rules still apply on
+top, so a kept operation an omit rule also removes is omitted, with no `E019` for the keep rule.
+
+A `paths` entry written as a `$ref` is kept **whole** once one of its target's operations is kept,
+because the target can be shared by other entries; a keep rule names such an operation by the
+`paths` key that refers to it.
+
+Keep rules are part of the `Omit` profile and its fingerprint: `Spec::omit` replaces them along with
+the omit rules, so call `keep_operation` after it. In `spargen.toml` each is a `[[keep]]` entry with
+both keys required:
+
+```toml
+[[keep]]
+method = "get"
+path = "/v1/sync"
+```
+
+On the command line it is the repeatable `--keep-operation "get /v1/sync"`, and in `generate_api!`
+a `keep { get "/v1/sync"; }` block. Each adds to the keep rules the file already holds.
+
 ## Auto-carve
 
 `Spec::carve(true)` (or the macro's `carve` argument) turns a spec that would **reject**

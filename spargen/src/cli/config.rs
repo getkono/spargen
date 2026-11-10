@@ -18,8 +18,9 @@ use super::args::SpecArgs;
 ///
 /// The config file is either the explicit `--config` path or, when that is absent, `spargen.toml`
 /// beside the spec (a missing auto-discovered file is fine). Flags are applied last so they win,
-/// each switch pair in either direction and only when one of its flags was given, and omit flags
-/// are unioned with the file's `[[omit]]` rules rather than replacing them.
+/// each switch pair in either direction and only when one of its flags was given, and omit and
+/// keep flags are unioned with the file's `[[omit]]` and `[[keep]]` rules rather than replacing
+/// them.
 pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, ConfigError> {
     let mut spec = match &args.config {
         Some(config) => Spec::new(path).config_file(config)?,
@@ -58,6 +59,10 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
     for value in &args.omit_pointer {
         spec = spec.omit_rule(parse_pointer_flag(value));
     }
+    for value in &args.keep_operation {
+        let (method, path) = parse_method_and_path("--keep-operation", value)?;
+        spec = spec.keep_operation(method, path);
+    }
     Ok(spec)
 }
 
@@ -73,23 +78,29 @@ fn switch(on: bool, off: bool) -> Option<bool> {
 
 /// Parse a `--omit-operation "METHOD /path"` value into an [`OmitRule::Operation`].
 fn parse_operation_flag(value: &str) -> Result<OmitRule, ConfigError> {
+    let (method, path) = parse_method_and_path("--omit-operation", value)?;
+    Ok(OmitRule::operation(method, path))
+}
+
+/// Split a `flag`'s `"METHOD /path"` value into its method and path.
+fn parse_method_and_path(flag: &str, value: &str) -> Result<(OmitMethod, String), ConfigError> {
     let mut parts = value.split_whitespace();
     let method = parts.next().ok_or_else(|| {
         error(format!(
-            "--omit-operation `{value}`: expected `METHOD /path` (e.g. `get /pets`)"
+            "{flag} `{value}`: expected `METHOD /path` (e.g. `get /pets`)"
         ))
     })?;
     let path = parts.next().ok_or_else(|| {
         error(format!(
-            "--omit-operation `{value}`: missing path; expected `METHOD /path` (e.g. `get /pets`)"
+            "{flag} `{value}`: missing path; expected `METHOD /path` (e.g. `get /pets`)"
         ))
     })?;
     if parts.next().is_some() {
         return Err(error(format!(
-            "--omit-operation `{value}`: too many parts; expected `METHOD /path`"
+            "{flag} `{value}`: too many parts; expected `METHOD /path`"
         )));
     }
-    Ok(OmitRule::operation(parse_method(method)?, path.to_owned()))
+    Ok((parse_method(method)?, path.to_owned()))
 }
 
 /// Parse a `--omit-component "kind:name"` value into an [`OmitRule::Component`].
@@ -312,6 +323,7 @@ mod tests {
             ("--omit-operation", "get /pets"),
             ("--omit-component", "schema:Pet"),
             ("--omit-pointer", "/paths"),
+            ("--keep-operation", "get /pets"),
         ] {
             assert_eq!(ignored(&[flag, value]), [flag]);
         }
@@ -373,6 +385,50 @@ mod tests {
         assert_eq!(
             parse_pointer_flag("#/paths/~1legacy"),
             OmitRule::pointer(None, "/paths/~1legacy")
+        );
+    }
+
+    /// `--keep-operation` reads `METHOD /path` as `--omit-operation` does, naming itself in each
+    /// syntax error, and its rules follow the config file's `[[keep]]` entries.
+    #[test]
+    fn the_keep_flag_parses_and_appends_after_the_config_file() {
+        assert_eq!(
+            parse_method_and_path("--keep-operation", "POST /pets").unwrap(),
+            (OmitMethod::Post, "/pets".to_owned())
+        );
+        for (value, expected) in [
+            (
+                "get",
+                "--keep-operation `get`: missing path; expected `METHOD /path` (e.g. `get /pets`)",
+            ),
+            (
+                "get /a /b",
+                "--keep-operation `get /a /b`: too many parts; expected `METHOD /path`",
+            ),
+        ] {
+            assert_eq!(
+                parse_method_and_path("--keep-operation", value)
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        }
+
+        let (_temp, dir) = with_config("[[keep]]\nmethod = \"get\"\npath = \"/from-file\"\n");
+        assert_eq!(
+            resolved(&dir, &["--keep-operation", "delete /from-flag"]),
+            Spec::new(dir.join("openapi.yaml"))
+                .config_file(dir.join("spargen.toml"))
+                .unwrap()
+                .keep_operation(OmitMethod::Delete, "/from-flag")
+        );
+        assert_eq!(
+            resolved(&dir, &["--keep-operation", "delete /from-flag"])
+                .omissions()
+                .keep
+                .len(),
+            2,
+            "the file's rule and the flag's"
         );
     }
 

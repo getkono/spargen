@@ -1251,5 +1251,98 @@ fn carve_removes_a_union_whose_sole_member_cannot_be_intersected() {
     assert_eq!(operation_methods(&generated), ["get_good", "get_good_url"]);
 }
 
+// --- Keep (allow-list) rules ---------------------------------------------------------------------
+
+/// Two operations on two paths under a document-level `security` requirement, beside a scheme only
+/// the second operation names.
+const KEEP_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: Keep, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+security: [ { key: [] } ]
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses: { "204": { description: OK } }
+  /pets/{id}:
+    get:
+      operationId: getPet
+      security: [ { other: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses: { "204": { description: OK } }
+components:
+  securitySchemes:
+    key: { type: apiKey, in: header, name: X-Key }
+    other: { type: apiKey, in: header, name: X-Other }
+"##;
+
+/// The pointer of every `W009` in `report`, in emission order.
+fn omitted_pointers(report: &Report) -> Vec<&str> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == Code::OmittedConstruct)
+        .map(|diagnostic| diagnostic.pointer.as_str())
+        .collect()
+}
+
+/// A client generated under a keep rule carries the kept operation and not the other one, with a
+/// `W009` for each construct the keep rule removed. The kept operation inherits the document-level
+/// `security`, so its scheme stays and the run is not an `E012`.
+#[test]
+fn a_generated_client_carries_only_the_kept_operations() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", KEEP_SPEC);
+    let out = temp.path().join("client.rs");
+
+    let report = spargen::generate(&build(
+        Spec::new(spec).keep_operation(spargen::OmitMethod::Get, "/pets"),
+        &out,
+    ));
+
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert_eq!(
+        omitted_pointers(&report),
+        ["/paths/~1pets~1{id}", "/components/securitySchemes/other"],
+        "{report:#?}"
+    );
+    assert_eq!(
+        w009_count(&report),
+        report.diagnostics().len(),
+        "{report:#?}"
+    );
+    let client = std::fs::read_to_string(&out).unwrap();
+    assert!(client.contains("fn list_pets("), "the kept operation");
+    assert!(
+        !client.contains("fn get_pet("),
+        "the operation no keep rule names"
+    );
+}
+
+/// A keep rule naming an operation the document does not declare rejects the run with `E019`
+/// instead of passing silently.
+#[test]
+fn a_keep_rule_naming_an_undeclared_operation_is_e019() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", KEEP_SPEC);
+
+    let report = spargen::check(
+        &Spec::new(spec)
+            .keep_operation(spargen::OmitMethod::Get, "/pets")
+            .keep_operation(spargen::OmitMethod::Post, "/pets"),
+    );
+
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let errors: Vec<_> = report.errors().collect();
+    assert_eq!(errors.len(), 1, "{report:#?}");
+    assert_eq!(errors[0].code, Code::InvalidOmitRule);
+    assert_eq!(
+        errors[0].message,
+        "keep rule did not name a declared operation: keep post /pets"
+    );
+}
+
 #[path = "carve/sub_files.rs"]
 mod sub_files;
