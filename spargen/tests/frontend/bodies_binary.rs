@@ -859,14 +859,19 @@ paths:
 }
 
 /// The generated `pub async fn {name}` method, from its signature to the next method.
-fn method_source<'a>(code: &'a str, name: &str) -> &'a str {
-    let head = format!("pub async fn {name}(");
-    let start = code.find(&head).unwrap_or_else(|| panic!("{head}\n{code}"));
-    let rest = &code[start..];
-    let end = rest[head.len()..]
-        .find("pub async fn ")
-        .map_or(rest.len(), |end| end + head.len());
-    &rest[..end]
+fn method_source(code: &str, name: &str) -> String {
+    let source = |head: &str| {
+        let start = code.find(head).unwrap_or_else(|| panic!("{head}\n{code}"));
+        let rest = &code[start..];
+        let end = rest[head.len()..]
+            .find("pub async fn ")
+            .map_or(rest.len(), |end| end + head.len());
+        &rest[..end]
+    };
+    // The method, then the preparer that builds the request it sends (#1264).
+    let method = source(&format!("pub async fn {name}("));
+    let preparer = source(&format!("async fn prepare_{name}("));
+    format!("{method}{preparer}")
 }
 
 #[test]
@@ -921,7 +926,7 @@ fn cbor_and_cbor_suffixed_bodies_are_byte_bodies_announced_by_their_own_name() {
         signature
     };
     assert!(
-        signature(octets).contains("body: &bytes::Bytes"),
+        signature(&octets).contains("body: &bytes::Bytes"),
         "{octets}"
     );
     for (name, error, key) in [
@@ -932,12 +937,10 @@ fn cbor_and_cbor_suffixed_bodies_are_byte_bodies_announced_by_their_own_name() {
         let method = method_source(&code, name);
         // The same byte-body shape the octet-stream operation takes and returns.
         assert_eq!(
-            signature(method).replacen(name, "send_octets", 1).replacen(
-                error,
-                "SendOctetsError",
-                1
-            ),
-            signature(octets),
+            signature(&method)
+                .replacen(name, "send_octets", 1)
+                .replacen(error, "SendOctetsError", 1),
+            signature(&octets),
             "{method}"
         );
         assert!(

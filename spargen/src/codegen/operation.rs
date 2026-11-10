@@ -1,5 +1,6 @@
-//! One async operation method on `Client` with its URL accessor, and the [`OperationSig`] its
-//! blocking twin shares.
+//! One async operation method on `Client` with its preparer, request builder, decoder and URL
+//! accessor, the [`OperationSig`] its blocking twin shares, and the `ops` module naming every
+//! operation.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -18,14 +19,19 @@ use super::params::{
 };
 use super::ty::{reqwest_method, ty_tokens};
 
-/// Emit one `#[inline] pub async fn` operation method. Its body is written out per operation: it
-/// substitutes the path parameters, serializes the query, `querystring`, header, and cookie
-/// parameters, encodes the request body by its media, attaches the selected credentials, and sends
-/// the request through `support`, then dispatches the response by status into the operation's
-/// typed success value or typed error. The wire work itself — encoding, sending, and decoding —
-/// is done by `support` routines, most of them generic over the body or error type.
+/// Emit one operation as four methods and its URL accessor. The private preparer is written out
+/// per operation: it substitutes the path parameters, serializes the query, `querystring`, header,
+/// and cookie parameters, encodes the request body by its media, attaches the selected
+/// credentials, `support::prepare`s the request and inserts the operation's `ops` constant into
+/// its extensions. The `#[inline] pub async fn` operation method sends what the preparer built
+/// through `support::execute`, which replays it once after a rejected refreshable credential, and
+/// hands the response to the decoder, which dispatches it by status into the operation's typed
+/// success value or typed error; a streaming success's stream is then handed the request it sent,
+/// to reconnect. The request builder is the preparer without its replay. The wire work itself —
+/// encoding, sending, and decoding — is done by `support` routines, most of them generic over the
+/// body or error type.
 ///
-/// The operation's URL accessor (`emit_operation_url`) is emitted after it, from the same
+/// The operation's URL accessor (`emit_operation_url`) is emitted after them, from the same
 /// URL-building statements.
 pub(super) fn emit_operation(
     operation: &Operation,
