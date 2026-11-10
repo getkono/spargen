@@ -179,6 +179,45 @@ fn with_timeout_bounds_each_call_as_a_total_timeout() {
     server.join().unwrap();
 }
 
+// Issue #1260: `with_options` bounds the success body of every call of the client value it
+// derives: a body past `max_body` is `Error::BodyTooLarge` with that limit and the response's
+// status, and one within it decodes.
+#[test]
+fn with_options_bounds_each_calls_success_body() {
+    let body = br#"{"ok":"yes"}"#;
+    let (base, server) = serve_once("application/json", "200 OK", body);
+    let bounded = basic_client::BlockingClient::new(&base)
+        .unwrap()
+        .with_options(basic_client::RequestOptions {
+            max_body: Some(body.len() - 1),
+            ..basic_client::RequestOptions::default()
+        });
+    assert_eq!(bounded.core().options().max_body, Some(body.len() - 1));
+    match bounded.get_multi() {
+        Err(basic_client::Error::BodyTooLarge { limit, status }) => {
+            assert_eq!(limit, body.len() - 1);
+            assert_eq!(status, 200);
+        }
+        other => panic!("expected BodyTooLarge, got {other:?}"),
+    }
+    drop(bounded);
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/json", "200 OK", body);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-call", "feed".parse().unwrap());
+    let client = basic_client::BlockingClient::new(&base)
+        .unwrap()
+        .with_options(basic_client::RequestOptions {
+            max_body: Some(body.len()),
+            headers,
+            ..basic_client::RequestOptions::default()
+        });
+    let response = client.get_multi().expect("a body within max_body decodes");
+    assert_eq!(response.status(), 200);
+    server.join().unwrap();
+}
+
 // `with_timeout(None)` lifts the total timeout `with_config` set: a response slower than that
 // configured bound still arrives.
 #[test]

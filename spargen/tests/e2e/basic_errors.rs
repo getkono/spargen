@@ -166,6 +166,27 @@ fn with_timeout_sets_the_total_timeout_of_a_derived_client() {
     assert_eq!(unbounded.core().config().timeout, None);
 }
 
+// Issue #1260: `with_options` replaces the options of the client value it derives, which `send`
+// reads per request, and leaves the client it was cloned from as it was.
+#[test]
+fn with_options_sets_the_options_of_a_derived_client() {
+    let base = basic_client::Client::new("http://127.0.0.1:1").unwrap();
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-call", "feed".parse().unwrap());
+    let feed = base.clone().with_options(basic_client::RequestOptions {
+        max_body: Some(4096),
+        headers,
+        ..basic_client::RequestOptions::default()
+    });
+    assert_eq!(base.core().options().max_body, None);
+    assert!(base.core().options().headers.is_empty());
+    assert_eq!(feed.core().options().max_body, Some(4096));
+    assert_eq!(feed.core().options().headers["x-call"], "feed");
+    let reset = feed.clone().with_options(basic_client::RequestOptions::default());
+    assert_eq!(reset.core().options().max_body, None);
+    assert_eq!(base.core().config().max_success_body, None);
+}
+
 // The reason the payload is `Vec<Vec<&str>>` and not the flat `Vec<&str>` the issue proposed: an
 // alternative is a conjunction, and flattening loses which schemes must be presented *together*.
 // This is the only place a generated client is driven to produce that shape. It also pins the two

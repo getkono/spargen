@@ -305,7 +305,7 @@ fn reqwest_error() -> reqwest::Error {
 
 /// How many variants `Error` has. `every_variant` returns an array of exactly this length, so
 /// raising it will not compile until a value of the new variant is listed.
-const ERROR_VARIANTS: usize = 10;
+const ERROR_VARIANTS: usize = 11;
 
 /// Each variant's position in `every_variant`. Indices are dense and unique. This is the same
 /// guard `request_variant_index` carries, applied to the other taxonomy that is a semver
@@ -322,6 +322,7 @@ fn error_variant_index(error: &Error<ApiBody>) -> usize {
         Error::Decode { .. } => 7,
         Error::InterruptedBody(_) => 8,
         Error::PaginationCycle { .. } => 9,
+        Error::BodyTooLarge { .. } => 10,
     }
 }
 
@@ -382,6 +383,10 @@ fn every_variant() -> [Error<ApiBody>; ERROR_VARIANTS] {
         Error::InterruptedBody(TransportError::interrupted(reqwest_error())),
         Error::PaginationCycle {
             url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
+        },
+        Error::BodyTooLarge {
+            limit: 1024,
+            status: StatusCode::CREATED,
         },
     ]
 }
@@ -684,7 +689,8 @@ fn is_transient_classifies_every_variant() {
             Error::RequestConstruction(_)
             | Error::Protocol(_)
             | Error::Redirect(_)
-            | Error::PaginationCycle { .. } => false,
+            | Error::PaginationCycle { .. }
+            | Error::BodyTooLarge { .. } => false,
         };
         assert_eq!(
             error.is_transient(),
@@ -694,14 +700,16 @@ fn is_transient_classifies_every_variant() {
     }
 }
 
-/// `status` answers exactly for the three classes that carry a response status; every other
+/// `status` answers exactly for the four classes that carry a response status; every other
 /// class produced no response to read one from.
 #[test]
-fn status_is_present_exactly_on_the_three_status_variants() {
+fn status_is_present_exactly_on_the_four_status_variants() {
     for error in every_variant() {
         let expected = match &error {
             Error::Api(value) => Some(value.status()),
-            Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => Some(*status),
+            Error::UnexpectedStatus { status, .. }
+            | Error::Decode { status, .. }
+            | Error::BodyTooLarge { status, .. } => Some(*status),
             Error::RequestConstruction(_)
             | Error::Transport(_)
             | Error::Timeout(_)
@@ -718,7 +726,8 @@ fn status_is_present_exactly_on_the_three_status_variants() {
         [
             StatusCode::BAD_REQUEST,
             StatusCode::IM_A_TEAPOT,
-            StatusCode::OK
+            StatusCode::OK,
+            StatusCode::CREATED
         ]
     );
 }
@@ -755,11 +764,17 @@ fn status_on_an_uninhabited_api_error_is_present_only_for_the_response_variants(
         Error::PaginationCycle {
             url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
         },
+        Error::BodyTooLarge {
+            limit: 8,
+            status: StatusCode::ACCEPTED,
+        },
     ];
     for error in &narrow {
         let expected = match error {
             Error::Api(value) => match *value.inner() {},
-            Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => Some(*status),
+            Error::UnexpectedStatus { status, .. }
+            | Error::Decode { status, .. }
+            | Error::BodyTooLarge { status, .. } => Some(*status),
             Error::RequestConstruction(_)
             | Error::Transport(_)
             | Error::Timeout(_)
@@ -773,7 +788,11 @@ fn status_on_an_uninhabited_api_error_is_present_only_for_the_response_variants(
     let statuses: Vec<_> = narrow.iter().filter_map(Error::status).collect();
     assert_eq!(
         statuses,
-        [StatusCode::IM_A_TEAPOT, StatusCode::PARTIAL_CONTENT]
+        [
+            StatusCode::IM_A_TEAPOT,
+            StatusCode::PARTIAL_CONTENT,
+            StatusCode::ACCEPTED
+        ]
     );
 }
 
@@ -819,6 +838,7 @@ fn every_variant_displays_something_that_names_its_class() {
             Error::Decode { .. } => "response decode failed",
             Error::InterruptedBody(_) => "response body was interrupted",
             Error::PaginationCycle { .. } => "pagination cycle",
+            Error::BodyTooLarge { .. } => "1024-byte limit",
         };
         assert!(
             rendered.contains(expected),
@@ -881,7 +901,8 @@ fn source_is_present_exactly_where_the_taxonomy_carries_a_cause() {
             Error::Timeout(_)
             | Error::UnexpectedStatus { .. }
             | Error::Decode { .. }
-            | Error::PaginationCycle { .. } => false,
+            | Error::PaginationCycle { .. }
+            | Error::BodyTooLarge { .. } => false,
         };
         assert_eq!(
             std::error::Error::source(&error).is_some(),
@@ -928,6 +949,10 @@ fn widen_preserves_every_reachable_variant() {
         Error::InterruptedBody(TransportError::interrupted(reqwest_error())),
         Error::PaginationCycle {
             url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
+        },
+        Error::BodyTooLarge {
+            limit: 8,
+            status: StatusCode::OK,
         },
     ];
 
@@ -1004,6 +1029,17 @@ fn widen_preserves_every_reachable_variant() {
         panic!("widen changed the variant");
     };
     assert_eq!(url, revisited);
+
+    // ... and the oversized body its limit and status.
+    let widened: Error<ApiBody> = Error::<std::convert::Infallible>::BodyTooLarge {
+        limit: 4096,
+        status: StatusCode::NOT_FOUND,
+    }
+    .widen();
+    let Error::BodyTooLarge { limit, status } = widened else {
+        panic!("widen changed the variant");
+    };
+    assert_eq!((limit, status), (4096, StatusCode::NOT_FOUND));
 }
 
 impl super::ApiErrorBody for ApiBody {
@@ -1033,7 +1069,8 @@ fn api_body_is_present_exactly_on_the_documented_api_error() {
             | Error::UnexpectedStatus { .. }
             | Error::Decode { .. }
             | Error::InterruptedBody(_)
-            | Error::PaginationCycle { .. } => false,
+            | Error::PaginationCycle { .. }
+            | Error::BodyTooLarge { .. } => false,
         };
         assert_eq!(
             error.api_body().is_some(),
@@ -1070,9 +1107,10 @@ fn into_api_body_moves_out_exactly_what_api_body_borrows() {
     assert_eq!(api.into_api_body(), Some("bad request"));
 }
 
-/// `headers` answers exactly where `status` does, from the same response: the `ResponseValue`'s
-/// own map for a documented API error, and the variant's field for an undocumented status and an
-/// undecodable body. Every class that received no response has neither.
+/// `headers` answers where `status` does, from the same response: the `ResponseValue`'s own map
+/// for a documented API error, and the variant's field for an undocumented status and an
+/// undecodable body. Every class that received no response has neither, and an oversized body
+/// keeps its status alone.
 #[test]
 fn headers_are_present_exactly_where_a_status_is_and_are_the_responses_own() {
     for error in every_variant() {
@@ -1095,13 +1133,13 @@ fn headers_are_present_exactly_where_a_status_is_and_are_the_responses_own() {
             | Error::InterruptedBody(_)
             | Error::PaginationCycle { .. } => {
                 assert!(error.headers().is_none(), "{error}");
+                assert!(error.status().is_none(), "{error}");
+            }
+            Error::BodyTooLarge { .. } => {
+                assert!(error.headers().is_none(), "{error}");
+                assert!(error.status().is_some(), "{error}");
             }
         }
-        assert_eq!(
-            error.headers().is_some(),
-            error.status().is_some(),
-            "headers and status disagree for {error}"
-        );
     }
     let mut headers = HeaderMap::new();
     headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
@@ -1135,7 +1173,9 @@ fn status_and_api_body_agree_on_every_variant() {
                     "api_body is not the Api value's own body: {error}"
                 );
             }
-            Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => {
+            Error::UnexpectedStatus { status, .. }
+            | Error::Decode { status, .. }
+            | Error::BodyTooLarge { status, .. } => {
                 assert_eq!(error.status(), Some(*status), "{error}");
                 assert!(error.api_body().is_none(), "{error}");
             }
@@ -1198,7 +1238,8 @@ fn problem_is_read_exactly_where_an_error_body_was_received() {
             | Error::Protocol(_)
             | Error::Redirect(_)
             | Error::InterruptedBody(_)
-            | Error::PaginationCycle { .. } => assert!(problem.is_none(), "{error}"),
+            | Error::PaginationCycle { .. }
+            | Error::BodyTooLarge { .. } => assert!(problem.is_none(), "{error}"),
         }
     }
 }

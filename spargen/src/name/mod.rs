@@ -171,6 +171,7 @@ pub(crate) const CLIENT_METHODS: &[&str] = &[
     "with_credential",
     "without_credential",
     "with_timeout",
+    "with_options",
     "with_base_url",
     "inner",
 ];
@@ -216,7 +217,8 @@ pub(crate) const SERVERS_MODULE_NAMES: &[&str] = &["Default", "Into", "String"];
 /// whole nameable runtime surface of a generated client, and so part of its semver surface. It has
 /// to cover every type that appears in a signature the output emits: `HeaderError` is the return
 /// type of each `…Headers::from_headers`, `RetryWait` is what a caller's `RetryPolicy` must return,
-/// `ClientCore` is what `Client::core` hands back, `HttpBody` is the body of every request and
+/// `ClientCore` is what `Client::core` hands back, `RequestOptions` what `Client::with_options`
+/// takes, `HttpBody` is the body of every request and
 /// response an `HttpBackend` handles, `MaybeSend` and `MaybeSync` bound the body `HttpBody::wrap`
 /// adopts, and the taxonomy's payload types are matched on.
 /// Anything short of that leaves a generated signature a caller can call but cannot write down.
@@ -257,6 +259,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "RejectionCheck",
     "RequestCause",
     "RequestError",
+    "RequestOptions",
     "ReqwestBackend",
     "ResponseValue",
     "RetryBackend",

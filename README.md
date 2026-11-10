@@ -87,6 +87,9 @@ the version it emits, and the idioms spargen handles.
   `Clone`. `Client::with_timeout(Option<Duration>)` gives a derived client value its own total
   timeout (`client.clone().with_timeout(Some(UPLOAD))`), elapsing as
   `Error::Timeout(TimeoutKind::Total)`; an `EventStream` operation is exempt from it.
+  `Client::with_options(RequestOptions)` gives a derived client value per-call options: a
+  response body limit (`max_body`, refused as `Error::BodyTooLarge`), extensions a transport
+  backend reads off each request, and headers added where a request lacks them.
 - One `async` method per operation: required parameters positional, optional parameters in a
   per-operation `…Params` struct deriving `Default`, `Result<ResponseValue<T>, Error<E>>` out.
   String parameters and the params bundle take `impl Into<…>`, so `client.get_pet("1")` and
@@ -133,7 +136,9 @@ the version it emits, and the idioms spargen handles.
   on the one path the emitted `ClientConfig::max_error_body` doc names), interrupted body
   (`Error::InterruptedBody`: the connection dropped partway through a streamed response
   body, or on native targets any other response body, and transient), pagination cycle (`Error::PaginationCycle`: a `LinkPaginator`
-  `next` link back to a page it already fetched). Every generated error
+  `next` link back to a page it already fetched), oversized body (`Error::BodyTooLarge`: a
+  non-streaming response body past the `max_body` or `max_success_body` limit the call was made
+  under, refused unread from its `Content-Length` or abandoned where it crossed). Every generated error
   type is `Display` + `std::error::Error`, so `Error<E>` drops straight into `?`, `anyhow`, or
   `thiserror`. `Error::is_transient()` classifies retry-worthy failures. An error enum whose
   bodied statuses carry the same body type (one schema, or schemas that generate the same Rust
@@ -141,7 +146,7 @@ the version it emits, and the idioms spargen handles.
   and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()` and the owning
   `Error::into_api_body()` hand that body back whichever status carried it (`Error::status()`
   reports that status, the same value as `ResponseValue::status()` on `Error::Api`, and
-  `Error::headers()` the response's headers on every class that received one); an enum mixing
+  `Error::headers()` the response's headers on every class that keeps them); an enum mixing
   body types is matched by variant instead. A multi-status success enum gets `body()` and
   `into_body()` the same way when its bodied statuses share one type (bare, with no `Option`, when
   every status carries a non-null body), and every status enum, and the single-body newtype,

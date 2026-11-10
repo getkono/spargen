@@ -166,23 +166,46 @@ impl HttpBody {
 
     /// The whole body. An in-memory body is handed over without a copy, and so is a streaming
     /// one that arrives as a single chunk.
-    pub(crate) async fn collect(mut self) -> Result<Bytes, TransportError> {
+    pub(crate) async fn collect(self) -> Result<Bytes, TransportError> {
+        // Nothing held in memory exceeds `usize::MAX` bytes, so the body is always within it.
+        Ok(self.collect_within(usize::MAX).await?.unwrap_or_default())
+    }
+
+    /// The whole body, or `None` once it is known to hold more than `limit` bytes: reading stops
+    /// at the chunk that would carry it past `limit`, which is never buffered, so at most `limit`
+    /// bytes are. An in-memory body is handed over without a copy, and so is a streaming one that
+    /// arrives as a single chunk.
+    pub(crate) async fn collect_within(
+        mut self,
+        limit: usize,
+    ) -> Result<Option<Bytes>, TransportError> {
         if let Inner::Full(bytes) = self.inner {
-            return Ok(bytes);
+            return Ok((bytes.len() <= limit).then_some(bytes));
         }
         let Some(first) = self.chunk().await? else {
-            return Ok(Bytes::new());
+            return Ok(Some(Bytes::new()));
         };
+        if first.len() > limit {
+            return Ok(None);
+        }
         let Some(second) = self.chunk().await? else {
-            return Ok(first);
+            return Ok(Some(first));
         };
-        let mut buffered = BytesMut::with_capacity(first.len() + second.len());
+        let mut length = first.len().saturating_add(second.len());
+        if length > limit {
+            return Ok(None);
+        }
+        let mut buffered = BytesMut::with_capacity(length);
         buffered.extend_from_slice(&first);
         buffered.extend_from_slice(&second);
         while let Some(chunk) = self.chunk().await? {
+            length = length.saturating_add(chunk.len());
+            if length > limit {
+                return Ok(None);
+            }
             buffered.extend_from_slice(&chunk);
         }
-        Ok(buffered.freeze())
+        Ok(Some(buffered.freeze()))
     }
 
     /// A request body reqwest built, as the seam carries it. Off `wasm32` an in-memory body
@@ -771,6 +794,31 @@ mod tests {
         assert_eq!(poll_ready(clone.collect()).unwrap(), "abc");
         assert!(HttpBody::empty().is_end_stream());
         assert_eq!(poll_ready(HttpBody::default().collect()).unwrap(), "");
+    }
+
+    /// `collect_within` hands back a body of at most `limit` bytes, in memory or streamed in one
+    /// chunk or several, and `None` for one past it, without reading past the crossing chunk.
+    #[test]
+    fn collect_within_reads_a_body_up_to_its_limit() {
+        let read = |body: HttpBody, limit| poll_ready(body.collect_within(limit)).unwrap();
+        assert_eq!(read(HttpBody::from("abc"), 3).unwrap(), "abc");
+        assert_eq!(read(HttpBody::from("abc"), 2), None);
+        assert_eq!(read(HttpBody::empty(), 0).unwrap(), "");
+        let streamed = |chunks: &[&str]| {
+            HttpBody::wrap(Chunks::new(chunks.iter().map(|chunk| Chunk::data(*chunk))))
+        };
+        assert_eq!(read(streamed(&[]), 0).unwrap(), "");
+        assert_eq!(read(streamed(&["abcd"]), 4).unwrap(), "abcd");
+        assert_eq!(read(streamed(&["abcd"]), 3), None);
+        assert_eq!(read(streamed(&["ab", "cd"]), 4).unwrap(), "abcd");
+        assert_eq!(read(streamed(&["ab", "cd"]), 3), None);
+        assert_eq!(read(streamed(&["ab", "cd", "ef"]), 6).unwrap(), "abcdef");
+        let crossing = Chunks::new([Chunk::data("ab"), Chunk::data("cd"), Chunk::data("ef")]);
+        let pulled = crossing.pulled();
+        assert_eq!(read(HttpBody::wrap(crossing), 5), None);
+        assert_eq!(pulled.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let failed = HttpBody::wrap(Chunks::new([Chunk::data("a"), Chunk::Fail]));
+        assert!(poll_ready(failed.collect_within(8)).is_err());
     }
 
     /// Each `From` conversion holds exactly the bytes it was given.

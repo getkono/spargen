@@ -35,6 +35,31 @@ fn the_default_error_body_cap_is_64_kib() {
     assert_eq!(core.config().max_error_body, 64 * 1024);
 }
 
+/// Issue #1260: no success body limit by default, and a core starts with empty options, which
+/// `set_options` replaces whole and `options` reads back.
+#[test]
+fn a_core_starts_unbounded_with_empty_options_that_set_options_replaces() {
+    assert_eq!(ClientConfig::default().max_success_body, None);
+    let mut core = ClientCore::new("https://example.com").unwrap();
+    assert_eq!(core.config().max_success_body, None);
+    let options = core.options();
+    assert_eq!(options.max_body, None);
+    assert!(options.headers.is_empty());
+    assert!(options.extensions.is_empty());
+
+    let mut options = super::RequestOptions {
+        max_body: Some(9),
+        ..super::RequestOptions::default()
+    };
+    options.headers.insert("x-a", "1".parse().unwrap());
+    core.set_options(options);
+    assert_eq!(core.options().max_body, Some(9));
+    assert_eq!(core.options().headers["x-a"], "1");
+    core.set_options(super::RequestOptions::default());
+    assert_eq!(core.options().max_body, None);
+    assert!(core.options().headers.is_empty());
+}
+
 #[test]
 fn the_error_body_cap_is_tunable_through_config_mut() {
     let mut core = ClientCore::new("https://example.com").unwrap();
