@@ -47,6 +47,9 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
     if let Some(open) = switch(args.open_unions, args.no_open_unions) {
         spec = spec.open_unions(open);
     }
+    if let Some(verbatim) = switch(args.verbatim_docs, args.no_verbatim_docs) {
+        spec = spec.verbatim_docs(verbatim);
+    }
     for path in &args.omit_path {
         spec = spec.omit_rule(OmitRule::path(path.clone()));
     }
@@ -190,11 +193,13 @@ mod tests {
     #[test]
     fn each_switch_pair_overrides_the_config_file_either_way() {
         let (_on, on) = with_config(
-            "carve = true\nuuid = true\ntime = true\nopen_narrowing = true\nopen_unions = true\n",
+            "carve = true\nuuid = true\ntime = true\nopen_narrowing = true\nopen_unions = true\n\
+             verbatim_docs = true\n",
         );
         let (_off, off) =
             with_config(
-            "carve = false\nuuid = false\ntime = false\nopen_narrowing = false\nopen_unions = false\n",
+            "carve = false\nuuid = false\ntime = false\nopen_narrowing = false\nopen_unions = false\n\
+             verbatim_docs = false\n",
         );
         let file_on = Spec::new(on.join("openapi.yaml"))
             .config_file(on.join("spargen.toml"))
@@ -213,7 +218,8 @@ mod tests {
                     "--no-uuid",
                     "--no-time",
                     "--no-open-narrowing",
-                    "--no-open-unions"
+                    "--no-open-unions",
+                    "--no-verbatim-docs"
                 ]
             ),
             file_on
@@ -223,6 +229,7 @@ mod tests {
                 .time(false)
                 .open_narrowing(false)
                 .open_unions(false)
+                .verbatim_docs(false)
         );
         assert_eq!(
             resolved(
@@ -232,7 +239,8 @@ mod tests {
                     "--uuid",
                     "--time",
                     "--open-narrowing",
-                    "--open-unions"
+                    "--open-unions",
+                    "--verbatim-docs"
                 ]
             ),
             file_off
@@ -242,21 +250,24 @@ mod tests {
                 .time(true)
                 .open_narrowing(true)
                 .open_unions(true)
+                .verbatim_docs(true)
         );
         // One flag of a pair moves only its own setting.
         assert_eq!(resolved(&off, &["--uuid"]), file_off.uuid(true));
     }
 
-    /// Each of the ten switch flags, alone, moves its own setting off the file's value and leaves
-    /// the other four where the file put them.
+    /// Each of the twelve switch flags, alone, moves its own setting off the file's value and
+    /// leaves the other five where the file put them.
     #[test]
     fn each_switch_flag_moves_only_its_own_setting() {
         let (_on, on) = with_config(
-            "carve = true\nuuid = true\ntime = true\nopen_narrowing = true\nopen_unions = true\n",
+            "carve = true\nuuid = true\ntime = true\nopen_narrowing = true\nopen_unions = true\n\
+             verbatim_docs = true\n",
         );
         let (_off, off) =
             with_config(
-            "carve = false\nuuid = false\ntime = false\nopen_narrowing = false\nopen_unions = false\n",
+            "carve = false\nuuid = false\ntime = false\nopen_narrowing = false\nopen_unions = false\n\
+             verbatim_docs = false\n",
         );
         let file = |dir: &Utf8PathBuf| {
             Spec::new(dir.join("openapi.yaml"))
@@ -264,7 +275,7 @@ mod tests {
                 .unwrap()
         };
         type Moved = fn(Spec) -> Spec;
-        let rows: [(&str, &Utf8PathBuf, Moved); 10] = [
+        let rows: [(&str, &Utf8PathBuf, Moved); 12] = [
             ("--no-carve", &on, |spec| spec.carve(false)),
             ("--no-uuid", &on, |spec| spec.uuid(false)),
             ("--no-time", &on, |spec| spec.time(false)),
@@ -272,11 +283,13 @@ mod tests {
                 spec.open_narrowing(false)
             }),
             ("--no-open-unions", &on, |spec| spec.open_unions(false)),
+            ("--no-verbatim-docs", &on, |spec| spec.verbatim_docs(false)),
             ("--carve", &off, |spec| spec.carve(true)),
             ("--uuid", &off, |spec| spec.uuid(true)),
             ("--time", &off, |spec| spec.time(true)),
             ("--open-narrowing", &off, |spec| spec.open_narrowing(true)),
             ("--open-unions", &off, |spec| spec.open_unions(true)),
+            ("--verbatim-docs", &off, |spec| spec.verbatim_docs(true)),
         ];
         for (flag, dir, moved) in rows {
             let resolved = resolved(dir, &[flag]);
@@ -314,6 +327,8 @@ mod tests {
             "--no-open-narrowing",
             "--open-unions",
             "--no-open-unions",
+            "--verbatim-docs",
+            "--no-verbatim-docs",
         ] {
             assert_eq!(ignored(&[flag]), [flag]);
         }
@@ -351,6 +366,7 @@ mod tests {
             ("--time", "--no-time"),
             ("--open-narrowing", "--no-open-narrowing"),
             ("--open-unions", "--no-open-unions"),
+            ("--verbatim-docs", "--no-verbatim-docs"),
         ] {
             let error = Cli::try_parse_from(["spargen", "check", "openapi.yaml", on, off])
                 .expect_err(&format!("`{on} {off}` must not parse"));

@@ -4,7 +4,14 @@ expression: surface
 ---
 # A spec with no conditional runtime module
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ClientConfig, ClientCore, Credential,
     Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
@@ -14,12 +21,26 @@ pub use support::{
     RetryWait, SecretString, TimeoutKind, TokenFuture, TokenProvider, TokenRefresher,
     TransportError, exponential_backoff, next_link, token_provider,
 };
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub use __spargen_blocking::*;
 
 # A spec with XML, sequential, and date-time bodies
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ClientConfig, ClientCore, Credential,
     Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
@@ -29,11 +50,32 @@ pub use support::{
     RetryWait, SecretString, TimeoutKind, TokenFuture, TokenProvider, TokenRefresher,
     TransportError, exponential_backoff, next_link, token_provider,
 };
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub use support::{
     EventStream, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
 };
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub use support::{Date, DateParseError, DateTime};
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub use __spargen_blocking::*;

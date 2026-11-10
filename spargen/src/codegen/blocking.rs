@@ -33,6 +33,7 @@ pub(super) fn emit_blocking_client(
     api: &Api,
     signatures: &[OperationSig],
     names: &Names,
+    options: &super::CodegenOptions,
 ) -> TokenStream {
     let methods = api
         .operations
@@ -46,7 +47,7 @@ pub(super) fn emit_blocking_client(
         panics when nested. Build one on a plain thread (e.g. `std::thread` or \
         `tokio::task::spawn_blocking`).";
     let cfg = blocking_cfg();
-    let credential_docs = with_credential_docs(api);
+    let credential_docs = with_credential_docs(api, options);
     let default_server = (!api.servers.is_empty()).then(|| {
         let docs = default_server_docs();
         quote! {

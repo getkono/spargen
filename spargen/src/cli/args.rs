@@ -86,6 +86,14 @@ pub(crate) struct SpecArgs {
     /// Keep discriminated unions closed, overriding `open_unions = true` in `spargen.toml`.
     #[arg(long)]
     pub(crate) no_open_unions: bool,
+    /// Carry the spec's prose into rustdoc as written, overriding `verbatim_docs = false` in
+    /// `spargen.toml`.
+    #[arg(long, conflicts_with = "no_verbatim_docs")]
+    pub(crate) verbatim_docs: bool,
+    /// Rewrite the spec's prose for rustdoc (intra-doc links to text, bare URLs and stray tags
+    /// escaped), overriding `verbatim_docs = true` in `spargen.toml`.
+    #[arg(long)]
+    pub(crate) no_verbatim_docs: bool,
     /// Omit a path item and every operation under it (repeatable), e.g. `--omit-path /pets/{id}`.
     #[arg(long = "omit-path", value_name = "PATH")]
     pub(crate) omit_path: Vec<String>,
@@ -126,6 +134,8 @@ impl SpecArgs {
             no_open_narrowing,
             open_unions,
             no_open_unions,
+            verbatim_docs,
+            no_verbatim_docs,
             omit_path,
             omit_operation,
             omit_component,
@@ -144,6 +154,8 @@ impl SpecArgs {
             (*no_open_narrowing, "--no-open-narrowing"),
             (*open_unions, "--open-unions"),
             (*no_open_unions, "--no-open-unions"),
+            (*verbatim_docs, "--verbatim-docs"),
+            (*no_verbatim_docs, "--no-verbatim-docs"),
             (!omit_path.is_empty(), "--omit-path"),
             (!omit_operation.is_empty(), "--omit-operation"),
             (!omit_component.is_empty(), "--omit-component"),

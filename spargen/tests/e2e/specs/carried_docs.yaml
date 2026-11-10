@@ -1,0 +1,56 @@
+openapi: 3.1.0
+info:
+  title: "Moderation, by [`crate::App`]"
+  version: 1.0.0
+  description: |
+    The moderation API, served by [`crate::serve`]. See https://example.com/docs.
+servers:
+  - url: https://{region}.example.com
+    description: The regional host, routed by [Router].
+    variables:
+      region:
+        default: eu
+        description: A region code, as [`Region`] lists them.
+components:
+  securitySchemes:
+    token:
+      type: http
+      scheme: bearer
+      description: A token [`crate::auth::mint`] issues; see https://example.com/auth.
+  schemas:
+    Report:
+      description: |
+        A report the [ModerationStore] holds, as a Vec<Entry>, shaped as [Vec<Note>] and
+        [Page<Report>](https://example.com/page).
+
+        ```text
+        [kept] Vec<kept>
+        ```
+
+        [ModerationStore]: crate::store::ModerationStore
+        [vec<note>]: https://example.com/note
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+paths:
+  /reports:
+    get:
+      operationId: listReports
+      summary: List reports, as [`ModerationStore::list`] does.
+      description: |
+        Reads the [store][ModerationStore] and returns <b>every</b> report, up to the
+        limit </b> set in [the config](crate::config::Limits). Details at
+        https://example.com/reports.
+      responses:
+        "200":
+          description: ok
+          headers:
+            X-Rate-Limit:
+              description: The limit [`crate::limits::Rate`] applies.
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Report" }

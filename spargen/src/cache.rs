@@ -53,6 +53,7 @@ fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[
     append(&mut hasher, &[u8::from(spec.carve)]);
     append(&mut hasher, &[u8::from(spec.open_narrowing)]);
     append(&mut hasher, &[u8::from(spec.open_unions)]);
+    append(&mut hasher, &[u8::from(spec.verbatim_docs)]);
     // The omit profile's one canonical encoding, the same bytes its provenance-header
     // fingerprint hashes, so the two cannot drift apart.
     append(&mut hasher, &spec.omit.canonical_encoding());
@@ -786,6 +787,7 @@ components:
             carve: true,
             open_narrowing: false,
             open_unions: true,
+            verbatim_docs: false,
             config_files: Vec::new(),
         };
         // A file over a block long, so its bytes cross a block boundary of the hash.
@@ -813,6 +815,7 @@ components:
         frame(&[1]);
         frame(&[0]);
         frame(&[1]);
+        frame(&[0]);
         frame(&spec.omit.canonical_encoding());
         for (path, bytes) in inputs {
             frame(path.as_str().as_bytes());
@@ -823,7 +826,7 @@ components:
         assert_eq!(digest, sha256_hex(&buffer));
         assert_eq!(
             digest,
-            "f4b711d10bb596b851ed5f4e6d9cabad9b267e25dfcbc546af242743221e7e9d"
+            "8d9bdb85a432e653938f6da87dac8eef3a2aeb256dcba54597b69d91d9c9796d"
         );
     }
 
@@ -959,6 +962,7 @@ components:
             carve,
             open_narrowing,
             open_unions,
+            verbatim_docs,
             config_files,
         } = &base;
         assert!(config_files.is_empty());
@@ -1035,6 +1039,13 @@ components:
                 "open_unions",
                 Spec {
                     open_unions: !open_unions,
+                    ..base.clone()
+                },
+            ),
+            (
+                "verbatim_docs",
+                Spec {
+                    verbatim_docs: !verbatim_docs,
                     ..base.clone()
                 },
             ),

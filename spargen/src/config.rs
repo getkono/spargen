@@ -50,6 +50,7 @@ pub struct Spec {
     pub(crate) carve: bool,
     pub(crate) open_narrowing: bool,
     pub(crate) open_unions: bool,
+    pub(crate) verbatim_docs: bool,
     /// Every config file applied through [`Spec::config_file`] (and so through
     /// [`Spec::discover_config_file`]), in the order applied. Generation reads them, so `build.rs`
     /// names each as a `cargo:rerun-if-changed` path and `generate_api!` tracks each.
@@ -58,7 +59,8 @@ pub struct Spec {
 
 impl Spec {
     /// A spec with defaults: `uuid` and `time` on, a 64 KiB error-body cap, a 100-diagnostic
-    /// batch, no omissions, no carving, no open narrowing, no open unions.
+    /// batch, no omissions, no carving, no open narrowing, no open unions, and carried docs
+    /// rewritten for rustdoc rather than verbatim.
     pub fn new(path: impl Into<Utf8PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -70,6 +72,7 @@ impl Spec {
             carve: false,
             open_narrowing: false,
             open_unions: false,
+            verbatim_docs: false,
             config_files: Vec::new(),
         }
     }
@@ -123,6 +126,12 @@ impl Spec {
     /// variant, as [`open_unions`](Self::open_unions) set it.
     pub fn open_unions_enabled(&self) -> bool {
         self.open_unions
+    }
+
+    /// Whether the spec's prose is carried into rustdoc as written, as
+    /// [`verbatim_docs`](Self::verbatim_docs) set it.
+    pub fn verbatim_docs_enabled(&self) -> bool {
+        self.verbatim_docs
     }
 
     /// Every config file applied through [`config_file`](Self::config_file) or
@@ -262,6 +271,24 @@ impl Spec {
         self
     }
 
+    /// Carry the spec's prose — `summary`, `description` and `title` — into rustdoc exactly as
+    /// written (default `false`).
+    ///
+    /// By default that prose is rewritten so rustdoc has nothing to report from wherever the
+    /// module is `include!`d, without changing what it says. A server framework that publishes its
+    /// handlers' rustdoc as `description` carries intra-doc links naming items of the server's
+    /// crate (``[`crate::serve`]``, `[Store]`), which no path from the generated module reaches:
+    /// each such link becomes its text, so ``[`crate::serve`]`` renders as `` `crate::serve` ``. A
+    /// bare `http(s)://` URL is wrapped in `<…>`, and an HTML tag nothing closes (`Vec<T>`'s
+    /// `<T>`) has its `<` escaped. Links to URLs, code spans and code blocks are kept as written.
+    ///
+    /// With this on, the prose is left as the spec wrote it, and the `include!` site answers for
+    /// `rustdoc::broken_intra_doc_links`, `rustdoc::bare_urls` and `rustdoc::invalid_html_tags`.
+    pub fn verbatim_docs(mut self, enabled: bool) -> Self {
+        self.verbatim_docs = enabled;
+        self
+    }
+
     /// Where to write the generated module. The result is the input to [`generate`](crate::generate).
     pub fn build(self, output: impl Into<Utf8PathBuf>) -> Build {
         Build::new(self, output)
@@ -339,6 +366,9 @@ impl Spec {
         }
         if let Some(value) = file.open_unions {
             self.open_unions = value;
+        }
+        if let Some(value) = file.verbatim_docs {
+            self.verbatim_docs = value;
         }
         for (index, entry) in file.omit.iter().enumerate() {
             let rule = entry.to_rule().map_err(|message| {
@@ -470,6 +500,7 @@ struct FileConfig {
     error_body_cap: Option<usize>,
     open_narrowing: Option<bool>,
     open_unions: Option<bool>,
+    verbatim_docs: Option<bool>,
     /// Retained solely to give the removed 0.2 `[features]` table a targeted error.
     features: Option<toml::Value>,
     #[serde(default)]
@@ -609,6 +640,7 @@ mod tests {
         assert_eq!(spec.error_body_cap, 64 * 1024);
         assert!(!spec.open_narrowing);
         assert!(!spec.open_unions);
+        assert!(!spec.verbatim_docs);
         assert!(spec.omit.is_empty());
         assert_eq!(Build::new(spec, "out.rs").cargo, CargoIntegration::Auto);
     }
@@ -624,6 +656,7 @@ mod tests {
             error_body_cap = 11
             open_narrowing = true
             open_unions = true
+            verbatim_docs = true
             "#,
         )
         .unwrap();
@@ -634,6 +667,7 @@ mod tests {
         assert_eq!(spec.error_body_cap, 11);
         assert!(spec.open_narrowing);
         assert!(spec.open_unions);
+        assert!(spec.verbatim_docs);
     }
 
     #[test]

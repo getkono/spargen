@@ -289,6 +289,7 @@ fn build_emit_plan(
             feature_uuid: spec.uuid,
             feature_time: spec.time,
             error_body_cap: spec.error_body_cap,
+            verbatim_docs: spec.verbatim_docs,
         },
     )
     .map_err(|error| emit_pipeline_error(diags, error.to_string()))?;

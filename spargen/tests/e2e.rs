@@ -654,6 +654,8 @@ mod basic_crate;
 mod basic_defaults;
 #[path = "e2e/basic_errors.rs"]
 mod basic_errors;
+#[path = "e2e/carried_docs.rs"]
+mod carried_docs;
 #[path = "e2e/collisions.rs"]
 mod collisions;
 #[path = "e2e/dependencies.rs"]

@@ -7,7 +7,7 @@ use quote::quote;
 use crate::ir::Api;
 use crate::name::Names;
 
-use super::docs::normalize_rustdoc;
+use super::docs::{carried, normalize_rustdoc};
 use super::operation::{emit_operation, OperationSig};
 use super::params::emit_params_struct;
 use super::responses::{emit_error_enum, emit_response_enum, emit_response_headers};
@@ -24,8 +24,8 @@ pub(super) fn default_server_docs() -> TokenStream {
 
 /// The rustdoc of `with_credential`, which `Client` and `BlockingClient` both carry: what
 /// registration checks and how an operation fails on it, followed by the declared schemes.
-pub(super) fn with_credential_docs(api: &Api) -> TokenStream {
-    let scheme_docs = scheme_doc_lines(api);
+pub(super) fn with_credential_docs(api: &Api, options: &CodegenOptions) -> TokenStream {
+    let scheme_docs = scheme_doc_lines(api, options);
     quote! {
         /// Register a credential for a named security scheme (a `securitySchemes` key).
         ///
@@ -43,12 +43,14 @@ pub(super) fn with_credential_docs(api: &Api) -> TokenStream {
 }
 
 /// The declared security schemes, rendered as rustdoc for `with_credential`, for the reason
-/// [`crate::ir::SecuritySchemeDef`] gives.
-fn scheme_doc_lines(api: &Api) -> Vec<TokenStream> {
-    let documented: Vec<&String> = api
+/// [`crate::ir::SecuritySchemeDef`] gives. The lines carry the spec's scheme and scope
+/// descriptions, so they go through [`carried`] together, as the one Markdown text rustdoc joins
+/// them into.
+fn scheme_doc_lines(api: &Api, options: &CodegenOptions) -> Vec<TokenStream> {
+    let documented: Vec<&str> = api
         .security_schemes
         .values()
-        .flat_map(|scheme| scheme.docs.iter())
+        .flat_map(|scheme| scheme.docs.iter().map(String::as_str))
         .collect();
     if documented.is_empty() {
         return Vec::new();
@@ -58,7 +60,11 @@ fn scheme_doc_lines(api: &Api) -> Vec<TokenStream> {
         "# Declared schemes".to_owned(),
         String::new(),
     ];
-    lines.extend(documented.into_iter().cloned());
+    lines.extend(
+        carried(&documented.join("\n"), options)
+            .split('\n')
+            .map(str::to_owned),
+    );
     lines
         .into_iter()
         .map(|line| quote! { #[doc = #line] })
@@ -78,7 +84,7 @@ pub(super) fn emit_client(
     names: &Names,
     options: &CodegenOptions,
 ) -> TokenStream {
-    let credential_docs = with_credential_docs(api);
+    let credential_docs = with_credential_docs(api, options);
     let params = api
         .operations
         .iter()
@@ -100,10 +106,10 @@ pub(super) fn emit_client(
     let response_headers = api
         .operations
         .iter()
-        .map(|operation| emit_response_headers(operation, names));
-    let client_docs = client_doc_tokens(api);
+        .map(|operation| emit_response_headers(operation, names, options));
+    let client_docs = client_doc_tokens(api, options);
     let error_body_cap = options.error_body_cap;
-    let servers = emit_servers(api, names);
+    let servers = emit_servers(api, names, options);
     let default_server = (!api.servers.is_empty()).then(|| {
         let docs = default_server_docs();
         quote! {
@@ -266,7 +272,7 @@ pub(super) fn emit_client(
 /// A Server Variable `default` is sent when the caller supplies no alternative, so every server
 /// resolves to a concrete URL with no arguments; a variable that declares an `enum` gets a typed
 /// enum so an illegal value cannot be constructed at all.
-fn emit_servers(api: &Api, names: &Names) -> TokenStream {
+fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStream {
     if api.servers.is_empty() {
         return quote! {};
     }
@@ -274,7 +280,7 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         let ident = names.servers.get(index).expect("server name allocated");
         let mut docs = vec![format!("Server `{}`.", server.url)];
         if let Some(description) = &server.description {
-            docs.push(description.clone());
+            docs.push(carried(description, options).into_owned());
         }
         let doc_attrs = docs.iter().map(|line| quote! { #[doc = #line] });
 
@@ -353,7 +359,7 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
             let mut doc = format!("Set the `{name}` server variable.");
             if let Some(description) = &variable.description {
                 doc.push(' ');
-                doc.push_str(description);
+                doc.push_str(&carried(description, options));
             }
             match enum_ident(name) {
                 Some(enum_ident) => {
@@ -462,9 +468,14 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
     }
 }
 
-/// Document the generated `Client` with the API identity and its declared servers.
-fn client_doc_tokens(api: &Api) -> TokenStream {
-    let mut text = format!("Client for {} v{}.", api.info.title, api.info.version);
+/// Document the generated `Client` with the API identity and its declared servers. The title,
+/// version and descriptions are the spec's, so each goes through [`carried`].
+fn client_doc_tokens(api: &Api, options: &CodegenOptions) -> TokenStream {
+    let mut text = format!(
+        "Client for {} v{}.",
+        carried(&api.info.title, options),
+        carried(&api.info.version, options)
+    );
     if let Some(description) = api
         .info
         .description
@@ -472,7 +483,7 @@ fn client_doc_tokens(api: &Api) -> TokenStream {
         .filter(|text| !text.trim().is_empty())
     {
         text.push_str("\n\n");
-        text.push_str(description);
+        text.push_str(&carried(description, options));
     }
     if !api.servers.is_empty() {
         text.push_str("\n\nServers declared by the spec:");
@@ -486,7 +497,7 @@ fn client_doc_tokens(api: &Api) -> TokenStream {
                 .filter(|text| !text.trim().is_empty())
             {
                 text.push_str(" — ");
-                text.push_str(description);
+                text.push_str(&carried(description, options));
             }
         }
     }
@@ -589,7 +600,7 @@ mod tests {
         };
         let names = crate::name::allocate(&api);
         let options = CodegenOptions::default();
-        let signatures = super::super::operation::signatures(&api, &names);
+        let signatures = super::super::operation::signatures(&api, &names, &options);
         let client: syn::File =
             syn::parse2(super::emit_client(&api, &signatures, &names, &options))
                 .expect("the emitted client parses");
@@ -597,6 +608,7 @@ mod tests {
             &api,
             &signatures,
             &names,
+            &options,
         ))
         .expect("the emitted blocking client parses");
 
@@ -718,18 +730,16 @@ mod tests {
                 )]),
             };
             let names = crate::name::allocate(&api);
-            let signatures = super::super::operation::signatures(&api, &names);
-            let client: syn::File = syn::parse2(super::emit_client(
-                &api,
-                &signatures,
-                &names,
-                &CodegenOptions::default(),
-            ))
-            .expect("the emitted client parses");
+            let options = CodegenOptions::default();
+            let signatures = super::super::operation::signatures(&api, &names, &options);
+            let client: syn::File =
+                syn::parse2(super::emit_client(&api, &signatures, &names, &options))
+                    .expect("the emitted client parses");
             let blocking: syn::File = syn::parse2(super::super::blocking::emit_blocking_client(
                 &api,
                 &signatures,
                 &names,
+                &options,
             ))
             .expect("the emitted blocking client parses");
 
