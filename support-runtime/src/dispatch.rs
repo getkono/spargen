@@ -169,8 +169,10 @@ pub fn build_url_with_query_string_on(
 ///
 /// A request that carries no total timeout of its own is given the core's
 /// [`crate::ClientConfig::timeout`], read now, which bounds it until its whole response body has
-/// been read. An operation whose success response is a stream sends with [`send_streaming`]
-/// instead.
+/// been read. The body limits [`crate::RequestOptions::max_body`] and
+/// [`crate::ClientConfig::max_success_body`] set are read now too, and travel on the response to
+/// the decoder that reads its body. An operation whose success response is a stream sends with
+/// [`send_streaming`] instead.
 pub async fn send(
     core: &ClientCore,
     mut request: Request,
@@ -178,19 +180,93 @@ pub async fn send(
     if request.timeout().is_none() {
         *request.timeout_mut() = core.config().timeout;
     }
-    send_streaming(core, request).await
+    let mut response = send_streaming(core, request).await?;
+    let max_body = core.options().max_body;
+    response.extensions_mut().insert(BodyLimits {
+        success: max_body.or(core.config().max_success_body),
+        error: max_body,
+    });
+    Ok(response)
 }
 
 /// [`send`] for a request whose success response is read as a stream (an `EventStream`): the
 /// core's [`crate::ClientConfig::timeout`] is not applied, because a stream may rightly stay open
-/// indefinitely. A total timeout the request carries itself still applies, and the client's
-/// connect and read timeouts bound it as they bound every request. Non-generic.
+/// indefinitely, and neither is a body limit. A total timeout the request carries itself still
+/// applies, and the client's connect and read timeouts bound it as they bound every request.
+/// Non-generic.
+///
+/// Both sends add the core's [`crate::RequestOptions`] headers the request does not already
+/// carry, and its extensions of a type the request does not already carry, before the backend
+/// executes it.
 pub async fn send_streaming(
     core: &ClientCore,
     request: Request,
 ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
-    let request = request_from_reqwest(request).map_err(Error::from_reqwest)?;
+    let mut request = request_from_reqwest(request).map_err(Error::from_reqwest)?;
+    apply_options(core.options(), &mut request);
     send_on(core.backend().as_ref(), request).await
+}
+
+/// Add `options`' headers and extensions to `request`, leaving whatever it already carries as it
+/// is: a header name it carries keeps exactly its own values, and an extension type it carries its
+/// own value. [`crate::EventStream`]'s reconnect applies them the same way to the request it
+/// resends.
+pub(crate) fn apply_options(
+    options: &crate::RequestOptions,
+    request: &mut http::Request<HttpBody>,
+) {
+    let headers = request.headers_mut();
+    for name in options.headers.keys() {
+        if !headers.contains_key(name) {
+            for value in options.headers.get_all(name) {
+                headers.append(name.clone(), value.clone());
+            }
+        }
+    }
+    if !options.extensions.is_empty() {
+        let mut extensions = options.extensions.clone();
+        extensions.extend(std::mem::take(request.extensions_mut()));
+        *request.extensions_mut() = extensions;
+    }
+}
+
+/// The body limits [`send`] read from the core, carried on the response it returns so the decoder
+/// reading the body applies the ones the call was made under. A response that does not carry them
+/// (a streaming operation's, or one a caller built) is read without a limit beyond
+/// `max_error_body`.
+#[derive(Debug, Clone, Copy)]
+struct BodyLimits {
+    /// The most bytes a success body may hold.
+    success: Option<usize>,
+    /// The most bytes an error body may hold, where it is less than `max_error_body`.
+    error: Option<usize>,
+}
+
+/// Whether `headers` declare a `Content-Length` past `limit`. A missing or malformed one declares
+/// nothing, and the body is bounded as it is read instead.
+fn declares_more_than(headers: &reqwest::header::HeaderMap, limit: usize) -> bool {
+    headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|length| length.to_str().ok())
+        .and_then(|length| length.parse::<u64>().ok())
+        .is_some_and(|length| u64::try_from(limit).is_ok_and(|limit| length > limit))
+}
+
+/// Read `body` whole, or fail with [`Error::BodyTooLarge`] once it is known to hold more than
+/// `limit` bytes: up front from a `Content-Length` past it, or at the chunk that carries it past.
+async fn read_within<E>(
+    limit: usize,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: HttpBody,
+) -> Result<Bytes, Error<E>> {
+    if declares_more_than(headers, limit) {
+        return Err(Error::BodyTooLarge { limit, status });
+    }
+    body.collect_within(limit)
+        .await
+        .map_err(Error::from_transport)?
+        .ok_or(Error::BodyTooLarge { limit, status })
 }
 
 /// [`send`] through the backend alone, for a caller that holds the backend and a request already
@@ -241,7 +317,9 @@ where
 /// wrap the value with status and headers. A decode failure becomes [`Error::Decode`] carrying the
 /// decoder's message as its `path` and a body capped at `max_error_body`. Deserialization needs the
 /// whole body, so peak memory here is inherent to typed decoding; only what the error *retains* is
-/// capped.
+/// capped. A response [`send`] returned is read within the success-body limit it was sent under
+/// ([`crate::RequestOptions::max_body`], else [`crate::ClientConfig::max_success_body`]), and one
+/// past it is [`Error::BodyTooLarge`], before `decode` runs.
 ///
 /// Generated code for a multi-status success enum calls it from the arm whose selector matched,
 /// with a `decode` that builds that arm's variant. `decode` receives the `Bytes` itself so a raw
@@ -252,8 +330,15 @@ pub async fn decode_success_with<T>(
     decode: impl FnOnce(&Bytes) -> Result<T, String>,
 ) -> Result<ResponseValue<T>, Error<Infallible>> {
     let (parts, body) = response.into_parts();
+    let limit = parts
+        .extensions
+        .get::<BodyLimits>()
+        .and_then(|limits| limits.success);
     let (status, headers) = (parts.status, parts.headers);
-    let body = body.collect().await.map_err(Error::from_transport)?;
+    let body = match limit {
+        Some(limit) => read_within(limit, status, &headers, body).await?,
+        None => body.collect().await.map_err(Error::from_transport)?,
+    };
     match decode(&body) {
         Ok(value) => Ok(ResponseValue::new(status, headers, value)),
         Err(path) => {
@@ -317,6 +402,19 @@ async fn read_error_body_capped<E>(
     response: Response,
 ) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool), Error<E>> {
     let (parts, body) = response.into_parts();
+    // A per-call `max_body` below the retention cap bounds the read itself: a body past it is
+    // refused rather than truncated. At or above the cap, the capped read below never reaches it.
+    let limit = parts
+        .extensions
+        .get::<BodyLimits>()
+        .and_then(|limits| limits.error)
+        .filter(|limit| *limit < max_error_body);
+    if let Some(limit) = limit {
+        let body = read_within(limit, parts.status, &parts.headers, body).await?;
+        // Within `limit`, so under the cap: `cap_body` only detaches the retained copy.
+        let (body, truncated) = cap_body(body, max_error_body);
+        return Ok((parts.status, parts.headers, body, truncated));
+    }
     let (body, truncated) = read_capped(max_error_body, body).await?;
     Ok((parts.status, parts.headers, body, truncated))
 }

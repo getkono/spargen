@@ -81,6 +81,17 @@ pub struct ClientConfig {
     /// `EventStream` sends its request with [`crate::send_streaming`], which never applies it, and
     /// each reconnect resends that same request.
     pub timeout: Option<Duration>,
+    /// Maximum bytes of a success body a non-streaming operation reads before it fails with
+    /// [`Error::BodyTooLarge`] (default `None`: a success body is read whole, however large).
+    ///
+    /// A response whose `Content-Length` declares more is refused before any of its body is read,
+    /// and one that grows past it is abandoned at the chunk that crosses it, which forgoes reuse
+    /// of that connection; peak memory is the limit, not what the server chose to send.
+    /// [`RequestOptions::max_body`], set per client value with a generated client's
+    /// `with_options`, replaces it. It is read each time [`crate::send`] sends a request, as
+    /// [`Self::timeout`] is. An operation returning an `EventStream` is exempt: its items are
+    /// bounded by [`Self::max_stream_frame`] instead.
+    pub max_success_body: Option<usize>,
 }
 
 impl Default for ClientConfig {
@@ -91,8 +102,41 @@ impl Default for ClientConfig {
             connect_timeout: Some(Duration::from_secs(30)),
             read_timeout: Some(Duration::from_secs(5 * 60)),
             timeout: None,
+            max_success_body: None,
         }
     }
+}
+
+/// Options every call made through one client value carries: a generated client's `with_options`
+/// sets them on the client value it returns, so a call that needs its own derives a client for it
+/// (`client.clone().with_options(options)`) rather than sharing mutable state with other calls.
+///
+/// They are read each time [`crate::send`] or [`crate::send_streaming`] sends a request, after the
+/// request is built and its credentials attached.
+#[derive(Debug, Clone, Default)]
+pub struct RequestOptions {
+    /// Maximum bytes of a response body a non-streaming operation reads before it fails with
+    /// [`Error::BodyTooLarge`]; `None` (the default) leaves [`ClientConfig::max_success_body`] in
+    /// force.
+    ///
+    /// On a success body it replaces [`ClientConfig::max_success_body`], and bounds the read as
+    /// that field describes: a `Content-Length` past it is refused before the body is read, and a
+    /// body that grows past it is abandoned at the chunk that crosses it. An error body is read no
+    /// further than [`ClientConfig::max_error_body`] in any case; where this limit is the smaller
+    /// of the two, an error body past it fails with [`Error::BodyTooLarge`] the same way, instead
+    /// of being truncated. An operation returning an `EventStream` is exempt, success and error
+    /// body alike: [`ClientConfig::max_stream_frame`] bounds its items.
+    pub max_body: Option<usize>,
+    /// Extensions copied onto each request this client value sends, where an
+    /// [`HttpBackend`] reads them from the `http::Request` it executes. An extension of a type the
+    /// request already carries is left as the request has it.
+    pub extensions: http::Extensions,
+    /// Headers added to each request this client value sends, every operation's included. A
+    /// header the request already carries — an operation's own header parameter, its content
+    /// type, or an attached credential — is left as the request has it, and every value of a name
+    /// the request lacks is added. `ClientCore`'s `Debug` prints them; mark a secret one with
+    /// `HeaderValue::set_sensitive` to redact it there.
+    pub headers: http::HeaderMap,
 }
 
 /// The shared core every generated `Client` wraps: the `reqwest::Client` used to BUILD requests
@@ -111,6 +155,7 @@ pub struct ClientCore {
     backend: Arc<dyn HttpBackend>,
     base_url: Url,
     config: ClientConfig,
+    options: RequestOptions,
     credentials: HashMap<String, Credential>,
 }
 
@@ -188,6 +233,7 @@ impl ClientCore {
             backend,
             base_url,
             config,
+            options: RequestOptions::default(),
             credentials: HashMap::new(),
         })
     }
@@ -200,6 +246,17 @@ impl ClientCore {
     /// Mutably borrow the retention/config settings.
     pub fn config_mut(&mut self) -> &mut ClientConfig {
         &mut self.config
+    }
+
+    /// The options every request this core sends carries (the default ones until
+    /// [`Self::set_options`] replaces them).
+    pub fn options(&self) -> &RequestOptions {
+        &self.options
+    }
+
+    /// Replace the options every later request this core sends carries.
+    pub fn set_options(&mut self, options: RequestOptions) {
+        self.options = options;
     }
 
     /// The base URL.

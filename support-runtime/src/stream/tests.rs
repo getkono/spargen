@@ -578,6 +578,72 @@ fn reconnect_replays_last_event_id_and_preserves_cookie_headers() {
     );
 }
 
+/// An extension type a caller's backend reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Tag(u32);
+
+/// Answers every request with one SSE event, recording each request's `x-option` header and
+/// [`Tag`] extension.
+#[derive(Debug, Default)]
+struct OptionRecorder {
+    seen: Mutex<Vec<(Option<String>, Option<Tag>)>>,
+}
+
+impl crate::HttpBackend for OptionRecorder {
+    fn execute(&self, request: http::Request<crate::HttpBody>) -> crate::ExecuteFuture<'_> {
+        self.seen.lock().unwrap().push((
+            request
+                .headers()
+                .get("x-option")
+                .map(|value| value.to_str().unwrap().to_owned()),
+            request.extensions().get::<Tag>().copied(),
+        ));
+        Box::pin(async { Ok(response("data: {\"seq\":2}\n\n")) })
+    }
+}
+
+/// Issue #1260: the operation keeps its clone of the request before `send_streaming` adds the
+/// core's `RequestOptions`, so the stream adds them to it, and an automatic reconnect carries the
+/// option headers and extensions the first request did.
+#[test]
+fn a_reconnect_carries_the_cores_option_headers_and_extensions() {
+    let backend = Arc::new(OptionRecorder::default());
+    let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
+    let mut options = crate::RequestOptions::default();
+    options.headers.insert("x-option", "set".parse().unwrap());
+    options.extensions.insert(Tag(7));
+    core.set_options(options);
+    let request = core
+        .http()
+        .request(Method::GET, "https://example.com/events")
+        .build()
+        .unwrap();
+    let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
+        response("data: {\"seq\":1}\n\n"),
+        Framing::SseJsonData,
+        &core,
+        Some(request),
+    );
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 1,
+        ..ImmediateReconnect::default()
+    });
+    let mut stream = stream.with_reconnect(policy).unwrap();
+
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 1})
+    );
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 2})
+    );
+    assert_eq!(
+        backend.seen.lock().unwrap().as_slice(),
+        &[(Some("set".to_owned()), Some(Tag(7)))]
+    );
+}
+
 /// Each connection's body is its own SSE stream, so a byte order mark opening a reconnect's body
 /// is stripped as the first connection's was, and its first event still decodes.
 #[test]

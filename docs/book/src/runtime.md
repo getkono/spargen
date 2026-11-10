@@ -96,6 +96,38 @@ default configuration, whose total
 On `wasm32`, reqwest's `fetch` backend has no connect or read timeout, so only the total `timeout`
 applies there.
 
+## Per-call options
+
+`Client::with_options(RequestOptions)` (and `BlockingClient::with_options`) sets the options every
+call made through the client value it returns carries, replacing the ones it had, so a call whose
+limits differ derives a client for itself rather than arming shared state in a backend:
+
+```rust,ignore
+let page = client
+    .clone()
+    .with_options(RequestOptions {
+        max_body: Some(PAGE_LIMIT),
+        ..RequestOptions::default()
+    })
+    .sync_feed(&params)
+    .await?;
+```
+
+- `max_body` bounds the response body of a non-streaming operation. A `Content-Length` past it is
+  refused before the body is read, and a body that grows past it is abandoned at the chunk that
+  crosses it; either is `Error::BodyTooLarge { limit, status }`, which is not transient. It
+  replaces `ClientConfig::max_success_body` (default none: a success body is read whole), which
+  `with_config` sets for every call. An error body is read no further than `max_error_body` in any
+  case; where `max_body` is the smaller of the two, an error body past it is `BodyTooLarge` instead
+  of truncated. An operation returning an `EventStream` is exempt, its error body included:
+  `max_stream_frame` bounds its items.
+- `extensions` are copied onto each request, where a caller-supplied `HttpBackend` reads them from
+  the `http::Request` it executes. An extension type the request already carries keeps its value.
+- `headers` are added to each request, streaming operations' included. A header the request already
+  carries (an operation's own header parameter, its content type, an attached credential) keeps
+  its own values. `ClientCore`'s `Debug` prints them; mark a secret value with
+  `HeaderValue::set_sensitive`.
+
 ## Retry
 
 `RetryBackend` wraps any inner `HttpBackend` and re-executes a request per a caller-supplied

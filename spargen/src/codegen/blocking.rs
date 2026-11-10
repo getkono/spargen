@@ -182,6 +182,15 @@ pub(super) fn emit_blocking_client(
                 self
             }
 
+            /// Set the `RequestOptions` every call made through this client value carries
+            /// (mirrors the async client's `with_options`): a body limit, request extensions and
+            /// added headers.
+            #[must_use]
+            pub fn with_options(mut self, options: support::RequestOptions) -> Self {
+                self.inner = self.inner.with_options(options);
+                self
+            }
+
             /// Repoint this client at another base URL, keeping everything else (mirrors the
             /// async client's `with_base_url`).
             pub fn with_base_url(

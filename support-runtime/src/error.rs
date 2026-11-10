@@ -8,7 +8,7 @@ use crate::{AuthError, ResponseValue};
 /// The closed error taxonomy shared by every spargen-generated client. `E` is the
 /// operation's typed error body (an enum when several error statuses are documented).
 ///
-/// Ten variants are constructed: classes #1 to #9, and #11. Taxonomy class #10, cancellation, is a
+/// Eleven variants are constructed: classes #1 to #9, #11 and #12. Taxonomy class #10, cancellation, is a
 /// documented drop-safety guarantee rather than a variant: dropping a returned future is safe and
 /// side-effect-free beyond standard HTTP semantics. The enum implements [`std::error::Error`], whose `source()` reaches
 /// each retained cause, and `Debug` never leaks secrets.
@@ -81,6 +81,17 @@ pub enum Error<E> {
     PaginationCycle {
         /// The revisited URL the `next` link resolved to.
         url: reqwest::Url,
+    },
+    /// #12 — a non-streaming operation's response body exceeded the limit the call was made
+    /// under: [`crate::RequestOptions::max_body`], or for a success body
+    /// `ClientConfig::max_success_body`. A `Content-Length` past it is refused before the body is
+    /// read; a body that grows past it is abandoned at the chunk that crosses it. Nothing of the
+    /// body is retained. Not transient: the same limit refuses the same response again.
+    BodyTooLarge {
+        /// The limit, in bytes, the body exceeded.
+        limit: usize,
+        /// The status of the response whose body exceeded it.
+        status: StatusCode,
     },
 }
 
@@ -160,7 +171,8 @@ impl<E> Error<E> {
             Error::RequestConstruction(_)
             | Error::Protocol(_)
             | Error::Redirect(_)
-            | Error::PaginationCycle { .. } => false,
+            | Error::PaginationCycle { .. }
+            | Error::BodyTooLarge { .. } => false,
         }
     }
 
@@ -168,11 +180,14 @@ impl<E> Error<E> {
     /// ([`Error::Api`], the same value as its `ResponseValue::status()`), for an undocumented
     /// status ([`Error::UnexpectedStatus`], which includes an undocumented 2xx), and for a
     /// response whose body failed to decode ([`Error::Decode`], success or documented error
-    /// status alike); `None` for every class that produced no response to read a status from.
+    /// status alike), and for a response whose body exceeded its limit ([`Error::BodyTooLarge`]);
+    /// `None` for every class that produced no response to read a status from.
     pub fn status(&self) -> Option<StatusCode> {
         match self {
             Error::Api(value) => Some(value.status()),
-            Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => Some(*status),
+            Error::UnexpectedStatus { status, .. }
+            | Error::Decode { status, .. }
+            | Error::BodyTooLarge { status, .. } => Some(*status),
             Error::RequestConstruction(_)
             | Error::Transport(_)
             | Error::Timeout(_)
@@ -183,11 +198,11 @@ impl<E> Error<E> {
         }
     }
 
-    /// The headers of the response the failed call received: `Some` exactly when
-    /// [`Error::status`] is — for [`Error::Api`] (the same map as its `ResponseValue::headers()`),
-    /// [`Error::UnexpectedStatus`], and [`Error::Decode`] — and `None` for every class that
-    /// produced no response. A `Retry-After` on a `429` or `503` is read here whichever of those
-    /// classes carried it.
+    /// The headers of the response the failed call received: `Some` for [`Error::Api`] (the same
+    /// map as its `ResponseValue::headers()`), [`Error::UnexpectedStatus`], and [`Error::Decode`],
+    /// and `None` for every other class: those that produced no response, and
+    /// [`Error::BodyTooLarge`], which keeps its response's status alone. A `Retry-After` on a
+    /// `429` or `503` is read here whichever of those classes carried it.
     pub fn headers(&self) -> Option<&HeaderMap> {
         match self {
             Error::Api(value) => Some(value.headers()),
@@ -200,7 +215,8 @@ impl<E> Error<E> {
             | Error::Protocol(_)
             | Error::Redirect(_)
             | Error::InterruptedBody(_)
-            | Error::PaginationCycle { .. } => None,
+            | Error::PaginationCycle { .. }
+            | Error::BodyTooLarge { .. } => None,
         }
     }
 }
@@ -250,6 +266,7 @@ impl Error<std::convert::Infallible> {
             },
             Error::InterruptedBody(e) => Error::InterruptedBody(e),
             Error::PaginationCycle { url } => Error::PaginationCycle { url },
+            Error::BodyTooLarge { limit, status } => Error::BodyTooLarge { limit, status },
         }
     }
 }
@@ -306,7 +323,8 @@ impl<E: ApiErrorBody> Error<E> {
             | Error::UnexpectedStatus { .. }
             | Error::Decode { .. }
             | Error::InterruptedBody(_)
-            | Error::PaginationCycle { .. } => None,
+            | Error::PaginationCycle { .. }
+            | Error::BodyTooLarge { .. } => None,
         }
     }
 
@@ -325,7 +343,8 @@ impl<E: ApiErrorBody> Error<E> {
             | Error::UnexpectedStatus { .. }
             | Error::Decode { .. }
             | Error::InterruptedBody(_)
-            | Error::PaginationCycle { .. } => None,
+            | Error::PaginationCycle { .. }
+            | Error::BodyTooLarge { .. } => None,
         }
     }
 }
@@ -456,7 +475,8 @@ impl<E: ApiErrorProblem> Error<E> {
             | Error::Protocol(_)
             | Error::Redirect(_)
             | Error::InterruptedBody(_)
-            | Error::PaginationCycle { .. } => None,
+            | Error::PaginationCycle { .. }
+            | Error::BodyTooLarge { .. } => None,
         }
     }
 }
@@ -483,6 +503,9 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
             Error::InterruptedBody(_) => f.write_str("response body was interrupted"),
             Error::PaginationCycle { url } => {
                 write!(f, "pagination cycle: the next link revisits {url}")
+            }
+            Error::BodyTooLarge { limit, status } => {
+                write!(f, "response body ({status}) exceeds its {limit}-byte limit")
             }
         }
     }
@@ -513,7 +536,8 @@ impl<E: std::error::Error + 'static> std::error::Error for Error<E> {
             Error::Timeout(_)
             | Error::UnexpectedStatus { .. }
             | Error::Decode { .. }
-            | Error::PaginationCycle { .. } => None,
+            | Error::PaginationCycle { .. }
+            | Error::BodyTooLarge { .. } => None,
         }
     }
 }

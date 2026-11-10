@@ -75,7 +75,7 @@ fn scheme_doc_lines(api: &Api, options: &CodegenOptions) -> Vec<TokenStream> {
 /// struct, typed error, multi-status success enum, and response-header structs, the `servers`
 /// module, and the `Client` itself — its constructors (`new`, `with_default_server` when a server
 /// is declared, `with_client`, `with_backend`, `with_client_and_backend`), `core`, the credential
-/// registration methods, `with_timeout` and `with_base_url`, and
+/// registration methods, `with_timeout`, `with_options` and `with_base_url`, and
 /// one async method per operation, declared from its entry in `signatures`, which runs parallel to
 /// `api.operations`.
 pub(super) fn emit_client(
@@ -247,6 +247,19 @@ pub(super) fn emit_client(
             #[must_use]
             pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
                 self.core.config_mut().timeout = timeout;
+                self
+            }
+
+            /// Set the `RequestOptions` every call made through this client value carries,
+            /// replacing the ones it had (none, until this is called): `max_body` bounds a
+            /// non-streaming call's response body, failing it with `Error::BodyTooLarge` past
+            /// the limit; `extensions` are copied onto each request, for a transport backend to
+            /// read; `headers` are added to each request that does not already carry them.
+            /// Derive a client for one call's options:
+            /// `client.clone().with_options(options).operation(..)`.
+            #[must_use]
+            pub fn with_options(mut self, options: support::RequestOptions) -> Self {
+                self.core.set_options(options);
                 self
             }
 

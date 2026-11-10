@@ -97,6 +97,8 @@ paths:
     get: { operationId: withoutCredential, responses: { "204": { description: ok } } }
   /with-timeout:
     get: { operationId: withTimeout, responses: { "204": { description: ok } } }
+  /with-options:
+    get: { operationId: withOptions, responses: { "204": { description: ok } } }
   /with-base-url:
     get: { operationId: withBaseUrl, responses: { "204": { description: ok } } }
   /inner:
@@ -174,6 +176,7 @@ fn reserved_spellings_compile_together() {
         "with_credential",
         "without_credential",
         "with_timeout",
+        "with_options",
         "with_base_url",
         "inner",
     ] {

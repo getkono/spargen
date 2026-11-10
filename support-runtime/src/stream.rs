@@ -24,7 +24,7 @@ use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 
-use crate::dispatch::{cap_body, send_on, unexpected_status_capped};
+use crate::dispatch::{apply_options, cap_body, send_on, unexpected_status_capped};
 use crate::transport::{request_from_reqwest, try_clone_request};
 use crate::wasm::BoxFuture;
 use crate::{ClientConfig, ClientCore, Error, HttpBackend, HttpBody, MaybeSend, MaybeSync};
@@ -182,7 +182,9 @@ impl<T> EventStream<T> {
     /// generated public API. The `allow` is for this crate's own build: its caller is generated code.
     ///
     /// `request` is the clone the operation kept of what it sent, built on reqwest; a URL that is
-    /// not a valid URI cannot cross the seam again, so it leaves the stream nothing to resend.
+    /// not a valid URI cannot cross the seam again, so it leaves the stream nothing to resend. The
+    /// clone was kept before [`crate::send_streaming`] added the core's [`crate::RequestOptions`],
+    /// so they are added to it here the same way, and every reconnect carries them too.
     #[allow(dead_code)]
     pub(crate) fn new_reconnectable(
         response: Response,
@@ -190,7 +192,11 @@ impl<T> EventStream<T> {
         core: &ClientCore,
         request: Option<reqwest::Request>,
     ) -> Self {
-        let request = request.and_then(|request| request_from_reqwest(request).ok());
+        let request = request.and_then(|request| {
+            let mut request = request_from_reqwest(request).ok()?;
+            apply_options(core.options(), &mut request);
+            Some(request)
+        });
         let last_event_id = request.as_ref().and_then(|request| {
             request
                 .headers()

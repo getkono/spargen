@@ -17,9 +17,10 @@ pub use support::{
     Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
     LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next,
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
-    RequestError, ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome, RetryPolicy,
-    RetryWait, SecretString, TimeoutKind, TokenFuture, TokenProvider, TokenRefresher,
-    TransportError, exponential_backoff, next_link, token_provider,
+    RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
+    RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
+    TokenProvider, TokenRefresher, TransportError, exponential_backoff, next_link,
+    token_provider,
 };
 #[allow(
     unused_imports,
@@ -46,9 +47,10 @@ pub use support::{
     Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
     LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next,
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
-    RequestError, ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome, RetryPolicy,
-    RetryWait, SecretString, TimeoutKind, TokenFuture, TokenProvider, TokenRefresher,
-    TransportError, exponential_backoff, next_link, token_provider,
+    RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
+    RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
+    TokenProvider, TokenRefresher, TransportError, exponential_backoff, next_link,
+    token_provider,
 };
 #[allow(
     unused_imports,
