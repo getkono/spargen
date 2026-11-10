@@ -274,6 +274,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "TokenProvider",
     "TokenRefresher",
     "TransportError",
+    "UnknownVariant",
     "exponential_backoff",
     "next_link",
     "token_provider",

@@ -23,8 +23,8 @@ pub use support::{
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
     RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
     RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
-    TokenProvider, TokenRefresher, TransportError, exponential_backoff, next_link,
-    token_provider,
+    TokenProvider, TokenRefresher, TransportError, UnknownVariant, exponential_backoff,
+    next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -2519,6 +2519,36 @@ mod support {
         pub struct RedirectError {
             source: BoxError,
         }
+        /// The `FromStr` error of a generated closed string enum: the text is none of the values the
+        /// enum lists. It carries the rejected text and the enum's Rust name.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct UnknownVariant {
+            type_name: &'static str,
+            value: String,
+        }
+        impl UnknownVariant {
+            /// `value` was parsed as the enum named `type_name`, which lists no such value.
+            pub fn new(type_name: &'static str, value: impl Into<String>) -> Self {
+                Self {
+                    type_name,
+                    value: value.into(),
+                }
+            }
+            /// The Rust name of the enum the text was parsed as.
+            pub fn type_name(&self) -> &'static str {
+                self.type_name
+            }
+            /// The rejected text, exactly as it was given.
+            pub fn value(&self) -> &str {
+                &self.value
+            }
+        }
+        impl std::fmt::Display for UnknownVariant {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{:?} is not a value of {}", self.value, self.type_name)
+            }
+        }
+        impl std::error::Error for UnknownVariant {}
         impl std::fmt::Display for RequestError {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match self {
@@ -6269,6 +6299,7 @@ mod support {
     pub use error::{
         ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError,
         RedirectError, RequestCause, RequestError, TimeoutKind, TransportError,
+        UnknownVariant,
     };
     pub use middleware::{Middleware, MiddlewareBackend, Next};
     pub use header::{parse_header, require_header, HeaderError, HeaderShape};
@@ -6428,21 +6459,48 @@ pub mod types {
     }
     pub type RefinedMember0LabelsItem = String;
     pub type RefinedMember1RunId = i64;
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum RefinedMember1Status {
         #[serde(rename = "queued")]
         Queued,
         #[serde(rename = "complete")]
         Complete,
     }
+    impl RefinedMember1Status {
+        /// Every variant, in the order the description lists its values.
+        pub const ALL: &'static [Self] = &[
+            RefinedMember1Status::Queued,
+            RefinedMember1Status::Complete,
+        ];
+        /// The wire value.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                RefinedMember1Status::Queued => "queued",
+                RefinedMember1Status::Complete => "complete",
+            }
+        }
+    }
     impl std::fmt::Display for RefinedMember1Status {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    RefinedMember1Status::Queued => "queued",
-                    RefinedMember1Status::Complete => "complete",
-                },
-            )
+            f.write_str(self.as_str())
+        }
+    }
+    impl std::str::FromStr for RefinedMember1Status {
+        type Err = super::support::UnknownVariant;
+        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
+        fn from_str(value: &str) -> Result<Self, Self::Err> {
+            match value {
+                "queued" => Ok(RefinedMember1Status::Queued),
+                "complete" => Ok(RefinedMember1Status::Complete),
+                _ => {
+                    Err(
+                        super::support::UnknownVariant::new(
+                            "RefinedMember1Status",
+                            value,
+                        ),
+                    )
+                }
+            }
         }
     }
     pub type RefinedMember1StepsItemName = String;
@@ -6783,38 +6841,92 @@ pub mod types {
             self
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum NarrowDefaultEnumValid {
         #[serde(rename = "a")]
         A,
         #[serde(rename = "b")]
         B,
     }
-    impl std::fmt::Display for NarrowDefaultEnumValid {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    NarrowDefaultEnumValid::A => "a",
-                    NarrowDefaultEnumValid::B => "b",
-                },
-            )
+    impl NarrowDefaultEnumValid {
+        /// Every variant, in the order the description lists its values.
+        pub const ALL: &'static [Self] = &[
+            NarrowDefaultEnumValid::A,
+            NarrowDefaultEnumValid::B,
+        ];
+        /// The wire value.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                NarrowDefaultEnumValid::A => "a",
+                NarrowDefaultEnumValid::B => "b",
+            }
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    impl std::fmt::Display for NarrowDefaultEnumValid {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.as_str())
+        }
+    }
+    impl std::str::FromStr for NarrowDefaultEnumValid {
+        type Err = super::support::UnknownVariant;
+        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
+        fn from_str(value: &str) -> Result<Self, Self::Err> {
+            match value {
+                "a" => Ok(NarrowDefaultEnumValid::A),
+                "b" => Ok(NarrowDefaultEnumValid::B),
+                _ => {
+                    Err(
+                        super::support::UnknownVariant::new(
+                            "NarrowDefaultEnumValid",
+                            value,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum NarrowDefaultEnumBad {
         #[serde(rename = "a")]
         A,
         #[serde(rename = "b")]
         B,
     }
+    impl NarrowDefaultEnumBad {
+        /// Every variant, in the order the description lists its values.
+        pub const ALL: &'static [Self] = &[
+            NarrowDefaultEnumBad::A,
+            NarrowDefaultEnumBad::B,
+        ];
+        /// The wire value.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                NarrowDefaultEnumBad::A => "a",
+                NarrowDefaultEnumBad::B => "b",
+            }
+        }
+    }
     impl std::fmt::Display for NarrowDefaultEnumBad {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    NarrowDefaultEnumBad::A => "a",
-                    NarrowDefaultEnumBad::B => "b",
-                },
-            )
+            f.write_str(self.as_str())
+        }
+    }
+    impl std::str::FromStr for NarrowDefaultEnumBad {
+        type Err = super::support::UnknownVariant;
+        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
+        fn from_str(value: &str) -> Result<Self, Self::Err> {
+            match value {
+                "a" => Ok(NarrowDefaultEnumBad::A),
+                "b" => Ok(NarrowDefaultEnumBad::B),
+                _ => {
+                    Err(
+                        super::support::UnknownVariant::new(
+                            "NarrowDefaultEnumBad",
+                            value,
+                        ),
+                    )
+                }
+            }
         }
     }
     pub type NarrowDefaultEnumRatio = i64;
@@ -6986,38 +7098,92 @@ pub mod types {
     fn default_57_ratio() -> Option<NarrowDefaultSiblingConstraintRatio> {
         Some(3)
     }
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum NarrowDefaultSiblingConstraintValid {
         #[serde(rename = "a")]
         A,
         #[serde(rename = "b")]
         B,
     }
-    impl std::fmt::Display for NarrowDefaultSiblingConstraintValid {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    NarrowDefaultSiblingConstraintValid::A => "a",
-                    NarrowDefaultSiblingConstraintValid::B => "b",
-                },
-            )
+    impl NarrowDefaultSiblingConstraintValid {
+        /// Every variant, in the order the description lists its values.
+        pub const ALL: &'static [Self] = &[
+            NarrowDefaultSiblingConstraintValid::A,
+            NarrowDefaultSiblingConstraintValid::B,
+        ];
+        /// The wire value.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                NarrowDefaultSiblingConstraintValid::A => "a",
+                NarrowDefaultSiblingConstraintValid::B => "b",
+            }
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    impl std::fmt::Display for NarrowDefaultSiblingConstraintValid {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.as_str())
+        }
+    }
+    impl std::str::FromStr for NarrowDefaultSiblingConstraintValid {
+        type Err = super::support::UnknownVariant;
+        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
+        fn from_str(value: &str) -> Result<Self, Self::Err> {
+            match value {
+                "a" => Ok(NarrowDefaultSiblingConstraintValid::A),
+                "b" => Ok(NarrowDefaultSiblingConstraintValid::B),
+                _ => {
+                    Err(
+                        super::support::UnknownVariant::new(
+                            "NarrowDefaultSiblingConstraintValid",
+                            value,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum NarrowDefaultSiblingConstraintBad {
         #[serde(rename = "a")]
         A,
         #[serde(rename = "b")]
         B,
     }
+    impl NarrowDefaultSiblingConstraintBad {
+        /// Every variant, in the order the description lists its values.
+        pub const ALL: &'static [Self] = &[
+            NarrowDefaultSiblingConstraintBad::A,
+            NarrowDefaultSiblingConstraintBad::B,
+        ];
+        /// The wire value.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                NarrowDefaultSiblingConstraintBad::A => "a",
+                NarrowDefaultSiblingConstraintBad::B => "b",
+            }
+        }
+    }
     impl std::fmt::Display for NarrowDefaultSiblingConstraintBad {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    NarrowDefaultSiblingConstraintBad::A => "a",
-                    NarrowDefaultSiblingConstraintBad::B => "b",
-                },
-            )
+            f.write_str(self.as_str())
+        }
+    }
+    impl std::str::FromStr for NarrowDefaultSiblingConstraintBad {
+        type Err = super::support::UnknownVariant;
+        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
+        fn from_str(value: &str) -> Result<Self, Self::Err> {
+            match value {
+                "a" => Ok(NarrowDefaultSiblingConstraintBad::A),
+                "b" => Ok(NarrowDefaultSiblingConstraintBad::B),
+                _ => {
+                    Err(
+                        super::support::UnknownVariant::new(
+                            "NarrowDefaultSiblingConstraintBad",
+                            value,
+                        ),
+                    )
+                }
+            }
         }
     }
     pub type NarrowDefaultSiblingConstraintRatio = i64;
@@ -7462,21 +7628,38 @@ pub mod types {
     pub type OptionalFieldsTagsItem = String;
     pub type OptionalFieldsTags = Vec<OptionalFieldsTagsItem>;
     ///Default: `auto`.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum Mode {
         #[serde(rename = "auto")]
         Auto,
         #[serde(rename = "manual")]
         Manual,
     }
+    impl Mode {
+        /// Every variant, in the order the description lists its values.
+        pub const ALL: &'static [Self] = &[Mode::Auto, Mode::Manual];
+        /// The wire value.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Mode::Auto => "auto",
+                Mode::Manual => "manual",
+            }
+        }
+    }
     impl std::fmt::Display for Mode {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    Mode::Auto => "auto",
-                    Mode::Manual => "manual",
-                },
-            )
+            f.write_str(self.as_str())
+        }
+    }
+    impl std::str::FromStr for Mode {
+        type Err = super::support::UnknownVariant;
+        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
+        fn from_str(value: &str) -> Result<Self, Self::Err> {
+            match value {
+                "auto" => Ok(Mode::Auto),
+                "manual" => Ok(Mode::Manual),
+                _ => Err(super::support::UnknownVariant::new("Mode", value)),
+            }
         }
     }
     pub type OptionalFieldsChoiceVariant0 = String;
@@ -7527,18 +7710,34 @@ pub mod types {
     pub type OptionalFieldsColour = String;
     pub type OptionalFieldsAnything = serde_json::Value;
     pub type OptionalFieldsMaybe = String;
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum StringLiteral {
         #[serde(rename = "special")]
         Special,
     }
+    impl StringLiteral {
+        /// Every variant, in the order the description lists its values.
+        pub const ALL: &'static [Self] = &[StringLiteral::Special];
+        /// The wire value.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                StringLiteral::Special => "special",
+            }
+        }
+    }
     impl std::fmt::Display for StringLiteral {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    StringLiteral::Special => "special",
-                },
-            )
+            f.write_str(self.as_str())
+        }
+    }
+    impl std::str::FromStr for StringLiteral {
+        type Err = super::support::UnknownVariant;
+        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
+        fn from_str(value: &str) -> Result<Self, Self::Err> {
+            match value {
+                "special" => Ok(StringLiteral::Special),
+                _ => Err(super::support::UnknownVariant::new("StringLiteral", value)),
+            }
         }
     }
     #[derive(Debug, Clone, PartialEq)]
@@ -7911,18 +8110,34 @@ pub mod types {
             Self { r#type, content }
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum ContentFileType {
         #[serde(rename = "file")]
         File,
     }
+    impl ContentFileType {
+        /// Every variant, in the order the description lists its values.
+        pub const ALL: &'static [Self] = &[ContentFileType::File];
+        /// The wire value.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                ContentFileType::File => "file",
+            }
+        }
+    }
     impl std::fmt::Display for ContentFileType {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    ContentFileType::File => "file",
-                },
-            )
+            f.write_str(self.as_str())
+        }
+    }
+    impl std::str::FromStr for ContentFileType {
+        type Err = super::support::UnknownVariant;
+        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
+        fn from_str(value: &str) -> Result<Self, Self::Err> {
+            match value {
+                "file" => Ok(ContentFileType::File),
+                _ => Err(super::support::UnknownVariant::new("ContentFileType", value)),
+            }
         }
     }
     pub type ContentFileContent = String;
@@ -7940,18 +8155,34 @@ pub mod types {
             Self { r#type, target }
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum ContentLinkType {
         #[serde(rename = "symlink")]
         Symlink,
     }
+    impl ContentLinkType {
+        /// Every variant, in the order the description lists its values.
+        pub const ALL: &'static [Self] = &[ContentLinkType::Symlink];
+        /// The wire value.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                ContentLinkType::Symlink => "symlink",
+            }
+        }
+    }
     impl std::fmt::Display for ContentLinkType {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    ContentLinkType::Symlink => "symlink",
-                },
-            )
+            f.write_str(self.as_str())
+        }
+    }
+    impl std::str::FromStr for ContentLinkType {
+        type Err = super::support::UnknownVariant;
+        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
+        fn from_str(value: &str) -> Result<Self, Self::Err> {
+            match value {
+                "symlink" => Ok(ContentLinkType::Symlink),
+                _ => Err(super::support::UnknownVariant::new("ContentLinkType", value)),
+            }
         }
     }
     pub type ContentLinkTarget = String;
@@ -8431,7 +8662,7 @@ pub mod types {
         }
     }
     pub type AliasNodeValue = String;
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum Priority {
         #[serde(rename = "low")]
         Low,
@@ -8440,15 +8671,37 @@ pub mod types {
         #[serde(rename = "high")]
         High,
     }
+    impl Priority {
+        /// Every variant, in the order the description lists its values.
+        pub const ALL: &'static [Self] = &[
+            Priority::Low,
+            Priority::Medium,
+            Priority::High,
+        ];
+        /// The wire value.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Priority::Low => "low",
+                Priority::Medium => "medium",
+                Priority::High => "high",
+            }
+        }
+    }
     impl std::fmt::Display for Priority {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(
-                match self {
-                    Priority::Low => "low",
-                    Priority::Medium => "medium",
-                    Priority::High => "high",
-                },
-            )
+            f.write_str(self.as_str())
+        }
+    }
+    impl std::str::FromStr for Priority {
+        type Err = super::support::UnknownVariant;
+        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
+        fn from_str(value: &str) -> Result<Self, Self::Err> {
+            match value {
+                "low" => Ok(Priority::Low),
+                "medium" => Ok(Priority::Medium),
+                "high" => Ok(Priority::High),
+                _ => Err(super::support::UnknownVariant::new("Priority", value)),
+            }
         }
     }
     #[derive(Debug, Clone, PartialEq)]

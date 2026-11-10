@@ -136,6 +136,69 @@ fn emit_open_string_enum(
     }
 }
 
+/// Emit a closed string enum: one unit variant per listed value, serde-derived under each value's
+/// `rename`. Every variant is a unit, so it is `Copy` and `Hash`; `as_str` is the `const` wire
+/// value `Display` writes, `ALL` lists the variants in declaration order, and `FromStr` accepts
+/// exactly the listed values, failing with the runtime's `UnknownVariant`. The serde renames, the
+/// `as_str` arms and the `FromStr` arms all read `listed`, so the three agree on every value.
+///
+/// `variants` are the variant declarations and `display_arms` map each variant to its value, as
+/// the open enum reads them too.
+fn emit_closed_string_enum(
+    ident: &crate::name::Ident,
+    listed: &[(&String, &crate::name::Ident)],
+    docs: TokenStream,
+    deprecated: Option<TokenStream>,
+    variants: impl Iterator<Item = TokenStream>,
+    display_arms: impl Iterator<Item = TokenStream>,
+) -> TokenStream {
+    let all = listed
+        .iter()
+        .map(|(_, variant_ident)| quote! { #ident::#variant_ident, });
+    let parse_arms = listed.iter().map(|(value, variant_ident)| {
+        quote! { #value => Ok(#ident::#variant_ident), }
+    });
+    let type_name = ident.as_str();
+    quote! {
+        #docs
+        #deprecated
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub enum #ident {
+            #(#variants)*
+        }
+
+        impl #ident {
+            /// Every variant, in the order the description lists its values.
+            pub const ALL: &'static [Self] = &[#(#all)*];
+
+            /// The wire value.
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    #(#display_arms)*
+                }
+            }
+        }
+
+        impl std::fmt::Display for #ident {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl std::str::FromStr for #ident {
+            type Err = super::support::UnknownVariant;
+
+            /// Parse a wire value: exactly one of the listed values, matched byte for byte.
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                match value {
+                    #(#parse_arms)*
+                    _ => Err(super::support::UnknownVariant::new(#type_name, value)),
+                }
+            }
+        }
+    }
+}
+
 /// Each listed value of string enum `id` beside the variant identifier `name` allocated for it,
 /// in declaration order. An open enum is a string enum too, so both shapes read their variants
 /// here.
@@ -242,22 +305,7 @@ fn emit_type_def(
                     display_arms.collect(),
                 );
             }
-            quote! {
-                #docs
-                #deprecated
-                #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-                pub enum #ident {
-                    #(#variants)*
-                }
-
-                impl std::fmt::Display for #ident {
-                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                        f.write_str(match self {
-                            #(#display_arms)*
-                        })
-                    }
-                }
-            }
+            emit_closed_string_enum(ident, &listed, docs, deprecated, variants, display_arms)
         }
         Emission::ScalarAlias(repr) => {
             let ty = match repr {

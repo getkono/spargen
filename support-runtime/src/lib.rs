@@ -81,7 +81,7 @@ pub use dispatch::{
 };
 pub use error::{
     ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError,
-    RequestCause, RequestError, TimeoutKind, TransportError,
+    RequestCause, RequestError, TimeoutKind, TransportError, UnknownVariant,
 };
 pub use header::{parse_header, require_header, HeaderError, HeaderShape};
 pub use middleware::{Middleware, MiddlewareBackend, Next};
