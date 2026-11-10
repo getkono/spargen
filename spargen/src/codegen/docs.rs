@@ -65,9 +65,13 @@ pub(super) fn doc_tokens(docs: &crate::ir::Docs, options: &CodegenOptions) -> To
 ///   the code span `` `crate::serve` ``. Carried text names items of whatever crate wrote it, which
 ///   no path from the generated module reaches, so no such link is kept. A link reference
 ///   definition whose destination is a path (`[Foo]: crate::Foo`) is dropped with it;
-/// - a link to a URL (`[text](https://…)`, or a reference whose definition is one), a bracketed
-///   text rustdoc does not read as a path (`[see below]`, `[1.5]`), a task-list marker
-///   (`- [x] done`) and an autolink (`<https://…>`) are kept as written;
+/// - a link to a URL (`[text](https://…)`, or a reference whose definition is one) and a bracketed
+///   text rustdoc does not read as a path (`[see below]`, `[1.5]`) are kept, their text rewritten
+///   like any other (`[Vec<T>](https://…)` becomes `[Vec\<T>](https://…)`), except that a URL in a
+///   link's text stays bare; a shortcut or collapsed reference whose text that changes becomes a
+///   full one (`[Vec\<T>][Vec<T>]`), still matching its definition;
+/// - a `[` nested deeper than [`MAX_LINK_NESTING`] brackets is escaped as `\[`;
+/// - a task-list marker (`- [x] done`) and an autolink (`<https://…>`) are kept as written;
 /// - a bare `http://` or `https://` URL is wrapped in `<…>`, which makes it an autolink;
 /// - an HTML tag with no partner (`Vec<T>`'s `<T>`, an unopened `</b>`, a `<` that never closes)
 ///   has its `<` escaped as `\<`, so it renders as text; a void element (`<br>`), a self-closing tag
@@ -224,12 +228,22 @@ fn render_pieces(pieces: Vec<Piece>) -> String {
     output
 }
 
+/// How deep [`Scanner::link`] reads brackets nested in a link's text. A `[` opened deeper is
+/// escaped as `\[` and its contents scanned as plain text, so a description of nested brackets
+/// costs bounded stack and at most this many scans of its length.
+const MAX_LINK_NESTING: usize = 32;
+
 /// The inline pass of [`sanitize_carried`] over a run of prose lines.
 struct Scanner<'a> {
     /// The link reference definitions, by normalized label: `true` for one to a path.
     definitions: &'a BTreeMap<String, bool>,
     pieces: &'a mut Vec<Piece>,
     text: String,
+    /// How many brackets enclose the text being scanned.
+    depth: usize,
+    /// Whether that text is a kept link's text, where a bare URL is left unwrapped: an autolink
+    /// there would end the enclosing link.
+    in_link_text: bool,
 }
 
 impl<'a> Scanner<'a> {
@@ -238,6 +252,36 @@ impl<'a> Scanner<'a> {
             definitions,
             pieces,
             text: String::new(),
+            depth: 0,
+            in_link_text: false,
+        }
+    }
+
+    /// Scan the bracketed `label` one level deeper, as a kept link's text when `link_text` holds.
+    fn nested(&mut self, label: &str, link_text: bool) {
+        let outer = self.in_link_text;
+        self.depth += 1;
+        self.in_link_text = outer || link_text;
+        self.inline(label);
+        self.in_link_text = outer;
+        self.depth -= 1;
+    }
+
+    /// Scan a kept reference link's `label` and finish it: as `[label]` plus `suffix` when scanning
+    /// left the label as written, otherwise as a full reference, `[scanned][label]`, since the
+    /// definition is matched on the label as written.
+    fn reference_link(&mut self, label: &str, suffix: &str) {
+        self.text.push('[');
+        let pieces = self.pieces.len();
+        let text = self.text.len();
+        self.nested(label, true);
+        if self.pieces.len() == pieces && self.text[text..] == *label {
+            self.text.push(']');
+            self.text.push_str(suffix);
+        } else {
+            self.text.push_str("][");
+            self.text.push_str(label);
+            self.text.push(']');
         }
     }
 
@@ -282,7 +326,9 @@ impl<'a> Scanner<'a> {
                 }
                 b'<' => self.angle(rest),
                 b'[' => self.link(rest),
-                b'h' if rest.starts_with("http://") || rest.starts_with("https://") => {
+                b'h' if !self.in_link_text
+                    && (rest.starts_with("http://") || rest.starts_with("https://")) =>
+                {
                     self.bare_url(rest)
                 }
                 _ => {
@@ -321,9 +367,14 @@ impl<'a> Scanner<'a> {
         1
     }
 
-    /// `rest` starts with `[`: an intra-doc link reduced to its text, anything else kept. Returns
-    /// the bytes consumed.
+    /// `rest` starts with `[`: an intra-doc link reduced to its text, anything else kept with its
+    /// text scanned, and a `[` deeper than [`MAX_LINK_NESTING`] escaped. Returns the bytes
+    /// consumed.
     fn link(&mut self, rest: &str) -> usize {
+        if self.depth >= MAX_LINK_NESTING {
+            self.text.push_str("\\[");
+            return 1;
+        }
         let Some(close) = closing_bracket(rest) else {
             self.text.push('[');
             return 1;
@@ -343,9 +394,11 @@ impl<'a> Scanner<'a> {
             if let Some(end) = closing_paren(after) {
                 let end = close + 1 + end;
                 if is_rust_path(inline_destination(&rest[close + 2..end])) {
-                    self.inline(label);
+                    self.nested(label, false);
                 } else {
-                    self.text.push_str(&rest[..=end]);
+                    self.text.push('[');
+                    self.nested(label, true);
+                    self.text.push_str(&rest[close..=end]);
                 }
                 return end + 1;
             }
@@ -360,11 +413,18 @@ impl<'a> Scanner<'a> {
                     reference_label
                 };
                 match self.reference(key) {
-                    Some(true) => self.text.push_str(&rest[..=end]),
-                    Some(false) => self.inline(label),
+                    Some(true) if reference_label.trim().is_empty() => {
+                        self.reference_link(label, "[]");
+                    }
+                    Some(true) => {
+                        self.text.push('[');
+                        self.nested(label, true);
+                        self.text.push_str(&rest[close..=end]);
+                    }
+                    Some(false) => self.nested(label, false),
                     None => {
                         self.text.push('[');
-                        self.inline(label);
+                        self.nested(label, false);
                         self.text.push_str(&rest[close..=end]);
                     }
                 }
@@ -372,11 +432,11 @@ impl<'a> Scanner<'a> {
             }
         }
         match self.reference(label) {
-            Some(true) => self.text.push_str(&rest[..=close]),
-            Some(false) => self.inline(label),
+            Some(true) => self.reference_link(label, ""),
+            Some(false) => self.nested(label, false),
             None => {
                 self.text.push('[');
-                self.inline(label);
+                self.nested(label, false);
                 self.text.push(']');
             }
         }
@@ -699,7 +759,7 @@ pub(super) fn normalize_rustdoc(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{doc_tokens, normalize_rustdoc, sanitize_carried};
+    use super::{doc_tokens, normalize_rustdoc, sanitize_carried, MAX_LINK_NESTING};
     use crate::codegen::CodegenOptions;
 
     /// `doc_tokens` over each row's `(title, summary, description)` yields exactly that row's doc
@@ -931,6 +991,26 @@ mod tests {
                 "[https://example.com](https://example.com)",
                 "[https://example.com](https://example.com)",
             ),
+            (
+                "a URL inside a reference link's text is kept",
+                "[see https://x.io][docs]\n\n[docs]: https://example.com",
+                "[see https://x.io][docs]\n\n[docs]: https://example.com",
+            ),
+            (
+                "a URL link's text is scanned",
+                "See [Vec<T>](https://example.com) and [[Store] docs](https://example.com).",
+                "See [Vec\\<T>](https://example.com) and [Store docs](https://example.com).",
+            ),
+            (
+                "a full reference link's text is scanned",
+                "See [Vec<T>][docs].\n\n[docs]: https://example.com",
+                "See [Vec\\<T>][docs].\n\n[docs]: https://example.com",
+            ),
+            (
+                "a shortcut reference whose text changes becomes a full reference",
+                "See [Vec<T>] and [Vec<T>][].\n\n[vec<t>]: https://example.com",
+                "See [Vec\\<T>][Vec<T>] and [Vec\\<T>][Vec<T>].\n\n[vec<t>]: https://example.com",
+            ),
             // Tags.
             ("an unclosed tag", "Returns Vec<T>.", "Returns Vec\\<T>."),
             ("an unopened closing tag", "a </b> c", "a \\</b> c"),
@@ -1020,6 +1100,38 @@ mod tests {
                 "{case}: sanitizing is idempotent"
             );
         }
+    }
+
+    /// Brackets nested to [`MAX_LINK_NESTING`] are read as links, the innermost path link
+    /// reduced to its text; one level more escapes the innermost `[`.
+    #[test]
+    fn link_nesting_is_read_to_the_bound_and_escaped_past_it() {
+        let nested = |depth: usize| format!("{}x{}", "[".repeat(depth), "]".repeat(depth));
+        let at = MAX_LINK_NESTING;
+        assert_eq!(
+            sanitize_carried(&nested(at)),
+            format!("{}x{}", "[".repeat(at - 1), "]".repeat(at - 1)),
+            "at the bound"
+        );
+        assert_eq!(
+            sanitize_carried(&nested(at + 1)),
+            format!("{}\\[x]{}", "[".repeat(at), "]".repeat(at)),
+            "one past the bound"
+        );
+    }
+
+    /// A description of brackets nested far past the bound, as long as the one that overflowed the
+    /// stack, is sanitized on a test thread's stack, with every `[` past the bound escaped.
+    #[test]
+    fn deeply_nested_brackets_do_not_exhaust_the_stack() {
+        let depth = 60_000;
+        let text = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        let sanitized = sanitize_carried(&text);
+        assert_eq!(
+            sanitized.matches("\\[").count(),
+            depth - MAX_LINK_NESTING,
+            "every `[` past the bound is escaped"
+        );
     }
 
     /// `normalize_rustdoc` over each row's input yields exactly that row's output. Every rule the
