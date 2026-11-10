@@ -393,7 +393,7 @@ fn multipart_parts_carry_their_resolved_content_types() {
 
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .upload_file(&basic_client::types::RequestBodyE12d70b5 {
+        .upload_file(&basic_client::types::UploadFileBody {
             file: bytes::Bytes::from_static(b"\x00\x01binary"),
             caption: "a caption".to_owned(),
             count: None,
