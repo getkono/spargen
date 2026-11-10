@@ -275,6 +275,14 @@ pub(crate) enum Prim {
     I32,
     /// `format: int64` / unformatted `integer` → `i64`.
     I64,
+    /// `format: uint8` → `u8`.
+    U8,
+    /// `format: uint16` → `u16`.
+    U16,
+    /// `format: uint32` → `u32`.
+    U32,
+    /// `format: uint64` → `u64`.
+    U64,
     /// `number` → `f64`.
     F64,
     /// `format: uuid` → `uuid::Uuid` (feature `uuid`, else `String`).

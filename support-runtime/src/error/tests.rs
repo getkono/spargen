@@ -1007,8 +1007,11 @@ fn widen_preserves_every_reachable_variant() {
 }
 
 impl super::ApiErrorBody for ApiBody {
-    type Body = str;
-    fn body(&self) -> Option<&str> {
+    type Body = &'static str;
+    fn body(&self) -> Option<&&'static str> {
+        Some(&self.0)
+    }
+    fn into_body(self) -> Option<&'static str> {
         Some(self.0)
     }
 }
@@ -1043,7 +1046,74 @@ fn api_body_is_present_exactly_on_the_documented_api_error() {
         HeaderMap::new(),
         ApiBody("bad request"),
     ));
-    assert_eq!(api.api_body(), Some("bad request"));
+    assert_eq!(api.api_body(), Some(&"bad request"));
+}
+
+/// `into_api_body` is `api_body` by value: `Some` on exactly the variants `api_body` answers
+/// `Some` on, with the same body, and `None` everywhere else.
+#[test]
+fn into_api_body_moves_out_exactly_what_api_body_borrows() {
+    for error in every_variant() {
+        let borrowed = error.api_body().copied();
+        let rendered = error.to_string();
+        assert_eq!(
+            error.into_api_body(),
+            borrowed,
+            "into_api_body disagrees with api_body for {rendered}"
+        );
+    }
+    let api = Error::Api(ResponseValue::new(
+        StatusCode::BAD_REQUEST,
+        HeaderMap::new(),
+        ApiBody("bad request"),
+    ));
+    assert_eq!(api.into_api_body(), Some("bad request"));
+}
+
+/// `headers` answers exactly where `status` does, from the same response: the `ResponseValue`'s
+/// own map for a documented API error, and the variant's field for an undocumented status and an
+/// undecodable body. Every class that received no response has neither.
+#[test]
+fn headers_are_present_exactly_where_a_status_is_and_are_the_responses_own() {
+    for error in every_variant() {
+        match &error {
+            Error::Api(value) => {
+                let answered = error.headers().expect("an API error carries headers");
+                assert!(std::ptr::eq(answered, value.headers()), "{error}");
+            }
+            Error::UnexpectedStatus { headers, .. } | Error::Decode { headers, .. } => {
+                let answered = error
+                    .headers()
+                    .expect("a received response carries headers");
+                assert!(std::ptr::eq(answered, headers), "{error}");
+            }
+            Error::RequestConstruction(_)
+            | Error::Transport(_)
+            | Error::Timeout(_)
+            | Error::Protocol(_)
+            | Error::Redirect(_)
+            | Error::InterruptedBody(_)
+            | Error::PaginationCycle { .. } => {
+                assert!(error.headers().is_none(), "{error}");
+            }
+        }
+        assert_eq!(
+            error.headers().is_some(),
+            error.status().is_some(),
+            "headers and status disagree for {error}"
+        );
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
+    let throttled = Error::<ApiBody>::UnexpectedStatus {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        headers,
+        body: Bytes::new(),
+    };
+    let retry_after = throttled
+        .headers()
+        .and_then(|headers| headers.get(reqwest::header::RETRY_AFTER));
+    assert_eq!(retry_after.map(|value| value.as_bytes()), Some(&b"120"[..]));
 }
 
 /// `status` and `api_body` read one `Error` from two sides, so they must agree on what each

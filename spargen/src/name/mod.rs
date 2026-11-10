@@ -22,7 +22,7 @@ use casing::{to_pascal_case, to_snake_case};
 pub(crate) use ident::Ident;
 pub(crate) use keyword::{escape, IdentRole};
 use scope::{RankedRequest, Scope};
-pub(crate) use synth::synth_operation_id;
+pub(crate) use synth::{request_body_hint, synth_operation_id};
 
 /// The identifiers allocated for a whole [`Api`]: one record per operation, and one name per type,
 /// field, variant and server item. Codegen looks these names up rather than deriving them; the
@@ -166,10 +166,12 @@ pub(crate) const CLIENT_METHODS: &[&str] = &[
     "with_default_server",
     "with_client",
     "with_backend",
+    "with_client_and_backend",
     "core",
     "with_credential",
     "without_credential",
     "with_timeout",
+    "with_base_url",
     "inner",
 ];
 

@@ -54,6 +54,10 @@ pub(super) fn prim_tokens(prim: Prim, options: &CodegenOptions) -> TokenStream {
         Prim::String => quote! { String },
         Prim::I32 => quote! { i32 },
         Prim::I64 => quote! { i64 },
+        Prim::U8 => quote! { u8 },
+        Prim::U16 => quote! { u16 },
+        Prim::U32 => quote! { u32 },
+        Prim::U64 => quote! { u64 },
         Prim::F64 => quote! { f64 },
         Prim::Uuid if options.feature_uuid => quote! { uuid::Uuid },
         // The embedded newtypes, not `time`'s own types: OpenAPI fixes these to RFC 3339, which is
@@ -218,6 +222,10 @@ mod tests {
             assert_eq!(tokens(Prim::String), "String", "{case}");
             assert_eq!(tokens(Prim::I32), "i32", "{case}");
             assert_eq!(tokens(Prim::I64), "i64", "{case}");
+            assert_eq!(tokens(Prim::U8), "u8", "{case}");
+            assert_eq!(tokens(Prim::U16), "u16", "{case}");
+            assert_eq!(tokens(Prim::U32), "u32", "{case}");
+            assert_eq!(tokens(Prim::U64), "u64", "{case}");
             assert_eq!(tokens(Prim::F64), "f64", "{case}");
             assert_eq!(
                 tokens(Prim::Uuid),

@@ -68,7 +68,8 @@ fn scheme_doc_lines(api: &Api) -> Vec<TokenStream> {
 /// Emit everything the generated root holds beside `types`: each operation's optional-parameters
 /// struct, typed error, multi-status success enum, and response-header structs, the `servers`
 /// module, and the `Client` itself — its constructors (`new`, `with_default_server` when a server
-/// is declared, `with_client`, `with_backend`), `core`, the credential registration methods, and
+/// is declared, `with_client`, `with_backend`, `with_client_and_backend`), `core`, the credential
+/// registration methods, `with_timeout` and `with_base_url`, and
 /// one async method per operation, declared from its entry in `signatures`, which runs parallel to
 /// `api.operations`.
 pub(super) fn emit_client(
@@ -90,7 +91,7 @@ pub(super) fn emit_client(
     let response_enums = api
         .operations
         .iter()
-        .map(|operation| emit_response_enum(operation, names));
+        .map(|operation| emit_response_enum(operation, api, names));
     let methods = api
         .operations
         .iter()
@@ -177,12 +178,27 @@ pub(super) fn emit_client(
             /// Build a client over a caller-supplied transport backend — the injection point for
             /// retry, middleware, or a non-reqwest transport. Requests are still built on a default
             /// `reqwest::Client`; only the execute step goes through the backend, so connecting
-            /// and reading are bounded however the backend bounds them.
+            /// and reading are bounded however the backend bounds them. Each call builds that
+            /// `reqwest::Client`; [`Self::with_client_and_backend`] takes one you already have.
             pub fn with_backend(
                 backend: std::sync::Arc<dyn support::HttpBackend>,
                 base_url: &str,
             ) -> Result<Self, support::Error<std::convert::Infallible>> {
                 let mut core = support::ClientCore::with_backend(backend, base_url)?;
+                core.config_mut().max_error_body = #error_body_cap;
+                Ok(Self { core })
+            }
+
+            /// Build a client over both a caller-supplied `reqwest::Client`, which builds
+            /// requests, and a caller-supplied transport backend, which executes them; nothing
+            /// else is built, so many clients can share one of each. Connecting and reading are
+            /// bounded however the backend bounds them.
+            pub fn with_client_and_backend(
+                client: reqwest::Client,
+                backend: std::sync::Arc<dyn support::HttpBackend>,
+                base_url: &str,
+            ) -> Result<Self, support::Error<std::convert::Infallible>> {
+                let mut core = support::ClientCore::with_client_and_backend(client, backend, base_url)?;
                 core.config_mut().max_error_body = #error_body_cap;
                 Ok(Self { core })
             }
@@ -226,6 +242,18 @@ pub(super) fn emit_client(
             pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
                 self.core.config_mut().timeout = timeout;
                 self
+            }
+
+            /// Repoint this client value at another base URL, keeping its `reqwest::Client`,
+            /// transport backend, configuration and credentials, so nothing is rebuilt: derive one
+            /// with `client.clone().with_base_url(url)?`. Fails with `Error::RequestConstruction`
+            /// if `base_url` is not a valid URL.
+            pub fn with_base_url(
+                mut self,
+                base_url: &str,
+            ) -> Result<Self, support::Error<std::convert::Infallible>> {
+                self.core.set_base_url(base_url)?;
+                Ok(self)
             }
 
             #(#methods)*

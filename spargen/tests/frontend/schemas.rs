@@ -675,6 +675,76 @@ fn a_required_name_no_property_declares_is_still_required() {
     );
 }
 
+/// Issue #1261: the unsigned integer formats lower to the Rust type of their width, so a `uint64`
+/// above `i64::MAX` decodes and a negative one does not, while `int32`, `int64` and an unformatted
+/// or unrecognised integer keep their signed types. An `allOf` meeting an unsigned width keeps the
+/// unsigned side against a signed integer or a `number`, and the narrower of two unsigned widths.
+#[test]
+fn unsigned_integer_formats_lower_to_unsigned_rust_types() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Counters:
+      type: object
+      required: [tiny, small, medium, large, signed, wide, plain, unknown]
+      properties:
+        tiny: { type: integer, format: uint8 }
+        small: { type: integer, format: uint16 }
+        medium: { type: integer, format: uint32 }
+        large: { type: integer, format: uint64 }
+        signed: { type: integer, format: int32 }
+        wide: { type: integer, format: int64 }
+        plain: { type: integer }
+        unknown: { type: integer, format: uint128 }
+    Met:
+      allOf:
+        - type: object
+          required: [a, b, c, d]
+          properties:
+            a: { type: integer, format: uint64 }
+            b: { type: number }
+            c: { type: integer, format: int32 }
+            d: { type: integer, format: uint8 }
+        - type: object
+          properties:
+            a: { type: integer, format: uint16 }
+            b: { type: integer, format: uint32 }
+            c: { type: integer, format: uint64 }
+            d: { type: integer }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let types = types_module(&code);
+    // The Rust type a required field resolves to, through the alias its inline schema lowers to.
+    let resolved = |owner: &str, field: &str| {
+        let body = &types[types
+            .find(&format!("pub struct {owner} "))
+            .unwrap_or_else(|| panic!("`{owner}` is a struct: {types}"))..];
+        let ty = field_type(body, &format!("pub {field}:"))
+            .unwrap_or_else(|| panic!("`{owner}` has no `{field}` field: {types}"));
+        alias_target(&types, &ty).unwrap_or(ty)
+    };
+    for (field, expected) in [
+        ("tiny", "u8"),
+        ("small", "u16"),
+        ("medium", "u32"),
+        ("large", "u64"),
+        ("signed", "i32"),
+        ("wide", "i64"),
+        ("plain", "i64"),
+        ("unknown", "i64"),
+    ] {
+        assert_eq!(resolved("Counters", field), expected, "{field}: {types}");
+    }
+    for (field, expected) in [("a", "u16"), ("b", "u32"), ("c", "u64"), ("d", "u8")] {
+        assert_eq!(resolved("Met", field), expected, "{field}: {types}");
+    }
+}
+
 #[test]
 fn w001_validation_keyword_ignored_still_generates() {
     let report = generate(

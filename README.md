@@ -134,11 +134,15 @@ the version it emits, and the idioms spargen handles.
   type is `Display` + `std::error::Error`, so `Error<E>` drops straight into `?`, `anyhow`, or
   `thiserror`. `Error::is_transient()` classifies retry-worthy failures. An error enum whose
   bodied statuses carry the same body type (one schema, or schemas that generate the same Rust
-  type) gets `body()`, and it, the single-body newtype,
-  and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()` hands that body back
-  whichever status carried it (`Error::status()` reports that status, the same value as
-  `ResponseValue::status()` on `Error::Api`); an enum mixing body types is matched by variant
-  instead. Every error shape implements `ApiErrorProblem`, so `Error::problem()` reads the RFC 9457
+  type) gets `body()` and an owning `into_body()`, and it, the single-body newtype,
+  and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()` and the owning
+  `Error::into_api_body()` hand that body back whichever status carried it (`Error::status()`
+  reports that status, the same value as `ResponseValue::status()` on `Error::Api`, and
+  `Error::headers()` the response's headers on every class that received one); an enum mixing
+  body types is matched by variant instead. A multi-status success enum gets `body()` and
+  `into_body()` the same way when its bodied statuses share one type (bare, with no `Option`, when
+  every status carries a non-null body), and every status enum, and the single-body newtype,
+  whose statuses are all exact codes gets `status()`. Every error shape implements `ApiErrorProblem`, so `Error::problem()` reads the RFC 9457
   members (`type`, `title`, `status`, `detail`, `instance`) of whichever error body a failure
   carried, across every operation and body type: the typed body on `Error::Api`, and the raw body
   of a `4xx`/`5xx` `Error::Decode` or `Error::UnexpectedStatus`. The opt-in `open_narrowing`

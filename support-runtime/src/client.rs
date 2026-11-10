@@ -50,8 +50,9 @@ pub struct ClientConfig {
     /// It is read once, when [`ClientCore::with_config`] or [`ClientCore::new`] builds the
     /// `reqwest::Client`, so changing it through [`ClientCore::config_mut`] afterwards changes
     /// nothing. A client injected with [`ClientCore::with_client`] keeps its own connect timeout
-    /// instead, and a backend installed with [`ClientCore::with_backend`] executes requests on its
-    /// own terms. reqwest's `fetch` backend has no connect timeout, so on `wasm32` it is ignored.
+    /// instead, and a backend installed with [`ClientCore::with_backend`] or
+    /// [`ClientCore::with_client_and_backend`] executes requests on its own terms. reqwest's
+    /// `fetch` backend has no connect timeout, so on `wasm32` it is ignored.
     pub connect_timeout: Option<Duration>,
     /// How long a read on an established connection may wait for its next bytes — the response
     /// head, or the next chunk of a body, a streamed one included — before the request fails with
@@ -100,7 +101,7 @@ impl Default for ClientConfig {
 ///
 /// Request building stays on a concrete `reqwest::Client`; only the execute step is routed through
 /// the backend (see [`crate::send`]). `new`/`with_client` install the default [`ReqwestBackend`];
-/// `with_backend` plugs a caller-supplied transport.
+/// `with_backend` plugs a caller-supplied transport, and `with_client_and_backend` takes both.
 ///
 /// The generated `Client` wraps one of these and documents its own constructors; each of its
 /// operation methods delegates to the shared dispatch routines.
@@ -148,12 +149,31 @@ impl ClientCore {
     /// `backend`, so connecting and reading are bounded however `backend` bounds them.
     /// [`ClientConfig::timeout`] travels on each request [`crate::send`] sends, for a backend that
     /// runs it on a `reqwest::Client` to enforce.
+    ///
+    /// Each call builds that request-building `reqwest::Client`, TLS initialisation included;
+    /// [`Self::with_client_and_backend`] takes one the caller already has instead.
     pub fn with_backend(
         backend: Arc<dyn HttpBackend>,
         base_url: &str,
     ) -> Result<Self, Error<Infallible>> {
-        let config = ClientConfig::default();
-        Self::assemble(http_client(&config)?, backend, base_url, config)
+        let client = http_client(&ClientConfig::default())?;
+        Self::with_client_and_backend(client, backend, base_url)
+    }
+
+    /// Build a core with both a caller-supplied `reqwest::Client`, which BUILDS requests, and a
+    /// caller-supplied transport [`HttpBackend`], which EXECUTES them; nothing is built besides,
+    /// so several cores can share one client and one backend. Only the execute step goes through
+    /// `backend`, so connecting and reading are bounded however `backend` bounds them, and
+    /// timeouts configured on `client` itself apply only where `backend` runs requests on it. The
+    /// configuration is the default [`ClientConfig`]; [`ClientConfig::timeout`] travels on each
+    /// request [`crate::send`] sends, as [`Self::with_backend`] describes. Returns a
+    /// request-construction error if the base URL is invalid.
+    pub fn with_client_and_backend(
+        client: reqwest::Client,
+        backend: Arc<dyn HttpBackend>,
+        base_url: &str,
+    ) -> Result<Self, Error<Infallible>> {
+        Self::assemble(client, backend, base_url, ClientConfig::default())
     }
 
     fn assemble(
@@ -185,6 +205,14 @@ impl ClientCore {
     /// The base URL.
     pub fn base_url(&self) -> &Url {
         &self.base_url
+    }
+
+    /// Replace the base URL every later request is resolved against, keeping the client, backend,
+    /// configuration and credentials. Returns a request-construction error, leaving the base URL
+    /// as it was, if `base_url` is invalid.
+    pub fn set_base_url(&mut self, base_url: &str) -> Result<(), Error<Infallible>> {
+        self.base_url = Url::parse(base_url).map_err(Error::request_construction)?;
+        Ok(())
     }
 
     /// The injected HTTP client used to BUILD requests.

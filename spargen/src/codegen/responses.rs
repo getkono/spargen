@@ -4,7 +4,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::ir::{Api, ErrorShape, Operation, SuccessShape, Ty};
+use crate::ir::{Api, ErrorShape, Operation, StatusSpec, SuccessShape, Ty, TypeGraph};
 use crate::name::Names;
 
 use super::docs::doc_tokens;
@@ -98,22 +98,183 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
 /// more success bodies, or one beside a documented bodyless status). The variant
 /// is selected by HTTP status at decode time, so the enum derives only `Debug, Clone` — no
 /// whole-enum `Deserialize`, no `serde(untagged)`.
-pub(super) fn emit_response_enum(operation: &Operation, names: &Names) -> TokenStream {
+///
+/// Its accessors are generated exhaustively, one arm per variant, so a newly documented status
+/// updates them rather than every caller's `match`: `status()` when every variant is an exact
+/// status, and `body()`/`into_body()` when every bodied variant carries one generated type.
+pub(super) fn emit_response_enum(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
     match operation.responses.success() {
         SuccessShape::Enum(entries) => {
             let ident = names.operation(&operation.id).success_enum();
             let variants = entries
                 .iter()
                 .map(|(spec, ty)| response_variant_def(*spec, *ty, names));
+            let status = status_method(&entries);
+            let body = shared_body(&entries, &api.types).map(|body| {
+                // Every variant carrying a non-null body hands one back unconditionally; a
+                // bodyless or nullable variant makes the body optional.
+                let always = entries
+                    .iter()
+                    .all(|(_, ty)| ty.is_some_and(|ty| !ty.nullable));
+                body_methods(&entries, body, always, names)
+            });
+            let accessors = (status.is_some() || body.is_some()).then(|| {
+                quote! {
+                    #[allow(dead_code, deprecated)]
+                    impl #ident {
+                        #status
+                        #body
+                    }
+                }
+            });
             quote! {
                 #[allow(dead_code, deprecated)]
                 #[derive(Debug, Clone)]
                 pub enum #ident {
                     #(#variants)*
                 }
+
+                #accessors
             }
         }
         _ => quote! {},
+    }
+}
+
+/// The one generated type every bodied entry carries, bare (unboxed, non-nullable, since a
+/// variant's box and nullability are absorbed by its accessor arm), or `None` when two bodied
+/// entries generate different types. The first bodied entry's type names the same Rust type as
+/// every other's. This is [`ErrorShape::api_error_body`]'s rule, applied to either side's entries.
+fn shared_body(entries: &[(StatusSpec, Option<Ty>)], types: &TypeGraph) -> Option<Ty> {
+    let bare = |ty: Ty| Ty {
+        nullable: false,
+        boxed: false,
+        ..ty
+    };
+    let mut bodies = entries.iter().filter_map(|(_, body)| body.map(bare));
+    let first = bodies.next()?;
+    bodies
+        .all(|body| types.same_generated_type(first, body))
+        .then_some(first)
+}
+
+/// A status enum's `status()`: one arm per variant answering the exact status it was dispatched
+/// on, or `None` when any variant is a range or `default`, whose value alone does not say which
+/// status of the several it covers was received. Each code is a [`status_const`].
+fn status_method(entries: &[(StatusSpec, Option<Ty>)]) -> Option<TokenStream> {
+    let arms = entries
+        .iter()
+        .map(|(spec, ty)| {
+            let StatusSpec::Exact(code) = *spec else {
+                return None;
+            };
+            let variant_ident = status_variant_ident(*spec);
+            let pattern = match ty {
+                Some(_) => quote! { Self::#variant_ident(_) },
+                None => quote! { Self::#variant_ident },
+            };
+            let status = status_const(code);
+            Some(quote! { #pattern => #status, })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(quote! {
+        /// The HTTP status this value was dispatched on: each variant names exactly one.
+        pub fn status(&self) -> reqwest::StatusCode {
+            match self {
+                #(#arms)*
+            }
+        }
+    })
+}
+
+/// A documented exact status as a `StatusCode` expression evaluated at compile time. The
+/// responses-key grammar admits only `100..=599`, all of which `from_u16` accepts, so the `panic!`
+/// arm is unreachable, and a code outside it would fail the consumer's build, never a call.
+fn status_const(code: u16) -> TokenStream {
+    quote! {
+        const {
+            match reqwest::StatusCode::from_u16(#code) {
+                Ok(status) => status,
+                Err(_) => panic!("a documented status is a valid status code"),
+            }
+        }
+    }
+}
+
+/// A status enum's `body()` and `into_body()` over the one type `body` its bodied variants share,
+/// one arm per variant in the enum's own order. With `always`, every variant carries a non-null
+/// body and the accessors return it bare; otherwise they return `Option`, `None` for a documented
+/// bodyless status or a `null` payload.
+fn body_methods(
+    entries: &[(StatusSpec, Option<Ty>)],
+    body: Ty,
+    always: bool,
+    names: &Names,
+) -> TokenStream {
+    let body_ty = ty_tokens(body, names, true);
+    let wrap = |expr: TokenStream| {
+        if always {
+            expr
+        } else {
+            quote! { Some(#expr) }
+        }
+    };
+    let arms = entries.iter().map(|(spec, ty)| {
+        let variant_ident = status_variant_ident(*spec);
+        match ty {
+            // A nullable payload is `Option<Box<T>>`, reachable only where the body is optional.
+            Some(ty) if ty.nullable => (
+                quote! { Self::#variant_ident(body) => body.as_deref(), },
+                quote! { Self::#variant_ident(body) => body.map(|body| *body), },
+            ),
+            // A boxed payload: `as_ref` borrows the `T` inside the `Box`, `*` moves it out.
+            Some(_) => {
+                let borrowed = wrap(quote! { body.as_ref() });
+                let owned = wrap(quote! { *body });
+                (
+                    quote! { Self::#variant_ident(body) => #borrowed, },
+                    quote! { Self::#variant_ident(body) => #owned, },
+                )
+            }
+            None => (
+                quote! { Self::#variant_ident => None, },
+                quote! { Self::#variant_ident => None, },
+            ),
+        }
+    });
+    let (borrow_arms, own_arms): (Vec<_>, Vec<_>) = arms.unzip();
+    let (borrowed_ty, owned_ty) = if always {
+        (quote! { &#body_ty }, quote! { #body_ty })
+    } else {
+        (quote! { Option<&#body_ty> }, quote! { Option<#body_ty> })
+    };
+    let (borrow_doc, own_doc) = if always {
+        (
+            " The body this value carries, whichever status carried it.",
+            " The body this value carries, moved out, whichever status carried it.",
+        )
+    } else {
+        (
+            " The body this value carries, whichever status carried it; `None` for a documented \
+             bodyless status or a `null` body.",
+            " The body this value carries, moved out, whichever status carried it; `None` for a \
+             documented bodyless status or a `null` body.",
+        )
+    };
+    quote! {
+        #[doc = #borrow_doc]
+        pub fn body(&self) -> #borrowed_ty {
+            match self {
+                #(#borrow_arms)*
+            }
+        }
+
+        #[doc = #own_doc]
+        pub fn into_body(self) -> #owned_ty {
+            match self {
+                #(#own_arms)*
+            }
+        }
     }
 }
 
@@ -157,9 +318,10 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                 }
             });
             // When every bodied variant carries one generated body type, the body is reachable
-            // without matching the status: an inherent `body()` (one arm per variant, in the
-            // enum's own order, so the output is as deterministic as the enum) and the runtime's
-            // `ApiErrorBody`, which is what `Error::api_body` needs. `body` names the first bodied
+            // without matching the status: an inherent `body()` and `into_body()` (one arm per
+            // variant, in the enum's own order, so the output is as deterministic as the enum) and
+            // the runtime's `ApiErrorBody`, which is what `Error::api_body` and
+            // `Error::into_api_body` need. `body` names the first bodied
             // status's type, which is the same Rust type as every other variant's. An enum whose
             // bodies are different types gets neither — there is no single body to hand back —
             // and is matched by variant.
@@ -168,40 +330,29 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                 // `Uninhabited` is the bodyless shape's answer, never an enum's.
                 Some(crate::ir::ApiErrorBodyImpl::Uninhabited) | None => None,
             };
-            let accessor = shared_body.map(|body| {
-                let body_ty = ty_tokens(body, names, true);
-                let body_arms = entries.iter().map(|(spec, ty)| {
-                    let variant_ident = status_variant_ident(*spec);
-                    match ty {
-                        // A nullable payload is `Option<Box<T>>`: `as_deref` reaches the `T`.
-                        Some(ty) if ty.nullable => {
-                            quote! { #error_ident::#variant_ident(body) => body.as_deref(), }
-                        }
-                        // A boxed payload: `as_ref` reaches the `T` inside the `Box`.
-                        Some(_) => {
-                            quote! { #error_ident::#variant_ident(body) => Some(body.as_ref()), }
-                        }
-                        None => quote! { #error_ident::#variant_ident => None, },
-                    }
-                });
+            // An error body is always optional: `ApiErrorBody` answers `Option` on every shape.
+            let accessors = shared_body.map(|body| body_methods(&entries, body, false, names));
+            let status = status_method(&entries);
+            let inherent = (status.is_some() || accessors.is_some()).then(|| {
                 quote! {
                     #[allow(dead_code, deprecated)]
                     impl #error_ident {
-                        /// The documented error body, whichever status carried it; `None` for a
-                        /// documented bodyless status. The status is on the `ResponseValue` that
-                        /// wraps this value.
-                        pub fn body(&self) -> Option<&#body_ty> {
-                            match self {
-                                #(#body_arms)*
-                            }
-                        }
+                        #status
+                        #accessors
                     }
-
+                }
+            });
+            let body_impl = shared_body.map(|body| {
+                let body_ty = ty_tokens(body, names, true);
+                quote! {
                     #[allow(deprecated)]
                     impl support::ApiErrorBody for #error_ident {
                         type Body = #body_ty;
                         fn body(&self) -> Option<&#body_ty> {
                             #error_ident::body(self)
+                        }
+                        fn into_body(self) -> Option<#body_ty> {
+                            #error_ident::into_body(self)
                         }
                     }
                 }
@@ -248,7 +399,8 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                     }
                 }
 
-                #accessor
+                #inherent
+                #body_impl
             }
         }
         // A single documented error body: a transparent newtype over that type.
@@ -277,10 +429,31 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                 names,
                 true,
             );
-            let body_expr = if body_ty.nullable {
-                quote! { self.0.as_ref() }
+            let (body_expr, into_body_expr) = if body_ty.nullable {
+                (quote! { self.0.as_ref() }, quote! { self.0 })
             } else {
-                quote! { Some(&self.0) }
+                (quote! { Some(&self.0) }, quote! { Some(self.0) })
+            };
+            // The newtype's one entry is the operation's only error entry, read by the same filter
+            // `Responses::error` builds the shape from. An exact status answers `status()`; a range
+            // or `default` does not say which of its statuses was received.
+            let mut error_statuses = operation
+                .responses
+                .entries()
+                .map(|(spec, _)| spec)
+                .filter(|spec| !spec.is_success());
+            let status = match (error_statuses.next(), error_statuses.next()) {
+                (Some(StatusSpec::Exact(code)), None) => {
+                    let status = status_const(code);
+                    Some(quote! {
+                        /// The HTTP status this value was dispatched on: the operation's one
+                        /// documented error status.
+                        pub fn status(&self) -> reqwest::StatusCode {
+                            #status
+                        }
+                    })
+                }
+                _ => None,
             };
             // The derive is emitted exactly when the decode path actually uses serde. A binary body
             // is classified by `classify_error_bytes`, which builds the newtype through
@@ -313,6 +486,8 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                     pub fn into_inner(self) -> #ty {
                         self.0
                     }
+
+                    #status
                 }
 
                 #[allow(deprecated)]
@@ -361,6 +536,9 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                     fn body(&self) -> Option<&#body> {
                         #body_expr
                     }
+                    fn into_body(self) -> Option<#body> {
+                        #into_body_expr
+                    }
                 }
 
                 impl support::ApiErrorProblem for #error_ident {
@@ -383,7 +561,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
 mod tests {
     use indexmap::IndexMap;
 
-    use super::emit_error_enum;
+    use super::{emit_error_enum, emit_response_enum};
     use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{
         Api, Docs, Info, MediaType, Method, Operation, OperationId, PathSegment, PathTemplate,
@@ -393,6 +571,33 @@ mod tests {
     /// The error type emitted for `get /message`, whose only documented error is a `400` carrying
     /// `body`, a reference to the one `Message` string definition.
     fn single_error_type(body: Ty) -> String {
+        let api = message_api(vec![(StatusSpec::Exact(400), Some(body))]);
+        let names = crate::name::allocate(&api);
+        emit_error_enum(&api.operations[0], &api, &names).to_string()
+    }
+
+    /// The success enum and the error type emitted for `get /message` documenting `entries`.
+    /// `TypeId(0)` is a `Message` string and `TypeId(1)` a distinct `Count` integer.
+    fn emitted(entries: &[(StatusSpec, Option<Ty>)]) -> (String, String) {
+        let api = message_api(entries.to_vec());
+        let names = crate::name::allocate(&api);
+        let operation = &api.operations[0];
+        (
+            emit_response_enum(operation, &api, &names).to_string(),
+            emit_error_enum(operation, &api, &names).to_string(),
+        )
+    }
+
+    fn body(id: u32, nullable: bool) -> Option<Ty> {
+        Some(Ty {
+            id: TypeId(id),
+            nullable,
+            boxed: false,
+        })
+    }
+
+    /// An API whose one operation, `get /message`, documents `entries`, each bodied entry as JSON.
+    fn message_api(entries: Vec<(StatusSpec, Option<Ty>)>) -> Api {
         let mut types = TypeGraph::default();
         types.insert(TypeDef {
             name_hint: "Message".to_owned(),
@@ -401,6 +606,23 @@ mod tests {
             provenance: Provenance::new(JsonPointer::root(), None),
             document: String::new(),
         });
+        types.insert(TypeDef {
+            name_hint: "Count".to_owned(),
+            kind: TypeKind::Primitive(Prim::I64),
+            docs: Docs::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
+        });
+        let response = |body: Option<Ty>| Response {
+            body,
+            media: body.map(|_| MediaType::Json),
+            stream: None,
+            accept: None,
+            headers: Vec::new(),
+        };
+        let (default, by_status): (Vec<_>, Vec<_>) = entries
+            .into_iter()
+            .partition(|(spec, _)| *spec == StatusSpec::Default);
         let operation = Operation {
             id: OperationId("getMessage".to_owned()),
             method: Method::Get,
@@ -411,17 +633,11 @@ mod tests {
             params: Vec::new(),
             request_body: None,
             responses: Responses {
-                by_status: vec![(
-                    StatusSpec::Exact(400),
-                    Response {
-                        body: Some(body),
-                        media: Some(MediaType::Json),
-                        stream: None,
-                        accept: None,
-                        headers: Vec::new(),
-                    },
-                )],
-                default: None,
+                by_status: by_status
+                    .into_iter()
+                    .map(|(spec, body)| (spec, response(body)))
+                    .collect(),
+                default: default.into_iter().next().map(|(_, body)| response(body)),
             },
             security: Vec::new(),
             deprecated: false,
@@ -429,7 +645,7 @@ mod tests {
             server: None,
             provenance: Provenance::new(JsonPointer::root(), None),
         };
-        let api = Api {
+        Api {
             info: Info {
                 title: "T".to_owned(),
                 version: "1".to_owned(),
@@ -439,9 +655,92 @@ mod tests {
             operations: vec![operation],
             types,
             security_schemes: IndexMap::new(),
-        };
-        let names = crate::name::allocate(&api);
-        emit_error_enum(&api.operations[0], &api, &names).to_string()
+        }
+    }
+
+    /// `status()` exists exactly when every variant names one exact status: a range or `default`
+    /// variant covers several, so its value alone cannot answer it (#1257). The single-body
+    /// newtype follows its one entry's selector the same way.
+    #[test]
+    fn status_is_emitted_exactly_when_every_variant_is_an_exact_status() {
+        let status = "pub fn status (& self) -> reqwest :: StatusCode";
+        for (second, expected) in [
+            (StatusSpec::Exact(206), true),
+            (StatusSpec::Range(2), false),
+        ] {
+            let (success, _) = emitted(&[(StatusSpec::Exact(200), body(0, false)), (second, None)]);
+            assert_eq!(success.contains(status), expected, "{second:?}: {success}");
+        }
+        for (second, expected) in [
+            (StatusSpec::Exact(409), true),
+            (StatusSpec::Range(4), false),
+            (StatusSpec::Default, false),
+        ] {
+            let (_, error) = emitted(&[(StatusSpec::Exact(404), body(0, false)), (second, None)]);
+            assert_eq!(error.contains(status), expected, "{second:?}: {error}");
+        }
+        for (only, expected) in [
+            (StatusSpec::Exact(400), true),
+            (StatusSpec::Range(4), false),
+            (StatusSpec::Default, false),
+        ] {
+            let (_, newtype) = emitted(&[(StatusSpec::Exact(200), None), (only, body(0, false))]);
+            assert!(newtype.contains("pub struct"), "{only:?}: {newtype}");
+            assert_eq!(newtype.contains(status), expected, "{only:?}: {newtype}");
+        }
+    }
+
+    /// A success enum's `body()`/`into_body()`: bare when every variant carries one non-null type,
+    /// `Option` beside a bodyless or nullable variant, and absent when two variants carry different
+    /// types (#1257).
+    #[test]
+    fn success_body_accessors_follow_the_shared_body_type() {
+        let ok = StatusSpec::Exact(200);
+        let partial = StatusSpec::Exact(206);
+        let bare = "pub fn into_body (self) -> types :: Message";
+        let optional = "pub fn into_body (self) -> Option < types :: Message >";
+        // The `206`'s body beside a non-null `Message` on the `200`, and the accessor it yields.
+        let cases = [
+            (body(0, false), Some(bare)),
+            (None, Some(optional)),
+            (body(0, true), Some(optional)),
+            (body(1, false), None),
+        ];
+        for (second, expected) in cases {
+            let entries = [(ok, body(0, false)), (partial, second)];
+            let (success, _) = emitted(&entries);
+            assert!(success.contains("pub enum"), "{entries:?}: {success}");
+            match expected {
+                Some(signature) => assert!(success.contains(signature), "{entries:?}: {success}"),
+                None => assert!(!success.contains("fn into_body"), "{entries:?}: {success}"),
+            }
+        }
+    }
+
+    /// An error enum's `into_body()` sits beside its `body()`, inherent and on `ApiErrorBody`, and
+    /// neither exists when its statuses carry different body types (#1257).
+    #[test]
+    fn error_into_body_accompanies_body_on_the_enum_and_the_trait() {
+        let shared = [
+            (StatusSpec::Exact(404), body(0, false)),
+            (StatusSpec::Exact(409), body(0, true)),
+        ];
+        let (_, error) = emitted(&shared);
+        assert!(
+            error.contains("pub fn into_body (self) -> Option < types :: Message >"),
+            "{error}"
+        );
+        assert!(
+            error.contains("fn into_body (self) -> Option < types :: Message > { GetMessageError :: into_body (self) }"),
+            "{error}"
+        );
+        let distinct = [
+            (StatusSpec::Exact(404), body(0, false)),
+            (StatusSpec::Exact(409), body(1, false)),
+        ];
+        let (_, error) = emitted(&distinct);
+        assert!(!error.contains("into_body"), "{error}");
+        assert!(!error.contains("ApiErrorBody"), "{error}");
     }
 
     /// The single-body arm's `boxed: false` normalisation (see its comment on why lowering hands it

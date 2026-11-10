@@ -38,10 +38,11 @@ exclude_re = [
   # column like the ones above, so an edit that moves it fails the run instead of excluding another
   # comparison of the same kind in the same function.
   '^support-runtime/src/stream\.rs:732:38: replace < with <= in sse_next$',
-  # `support-runtime/src/error.rs`, `ApiErrorBody::body` and `ApiErrorProblem::problem` for
-  # `std::convert::Infallible`: the type is uninhabited, so no `&self` exists to call either with,
-  # and no test or caller can observe what the body returns.
+  # `support-runtime/src/error.rs`, `ApiErrorBody::body`, `ApiErrorBody::into_body` and
+  # `ApiErrorProblem::problem` for `std::convert::Infallible`: the type is uninhabited, so no
+  # `self` exists to call any of them with, and no test or caller can observe what they return.
   '^support-runtime/src/error\.rs:\d+:\d+: replace <impl ApiErrorBody for std::convert::Infallible>::body -> ',
+  '^support-runtime/src/error\.rs:\d+:\d+: replace <impl ApiErrorBody for std::convert::Infallible>::into_body -> ',
   '^support-runtime/src/error\.rs:\d+:\d+: replace <impl ApiErrorProblem for std::convert::Infallible>::problem -> ',
   # `spargen/src/source/sha256.rs`, `Sha256::update`'s `self.buffered > 0` to `>=`: from an empty
   # block the branch then copies up to 64 bytes into it, returning with them buffered when fewer

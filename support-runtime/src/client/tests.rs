@@ -185,6 +185,52 @@ fn with_client_adds_no_timeout_to_the_injected_client() {
     assert!(!injected.contains("timeout"), "{injected}");
 }
 
+/// Issue #1259: `with_client_and_backend` keeps both pieces it is given: `http` is the caller's
+/// client (its configured total timeout, which no core-built client carries, shows in its
+/// `Debug`), and `send` executes on the caller's backend, which records the request.
+#[test]
+fn with_client_and_backend_builds_on_the_given_client_and_runs_on_the_given_backend() {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(7))
+        .build()
+        .expect("build a configured client");
+    let backend = Recorder::new();
+    let core = ClientCore::with_client_and_backend(client, backend.clone(), "https://example.com")
+        .unwrap();
+    let installed: Arc<dyn HttpBackend> = backend.clone();
+    assert!(Arc::ptr_eq(core.backend(), &installed));
+    let injected = format!("{:?}", core.http());
+    assert!(injected.contains("7s"), "{injected}");
+    assert!(!injected.contains("read_timeout"), "{injected}");
+    assert_eq!(core.base_url().as_str(), "https://example.com/");
+    assert_eq!(core.config().timeout, None);
+
+    poll_ready(send(&core, get(&core))).unwrap();
+    assert_eq!(backend.timeouts(), [None]);
+
+    let error = ClientCore::with_client_and_backend(reqwest::Client::new(), backend, "not a url")
+        .unwrap_err();
+    assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
+}
+
+/// `set_base_url` repoints the core and keeps everything else; an invalid URL is a
+/// request-construction error that leaves the base URL as it was.
+#[test]
+fn set_base_url_repoints_the_core_and_keeps_its_credentials() {
+    let mut core = ClientCore::new("https://example.com/v1/").unwrap();
+    core.set_credential("token", Credential::Bearer(SecretString::from("t0k")));
+    core.config_mut().max_error_body = 128;
+
+    core.set_base_url("https://peer.example/v2/").unwrap();
+    assert_eq!(core.base_url().as_str(), "https://peer.example/v2/");
+    assert!(core.credential("token").is_some());
+    assert_eq!(core.config().max_error_body, 128);
+
+    let error = core.set_base_url("not a url").unwrap_err();
+    assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
+    assert_eq!(core.base_url().as_str(), "https://peer.example/v2/");
+}
+
 /// A transport that answers `204` and records the total timeout each request carries across the
 /// seam, read back the way `ReqwestBackend` reads it.
 #[derive(Debug, Default)]

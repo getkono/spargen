@@ -21,11 +21,24 @@ pub(crate) fn synth_operation_id(method: &Method, path: &PathTemplate) -> String
     crate::name::to_snake_case(&parts.join("_"))
 }
 
+/// The name hint an inline request-body schema lowers under: its operation's id followed by
+/// `Body` (`storeEscrow` → `StoreEscrowBody`), so the type a caller constructs names the call it
+/// belongs to, as `{Method}Error` and `{Method}Response` do. An id with no ASCII alphanumeric
+/// segments to nothing and keeps the role's own `RequestBody`. A collision this leaves (another
+/// type spelled the same) is resolved by the type scope's pointer-seeded suffix.
+pub(crate) fn request_body_hint(operation_id: &str) -> String {
+    if operation_id.chars().any(|ch| ch.is_ascii_alphanumeric()) {
+        format!("{}Body", crate::name::to_pascal_case(operation_id))
+    } else {
+        "RequestBody".to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ir::{Method, PathSegment, PathTemplate};
 
-    use super::synth_operation_id;
+    use super::{request_body_hint, synth_operation_id};
 
     fn path(raw: &str, segments: Vec<PathSegment>) -> PathTemplate {
         PathTemplate {
@@ -134,6 +147,28 @@ mod tests {
                 synth_operation_id(&Method::Get, &template),
                 expected,
                 "{raw}"
+            );
+        }
+    }
+
+    /// The hint is the operation id Pascal-cased with `Body` appended, whatever casing the id is
+    /// written in; an id with nothing to segment falls back to the role name.
+    #[test]
+    fn a_request_body_hint_names_its_operation() {
+        for (operation_id, expected) in [
+            ("storeEscrow", "StoreEscrowBody"),
+            ("append_drop_chunk", "AppendDropChunkBody"),
+            ("upload-file", "UploadFileBody"),
+            ("Pets.create", "PetsCreateBody"),
+            ("post_v1_items", "PostV1ItemsBody"),
+            ("2fa", "2faBody"),
+            ("-/-", "RequestBody"),
+            ("日本", "RequestBody"),
+        ] {
+            assert_eq!(
+                request_body_hint(operation_id),
+                expected,
+                "{operation_id:?}"
             );
         }
     }

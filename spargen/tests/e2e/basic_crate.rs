@@ -246,7 +246,8 @@ fn the_macro_preview_emits_the_module_generate_writes() {
     let contents = preview.contents.expect("a generated module");
     // The non-default cap reaches every client constructor that sets it: `with_config` (which
     // `new` builds through) as the `ClientConfig` field it starts from, and `with_client` and
-    // `with_backend` through `config_mut`, so the parity below compares a module that carries it.
+    // `with_backend` and `with_client_and_backend` through `config_mut`, so the parity below
+    // compares a module that carries it.
     assert_eq!(
         contents.matches("max_error_body: 4096usize,").count(),
         1,
@@ -254,8 +255,9 @@ fn the_macro_preview_emits_the_module_generate_writes() {
     );
     assert_eq!(
         contents.matches("max_error_body = 4096usize;").count(),
-        2,
-        "the configured error_body_cap must reach `with_client` and `with_backend`"
+        3,
+        "the configured error_body_cap must reach `with_client`, `with_backend` and \
+         `with_client_and_backend`"
     );
     assert!(!contents.contains("max_error_body = 65536usize"));
     assert!(!contents.contains("max_error_body: 65536usize"));
