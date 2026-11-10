@@ -1087,7 +1087,8 @@ components:
         // Every backend other than the base's is its own build input.
         variants.extend(
             DateTimeBackend::ALL
-                .into_iter()
+                .iter()
+                .copied()
                 .filter(|backend| backend != datetime)
                 .map(|backend| {
                     (

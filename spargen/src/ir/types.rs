@@ -332,7 +332,7 @@ pub enum DateTimeBackend {
 
 impl DateTimeBackend {
     /// Every backend, in declaration order.
-    pub const ALL: [Self; 4] = [Self::Time, Self::Jiff, Self::Chrono, Self::String];
+    pub const ALL: &'static [Self] = &[Self::Time, Self::Jiff, Self::Chrono, Self::String];
 
     /// The spelling `spargen.toml`'s `datetime` key, the CLI's `--datetime` flag and
     /// `generate_api!`'s `datetime` argument take: `time`, `jiff`, `chrono` or `string`.
@@ -365,7 +365,8 @@ impl std::str::FromStr for DateTimeBackend {
     /// four it accepts.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         Self::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .find(|backend| backend.as_str() == text)
             .ok_or_else(|| {
                 format!("unknown date-time backend `{text}`; expected time, jiff, chrono or string")
@@ -783,7 +784,7 @@ mod tests {
         assert_eq!(DateTimeBackend::default(), DateTimeBackend::Time);
         let spellings: Vec<&str> = DateTimeBackend::ALL.iter().map(|b| b.as_str()).collect();
         assert_eq!(spellings, ["time", "jiff", "chrono", "string"]);
-        for backend in DateTimeBackend::ALL {
+        for &backend in DateTimeBackend::ALL {
             assert_eq!(backend.as_str().parse::<DateTimeBackend>(), Ok(backend));
             assert_eq!(backend.to_string(), backend.as_str());
             let file: File = toml::from_str(&format!("datetime = \"{backend}\"")).unwrap();

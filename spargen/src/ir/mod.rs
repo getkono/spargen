@@ -557,7 +557,7 @@ mod tests {
         let plain = api();
         let mut dated = api();
         insert(&mut dated, TypeKind::Primitive(Prim::DateTime));
-        for backend in DateTimeBackend::ALL {
+        for &backend in DateTimeBackend::ALL {
             let typed = (backend != DateTimeBackend::String).then_some(backend);
             for (case, api, expected) in [("no date", &plain, None), ("a date", &dated, typed)] {
                 let features = api.runtime_features(backend);

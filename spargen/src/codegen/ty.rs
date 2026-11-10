@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn prim_tokens_follow_the_uuid_and_time_mappings() {
         for feature_uuid in [false, true] {
-            for datetime in crate::ir::DateTimeBackend::ALL {
+            for &datetime in crate::ir::DateTimeBackend::ALL {
                 let feature_time = datetime.is_typed();
                 let options = CodegenOptions {
                     feature_uuid,

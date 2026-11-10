@@ -249,7 +249,7 @@ fn the_datetime_argument_overrides_the_config_file() {
         config(&args(r#""openapi.yaml""#), discovered.clone()),
         discovered
     );
-    for backend in DateTimeBackend::ALL {
+    for &backend in DateTimeBackend::ALL {
         let given = args(&format!(r#""openapi.yaml", datetime = "{backend}""#));
         assert_eq!(
             config(&given, discovered.clone()),

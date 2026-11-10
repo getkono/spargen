@@ -304,7 +304,7 @@ mod tests {
             .unwrap();
         assert_eq!(file.datetime_backend(), DateTimeBackend::Jiff);
         assert_eq!(resolved(&dir, &[]), file);
-        for backend in DateTimeBackend::ALL {
+        for &backend in DateTimeBackend::ALL {
             assert_eq!(
                 resolved(&dir, &["--datetime", backend.as_str()]),
                 file.clone().datetime(backend),
