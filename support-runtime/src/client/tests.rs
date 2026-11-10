@@ -136,6 +136,17 @@ fn a_bound_header_is_keyed_case_insensitively_and_the_last_binding_wins() {
     assert_eq!(core.unbind_header("X-Api-Version"), None);
 }
 
+/// A bound header's value is redacted in `ClientCore`'s `Debug`, as a credential's is, so a core
+/// logged with a tenant or key header bound does not leak it; the bound name still prints.
+#[test]
+fn a_bound_header_value_is_redacted_in_debug() {
+    let mut core = ClientCore::new("https://example.com").unwrap();
+    core.bind_header("X-Tenant", "tenant-secret-7781");
+    let debug = format!("{core:?}");
+    assert!(debug.contains("x-tenant"), "{debug}");
+    assert!(!debug.contains("tenant-secret-7781"), "{debug}");
+}
+
 /// The supplied client is the one requests run on: an `https_only` client refuses a plain `http`
 /// request at execute, which a default client would instead try to send. reqwest refuses it
 /// without touching the network, so the future is ready on the first poll, and the refusal is a
