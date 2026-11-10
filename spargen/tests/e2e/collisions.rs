@@ -87,6 +87,8 @@ paths:
     get: { operationId: withClient, responses: { "204": { description: ok } } }
   /with-backend:
     get: { operationId: withBackend, responses: { "204": { description: ok } } }
+  /with-client-and-backend:
+    get: { operationId: withClientAndBackend, responses: { "204": { description: ok } } }
   /core:
     get: { operationId: core, responses: { "204": { description: ok } } }
   /with-credential:
@@ -95,6 +97,8 @@ paths:
     get: { operationId: withoutCredential, responses: { "204": { description: ok } } }
   /with-timeout:
     get: { operationId: withTimeout, responses: { "204": { description: ok } } }
+  /with-base-url:
+    get: { operationId: withBaseUrl, responses: { "204": { description: ok } } }
   /inner:
     get: { operationId: inner, responses: { "204": { description: ok } } }
 components:
@@ -165,10 +169,12 @@ fn reserved_spellings_compile_together() {
         "with_default_server",
         "with_client",
         "with_backend",
+        "with_client_and_backend",
         "core",
         "with_credential",
         "without_credential",
         "with_timeout",
+        "with_base_url",
         "inner",
     ] {
         assert!(

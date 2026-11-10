@@ -166,10 +166,12 @@ pub(crate) const CLIENT_METHODS: &[&str] = &[
     "with_default_server",
     "with_client",
     "with_backend",
+    "with_client_and_backend",
     "core",
     "with_credential",
     "without_credential",
     "with_timeout",
+    "with_base_url",
     "inner",
 ];
 

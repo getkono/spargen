@@ -681,7 +681,24 @@ fn custom_http_backend_plugs_into_non_generic_client() {
     }
 
     let backend: std::sync::Arc<dyn basic_client::HttpBackend> = std::sync::Arc::new(TestBackend);
-    let _client = basic_client::Client::with_backend(backend, "https://api.example.com").unwrap();
+    let _client =
+        basic_client::Client::with_backend(backend.clone(), "https://api.example.com").unwrap();
+
+    // Issue #1259: one shared `reqwest::Client` and one backend, both injected, so nothing is
+    // built per client; `with_base_url` repoints a derived value and keeps the backend.
+    let shared = reqwest::Client::new();
+    let both = basic_client::Client::with_client_and_backend(
+        shared.clone(),
+        backend.clone(),
+        "https://api.example.com",
+    )
+    .unwrap();
+    assert!(std::sync::Arc::ptr_eq(both.core().backend(), &backend));
+    let moved = both.clone().with_base_url("https://peer.example/v2/").unwrap();
+    assert_eq!(moved.core().base_url().as_str(), "https://peer.example/v2/");
+    assert_eq!(both.core().base_url().as_str(), "https://api.example.com/");
+    assert!(std::sync::Arc::ptr_eq(moved.core().backend(), &backend));
+    assert!(both.with_base_url("not a url").is_err());
 
     // Back-compat: the pre-existing `new` / `with_client` constructors still work and install the
     // default reqwest-backed transport.
