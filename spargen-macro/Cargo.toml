@@ -19,8 +19,8 @@ proc-macro = true
 [dependencies]
 # The generator, with no spargen feature requested: the generation pipeline needs none, and
 # `default-features = false` keeps it that way should spargen's default set ever grow.
-# `uuid`/`time` output mappings are controlled at call time through `Spec::uuid`/`Spec::time` (or
-# the macro's `no_uuid`/`no_time`), not by Cargo features.
+# The `uuid` and date-time output mappings are controlled at call time through
+# `Spec::uuid`/`Spec::datetime` (or the macro's `no_uuid`/`datetime = "…"`), not by Cargo features.
 # The version is an exact `=` requirement: the macro calls spargen's `#[doc(hidden)]` `__private`
 # bridge, which carries no semver promise, so a macro release is only ever paired with the spargen
 # release it was built against. release-plz keeps the `=` operator when it bumps the version.

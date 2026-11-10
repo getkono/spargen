@@ -373,7 +373,7 @@ fn config_file_knobs_reach_the_library() {
 
     std::fs::write(
         temp.path().join("spargen.toml"),
-        "carve = true\nuuid = false\ntime = false\n",
+        "carve = true\nuuid = false\ndatetime = \"string\"\n",
     )
     .unwrap();
     // `carve` in the file has the same effect as `--carve`: the unsupported operation is carved
@@ -382,7 +382,8 @@ fn config_file_knobs_reach_the_library() {
     assert!(carved.status.success(), "{carved:?}");
     let carved = String::from_utf8_lossy(&carved.stdout);
     assert!(omits_pointer(&carved, "/paths/~1bad/get"), "{carved}");
-    // `uuid = false` and `time = false` map both formats to `String`, which needs neither crate.
+    // `uuid = false` and `datetime = "string"` map both formats to `String`, which needs neither
+    // crate.
     let untyped = deps(temp.path(), &spec, &[]);
     assert!(untyped.status.success(), "{untyped:?}");
     let untyped = String::from_utf8_lossy(&untyped.stdout);
@@ -394,21 +395,35 @@ fn config_file_knobs_reach_the_library() {
 
 #[cfg(feature = "cli")]
 #[test]
-fn no_time_maps_dates_to_strings_and_drops_the_time_dependency() {
+fn the_datetime_flag_picks_the_date_crate_deps_prints() {
     let (temp, spec) = knobs_workspace();
     let typed = deps(temp.path(), &spec, &["--carve"]);
     assert!(typed.status.success(), "{typed:?}");
     let typed = String::from_utf8_lossy(&typed.stdout);
     assert!(typed.contains("time = {"), "{typed}");
 
-    let untyped = deps(temp.path(), &spec, &["--carve", "--no-time"]);
+    let untyped = deps(temp.path(), &spec, &["--carve", "--datetime", "string"]);
     assert!(untyped.status.success(), "{untyped:?}");
     let untyped = String::from_utf8_lossy(&untyped.stdout);
     assert!(!untyped.contains("time = {"), "{untyped}");
     assert!(
         untyped.contains("uuid = {"),
-        "`--no-time` leaves `uuid` alone: {untyped}"
+        "`--datetime string` leaves `uuid` alone: {untyped}"
     );
+
+    for (backend, line) in [("jiff", "\njiff = \""), ("chrono", "\nchrono = \"")] {
+        let other = deps(temp.path(), &spec, &["--carve", "--datetime", backend]);
+        assert!(other.status.success(), "{other:?}");
+        let other = String::from_utf8_lossy(&other.stdout);
+        assert!(
+            other.contains(line) && !other.contains("time = {"),
+            "{other}"
+        );
+    }
+
+    // The removed switch is a usage error, exit status 2.
+    let removed = deps(temp.path(), &spec, &["--carve", "--no-time"]);
+    assert_eq!(removed.status.code(), Some(2), "{removed:?}");
 }
 
 #[cfg(feature = "cli")]

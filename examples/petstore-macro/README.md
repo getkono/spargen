@@ -13,7 +13,7 @@ It spins up a local mock server and drives the generated client through a few ty
 before sending anything, as `RequestError::MissingCredential`. The broader feature surface (the
 other auth failure modes, retry, undocumented statuses, …) lives in the `petstore` example; this
 one exists to exercise the macro.
-Its invocation exercises `no_uuid`, `no_time`, `carve`, `error_body_cap`, `batch_cap`, and an
+Its invocation exercises `no_uuid`, `datetime = "string"`, `carve`, `error_body_cap`, `batch_cap`, and an
 `omit` block with a `components` rule; [spargen-macro's README](../../spargen-macro/README.md)
 shows the rest. The expansion names, through `include_bytes!`, the spec, each file its `$ref`s
 load, the manifests the runtime-dependency audit reads, and a `spargen.lock` and the applied

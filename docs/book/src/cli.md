@@ -48,9 +48,9 @@ Options:
 ```
 
 `check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, the switch pairs
-`--carve`/`--no-carve`, `--uuid`/`--no-uuid`, `--time`/`--no-time` and
-`--open-narrowing`/`--no-open-narrowing`, `--open-unions`/`--no-open-unions`,
-`--verbatim-docs`/`--no-verbatim-docs`, `--error-body-cap`, `--batch-cap`, and the repeatable
+`--carve`/`--no-carve`, `--uuid`/`--no-uuid`, `--open-narrowing`/`--no-open-narrowing`,
+`--open-unions`/`--no-open-unions` and `--verbatim-docs`/`--no-verbatim-docs`, `--datetime`,
+`--error-body-cap`, `--batch-cap`, and the repeatable
 `--omit-path`, `--omit-operation`, `--omit-component`, `--omit-pointer`, `--keep-operation` and
 `--bind-header`. The
 group mirrors the setter list on `spargen::Spec` and the keys of [`spargen.toml`](#spargentoml-reference). `lock`
@@ -61,8 +61,8 @@ accepted there and have no effect.
 ### Flags and `spargen.toml`
 
 Each spec is resolved as built-in defaults, then its `spargen.toml` (the `--config` path, or the
-file beside the spec when there is one), then the flags. `--error-body-cap` and `--batch-cap`
-replace the file's value. The `--omit-*` flags add rules to the file's `[[omit]]` rules,
+file beside the spec when there is one), then the flags. `--datetime`, `--error-body-cap` and
+`--batch-cap` replace the file's value. The `--omit-*` flags add rules to the file's `[[omit]]` rules,
 `--keep-operation` to its `[[keep]]` rules, and `--bind-header` to its `bind_headers`, rather
 than replacing them. Each switch pair sets its setting in either direction, so `--no-carve`
 overrides `carve = true` in the file and `--uuid` overrides `uuid = false`; with neither flag of a
@@ -77,7 +77,8 @@ The same file is read by `build.rs` (`Spec::config_file`, `Spec::discover_config
 
 ```toml
 uuid = true             # default true; map `format: uuid` to `uuid::Uuid`
-time = true             # default true; map `format: date-time`/`date` to `time`
+datetime = "time"       # default "time"; the crate `format: date-time`/`date` map to: "time",
+                        # "jiff", "chrono", or "string" for none
 carve = false           # default false; auto-carve unsupported constructs
 batch_cap = 100         # default 100; diagnostics collected before the report is truncated
 error_body_cap = 65536  # default 64 KiB

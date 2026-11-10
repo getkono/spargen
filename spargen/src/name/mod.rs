@@ -195,8 +195,8 @@ pub(crate) const CLIENT_METHODS: &[&str] = &[
 /// hinted `Date`, a component named `String`) is disambiguated instead of redefining an imported
 /// name (`E0255`) or shadowing the prelude type every other model refers to.
 ///
-/// `Date` and `DateTime` are imported only when the API uses a date type with the `time` mapping
-/// on; they are reserved unconditionally, so a model's name does not change when an unrelated
+/// `Date` and `DateTime` are imported only when the API uses a date type with a typed date-time
+/// backend; they are reserved unconditionally, so a model's name does not change when an unrelated
 /// part of the spec starts using dates. `codegen`'s tests hold this list to every such name the
 /// emitted module uses.
 pub(crate) const TYPES_MODULE_NAMES: &[&str] = &[
