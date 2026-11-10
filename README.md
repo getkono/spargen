@@ -134,7 +134,7 @@ the version it emits, and the idioms spargen handles.
   `RequestError::MissingBoundParameter`.
 - A closed error taxonomy, identical across all spargen output: request-construction
   (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
-  above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
+  above, the missing bound header above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
   (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
   error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
   preserved), decode failure (`Error::Decode`: status, headers, serde path + body, capped except
