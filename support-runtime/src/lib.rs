@@ -91,13 +91,13 @@ pub use parameter::{
     serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter,
     FormMode, FormProperty, FormStyle, PercentEncoding,
 };
-pub use response::ResponseValue;
+pub use response::{stream_success_bytes, ByteStream, ResponseValue};
 pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
 #[cfg(feature = "stream")]
 pub use stream::{
     EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
 };
-pub use transport::{ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend};
+pub use transport::{request_body, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend};
 pub use wasm::{MaybeSend, MaybeSync};
 #[cfg(feature = "xml")]
 pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml};

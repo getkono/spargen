@@ -1431,12 +1431,67 @@ fn max_body_replaces_the_configured_success_limit() {
     ));
 }
 
-/// With no limit set anywhere, a success body is read whole, as before.
+/// With no limit set anywhere, a success body within the binary default is read whole, as before.
 #[test]
 fn a_success_body_is_unbounded_by_default() {
     let backend = Canned::answering([Chunks::repeat(1024, 64).into_response(200)]);
     let core = core_with(backend, crate::RequestOptions::default());
     assert_eq!(send_and_read(&core).unwrap().into_inner().len(), 64 * 1024);
+}
+
+/// Issue #1263: with no limit set anywhere, a raw binary success body is read within
+/// `ClientConfig::DEFAULT_MAX_BINARY_BODY`, a `Content-Length` past it refused before any of the
+/// body is read; a structured success body under the same declaration is read whole.
+#[test]
+fn a_binary_success_body_is_bounded_by_the_binary_default() {
+    let default = crate::ClientConfig::DEFAULT_MAX_BINARY_BODY;
+    assert_eq!(default, 64 * 1024 * 1024);
+    let chunks = Chunks::repeat(4, 2);
+    let pulled = chunks.pulled();
+    let backend = Canned::answering([declaring(chunks.into_response(200), default + 1)]);
+    let core = core_with(backend, crate::RequestOptions::default());
+    let error = send_and_read(&core).unwrap_err();
+    assert!(
+        matches!(error, Error::BodyTooLarge { limit, status } if limit == default && status == 200),
+        "{error:?}"
+    );
+    assert_eq!(pulled.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let backend = Canned::answering([declaring(
+        Chunks::repeat(4, 2).into_response(200),
+        default + 1,
+    )]);
+    let core = core_with(backend, crate::RequestOptions::default());
+    let response = poll_ready(super::send(&core, crate::tests::request())).unwrap();
+    let structured = poll_ready(super::decode_success_with(&core, response, |body| {
+        Ok(body.len())
+    }));
+    assert_eq!(structured.unwrap().into_inner(), 8);
+}
+
+/// Issue #1263: a limit the call is made under replaces the binary default, larger or smaller.
+#[test]
+fn a_set_limit_replaces_the_binary_default() {
+    let default = crate::ClientConfig::DEFAULT_MAX_BINARY_BODY;
+    let read = |options, configured: Option<usize>| {
+        let response = declaring(Chunks::repeat(4, 2).into_response(200), default + 1);
+        let mut core = core_with(Canned::answering([response]), options);
+        core.config_mut().max_success_body = configured;
+        send_and_read(&core).map(|value| value.into_inner().len())
+    };
+    // Larger: the declared length is within it, so the body is read.
+    assert_eq!(read(max_body(default + 1), None).unwrap(), 8);
+    assert_eq!(
+        read(crate::RequestOptions::default(), Some(default + 1)).unwrap(),
+        8
+    );
+    // Smaller: the 8 bytes cross it as they are read.
+    let backend = Canned::answering([Chunks::repeat(4, 2).into_response(200)]);
+    let error = send_and_read(&core_with(backend, max_body(5))).unwrap_err();
+    assert!(
+        matches!(error, Error::BodyTooLarge { limit: 5, .. }),
+        "{error:?}"
+    );
 }
 
 /// A streaming operation's response carries no limit: `send_streaming` leaves its bodies to
