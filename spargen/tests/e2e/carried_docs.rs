@@ -1,6 +1,7 @@
 //! Carried docs and lint hygiene (#1269): a module whose spec prose carries a server framework's
 //! intra-doc links, bare URLs and stray tags, `include!`d by a crate that denies every lint the
-//! generated items allow, with no lint attribute at the include site.
+//! generated items allow, with no lint attribute at the include site. A description with no
+//! operation is held to the same consumer.
 
 use super::*;
 
@@ -28,6 +29,25 @@ mod rest {
 pub use rest::Client;
 "#;
 
+/// A description with components and a server but no operation: the `ops` module holds the
+/// `Operation` type and no constant, so nothing in the generated module builds an `Operation`.
+const NO_OPERATIONS_SPEC: &str = r"openapi: 3.1.0
+info:
+  title: Schemas only
+  version: 1.0.0
+servers:
+  - url: https://example.com
+paths: {}
+components:
+  schemas:
+    Note:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+";
+
 /// Generate the carried-docs spec under `configure` into a fixture crate named `name` whose root is
 /// [`STRICT_ROOT`], and return its directory.
 fn strict_fixture(
@@ -35,7 +55,17 @@ fn strict_fixture(
     name: &str,
     configure: impl FnOnce(Spec) -> Spec,
 ) -> std::path::PathBuf {
-    let spec = write_spec(temp, "moderation.yaml", CARRIED_DOCS_SPEC);
+    strict_fixture_of(temp, CARRIED_DOCS_SPEC, name, configure)
+}
+
+/// [`strict_fixture`] over the description `contents`.
+fn strict_fixture_of(
+    temp: &std::path::Path,
+    contents: &str,
+    name: &str,
+    configure: impl FnOnce(Spec) -> Spec,
+) -> std::path::PathBuf {
+    let spec = write_spec(temp, "moderation.yaml", contents);
     let out = temp.join(name);
     let report = generate_configured_fixture_crate(&spec, &out, name, "2021", configure);
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
@@ -95,6 +125,36 @@ fn the_include_site_needs_no_lint_attribute() {
     assert!(
         output.status.success(),
         "the strict consumer must document with every rustdoc warning denied:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A description with no operation, `include!`d into the same private module: the `ops` module's
+/// `Operation` type, which no constant constructs, must not fail the strict consumer's clippy as
+/// never constructed.
+#[test]
+fn a_description_without_operations_passes_the_strict_consumer() {
+    let temp = tempfile::tempdir().unwrap();
+    let out = strict_fixture_of(
+        temp.path(),
+        NO_OPERATIONS_SPEC,
+        "no_operations_client",
+        |spec| spec,
+    );
+
+    let generated = std::fs::read_to_string(out.join("src/rest_client.rs")).unwrap();
+    assert!(
+        generated.contains("pub struct Operation") && !generated.contains("pub const "),
+        "the module declares `Operation` and no constant of it"
+    );
+
+    let output = fixture_cargo(&out)
+        .args(["clippy", "--all-features", "--", "-D", "warnings"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a description with no operation must pass the strict consumer's clippy:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
