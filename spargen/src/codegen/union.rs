@@ -487,7 +487,7 @@ fn union_enum_decl(
     quote! {
         #docs
         #deprecated
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, PartialEq)]
         pub enum #ident {
             #(#variant_defs)*
             #unknown

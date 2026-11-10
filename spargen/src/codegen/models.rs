@@ -205,16 +205,21 @@ fn emit_type_def(
                 }
                 AdditionalProps::Allow | AdditionalProps::Deny => quote! {},
             };
+            let StructConstructors {
+                derive_default,
+                constructors,
+            } = emit_struct_constructors(id, object, names);
             quote! {
                 #docs
                 #deprecated
-                #[derive(Debug, Clone, Serialize, Deserialize)]
+                #[derive(Debug, Clone, PartialEq, #derive_default Serialize, Deserialize)]
                 #xml_root
                 #deny_unknown
                 pub struct #ident {
                     #(#fields)*
                     #additional
                 }
+                #constructors
                 #(#providers)*
             }
         }
@@ -267,7 +272,7 @@ fn emit_type_def(
             quote! {
                 #docs
                 #deprecated
-                #[derive(Debug, Clone)]
+                #[derive(Debug, Clone, PartialEq)]
                 pub enum #ident {}
 
                 impl<'de> serde::Deserialize<'de> for #ident {
@@ -299,7 +304,7 @@ fn emit_type_def(
             quote! {
                 #docs
                 #deprecated
-                #[derive(Debug, Clone, Serialize, Deserialize)]
+                #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
                 #[serde(transparent)]
                 pub struct #ident(pub #ty);
             }
@@ -381,14 +386,7 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names) -> TokenStrea
         .xml
         .wire_override(&field.name.wire)
         .unwrap_or_else(|| field.name.wire.clone());
-    // `ty_tokens` already wraps a nullable type in `Option` (`"null"` in the type array), so only an
-    // *optional* non-nullable field needs the extra `Option` here — wrapping a nullable field again
-    // would yield `Option<Option<T>>`. A required nullable field stays a single `Option<T>` (present
-    // but may be `null`); an optional field of either kind is a single `Option<T>`.
-    let mut ty = ty_tokens(field.ty, names, false);
-    if !field.required && !field.ty.nullable {
-        ty = quote! { Option<#ty> };
-    }
+    let ty = field_ty_tokens(field, names);
     // An optional field always deserializes an absent value; when the spec gives a representable
     // scalar default, point serde at a generated provider so the default fills in rather than
     // `None`. Otherwise fall back to `Option::default()` (`None`).
@@ -437,6 +435,180 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names) -> TokenStrea
         #(#notes)*
         #[serde(rename = #wire, #serde_default #decode_present)]
         pub #ident: #ty,
+    }
+}
+
+/// A struct field's declared Rust type. `ty_tokens` already wraps a nullable type in `Option`
+/// (`"null"` in the type array), so only an *optional* non-nullable field needs the extra `Option`
+/// here — wrapping a nullable field again would yield `Option<Option<T>>`. A required nullable
+/// field stays a single `Option<T>` (present but may be `null`); an optional field of either kind
+/// is a single `Option<T>`.
+fn field_ty_tokens(field: &Field, names: &Names) -> TokenStream {
+    let ty = ty_tokens(field.ty, names, false);
+    if !field.required && !field.ty.nullable {
+        quote! { Option<#ty> }
+    } else {
+        ty
+    }
+}
+
+/// What [`emit_struct_constructors`] adds to an object struct: `Default` for its derive list, when
+/// the derive builds what `new` does, and the items following the struct.
+struct StructConstructors {
+    derive_default: Option<TokenStream>,
+    constructors: TokenStream,
+}
+
+/// Whether optional `field` takes its schema `default` when absent: decoding fills it through a
+/// generated provider, and `new` does the same.
+fn applies_default(field: &Field) -> bool {
+    !field.required
+        && field
+            .default
+            .as_ref()
+            .is_some_and(|default| default.applied.is_some())
+}
+
+/// The inherent `impl` of object struct `id`: `new`, taking every required member by value in
+/// declaration order and setting every optional member as decoding an absent one does (its schema
+/// `default` where decoding applies one, else `None`, and the overflow map empty), then one
+/// consuming `with_<field>` setter per optional member and for the overflow map, in field order. A
+/// setter takes the value the field's single `Option` wraps, the bare `T` whether or not the
+/// member is nullable, and stores `Some` of it; the overflow map's takes the whole map. By value,
+/// as the `…Params` setters take theirs, so inference stays trivial for every field type.
+///
+/// So `new` with the required members equals what decoding an object of just those members
+/// yields. With no required member, `Default` is `new()`: derived when every optional member is
+/// `None` there, and otherwise an `impl` calling `new`. Setter names are `with_` before the field
+/// identifier unraw, so they are distinct exactly when the identifiers are, which allocation makes
+/// them within one struct.
+fn emit_struct_constructors(
+    id: crate::ir::TypeId,
+    object: &crate::ir::Struct,
+    names: &Names,
+) -> StructConstructors {
+    let ident = names.types.get(&id).expect("type name allocated");
+    let field_ident = |field: &Field| {
+        names
+            .fields
+            .get(&(id, field.name.wire.clone()))
+            .expect("field name allocated")
+    };
+    let params = object
+        .fields
+        .iter()
+        .filter(|field| field.required)
+        .map(|field| {
+            let field_ident = field_ident(field);
+            let ty = field_ty_tokens(field, names);
+            quote! { #field_ident: #ty }
+        });
+    let inits = object.fields.iter().map(|field| {
+        let field_ident = field_ident(field);
+        if field.required {
+            quote! { #field_ident, }
+        } else if applies_default(field) {
+            let provider = default_provider_ident(id, field_ident);
+            quote! { #field_ident: #provider(), }
+        } else {
+            quote! { #field_ident: None, }
+        }
+    });
+    let mut setters: Vec<TokenStream> = object
+        .fields
+        .iter()
+        .filter(|field| !field.required)
+        .map(|field| {
+            let field_ident = field_ident(field);
+            let setter = format_ident!("with_{}", field_ident.unraw());
+            let inner = ty_tokens(
+                Ty {
+                    nullable: false,
+                    ..field.ty
+                },
+                names,
+                false,
+            );
+            let doc = format!("Set the `{}` member.", field.name.wire);
+            quote! {
+                #[doc = #doc]
+                #[must_use]
+                pub fn #setter(mut self, value: #inner) -> Self {
+                    self.#field_ident = Some(value);
+                    self
+                }
+            }
+        })
+        .collect();
+    let overflow_init = match &object.additional {
+        AdditionalProps::Typed(ty) => {
+            let ty = ty_tokens(**ty, names, false);
+            let overflow = names
+                .struct_overflow
+                .get(&id)
+                .expect("overflow field name allocated");
+            let setter = format_ident!("with_{}", overflow.unraw());
+            setters.push(quote! {
+                /// Set the members no property declares, replacing any set before.
+                #[must_use]
+                pub fn #setter(mut self, value: BTreeMap<String, #ty>) -> Self {
+                    self.#overflow = value;
+                    self
+                }
+            });
+            quote! { #overflow: BTreeMap::new(), }
+        }
+        AdditionalProps::Allow | AdditionalProps::Deny => quote! {},
+    };
+    let required = object.fields.iter().filter(|field| field.required).count();
+    let optional_doc = "every optional member as decoding an absent one sets it: its schema \
+                        `default` where it has one, else unset.";
+    let new_doc = if required == 0 {
+        format!("A `{ident}` with {optional_doc} `Default` builds the same value.")
+    } else if setters.is_empty() {
+        format!("A `{ident}` holding every member given, in declaration order.")
+    } else {
+        format!(
+            "A `{ident}` holding the required members given, in declaration order, and \
+             {optional_doc}"
+        )
+    };
+    let (derive_default, default_impl) = if required > 0 {
+        (None, None)
+    } else if object.fields.iter().any(applies_default) {
+        // Spelled by path: `name::TYPES_MODULE_NAMES` does not reserve `Default`, so a schema may
+        // take that name in this module.
+        let default_impl = quote! {
+            impl std::default::Default for #ident {
+                fn default() -> Self {
+                    Self::new()
+                }
+            }
+        };
+        (None, Some(default_impl))
+    } else {
+        (Some(quote! { Default, }), None)
+    };
+    // A description decides how many members are required, and a consumer's `clippy.toml` where
+    // `too_many_arguments` fires, so `new` allows it whatever its arity.
+    let constructors = quote! {
+        impl #ident {
+            #[doc = #new_doc]
+            #[allow(clippy::too_many_arguments)]
+            pub fn new(#(#params),*) -> Self {
+                Self {
+                    #(#inits)*
+                    #overflow_init
+                }
+            }
+
+            #(#setters)*
+        }
+        #default_impl
+    };
+    StructConstructors {
+        derive_default,
+        constructors,
     }
 }
 

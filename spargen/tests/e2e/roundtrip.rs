@@ -7,11 +7,11 @@ use super::*;
 /// string-vs-array union, a required-key-disjoint closed-object union, a nullable-variant union, and
 /// an `allOf`-merged struct), then add `proptest` as a dev-dependency OF THE HARNESS-SCAFFOLDED
 /// CRATE ONLY and drive a generated `tests/roundtrip.rs` that round-trips MANY random values through
-/// the real emitted serde code. The types derive `Serialize`/`Deserialize` but NOT `PartialEq`, so
-/// stability is asserted via re-serialized `serde_json::Value` equality (serialize→deserialize→
-/// serialize is a fixed point) — this catches a disjoint union misrouting a value to the wrong
-/// variant (j2 would differ) and `allOf` field loss. A stronger per-variant assertion proves a value
-/// built as variant K deserializes back onto variant K (not misrouted).
+/// the real emitted serde code. Each value decodes back equal to itself (the generated `PartialEq`),
+/// and serialize→deserialize→serialize is a fixed point on the `serde_json::Value` — this catches a
+/// disjoint union misrouting a value to the wrong variant and `allOf` field loss. A stronger
+/// per-variant assertion proves a value built as variant K deserializes back onto variant K (not
+/// misrouted).
 ///
 /// Confirms, before appending, that the fixture manifest carries no `proptest`: the dependency is
 /// scoped strictly to this throwaway test crate.
@@ -54,15 +54,15 @@ const ROUNDTRIP_TEST: &str = r####"
 use proptest::prelude::*;
 use roundtrip_client::types;
 
-/// serialize → deserialize → serialize is a fixed point on the JSON value (the types lack
-/// `PartialEq`, so equality is asserted on the re-serialized `serde_json::Value`). A misrouted
-/// disjoint-union value or a dropped `allOf` field would make the second serialization differ.
+/// A value decodes back equal to itself, and serialize → deserialize → serialize is a fixed point on
+/// the JSON value. A misrouted disjoint-union value or a dropped `allOf` field fails both.
 fn roundtrip_stable<T>(value: &T) -> Result<(), TestCaseError>
 where
-    T: serde::Serialize + serde::de::DeserializeOwned,
+    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
 {
     let first = serde_json::to_value(value).expect("serialize");
     let back: T = serde_json::from_value(first.clone()).expect("deserialize");
+    prop_assert_eq!(&back, value);
     let second = serde_json::to_value(&back).expect("re-serialize");
     prop_assert_eq!(first, second);
     Ok(())

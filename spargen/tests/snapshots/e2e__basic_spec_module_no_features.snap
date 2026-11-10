@@ -5624,7 +5624,7 @@ pub mod types {
     {
         T::deserialize(deserializer).map(Some)
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct DeepFilter {
         #[serde(rename = "kind")]
         pub kind: DeepFilterKind,
@@ -5636,6 +5636,19 @@ pub mod types {
         )]
         pub limit: Option<DeepFilterLimit>,
     }
+    impl DeepFilter {
+        ///A `DeepFilter` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(kind: DeepFilterKind) -> Self {
+            Self { kind, limit: None }
+        }
+        ///Set the `limit` member.
+        #[must_use]
+        pub fn with_limit(mut self, value: DeepFilterLimit) -> Self {
+            self.limit = Some(value);
+            self
+        }
+    }
     pub type DeepFilterKind = String;
     pub type DeepFilterLimit = i64;
     pub type CollisionPayload = String;
@@ -5643,7 +5656,7 @@ pub mod types {
     #[doc = "*   A list item\n    continuation text\n\n> A quoted warning\n> continuation text"]
     pub type MarkdownDocs = String;
     ///Workflow identifier    accepted as a numeric id or file name.
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum WorkflowId {
         WorkflowIdVariant0(Box<WorkflowIdVariant0>),
         WorkflowIdVariant1(Box<WorkflowIdVariant1>),
@@ -5684,7 +5697,7 @@ pub mod types {
     }
     pub type WorkflowIdVariant0 = i64;
     pub type WorkflowIdVariant1 = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Refined {
         #[serde(rename = "run_id")]
         pub run_id: RefinedMember1RunId,
@@ -5698,6 +5711,27 @@ pub mod types {
         pub steps: RefinedStepsIntersection,
         #[serde(rename = "empty_only")]
         pub empty_only: RefinedEmptyOnlyIntersection,
+    }
+    impl Refined {
+        ///A `Refined` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(
+            run_id: RefinedMember1RunId,
+            status: RefinedMember1Status,
+            marker: Option<RefinedMarkerIntersection>,
+            labels: RefinedLabelsIntersection,
+            steps: RefinedStepsIntersection,
+            empty_only: RefinedEmptyOnlyIntersection,
+        ) -> Self {
+            Self {
+                run_id,
+                status,
+                marker,
+                labels,
+                steps,
+                empty_only,
+            }
+        }
     }
     pub type RefinedMember0LabelsItem = String;
     pub type RefinedMember1RunId = i64;
@@ -5721,13 +5755,20 @@ pub mod types {
     pub type RefinedMember1StepsItemName = String;
     pub type RefinedMarkerIntersection = ();
     pub type RefinedLabelsIntersection = Vec<RefinedMember0LabelsItem>;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct RefinedStepsIntersectionItem {
         #[serde(rename = "name")]
         pub name: RefinedMember1StepsItemName,
     }
+    impl RefinedStepsIntersectionItem {
+        ///A `RefinedStepsIntersectionItem` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(name: RefinedMember1StepsItemName) -> Self {
+            Self { name }
+        }
+    }
     pub type RefinedStepsIntersection = Vec<RefinedStepsIntersectionItem>;
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum RefinedEmptyOnlyIntersectionItem {}
     impl<'de> serde::Deserialize<'de> for RefinedEmptyOnlyIntersectionItem {
         fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
@@ -5754,7 +5795,7 @@ pub mod types {
         }
     }
     pub type RefinedEmptyOnlyIntersection = Vec<RefinedEmptyOnlyIntersectionItem>;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ConflictDefaultTarget {
         ///Default: `a`.
         #[serde(
@@ -5765,11 +5806,29 @@ pub mod types {
         )]
         pub x: Option<ConflictDefaultTargetX>,
     }
+    impl ConflictDefaultTarget {
+        ///A `ConflictDefaultTarget` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self { x: default_35_x() }
+        }
+        ///Set the `x` member.
+        #[must_use]
+        pub fn with_x(mut self, value: ConflictDefaultTargetX) -> Self {
+            self.x = Some(value);
+            self
+        }
+    }
+    impl std::default::Default for ConflictDefaultTarget {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
     fn default_35_x() -> Option<ConflictDefaultTargetX> {
         Some("a".to_owned())
     }
     pub type ConflictDefaultTargetX = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct ConflictDefault {
         ///Default (not applied): `"a"`.
         #[serde(
@@ -5780,7 +5839,20 @@ pub mod types {
         )]
         pub x: Option<ConflictDefaultXintersection>,
     }
-    #[derive(Debug, Clone)]
+    impl ConflictDefault {
+        ///A `ConflictDefault` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self { x: None }
+        }
+        ///Set the `x` member.
+        #[must_use]
+        pub fn with_x(mut self, value: ConflictDefaultXintersection) -> Self {
+            self.x = Some(value);
+            self
+        }
+    }
+    #[derive(Debug, Clone, PartialEq)]
     pub enum ConflictDefaultXintersection {}
     impl<'de> serde::Deserialize<'de> for ConflictDefaultXintersection {
         fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
@@ -5806,7 +5878,7 @@ pub mod types {
             )
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct ConflictDefaultSibling {
         ///Default (not applied): `"a"`.
         #[serde(
@@ -5817,7 +5889,23 @@ pub mod types {
         )]
         pub x: Option<ConflictDefaultSiblingReferenceIntersectionX>,
     }
-    #[derive(Debug, Clone)]
+    impl ConflictDefaultSibling {
+        ///A `ConflictDefaultSibling` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self { x: None }
+        }
+        ///Set the `x` member.
+        #[must_use]
+        pub fn with_x(
+            mut self,
+            value: ConflictDefaultSiblingReferenceIntersectionX,
+        ) -> Self {
+            self.x = Some(value);
+            self
+        }
+    }
+    #[derive(Debug, Clone, PartialEq)]
     pub enum ConflictDefaultSiblingReferenceIntersectionX {}
     impl<'de> serde::Deserialize<'de> for ConflictDefaultSiblingReferenceIntersectionX {
         fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
@@ -5843,7 +5931,7 @@ pub mod types {
             )
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct NarrowDefaultBase {
         ///Default: `a`.
         #[serde(
@@ -5878,6 +5966,47 @@ pub mod types {
         )]
         pub fraction: Option<NarrowDefaultBaseFraction>,
     }
+    impl NarrowDefaultBase {
+        ///A `NarrowDefaultBase` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self {
+                valid: default_46_valid(),
+                bad: default_46_bad(),
+                ratio: default_46_ratio(),
+                fraction: default_46_fraction(),
+            }
+        }
+        ///Set the `valid` member.
+        #[must_use]
+        pub fn with_valid(mut self, value: NarrowDefaultBaseValid) -> Self {
+            self.valid = Some(value);
+            self
+        }
+        ///Set the `bad` member.
+        #[must_use]
+        pub fn with_bad(mut self, value: NarrowDefaultBaseBad) -> Self {
+            self.bad = Some(value);
+            self
+        }
+        ///Set the `ratio` member.
+        #[must_use]
+        pub fn with_ratio(mut self, value: NarrowDefaultBaseRatio) -> Self {
+            self.ratio = Some(value);
+            self
+        }
+        ///Set the `fraction` member.
+        #[must_use]
+        pub fn with_fraction(mut self, value: NarrowDefaultBaseFraction) -> Self {
+            self.fraction = Some(value);
+            self
+        }
+    }
+    impl std::default::Default for NarrowDefaultBase {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
     fn default_46_valid() -> Option<NarrowDefaultBaseValid> {
         Some("a".to_owned())
     }
@@ -5894,7 +6023,7 @@ pub mod types {
     pub type NarrowDefaultBaseBad = String;
     pub type NarrowDefaultBaseRatio = f64;
     pub type NarrowDefaultBaseFraction = f64;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct NarrowDefaultEnum {
         #[serde(
             rename = "valid",
@@ -5924,6 +6053,42 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub fraction: Option<NarrowDefaultEnumFraction>,
+    }
+    impl NarrowDefaultEnum {
+        ///A `NarrowDefaultEnum` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self {
+                valid: None,
+                bad: None,
+                ratio: None,
+                fraction: None,
+            }
+        }
+        ///Set the `valid` member.
+        #[must_use]
+        pub fn with_valid(mut self, value: NarrowDefaultEnumValid) -> Self {
+            self.valid = Some(value);
+            self
+        }
+        ///Set the `bad` member.
+        #[must_use]
+        pub fn with_bad(mut self, value: NarrowDefaultEnumBad) -> Self {
+            self.bad = Some(value);
+            self
+        }
+        ///Set the `ratio` member.
+        #[must_use]
+        pub fn with_ratio(mut self, value: NarrowDefaultEnumRatio) -> Self {
+            self.ratio = Some(value);
+            self
+        }
+        ///Set the `fraction` member.
+        #[must_use]
+        pub fn with_fraction(mut self, value: NarrowDefaultEnumFraction) -> Self {
+            self.fraction = Some(value);
+            self
+        }
     }
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub enum NarrowDefaultEnumValid {
@@ -5961,7 +6126,7 @@ pub mod types {
     }
     pub type NarrowDefaultEnumRatio = i64;
     pub type NarrowDefaultEnumFraction = i64;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct NarrowDefault {
         ///Default: `a`.
         #[serde(
@@ -5996,13 +6161,54 @@ pub mod types {
         )]
         pub fraction: Option<NarrowDefaultEnumFraction>,
     }
+    impl NarrowDefault {
+        ///A `NarrowDefault` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self {
+                valid: default_56_valid(),
+                bad: None,
+                ratio: default_56_ratio(),
+                fraction: None,
+            }
+        }
+        ///Set the `valid` member.
+        #[must_use]
+        pub fn with_valid(mut self, value: NarrowDefaultEnumValid) -> Self {
+            self.valid = Some(value);
+            self
+        }
+        ///Set the `bad` member.
+        #[must_use]
+        pub fn with_bad(mut self, value: NarrowDefaultEnumBad) -> Self {
+            self.bad = Some(value);
+            self
+        }
+        ///Set the `ratio` member.
+        #[must_use]
+        pub fn with_ratio(mut self, value: NarrowDefaultEnumRatio) -> Self {
+            self.ratio = Some(value);
+            self
+        }
+        ///Set the `fraction` member.
+        #[must_use]
+        pub fn with_fraction(mut self, value: NarrowDefaultEnumFraction) -> Self {
+            self.fraction = Some(value);
+            self
+        }
+    }
+    impl std::default::Default for NarrowDefault {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
     fn default_56_valid() -> Option<NarrowDefaultEnumValid> {
         Some(NarrowDefaultEnumValid::A)
     }
     fn default_56_ratio() -> Option<NarrowDefaultEnumRatio> {
         Some(3)
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct NarrowDefaultSibling {
         ///Default: `a`.
         #[serde(
@@ -6036,6 +6242,50 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub fraction: Option<NarrowDefaultSiblingConstraintFraction>,
+    }
+    impl NarrowDefaultSibling {
+        ///A `NarrowDefaultSibling` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self {
+                valid: default_57_valid(),
+                bad: None,
+                ratio: default_57_ratio(),
+                fraction: None,
+            }
+        }
+        ///Set the `valid` member.
+        #[must_use]
+        pub fn with_valid(mut self, value: NarrowDefaultSiblingConstraintValid) -> Self {
+            self.valid = Some(value);
+            self
+        }
+        ///Set the `bad` member.
+        #[must_use]
+        pub fn with_bad(mut self, value: NarrowDefaultSiblingConstraintBad) -> Self {
+            self.bad = Some(value);
+            self
+        }
+        ///Set the `ratio` member.
+        #[must_use]
+        pub fn with_ratio(mut self, value: NarrowDefaultSiblingConstraintRatio) -> Self {
+            self.ratio = Some(value);
+            self
+        }
+        ///Set the `fraction` member.
+        #[must_use]
+        pub fn with_fraction(
+            mut self,
+            value: NarrowDefaultSiblingConstraintFraction,
+        ) -> Self {
+            self.fraction = Some(value);
+            self
+        }
+    }
+    impl std::default::Default for NarrowDefaultSibling {
+        fn default() -> Self {
+            Self::new()
+        }
     }
     fn default_57_valid() -> Option<NarrowDefaultSiblingConstraintValid> {
         Some(NarrowDefaultSiblingConstraintValid::A)
@@ -6079,7 +6329,7 @@ pub mod types {
     }
     pub type NarrowDefaultSiblingConstraintRatio = i64;
     pub type NarrowDefaultSiblingConstraintFraction = i64;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct MergedDefaultNarrow {
         #[serde(
             rename = "p",
@@ -6089,8 +6339,21 @@ pub mod types {
         )]
         pub p: Option<MergedDefaultNarrowP>,
     }
+    impl MergedDefaultNarrow {
+        ///A `MergedDefaultNarrow` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self { p: None }
+        }
+        ///Set the `p` member.
+        #[must_use]
+        pub fn with_p(mut self, value: MergedDefaultNarrowP) -> Self {
+            self.p = Some(value);
+            self
+        }
+    }
     pub type MergedDefaultNarrowP = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct MergedDefaultBase {
         ///Default: `hello`.
         #[serde(
@@ -6101,11 +6364,29 @@ pub mod types {
         )]
         pub p: Option<MergedDefaultBaseP>,
     }
+    impl MergedDefaultBase {
+        ///A `MergedDefaultBase` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self { p: default_65_p() }
+        }
+        ///Set the `p` member.
+        #[must_use]
+        pub fn with_p(mut self, value: MergedDefaultBaseP) -> Self {
+            self.p = Some(value);
+            self
+        }
+    }
+    impl std::default::Default for MergedDefaultBase {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
     fn default_65_p() -> Option<MergedDefaultBaseP> {
         Some("hello".to_owned())
     }
     pub type MergedDefaultBaseP = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct MergedDefaultOther {
         ///Default: `world`.
         #[serde(
@@ -6116,11 +6397,29 @@ pub mod types {
         )]
         pub p: Option<MergedDefaultOtherP>,
     }
+    impl MergedDefaultOther {
+        ///A `MergedDefaultOther` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self { p: default_67_p() }
+        }
+        ///Set the `p` member.
+        #[must_use]
+        pub fn with_p(mut self, value: MergedDefaultOtherP) -> Self {
+            self.p = Some(value);
+            self
+        }
+    }
+    impl std::default::Default for MergedDefaultOther {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
     fn default_67_p() -> Option<MergedDefaultOtherP> {
         Some("world".to_owned())
     }
     pub type MergedDefaultOtherP = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct MergedDefault {
         ///Default: `hello`.
         #[serde(
@@ -6131,10 +6430,28 @@ pub mod types {
         )]
         pub p: Option<MergedDefaultNarrowP>,
     }
+    impl MergedDefault {
+        ///A `MergedDefault` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self { p: default_69_p() }
+        }
+        ///Set the `p` member.
+        #[must_use]
+        pub fn with_p(mut self, value: MergedDefaultNarrowP) -> Self {
+            self.p = Some(value);
+            self
+        }
+    }
+    impl std::default::Default for MergedDefault {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
     fn default_69_p() -> Option<MergedDefaultNarrowP> {
         Some("hello".to_owned())
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct MergedDefaultSibling {
         ///Default: `hello`.
         #[serde(
@@ -6145,10 +6462,28 @@ pub mod types {
         )]
         pub p: Option<MergedDefaultNarrowP>,
     }
+    impl MergedDefaultSibling {
+        ///A `MergedDefaultSibling` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self { p: default_70_p() }
+        }
+        ///Set the `p` member.
+        #[must_use]
+        pub fn with_p(mut self, value: MergedDefaultNarrowP) -> Self {
+            self.p = Some(value);
+            self
+        }
+    }
+    impl std::default::Default for MergedDefaultSibling {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
     fn default_70_p() -> Option<MergedDefaultNarrowP> {
         Some("hello".to_owned())
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct MergedDefaultClash {
         ///Default: `hello`.
         #[serde(
@@ -6159,10 +6494,28 @@ pub mod types {
         )]
         pub p: Option<MergedDefaultOtherP>,
     }
+    impl MergedDefaultClash {
+        ///A `MergedDefaultClash` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self { p: default_73_p() }
+        }
+        ///Set the `p` member.
+        #[must_use]
+        pub fn with_p(mut self, value: MergedDefaultOtherP) -> Self {
+            self.p = Some(value);
+            self
+        }
+    }
+    impl std::default::Default for MergedDefaultClash {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
     fn default_73_p() -> Option<MergedDefaultOtherP> {
         Some("hello".to_owned())
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct ForbiddenProperty {
         #[serde(
             rename = "x",
@@ -6172,7 +6525,20 @@ pub mod types {
         )]
         pub x: Option<ForbiddenPropertyX>,
     }
-    #[derive(Debug, Clone)]
+    impl ForbiddenProperty {
+        ///A `ForbiddenProperty` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self { x: None }
+        }
+        ///Set the `x` member.
+        #[must_use]
+        pub fn with_x(mut self, value: ForbiddenPropertyX) -> Self {
+            self.x = Some(value);
+            self
+        }
+    }
+    #[derive(Debug, Clone, PartialEq)]
     pub enum ForbiddenPropertyX {}
     impl<'de> serde::Deserialize<'de> for ForbiddenPropertyX {
         fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
@@ -6198,12 +6564,25 @@ pub mod types {
             )
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct NullOnlyProperty {
         #[serde(rename = "x", default, skip_serializing_if = "Option::is_none")]
         pub x: Option<NullOnlyPropertyX>,
     }
-    #[derive(Debug, Clone)]
+    impl NullOnlyProperty {
+        ///A `NullOnlyProperty` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self { x: None }
+        }
+        ///Set the `x` member.
+        #[must_use]
+        pub fn with_x(mut self, value: NullOnlyPropertyX) -> Self {
+            self.x = Some(value);
+            self
+        }
+    }
+    #[derive(Debug, Clone, PartialEq)]
     pub enum NullOnlyPropertyX {}
     impl<'de> serde::Deserialize<'de> for NullOnlyPropertyX {
         fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
@@ -6229,7 +6608,7 @@ pub mod types {
             )
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct OptionalFields {
         #[serde(
             rename = "name",
@@ -6298,6 +6677,89 @@ pub mod types {
         #[serde(rename = "maybe", default, skip_serializing_if = "Option::is_none")]
         pub maybe: Option<OptionalFieldsMaybe>,
     }
+    impl OptionalFields {
+        ///A `OptionalFields` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self {
+                name: None,
+                count: None,
+                flag: None,
+                tags: None,
+                mode: None,
+                nested: None,
+                choice: None,
+                colour: default_79_colour(),
+                anything: None,
+                maybe: None,
+            }
+        }
+        ///Set the `name` member.
+        #[must_use]
+        pub fn with_name(mut self, value: OptionalFieldsName) -> Self {
+            self.name = Some(value);
+            self
+        }
+        ///Set the `count` member.
+        #[must_use]
+        pub fn with_count(mut self, value: OptionalFieldsCount) -> Self {
+            self.count = Some(value);
+            self
+        }
+        ///Set the `flag` member.
+        #[must_use]
+        pub fn with_flag(mut self, value: OptionalFieldsFlag) -> Self {
+            self.flag = Some(value);
+            self
+        }
+        ///Set the `tags` member.
+        #[must_use]
+        pub fn with_tags(mut self, value: OptionalFieldsTags) -> Self {
+            self.tags = Some(value);
+            self
+        }
+        ///Set the `mode` member.
+        #[must_use]
+        pub fn with_mode(mut self, value: Mode) -> Self {
+            self.mode = Some(value);
+            self
+        }
+        ///Set the `nested` member.
+        #[must_use]
+        pub fn with_nested(mut self, value: ForbiddenProperty) -> Self {
+            self.nested = Some(value);
+            self
+        }
+        ///Set the `choice` member.
+        #[must_use]
+        pub fn with_choice(mut self, value: OptionalFieldsChoice) -> Self {
+            self.choice = Some(value);
+            self
+        }
+        ///Set the `colour` member.
+        #[must_use]
+        pub fn with_colour(mut self, value: OptionalFieldsColour) -> Self {
+            self.colour = Some(value);
+            self
+        }
+        ///Set the `anything` member.
+        #[must_use]
+        pub fn with_anything(mut self, value: OptionalFieldsAnything) -> Self {
+            self.anything = Some(value);
+            self
+        }
+        ///Set the `maybe` member.
+        #[must_use]
+        pub fn with_maybe(mut self, value: OptionalFieldsMaybe) -> Self {
+            self.maybe = Some(value);
+            self
+        }
+    }
+    impl std::default::Default for OptionalFields {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
     fn default_79_colour() -> Option<OptionalFieldsColour> {
         Some("red".to_owned())
     }
@@ -6326,7 +6788,7 @@ pub mod types {
     }
     pub type OptionalFieldsChoiceVariant0 = String;
     pub type OptionalFieldsChoiceVariant1 = i64;
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum OptionalFieldsChoice {
         OptionalFieldsChoiceVariant0(Box<OptionalFieldsChoiceVariant0>),
         OptionalFieldsChoiceVariant1(Box<OptionalFieldsChoiceVariant1>),
@@ -6386,7 +6848,7 @@ pub mod types {
             )
         }
     }
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum AnyString {
         AnyStringVariant0(Box<AnyStringVariant0>),
         StringLiteral(Box<StringLiteral>),
@@ -6470,7 +6932,7 @@ pub mod types {
         }
     }
     pub type AnyStringVariant0 = String;
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum AnyNumber {
         AnyNumberVariant0(Box<AnyNumberVariant0>),
         AnyNumberVariant1(Box<AnyNumberVariant1>),
@@ -6555,7 +7017,7 @@ pub mod types {
     }
     pub type AnyNumberVariant0 = f64;
     pub type AnyNumberVariant1 = i64;
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum OneOverlap {
         OneOverlapVariant0(Box<OneOverlapVariant0>),
         StringLiteral(Box<StringLiteral>),
@@ -6639,15 +7101,29 @@ pub mod types {
         }
     }
     pub type OneOverlapVariant0 = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct BroadOwner {}
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    impl BroadOwner {
+        ///A `BroadOwner` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self {}
+        }
+    }
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct DetailedOwner {
         #[serde(rename = "id")]
         pub id: DetailedOwnerId,
     }
+    impl DetailedOwner {
+        ///A `DetailedOwner` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(id: DetailedOwnerId) -> Self {
+            Self { id }
+        }
+    }
     pub type DetailedOwnerId = i64;
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum AnyOwner {
         BroadOwner(Box<BroadOwner>),
         DetailedOwner(Box<DetailedOwner>),
@@ -6728,12 +7204,19 @@ pub mod types {
             }
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ContentFile {
         #[serde(rename = "type")]
         pub r#type: ContentFileType,
         #[serde(rename = "content")]
         pub content: ContentFileContent,
+    }
+    impl ContentFile {
+        ///A `ContentFile` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(r#type: ContentFileType, content: ContentFileContent) -> Self {
+            Self { r#type, content }
+        }
     }
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub enum ContentFileType {
@@ -6750,12 +7233,19 @@ pub mod types {
         }
     }
     pub type ContentFileContent = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ContentLink {
         #[serde(rename = "type")]
         pub r#type: ContentLinkType,
         #[serde(rename = "target")]
         pub target: ContentLinkTarget,
+    }
+    impl ContentLink {
+        ///A `ContentLink` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(r#type: ContentLinkType, target: ContentLinkTarget) -> Self {
+            Self { r#type, target }
+        }
     }
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub enum ContentLinkType {
@@ -6772,7 +7262,7 @@ pub mod types {
         }
     }
     pub type ContentLinkTarget = String;
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum MixedContent {
         MixedContentVariant0(Box<MixedContentVariant0>),
         ContentFile(Box<ContentFile>),
@@ -6862,7 +7352,7 @@ pub mod types {
     }
     pub type MixedContentVariant0Item = String;
     pub type MixedContentVariant0 = Vec<MixedContentVariant0Item>;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct User {
         #[serde(rename = "id")]
         pub id: UserId,
@@ -6978,11 +7468,140 @@ pub mod types {
         )]
         pub mixed_content: Option<MixedContent>,
     }
+    impl User {
+        ///A `User` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(id: UserId, name: UserName) -> Self {
+            Self {
+                id,
+                external_id: None,
+                created_at: None,
+                name,
+                tree: None,
+                category: None,
+                dict: None,
+                alias_node: None,
+                priority: None,
+                pet: None,
+                animal: None,
+                alias: None,
+                notes: None,
+                refined: None,
+                any_string: None,
+                any_number: None,
+                one_overlap: None,
+                any_owner: None,
+                mixed_content: None,
+            }
+        }
+        ///Set the `external_id` member.
+        #[must_use]
+        pub fn with_external_id(mut self, value: UserExternalId) -> Self {
+            self.external_id = Some(value);
+            self
+        }
+        ///Set the `created_at` member.
+        #[must_use]
+        pub fn with_created_at(mut self, value: UserCreatedAt) -> Self {
+            self.created_at = Some(value);
+            self
+        }
+        ///Set the `tree` member.
+        #[must_use]
+        pub fn with_tree(mut self, value: TreeNode) -> Self {
+            self.tree = Some(value);
+            self
+        }
+        ///Set the `category` member.
+        #[must_use]
+        pub fn with_category(mut self, value: Category) -> Self {
+            self.category = Some(value);
+            self
+        }
+        ///Set the `dict` member.
+        #[must_use]
+        pub fn with_dict(mut self, value: Dict) -> Self {
+            self.dict = Some(value);
+            self
+        }
+        ///Set the `alias_node` member.
+        #[must_use]
+        pub fn with_alias_node(mut self, value: AliasNode) -> Self {
+            self.alias_node = Some(value);
+            self
+        }
+        ///Set the `priority` member.
+        #[must_use]
+        pub fn with_priority(mut self, value: Priority) -> Self {
+            self.priority = Some(value);
+            self
+        }
+        ///Set the `pet` member.
+        #[must_use]
+        pub fn with_pet(mut self, value: Pet) -> Self {
+            self.pet = Some(value);
+            self
+        }
+        ///Set the `animal` member.
+        #[must_use]
+        pub fn with_animal(mut self, value: LooseAnimal) -> Self {
+            self.animal = Some(value);
+            self
+        }
+        ///Set the `alias` member.
+        #[must_use]
+        pub fn with_alias(mut self, value: StringOrList) -> Self {
+            self.alias = Some(value);
+            self
+        }
+        ///Set the `notes` member.
+        #[must_use]
+        pub fn with_notes(mut self, value: StringListOrNull) -> Self {
+            self.notes = Some(value);
+            self
+        }
+        ///Set the `refined` member.
+        #[must_use]
+        pub fn with_refined(mut self, value: Refined) -> Self {
+            self.refined = Some(value);
+            self
+        }
+        ///Set the `any_string` member.
+        #[must_use]
+        pub fn with_any_string(mut self, value: AnyString) -> Self {
+            self.any_string = Some(value);
+            self
+        }
+        ///Set the `any_number` member.
+        #[must_use]
+        pub fn with_any_number(mut self, value: AnyNumber) -> Self {
+            self.any_number = Some(value);
+            self
+        }
+        ///Set the `one_overlap` member.
+        #[must_use]
+        pub fn with_one_overlap(mut self, value: OneOverlap) -> Self {
+            self.one_overlap = Some(value);
+            self
+        }
+        ///Set the `any_owner` member.
+        #[must_use]
+        pub fn with_any_owner(mut self, value: AnyOwner) -> Self {
+            self.any_owner = Some(value);
+            self
+        }
+        ///Set the `mixed_content` member.
+        #[must_use]
+        pub fn with_mixed_content(mut self, value: MixedContent) -> Self {
+            self.mixed_content = Some(value);
+            self
+        }
+    }
     pub type UserId = String;
     pub type UserExternalId = String;
     pub type UserCreatedAt = String;
     pub type UserName = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct TreeNode {
         #[serde(rename = "value")]
         pub value: TreeNodeValue,
@@ -7001,9 +7620,32 @@ pub mod types {
         )]
         pub children: Option<TreeNodeChildren>,
     }
+    impl TreeNode {
+        ///A `TreeNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(value: TreeNodeValue) -> Self {
+            Self {
+                value,
+                parent: None,
+                children: None,
+            }
+        }
+        ///Set the `parent` member.
+        #[must_use]
+        pub fn with_parent(mut self, value: Box<TreeNode>) -> Self {
+            self.parent = Some(value);
+            self
+        }
+        ///Set the `children` member.
+        #[must_use]
+        pub fn with_children(mut self, value: TreeNodeChildren) -> Self {
+            self.children = Some(value);
+            self
+        }
+    }
     pub type TreeNodeValue = String;
     pub type TreeNodeChildren = Vec<TreeNode>;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Category {
         #[serde(rename = "name")]
         pub name: CategoryName,
@@ -7015,8 +7657,21 @@ pub mod types {
         )]
         pub item: Option<Item>,
     }
+    impl Category {
+        ///A `Category` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(name: CategoryName) -> Self {
+            Self { name, item: None }
+        }
+        ///Set the `item` member.
+        #[must_use]
+        pub fn with_item(mut self, value: Item) -> Self {
+            self.item = Some(value);
+            self
+        }
+    }
     pub type CategoryName = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Item {
         #[serde(rename = "label")]
         pub label: ItemLabel,
@@ -7028,18 +7683,59 @@ pub mod types {
         )]
         pub category: Option<Box<Category>>,
     }
+    impl Item {
+        ///A `Item` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(label: ItemLabel) -> Self {
+            Self { label, category: None }
+        }
+        ///Set the `category` member.
+        #[must_use]
+        pub fn with_category(mut self, value: Box<Category>) -> Self {
+            self.category = Some(value);
+            self
+        }
+    }
     pub type ItemLabel = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct Dict {
         #[serde(flatten)]
         pub additional: BTreeMap<String, Dict>,
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    impl Dict {
+        ///A `Dict` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self {
+                additional: BTreeMap::new(),
+            }
+        }
+        /// Set the members no property declares, replacing any set before.
+        #[must_use]
+        pub fn with_additional(mut self, value: BTreeMap<String, Dict>) -> Self {
+            self.additional = value;
+            self
+        }
+    }
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct AliasNode {
         #[serde(rename = "value")]
         pub value: AliasNodeValue,
         #[serde(rename = "parent", default, skip_serializing_if = "Option::is_none")]
         pub parent: Option<Box<AliasNode>>,
+    }
+    impl AliasNode {
+        ///A `AliasNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(value: AliasNodeValue) -> Self {
+            Self { value, parent: None }
+        }
+        ///Set the `parent` member.
+        #[must_use]
+        pub fn with_parent(mut self, value: Box<AliasNode>) -> Self {
+            self.parent = Some(value);
+            self
+        }
     }
     pub type AliasNodeValue = String;
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -7062,7 +7758,7 @@ pub mod types {
             )
         }
     }
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum Pet {
         Cat(Box<Cat>),
         Dog(Box<Dog>),
@@ -7138,22 +7834,36 @@ pub mod types {
             value.serialize(serializer)
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Cat {
         #[serde(rename = "petType")]
         pub pet_type: CatPetType,
         #[serde(rename = "name")]
         pub name: CatName,
     }
+    impl Cat {
+        ///A `Cat` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(pet_type: CatPetType, name: CatName) -> Self {
+            Self { pet_type, name }
+        }
+    }
     pub type CatPetType = String;
     pub type CatName = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Dog {
         #[serde(rename = "bark")]
         pub bark: DogBark,
     }
+    impl Dog {
+        ///A `Dog` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(bark: DogBark) -> Self {
+            Self { bark }
+        }
+    }
     pub type DogBark = bool;
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum LooseAnimal {
         Cat(Box<Cat>),
         Dog(Box<Dog>),
@@ -7284,14 +7994,24 @@ pub mod types {
     }
     pub type LooseAnimalVariant2PetType = String;
     pub type LooseAnimalVariant2Fins = i64;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct LooseAnimalVariant2 {
         #[serde(rename = "petType")]
         pub pet_type: LooseAnimalVariant2PetType,
         #[serde(rename = "fins")]
         pub fins: LooseAnimalVariant2Fins,
     }
-    #[derive(Debug, Clone)]
+    impl LooseAnimalVariant2 {
+        ///A `LooseAnimalVariant2` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(
+            pet_type: LooseAnimalVariant2PetType,
+            fins: LooseAnimalVariant2Fins,
+        ) -> Self {
+            Self { pet_type, fins }
+        }
+    }
+    #[derive(Debug, Clone, PartialEq)]
     pub enum StringOrList {
         StringOrListVariant0(Box<StringOrListVariant0>),
         StringOrListVariant1(Box<StringOrListVariant1>),
@@ -7333,7 +8053,7 @@ pub mod types {
     pub type StringOrListVariant0 = String;
     pub type StringOrListVariant1Item = String;
     pub type StringOrListVariant1 = Vec<StringOrListVariant1Item>;
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum StringListOrNull {
         StringListOrNullVariant0(Box<StringListOrNullVariant0>),
         StringListOrNullVariant1(Box<StringListOrNullVariant1>),
@@ -7379,7 +8099,7 @@ pub mod types {
     pub type StringListOrNullVariant0 = String;
     pub type StringListOrNullVariant1Item = String;
     pub type StringListOrNullVariant1 = Vec<StringListOrNullVariant1Item>;
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     pub enum Channel {
         Webhook(Box<ChannelWebhook>),
         Apprise(Box<ChannelApprise>),
@@ -7456,33 +8176,67 @@ pub mod types {
         }
     }
     pub type ChannelWebhookUrl = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ChannelWebhook {
         #[serde(rename = "url")]
         pub url: ChannelWebhookUrl,
     }
+    impl ChannelWebhook {
+        ///A `ChannelWebhook` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(url: ChannelWebhookUrl) -> Self {
+            Self { url }
+        }
+    }
     pub type ChannelAppriseUrl = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ChannelApprise {
         #[serde(rename = "url")]
         pub url: ChannelAppriseUrl,
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    impl ChannelApprise {
+        ///A `ChannelApprise` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(url: ChannelAppriseUrl) -> Self {
+            Self { url }
+        }
+    }
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct MaybeAliasNode {
         #[serde(rename = "value")]
         pub value: AliasNodeValue,
         #[serde(rename = "parent", default, skip_serializing_if = "Option::is_none")]
         pub parent: Option<Box<AliasNode>>,
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    impl MaybeAliasNode {
+        ///A `MaybeAliasNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(value: AliasNodeValue) -> Self {
+            Self { value, parent: None }
+        }
+        ///Set the `parent` member.
+        #[must_use]
+        pub fn with_parent(mut self, value: Box<AliasNode>) -> Self {
+            self.parent = Some(value);
+            self
+        }
+    }
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Ticket {
         #[serde(rename = "priority")]
         pub priority: Option<Priority>,
         #[serde(rename = "history")]
         pub history: TicketHistory,
     }
+    impl Ticket {
+        ///A `Ticket` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(priority: Option<Priority>, history: TicketHistory) -> Self {
+            Self { priority, history }
+        }
+    }
     pub type TicketHistory = Vec<Option<Priority>>;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Settings {
         ///Default: `red`.
         #[serde(
@@ -7528,6 +8282,50 @@ pub mod types {
         )]
         pub mode: Option<Mode>,
     }
+    impl Settings {
+        ///A `Settings` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(retries: SettingsRetries) -> Self {
+            Self {
+                color: default_157_color(),
+                enabled: default_157_enabled(),
+                ratio: default_157_ratio(),
+                retries,
+                wide: None,
+                mode: default_157_mode(),
+            }
+        }
+        ///Set the `color` member.
+        #[must_use]
+        pub fn with_color(mut self, value: SettingsColor) -> Self {
+            self.color = Some(value);
+            self
+        }
+        ///Set the `enabled` member.
+        #[must_use]
+        pub fn with_enabled(mut self, value: SettingsEnabled) -> Self {
+            self.enabled = Some(value);
+            self
+        }
+        ///Set the `ratio` member.
+        #[must_use]
+        pub fn with_ratio(mut self, value: SettingsRatio) -> Self {
+            self.ratio = Some(value);
+            self
+        }
+        ///Set the `wide` member.
+        #[must_use]
+        pub fn with_wide(mut self, value: SettingsWide) -> Self {
+            self.wide = Some(value);
+            self
+        }
+        ///Set the `mode` member.
+        #[must_use]
+        pub fn with_mode(mut self, value: Mode) -> Self {
+            self.mode = Some(value);
+            self
+        }
+    }
     fn default_157_color() -> Option<SettingsColor> {
         Some("red".to_owned())
     }
@@ -7545,7 +8343,7 @@ pub mod types {
     pub type SettingsRatio = f64;
     pub type SettingsRetries = i64;
     pub type SettingsWide = i32;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct Headers {
         #[serde(
             rename = "host",
@@ -7557,15 +8355,52 @@ pub mod types {
         #[serde(flatten)]
         pub additional: BTreeMap<String, HeadersValue>,
     }
+    impl Headers {
+        ///A `Headers` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self {
+                host: None,
+                additional: BTreeMap::new(),
+            }
+        }
+        ///Set the `host` member.
+        #[must_use]
+        pub fn with_host(mut self, value: HeadersHost) -> Self {
+            self.host = Some(value);
+            self
+        }
+        /// Set the members no property declares, replacing any set before.
+        #[must_use]
+        pub fn with_additional(mut self, value: BTreeMap<String, HeadersValue>) -> Self {
+            self.additional = value;
+            self
+        }
+    }
     pub type HeadersHost = String;
     pub type HeadersValue = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct Tags {
         #[serde(flatten)]
         pub additional: BTreeMap<String, TagsValue>,
     }
+    impl Tags {
+        ///A `Tags` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self {
+                additional: BTreeMap::new(),
+            }
+        }
+        /// Set the members no property declares, replacing any set before.
+        #[must_use]
+        pub fn with_additional(mut self, value: BTreeMap<String, TagsValue>) -> Self {
+            self.additional = value;
+            self
+        }
+    }
     pub type TagsValue = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct Bag {
         #[serde(
             rename = "additional",
@@ -7577,15 +8412,47 @@ pub mod types {
         #[serde(flatten)]
         pub additional_0093371c: BTreeMap<String, BagValue>,
     }
+    impl Bag {
+        ///A `Bag` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self {
+                additional: None,
+                additional_0093371c: BTreeMap::new(),
+            }
+        }
+        ///Set the `additional` member.
+        #[must_use]
+        pub fn with_additional(mut self, value: BagAdditional) -> Self {
+            self.additional = Some(value);
+            self
+        }
+        /// Set the members no property declares, replacing any set before.
+        #[must_use]
+        pub fn with_additional_0093371c(
+            mut self,
+            value: BTreeMap<String, BagValue>,
+        ) -> Self {
+            self.additional_0093371c = value;
+            self
+        }
+    }
     pub type BagAdditional = String;
     pub type BagValue = i64;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct AccountBase {
         #[serde(rename = "id")]
         pub id: AccountBaseId,
     }
+    impl AccountBase {
+        ///A `AccountBase` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(id: AccountBaseId) -> Self {
+            Self { id }
+        }
+    }
     pub type AccountBaseId = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Account {
         #[serde(rename = "id")]
         pub id: AccountBaseId,
@@ -7599,55 +8466,117 @@ pub mod types {
         )]
         pub owner: Option<AccountOwner>,
     }
+    impl Account {
+        ///A `Account` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(id: AccountBaseId, label: AccountMember1Label) -> Self {
+            Self { id, label, owner: None }
+        }
+        ///Set the `owner` member.
+        #[must_use]
+        pub fn with_owner(mut self, value: AccountOwner) -> Self {
+            self.owner = Some(value);
+            self
+        }
+    }
     pub type AccountMember1Label = String;
     pub type AccountOwner = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct MultiOk {
         #[serde(rename = "ok")]
         pub ok: MultiOkOk,
     }
+    impl MultiOk {
+        ///A `MultiOk` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(ok: MultiOkOk) -> Self {
+            Self { ok }
+        }
+    }
     pub type MultiOkOk = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct MultiCreated {
         #[serde(rename = "id")]
         pub id: MultiCreatedId,
     }
+    impl MultiCreated {
+        ///A `MultiCreated` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(id: MultiCreatedId) -> Self {
+            Self { id }
+        }
+    }
     pub type MultiCreatedId = i64;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct NotFoundError {
         #[serde(rename = "reason")]
         pub reason: NotFoundErrorReason,
     }
+    impl NotFoundError {
+        ///A `NotFoundError` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(reason: NotFoundErrorReason) -> Self {
+            Self { reason }
+        }
+    }
     pub type NotFoundErrorReason = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ConflictError {
         #[serde(rename = "detail")]
         pub detail: ConflictErrorDetail,
     }
+    impl ConflictError {
+        ///A `ConflictError` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(detail: ConflictErrorDetail) -> Self {
+            Self { detail }
+        }
+    }
     pub type ConflictErrorDetail = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Problem {
         #[serde(rename = "title")]
         pub title: ProblemTitle,
         #[serde(rename = "detail")]
         pub detail: ProblemDetail,
     }
+    impl Problem {
+        ///A `Problem` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(title: ProblemTitle, detail: ProblemDetail) -> Self {
+            Self { title, detail }
+        }
+    }
     pub type ProblemTitle = String;
     pub type ProblemDetail = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct MaybeProblem {
         #[serde(rename = "title")]
         pub title: MaybeProblemTitle,
     }
+    impl MaybeProblem {
+        ///A `MaybeProblem` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(title: MaybeProblemTitle) -> Self {
+            Self { title }
+        }
+    }
     pub type MaybeProblemTitle = String;
     pub type PlainMessage = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ChatChunk {
         #[serde(rename = "delta")]
         pub delta: ChatChunkDelta,
     }
+    impl ChatChunk {
+        ///A `ChatChunk` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(delta: ChatChunkDelta) -> Self {
+            Self { delta }
+        }
+    }
     pub type ChatChunkDelta = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(rename = "order")]
     pub struct XmlOrder {
         #[serde(rename = "@id")]
@@ -7655,9 +8584,16 @@ pub mod types {
         #[serde(rename = "sku")]
         pub sku: XmlOrderSku,
     }
+    impl XmlOrder {
+        ///A `XmlOrder` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(id: XmlOrderId, sku: XmlOrderSku) -> Self {
+            Self { id, sku }
+        }
+    }
     pub type XmlOrderId = i64;
     pub type XmlOrderSku = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(rename = "xml-receipt")]
     pub struct XmlReceipt {
         #[serde(rename = "ReceiptCode")]
@@ -7670,9 +8606,22 @@ pub mod types {
         )]
         pub note: Option<XmlReceiptNote>,
     }
+    impl XmlReceipt {
+        ///A `XmlReceipt` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(code: XmlReceiptCode) -> Self {
+            Self { code, note: None }
+        }
+        ///Set the `note` member.
+        #[must_use]
+        pub fn with_note(mut self, value: XmlReceiptNote) -> Self {
+            self.note = Some(value);
+            self
+        }
+    }
     pub type XmlReceiptCode = String;
     pub type XmlReceiptNote = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(rename = "meta")]
     pub struct JsonMeta {
         #[serde(rename = "id")]
@@ -7686,6 +8635,19 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub note: Option<JsonMetaNote>,
+    }
+    impl JsonMeta {
+        ///A `JsonMeta` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(id: JsonMetaId, sku: JsonMetaSku) -> Self {
+            Self { id, sku, note: None }
+        }
+        ///Set the `note` member.
+        #[must_use]
+        pub fn with_note(mut self, value: JsonMetaNote) -> Self {
+            self.note = Some(value);
+            self
+        }
     }
     pub type JsonMetaId = i64;
     pub type JsonMetaSku = String;
@@ -7719,7 +8681,7 @@ pub mod types {
     pub type RequestBodyCount = i64;
     pub type RequestBodyTagsItemDdafbaaa = String;
     pub type RequestBodyTags0d6778a5 = Vec<RequestBodyTagsItemDdafbaaa>;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct RequestBodyE12d70b5 {
         #[serde(rename = "file")]
         pub file: RequestBodyFileBb3f81ea,
@@ -7739,6 +8701,30 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub tags: Option<RequestBodyTags0d6778a5>,
+    }
+    impl RequestBodyE12d70b5 {
+        ///A `RequestBodyE12d70b5` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(file: RequestBodyFileBb3f81ea, caption: RequestBodyCaption) -> Self {
+            Self {
+                file,
+                caption,
+                count: None,
+                tags: None,
+            }
+        }
+        ///Set the `count` member.
+        #[must_use]
+        pub fn with_count(mut self, value: RequestBodyCount) -> Self {
+            self.count = Some(value);
+            self
+        }
+        ///Set the `tags` member.
+        #[must_use]
+        pub fn with_tags(mut self, value: RequestBodyTags0d6778a5) -> Self {
+            self.tags = Some(value);
+            self
+        }
     }
     pub type Token84222325 = String;
     pub type Cursor84222325 = String;
@@ -7812,12 +8798,22 @@ pub mod types {
             super::support::deserialize_base64(deserializer).map(RequestBodyPrevious)
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct RequestBody4fcf0620 {
         #[serde(rename = "digest")]
         pub digest: Option<RequestBodyDigest>,
         #[serde(rename = "previous")]
         pub previous: Option<RequestBodyPrevious>,
+    }
+    impl RequestBody4fcf0620 {
+        ///A `RequestBody4fcf0620` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(
+            digest: Option<RequestBodyDigest>,
+            previous: Option<RequestBodyPrevious>,
+        ) -> Self {
+            Self { digest, previous }
+        }
     }
     #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
     pub struct ResponseBodyDigest(pub bytes::Bytes);
@@ -7853,19 +8849,39 @@ pub mod types {
             super::support::deserialize_base64(deserializer).map(ResponseBodyDigest)
         }
     }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ResponseBody8899a140 {
         #[serde(rename = "digest")]
         pub digest: Option<ResponseBodyDigest>,
     }
+    impl ResponseBody8899a140 {
+        ///A `ResponseBody8899a140` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(digest: Option<ResponseBodyDigest>) -> Self {
+            Self { digest }
+        }
+    }
     pub type RequestBodyFile = bytes::Bytes;
     pub type RequestBodyThumb = bytes::Bytes;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct RequestBody20d50470 {
         #[serde(rename = "file")]
         pub file: Option<RequestBodyFile>,
         #[serde(rename = "thumb", default, skip_serializing_if = "Option::is_none")]
         pub thumb: Option<RequestBodyThumb>,
+    }
+    impl RequestBody20d50470 {
+        ///A `RequestBody20d50470` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(file: Option<RequestBodyFile>) -> Self {
+            Self { file, thumb: None }
+        }
+        ///Set the `thumb` member.
+        #[must_use]
+        pub fn with_thumb(mut self, value: RequestBodyThumb) -> Self {
+            self.thumb = Some(value);
+            self
+        }
     }
     pub type ResponseBody4555dd31 = String;
     pub type ResponseBodyE2c17756 = String;
@@ -7898,7 +8914,7 @@ pub mod types {
     pub type RequestBodyName = String;
     pub type RequestBodyTagsItem = String;
     pub type RequestBodyTags = Vec<RequestBodyTagsItem>;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct RequestBody75618f63 {
         #[serde(rename = "name")]
         pub name: RequestBodyName,
@@ -7907,18 +8923,48 @@ pub mod types {
         #[serde(rename = "blob")]
         pub blob: DeepFilter,
     }
+    impl RequestBody75618f63 {
+        ///A `RequestBody75618f63` holding every member given, in declaration order.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(
+            name: RequestBodyName,
+            tags: RequestBodyTags,
+            blob: DeepFilter,
+        ) -> Self {
+            Self { name, tags, blob }
+        }
+    }
     pub type RequestBodyA = String;
     pub type RequestBodyAdditional = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct RequestBody3c5761a3 {
         #[serde(rename = "a")]
         pub a: RequestBodyA,
         #[serde(flatten)]
         pub additional: BTreeMap<String, RequestBodyAdditional>,
     }
+    impl RequestBody3c5761a3 {
+        ///A `RequestBody3c5761a3` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(a: RequestBodyA) -> Self {
+            Self {
+                a,
+                additional: BTreeMap::new(),
+            }
+        }
+        /// Set the members no property declares, replacing any set before.
+        #[must_use]
+        pub fn with_additional(
+            mut self,
+            value: BTreeMap<String, RequestBodyAdditional>,
+        ) -> Self {
+            self.additional = value;
+            self
+        }
+    }
     pub type RequestBodyAF8000e9c = String;
     pub type RequestBodyAdditionalAba279dd = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct RequestBodyE2940da4 {
         #[serde(
             rename = "a",
@@ -7930,15 +8976,59 @@ pub mod types {
         #[serde(flatten)]
         pub additional: BTreeMap<String, RequestBodyAdditionalAba279dd>,
     }
+    impl RequestBodyE2940da4 {
+        ///A `RequestBodyE2940da4` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new() -> Self {
+            Self {
+                a: None,
+                additional: BTreeMap::new(),
+            }
+        }
+        ///Set the `a` member.
+        #[must_use]
+        pub fn with_a(mut self, value: RequestBodyAF8000e9c) -> Self {
+            self.a = Some(value);
+            self
+        }
+        /// Set the members no property declares, replacing any set before.
+        #[must_use]
+        pub fn with_additional(
+            mut self,
+            value: BTreeMap<String, RequestBodyAdditionalAba279dd>,
+        ) -> Self {
+            self.additional = value;
+            self
+        }
+    }
     pub type RequestBodyCaption820ffb52 = String;
     pub type RequestBodyAdditionalItem = i64;
     pub type RequestBodyAdditionalB504903e = Vec<RequestBodyAdditionalItem>;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct RequestBody1654af29 {
         #[serde(rename = "caption")]
         pub caption: RequestBodyCaption820ffb52,
         #[serde(flatten)]
         pub additional: BTreeMap<String, RequestBodyAdditionalB504903e>,
+    }
+    impl RequestBody1654af29 {
+        ///A `RequestBody1654af29` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(caption: RequestBodyCaption820ffb52) -> Self {
+            Self {
+                caption,
+                additional: BTreeMap::new(),
+            }
+        }
+        /// Set the members no property declares, replacing any set before.
+        #[must_use]
+        pub fn with_additional(
+            mut self,
+            value: BTreeMap<String, RequestBodyAdditionalB504903e>,
+        ) -> Self {
+            self.additional = value;
+            self
+        }
     }
     pub type HeaderXTraceIds = Vec<Mode>;
     pub type ResponseBody2a32723f = String;

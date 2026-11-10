@@ -1,5 +1,5 @@
 //! Type shapes compiled and decoded in a fixture crate: tuples, alias cycles, deprecated
-//! components, and an `allOf` beside a union.
+//! components, an `allOf` beside a union, and object structs built through `new` and setters.
 
 use super::*;
 
@@ -409,4 +409,164 @@ fn strings_and_nulls_decode_beside_the_refined_object_branch() {
         status.success(),
         "the allOf-beside-union fixture must lint clean"
     );
+}
+
+/// Object structs of every member shape `new` and the `with_*` setters handle: required members
+/// (one nullable), optional members (one nullable, one keyword-named, one with a schema `default`,
+/// one a recursive reference, one a union), a typed overflow map, a struct with no required member,
+/// and one with more required members than clippy's argument threshold (issue #1267).
+const CONSTRUCTORS_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /envelope:
+    post:
+      operationId: postEnvelope
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Envelope' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Settings' }
+        '201':
+          description: wide
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Wide' }
+components:
+  schemas:
+    Envelope:
+      type: object
+      required: [id, count, parent]
+      properties:
+        id: { type: string }
+        count: { type: integer }
+        parent: { type: [string, 'null'] }
+        note: { type: string }
+        label: { type: [string, 'null'] }
+        type: { type: string }
+        mode: { type: string, enum: [fast, slow], default: fast }
+        ratio: { type: number }
+        child: { $ref: '#/components/schemas/Envelope' }
+        pet: { oneOf: [{ type: string }, { type: array, items: { type: integer } }] }
+      additionalProperties: { type: integer }
+    Settings:
+      type: object
+      properties:
+        verbose: { type: boolean }
+        level: { type: integer }
+    Tuned:
+      type: object
+      properties:
+        retries: { type: integer, default: 3 }
+        tags: { type: array, items: { $ref: '#/components/schemas/Settings' } }
+    Wide:
+      type: object
+      required: [a, b, c, d, e, f, g, h]
+      properties:
+        a: { type: string }
+        b: { type: string }
+        c: { type: string }
+        d: { type: string }
+        e: { type: string }
+        f: { type: string }
+        g: { type: string }
+        h: { type: string }
+"#;
+
+/// Issue #1267: an object struct derives `PartialEq` (and `Default` when no member is required),
+/// and `new` plus one `with_*` setter per optional member build the value a struct literal does, so
+/// a test compares a decoded value with an expected one directly.
+#[test]
+fn object_structs_build_through_new_and_setters_and_compare_equal() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", CONSTRUCTORS_SPEC);
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "constructors_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/constructors.rs"),
+        r##"
+use std::collections::BTreeMap;
+
+use constructors_client::types::{Envelope, EnvelopeMode, EnvelopePet, Settings, Tuned, Wide};
+
+#[test]
+fn new_and_setters_build_the_decoded_value() {
+    let built = Envelope::new("e1".to_owned(), 3, None)
+        .with_note("hi".to_owned())
+        .with_label("l".to_owned())
+        .with_type("kind".to_owned())
+        .with_mode(EnvelopeMode::Slow)
+        .with_ratio(0.5)
+        .with_child(Box::new(Envelope::new("e2".to_owned(), 0, Some("e1".to_owned()))))
+        .with_pet(EnvelopePet::EnvelopePetVariant0(Box::new("cat".to_owned())))
+        .with_additional(BTreeMap::from([("extra".to_owned(), 7)]));
+    let wire = serde_json::json!({
+        "id": "e1", "count": 3, "parent": null, "note": "hi", "label": "l", "type": "kind",
+        "mode": "slow", "ratio": 0.5,
+        "child": { "id": "e2", "count": 0, "parent": "e1", "mode": "fast" },
+        "pet": "cat", "extra": 7
+    });
+    let decoded: Envelope = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(decoded, built);
+    assert_eq!(serde_json::to_value(&built).unwrap(), wire);
+    assert_ne!(decoded, built.with_note("other".to_owned()));
+}
+
+#[test]
+fn new_sets_each_optional_member_as_decoding_an_absent_one_does() {
+    let envelope = Envelope::new("e".to_owned(), 1, Some("p".to_owned()));
+    assert_eq!(envelope.note, None);
+    assert_eq!(envelope.label, None);
+    assert_eq!(envelope.mode, Some(EnvelopeMode::Fast));
+    assert!(envelope.additional.is_empty());
+    let decoded: Envelope =
+        serde_json::from_value(serde_json::json!({ "id": "e", "count": 1, "parent": "p" }))
+            .unwrap();
+    assert_eq!(envelope, decoded);
+}
+
+#[test]
+fn a_struct_with_no_required_member_defaults_to_new() {
+    assert_eq!(Settings::default(), Settings::new());
+    let settings = Settings::new().with_verbose(true).with_level(2);
+    let decoded: Settings =
+        serde_json::from_value(serde_json::json!({ "verbose": true, "level": 2 })).unwrap();
+    assert_eq!(settings, decoded);
+
+    // A schema `default` makes `Default` an `impl` calling `new`, which applies it.
+    assert_eq!(Tuned::default(), Tuned::new());
+    assert_eq!(Tuned::default().retries, Some(3));
+    let decoded: Tuned = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(Tuned::default(), decoded);
+}
+
+#[test]
+fn every_required_member_is_a_new_argument() {
+    let [a, b, c, d, e, f, g, h] = ["a", "b", "c", "d", "e", "f", "g", "h"].map(str::to_owned);
+    let wide = Wide::new(a, b, c, d, e, f, g, h);
+    assert_eq!(wide.h, "h");
+}
+"##,
+    )
+    .unwrap();
+
+    let status = fixture_cargo(&out).arg("test").status().unwrap();
+    assert!(
+        status.success(),
+        "`new` and the setters must build the value decoding yields"
+    );
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the constructors fixture must lint clean");
 }
