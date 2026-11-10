@@ -1011,6 +1011,7 @@ fn the_getters_read_back_the_defaults() {
     assert!(!spec.carve_enabled());
     assert!(!spec.open_narrowing_enabled());
     assert!(!spec.open_unions_enabled());
+    assert!(!spec.verbatim_docs_enabled());
     assert!(spec.config_files().is_empty());
     assert_eq!(
         spec.build("out.rs").cargo_integration(),
@@ -1041,7 +1042,8 @@ fn the_getters_read_back_what_the_setters_wrote() {
         .batch_cap(7)
         .carve(true)
         .open_narrowing(true)
-        .open_unions(true);
+        .open_unions(true)
+        .verbatim_docs(true);
     assert!(!spec.uuid_enabled());
     assert!(!spec.time_enabled());
     assert_eq!(spec.omissions().rules, [rule, appended]);
@@ -1050,6 +1052,7 @@ fn the_getters_read_back_what_the_setters_wrote() {
     assert!(spec.carve_enabled());
     assert!(spec.open_narrowing_enabled());
     assert!(spec.open_unions_enabled());
+    assert!(spec.verbatim_docs_enabled());
     for integration in [
         spargen::CargoIntegration::Required,
         spargen::CargoIntegration::Off,

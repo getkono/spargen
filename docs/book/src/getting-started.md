@@ -24,7 +24,7 @@ never ask for an output path they would not use. Both types have private fields 
 setters, so a new knob is additive rather than breaking.
 
 `Spec`'s knobs are `uuid`, `time`, `omit`/`omit_rule`, `error_body_cap`, `batch_cap`, `carve`,
-`open_narrowing`, and `open_unions`. They can equally be read from a
+`open_narrowing`, `open_unions`, and `verbatim_docs`. They can equally be read from a
 [`spargen.toml`](./cli.md#spargentoml-reference) (`Spec::config_file`,
 `Spec::discover_config_file`) — the same file the CLI and the macro read, parsed by the library
 so the three cannot drift. Setters called afterwards still win, so build code stays
@@ -62,6 +62,11 @@ mod api {
     include!(concat!(env!("OUT_DIR"), "/api.rs"));
 }
 ```
+
+The include site needs no lint attribute either. Each generated top-level item allows the lints
+that judge what the spec chose or where you put the module (`missing_docs`, `unreachable_pub`,
+`dead_code`, `clippy::pedantic`, `clippy::nursery`), and the spec's prose is rewritten so rustdoc's
+link and HTML lints find nothing in it (`Spec::verbatim_docs(true)` keeps it as written).
 
 Your `[dependencies]` provide the runtime set the generated code needs. The
 [petstore `Cargo.toml`](https://github.com/getkono/spargen/blob/master/examples/petstore/Cargo.toml)

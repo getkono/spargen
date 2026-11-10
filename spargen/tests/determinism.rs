@@ -163,6 +163,7 @@ fn the_e2e_basic_spec_is_byte_identical_across_runs_under_default_and_non_defaul
                 .time(false)
                 .open_narrowing(true)
                 .open_unions(true)
+                .verbatim_docs(true)
                 .error_body_cap(1024)
                 .batch_cap(7)
                 .carve(true)

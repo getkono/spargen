@@ -49,7 +49,8 @@ Options:
 
 `check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, the switch pairs
 `--carve`/`--no-carve`, `--uuid`/`--no-uuid`, `--time`/`--no-time` and
-`--open-narrowing`/`--no-open-narrowing`, `--open-unions`/`--no-open-unions`, `--error-body-cap`, `--batch-cap`, and the repeatable
+`--open-narrowing`/`--no-open-narrowing`, `--open-unions`/`--no-open-unions`,
+`--verbatim-docs`/`--no-verbatim-docs`, `--error-body-cap`, `--batch-cap`, and the repeatable
 `--omit-path`, `--omit-operation`, `--omit-component`, `--omit-pointer` and `--keep-operation`. The
 group mirrors the setter list on `spargen::Spec` and the keys of [`spargen.toml`](#spargentoml-reference). `lock`
 fetches every remote `$ref` the spec reaches whatever the omit and keep rules and switches say, so of the
@@ -80,6 +81,7 @@ batch_cap = 100         # default 100; diagnostics collected before the report i
 error_body_cap = 65536  # default 64 KiB
 open_narrowing = false  # default false; open a response body's string `enum`/`const` narrowings
 open_unions = false     # default false; give a discriminated union an `Unknown { tag, value }` variant
+verbatim_docs = false   # default false; carry the spec's prose into rustdoc as written
 ```
 
 `error_body_cap` sets the generated client's `ClientConfig::max_error_body`, whose emitted doc
@@ -88,7 +90,10 @@ one statement of what it bounds on each target and which paths it does not cap. 
 described under [auto-carve](./compatibility.md#auto-carve), `open_narrowing` under
 [problem details](./runtime.md#problem-details), `open_unions` on `Spec::open_unions` (a
 discriminator value no variant lists decodes into the `Unknown` variant instead of failing; a
-union with a 3.2 `defaultMapping` keeps its fallback), and the `[[omit]]` and `[[keep]]` rules the file may
+union with a 3.2 `defaultMapping` keeps its fallback), `verbatim_docs` on `Spec::verbatim_docs`
+(by default the spec's `summary`, `description` and `title` text is rewritten so rustdoc has
+nothing to report at the `include!` site: an intra-doc link such as ``[`crate::serve`]`` becomes
+its text, a bare URL is wrapped in `<…>`, and an HTML tag nothing closes has its `<` escaped), and the `[[omit]]` and `[[keep]]` rules the file may
 also carry under [keep rules](./compatibility.md#keep-rules-allow-list) and [`spargen.toml` and the analysis CLI](./compatibility.md#spargentoml-and-the-analysis-cli).
 An unknown key is a configuration error (exit status `3`).
 
