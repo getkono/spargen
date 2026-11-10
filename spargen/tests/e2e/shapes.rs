@@ -414,7 +414,8 @@ fn strings_and_nulls_decode_beside_the_refined_object_branch() {
 /// Object structs of every member shape `new` and the `with_*` setters handle: required members
 /// (one nullable), optional members (one nullable, one keyword-named, one with a schema `default`,
 /// one a recursive reference, one a union), a typed overflow map, a struct with no required member,
-/// and one with more required members than clippy's argument threshold (issue #1267).
+/// one with more required members than clippy's argument threshold (issue #1267), and one whose
+/// required member is named like the provider of its defaulted one.
 const CONSTRUCTORS_SPEC: &str = r#"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -476,7 +477,17 @@ components:
         f: { type: string }
         g: { type: string }
         h: { type: string }
+    Shadowed:
+      type: object
+      required: [default_29_speed]
+      properties:
+        default_29_speed: { type: string }
+        speed: { type: string, default: fast }
 "#;
+
+/// The provider `new` calls to apply `Shadowed.speed`'s default. `Shadowed`'s required member has
+/// the same name, so it becomes a `new` parameter that shadows a bare call to the provider.
+const SHADOWED_PROVIDER: &str = "fn default_29_speed(";
 
 /// Issue #1267: an object struct derives `PartialEq` (and `Default` when no member is required),
 /// and `new` plus one `with_*` setter per optional member build the value a struct literal does, so
@@ -489,6 +500,15 @@ fn object_structs_build_through_new_and_setters_and_compare_equal() {
 
     let report = generate_fixture_crate(&spec, &out, "constructors_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let module = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        module.contains(SHADOWED_PROVIDER),
+        "`Shadowed`'s required member must share its default provider's name; providers: {:?}",
+        module
+            .lines()
+            .filter(|line| line.contains("fn default_"))
+            .collect::<Vec<_>>()
+    );
 
     std::fs::create_dir_all(out.join("tests")).unwrap();
     std::fs::write(
@@ -496,7 +516,9 @@ fn object_structs_build_through_new_and_setters_and_compare_equal() {
         r##"
 use std::collections::BTreeMap;
 
-use constructors_client::types::{Envelope, EnvelopeMode, EnvelopePet, Settings, Tuned, Wide};
+use constructors_client::types::{
+    Envelope, EnvelopeMode, EnvelopePet, Settings, Shadowed, Tuned, Wide,
+};
 
 #[test]
 fn new_and_setters_build_the_decoded_value() {
@@ -554,6 +576,15 @@ fn every_required_member_is_a_new_argument() {
     let [a, b, c, d, e, f, g, h] = ["a", "b", "c", "d", "e", "f", "g", "h"].map(str::to_owned);
     let wide = Wide::new(a, b, c, d, e, f, g, h);
     assert_eq!(wide.h, "h");
+}
+
+#[test]
+fn new_applies_a_default_whose_provider_a_required_member_is_named_after() {
+    let shadowed = Shadowed::new("x".to_owned());
+    assert!(shadowed.speed.is_some());
+    let decoded: Shadowed =
+        serde_json::from_value(serde_json::json!({ "default_29_speed": "x" })).unwrap();
+    assert_eq!(shadowed, decoded);
 }
 "##,
     )

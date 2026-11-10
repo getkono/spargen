@@ -508,8 +508,10 @@ fn emit_struct_constructors(
         if field.required {
             quote! { #field_ident, }
         } else if applies_default(field) {
+            // By path: a required member named like the provider is a `new` parameter, which
+            // would shadow the bare name.
             let provider = default_provider_ident(id, field_ident);
-            quote! { #field_ident: #provider(), }
+            quote! { #field_ident: self::#provider(), }
         } else {
             quote! { #field_ident: None, }
         }

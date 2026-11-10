@@ -6015,7 +6015,7 @@ pub mod types {
         ///A `ConflictDefaultTarget` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         pub fn new() -> Self {
-            Self { x: default_35_x() }
+            Self { x: self::default_35_x() }
         }
         ///Set the `x` member.
         #[must_use]
@@ -6176,10 +6176,10 @@ pub mod types {
         #[allow(clippy::too_many_arguments)]
         pub fn new() -> Self {
             Self {
-                valid: default_46_valid(),
-                bad: default_46_bad(),
-                ratio: default_46_ratio(),
-                fraction: default_46_fraction(),
+                valid: self::default_46_valid(),
+                bad: self::default_46_bad(),
+                ratio: self::default_46_ratio(),
+                fraction: self::default_46_fraction(),
             }
         }
         ///Set the `valid` member.
@@ -6371,9 +6371,9 @@ pub mod types {
         #[allow(clippy::too_many_arguments)]
         pub fn new() -> Self {
             Self {
-                valid: default_56_valid(),
+                valid: self::default_56_valid(),
                 bad: None,
-                ratio: default_56_ratio(),
+                ratio: self::default_56_ratio(),
                 fraction: None,
             }
         }
@@ -6453,9 +6453,9 @@ pub mod types {
         #[allow(clippy::too_many_arguments)]
         pub fn new() -> Self {
             Self {
-                valid: default_57_valid(),
+                valid: self::default_57_valid(),
                 bad: None,
-                ratio: default_57_ratio(),
+                ratio: self::default_57_ratio(),
                 fraction: None,
             }
         }
@@ -6573,7 +6573,7 @@ pub mod types {
         ///A `MergedDefaultBase` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         pub fn new() -> Self {
-            Self { p: default_65_p() }
+            Self { p: self::default_65_p() }
         }
         ///Set the `p` member.
         #[must_use]
@@ -6606,7 +6606,7 @@ pub mod types {
         ///A `MergedDefaultOther` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         pub fn new() -> Self {
-            Self { p: default_67_p() }
+            Self { p: self::default_67_p() }
         }
         ///Set the `p` member.
         #[must_use]
@@ -6639,7 +6639,7 @@ pub mod types {
         ///A `MergedDefault` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         pub fn new() -> Self {
-            Self { p: default_69_p() }
+            Self { p: self::default_69_p() }
         }
         ///Set the `p` member.
         #[must_use]
@@ -6671,7 +6671,7 @@ pub mod types {
         ///A `MergedDefaultSibling` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         pub fn new() -> Self {
-            Self { p: default_70_p() }
+            Self { p: self::default_70_p() }
         }
         ///Set the `p` member.
         #[must_use]
@@ -6703,7 +6703,7 @@ pub mod types {
         ///A `MergedDefaultClash` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         pub fn new() -> Self {
-            Self { p: default_73_p() }
+            Self { p: self::default_73_p() }
         }
         ///Set the `p` member.
         #[must_use]
@@ -6894,7 +6894,7 @@ pub mod types {
                 mode: None,
                 nested: None,
                 choice: None,
-                colour: default_79_colour(),
+                colour: self::default_79_colour(),
                 anything: None,
                 maybe: None,
             }
@@ -8492,12 +8492,12 @@ pub mod types {
         #[allow(clippy::too_many_arguments)]
         pub fn new(retries: SettingsRetries) -> Self {
             Self {
-                color: default_157_color(),
-                enabled: default_157_enabled(),
-                ratio: default_157_ratio(),
+                color: self::default_157_color(),
+                enabled: self::default_157_enabled(),
+                ratio: self::default_157_ratio(),
                 retries,
                 wide: None,
-                mode: default_157_mode(),
+                mode: self::default_157_mode(),
             }
         }
         ///Set the `color` member.
