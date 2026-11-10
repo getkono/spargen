@@ -50,7 +50,9 @@ pub type TokenProvider = Arc<dyn Fn() -> TokenFuture>;
 
 /// Decides whether a failed response rejected the token a [`Credential::Refreshable`] attached
 /// (for example a 401 whose problem `code` is `expired_token`), rather than refusing the call for
-/// some other reason, such as a wrong password. It reads the whole response, its body buffered.
+/// some other reason, such as a wrong password. It reads the response with its body buffered as
+/// the operation's error reads it: whole when it holds at most `ClientConfig::max_error_body`
+/// bytes, and otherwise only up to the first chunk past that cap.
 /// `Send + Sync` on native; vacuous on `wasm32`, matching [`TokenProvider`].
 #[cfg(not(target_arch = "wasm32"))]
 pub type RejectionCheck = Arc<dyn Fn(&http::Response<Bytes>) -> bool + Send + Sync>;
@@ -334,7 +336,8 @@ pub async fn attach_auth_replayable(
 /// [`crate::send`].
 ///
 /// A success, or a call with no `Replay`, is returned as it came. Otherwise the response's body is
-/// read into memory, and each refreshable credential whose `is_rejection` holds for the response
+/// read into memory as the operation's error would read it, up to the first chunk past
+/// `ClientConfig::max_error_body`, and each refreshable credential whose `is_rejection` holds for it
 /// is handed the token it sent to its `on_rejected`. When none holds, the response is returned.
 /// When one does, the request is signed again — a refreshed scheme with its fresh token, another
 /// refreshable scheme with the token it sent, any other credential attached as it was the first
@@ -357,7 +360,9 @@ pub async fn replay_rejected(
     if response.status().is_success() {
         return Ok(response);
     }
-    let original = buffered(response).await.map_err(Error::from_transport)?;
+    let original = buffered(core, response)
+        .await
+        .map_err(Error::from_transport)?;
     let mut tokens = Vec::with_capacity(replay.sent.len());
     let mut refreshed = Vec::new();
     for (name, sent) in replay.sent {
@@ -408,7 +413,7 @@ pub async fn replay_rejected(
     if replayed.status().is_success() {
         return Ok(replayed);
     }
-    let Ok(replayed) = buffered(replayed).await else {
+    let Ok(replayed) = buffered(core, replayed).await else {
         return Ok(unbuffered(original));
     };
     let rejected_again = refreshed.iter().any(|name| {
@@ -420,12 +425,16 @@ pub async fn replay_rejected(
     Ok(unbuffered(if rejected_again { original } else { replayed }))
 }
 
-/// `response` with its body read into memory, for a [`RejectionCheck`] to read.
+/// A failed `response` with its body read into memory for a [`RejectionCheck`] to read, as the
+/// error classifier reads it: up to the first chunk past the client's `max_error_body`, the rest
+/// abandoned. A body that held more keeps more than `max_error_body` bytes, so the operation's
+/// error classifies it as truncated, as it would have the whole body.
 async fn buffered(
+    core: &ClientCore,
     response: http::Response<HttpBody>,
 ) -> Result<http::Response<Bytes>, crate::TransportError> {
     let (parts, body) = response.into_parts();
-    let body = body.collect().await?;
+    let body = crate::dispatch::read_prefix(core.config().max_error_body, body).await?;
     Ok(http::Response::from_parts(parts, body))
 }
 

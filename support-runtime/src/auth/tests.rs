@@ -1207,6 +1207,111 @@ fn a_replay_the_transport_fails_returns_the_original_response() {
     assert_eq!(backend.calls(), 2);
 }
 
+/// 1 KiB chunks against a 4 KiB `max_error_body`: four pulls reach the cap exactly, and the fifth
+/// is the first past it, where reading stops, as `read_capped` stops.
+const PULLS_FOR_4K_CAP: usize = 5;
+
+/// A failed body `replay_rejected` handed on still classifies as the cut-short body it is: the
+/// operation's error retains `max_error_body` bytes of it and marks them truncated.
+fn assert_classified_as_truncated(core: &ClientCore, response: http::Response<crate::HttpBody>) {
+    let (_, _, retained, truncated) =
+        poll_ready(crate::dispatch::read_error_body::<std::convert::Infallible>(core, response))
+            .unwrap();
+    assert_eq!((retained.len(), truncated), (4096, true));
+}
+
+/// `max_error_body` bounds the read of a failed body `is_rejection` is handed, as it bounds the
+/// error classifier's: a 1 MiB failed body stops being pulled at the first chunk past the cap, so
+/// a refreshable credential does not hold a server's whole error body in memory.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_failed_body_the_check_reads_is_capped_at_max_error_body() {
+    let backend = SequenceBackend::new([Reply::status(200, "ok")]);
+    let mut core = core_over(&backend);
+    core.config_mut().max_error_body = 4096;
+    let seen = Arc::new(AtomicUsize::new(0));
+    let seen_by_check = seen.clone();
+    core.set_credential(
+        "token",
+        Credential::refreshable(
+            token_provider(|| async { Ok(SecretString::from("stale")) }),
+            move |response| {
+                seen_by_check.store(response.body().len(), Ordering::SeqCst);
+                false
+            },
+            |_| async { Ok(SecretString::from("fresh")) },
+        ),
+    );
+    let (_, replay) = poll_ready(attach_auth_replayable(&core, get(&core), &[BEARER])).unwrap();
+    let body = crate::tests::Chunks::repeat(1024, 1024);
+    let pulled = body.pulled();
+    let response = http::Response::builder()
+        .status(401)
+        .body(crate::HttpBody::wrap(body))
+        .unwrap();
+
+    let response = poll_ready(replay_rejected(&core, response, replay, false)).unwrap();
+    assert_eq!(pulled.load(Ordering::SeqCst), PULLS_FOR_4K_CAP);
+    assert_eq!(seen.load(Ordering::SeqCst), PULLS_FOR_4K_CAP * 1024);
+    assert_eq!(
+        backend.calls(),
+        0,
+        "nothing was rejected, so nothing is resent"
+    );
+    assert_classified_as_truncated(&core, response);
+}
+
+/// A transport answering a 401 its refreshable credential rejects, then a 1 MiB failed body in
+/// 1 KiB chunks, counting the chunks pulled from it.
+struct OversizedReplay {
+    calls: AtomicUsize,
+    pulled: std::sync::Mutex<Option<Arc<AtomicUsize>>>,
+}
+
+impl std::fmt::Debug for OversizedReplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OversizedReplay")
+    }
+}
+
+impl crate::HttpBackend for OversizedReplay {
+    fn execute(&self, _: http::Request<crate::HttpBody>) -> crate::ExecuteFuture<'_> {
+        let body = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            crate::HttpBody::from("expired")
+        } else {
+            let body = crate::tests::Chunks::repeat(1024, 1024);
+            *self.pulled.lock().unwrap() = Some(body.pulled());
+            crate::HttpBody::wrap(body)
+        };
+        let response = http::Response::builder().status(401).body(body).unwrap();
+        Box::pin(async move { Ok(response) })
+    }
+}
+
+/// The replay's failed body is read under the same bound before `is_rejection` reads it.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_failed_body_of_a_replay_is_capped_at_max_error_body() {
+    let backend = Arc::new(OversizedReplay {
+        calls: AtomicUsize::new(0),
+        pulled: std::sync::Mutex::new(None),
+    });
+    let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
+    core.config_mut().max_error_body = 4096;
+    let calls = Arc::new(Calls::default());
+    core.set_credential("token", refreshable(&calls, Some("fresh")));
+    let (request, replay) =
+        poll_ready(attach_auth_replayable(&core, get(&core), &[BEARER])).unwrap();
+    let response = poll_ready(crate::send(&core, request.build().unwrap())).unwrap();
+
+    // The oversized body is not `expired`, so the replay's own response is the call's answer.
+    let response = poll_ready(replay_rejected(&core, response, replay, false)).unwrap();
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+    let pulled = backend.pulled.lock().unwrap().clone().unwrap();
+    assert_eq!(pulled.load(Ordering::SeqCst), PULLS_FOR_4K_CAP);
+    assert_classified_as_truncated(&core, response);
+}
+
 /// The replay is signed from the request as it stood before any credential was attached, so the
 /// rest of the alternative re-attaches once (a static apiKey beside the refreshed token) and a
 /// query apiKey is not appended a second time.
