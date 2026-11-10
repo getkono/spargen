@@ -115,7 +115,7 @@ pub(super) fn lower_operation(
         .request_body
         .as_ref()
         .and_then(|body| ctx.resolve_request_body(body))
-        .and_then(|body| ctx.lower_request_body(&body));
+        .and_then(|body| ctx.lower_request_body(&body, &crate::name::request_body_hint(&id)));
 
     let responses = ctx.lower_responses(&operation.responses);
     // XML decode is scoped to the single-body success/error paths. An XML body beside a
