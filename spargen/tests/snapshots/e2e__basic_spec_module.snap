@@ -1249,8 +1249,9 @@ mod support {
         }
         /// Add `options`' headers and extensions to `request`, leaving whatever it already carries as it
         /// is: a header name it carries keeps exactly its own values, and an extension type it carries its
-        /// own value.
-        fn apply_options(
+        /// own value. [`super::EventStream`]'s reconnect applies them the same way to the request it
+        /// resends.
+        pub(crate) fn apply_options(
             options: &super::RequestOptions,
             request: &mut http::Request<HttpBody>,
         ) {
@@ -5117,7 +5118,9 @@ mod support {
         use reqwest::header::HeaderMap;
         use reqwest::StatusCode;
         use serde::de::DeserializeOwned;
-        use super::dispatch::{cap_body, send_on, unexpected_status_capped};
+        use super::dispatch::{
+            apply_options, cap_body, send_on, unexpected_status_capped,
+        };
         use super::transport::{request_from_reqwest, try_clone_request};
         use super::wasm::BoxFuture;
         use super::{
@@ -5264,7 +5267,9 @@ mod support {
             /// generated public API. The `allow` is for this crate's own build: its caller is generated code.
             ///
             /// `request` is the clone the operation kept of what it sent, built on reqwest; a URL that is
-            /// not a valid URI cannot cross the seam again, so it leaves the stream nothing to resend.
+            /// not a valid URI cannot cross the seam again, so it leaves the stream nothing to resend. The
+            /// clone was kept before [`super::send_streaming`] added the core's [`super::RequestOptions`],
+            /// so they are added to it here the same way, and every reconnect carries them too.
             #[allow(dead_code)]
             pub(crate) fn new_reconnectable(
                 response: Response,
@@ -5273,7 +5278,11 @@ mod support {
                 request: Option<reqwest::Request>,
             ) -> Self {
                 let request = request
-                    .and_then(|request| request_from_reqwest(request).ok());
+                    .and_then(|request| {
+                        let mut request = request_from_reqwest(request).ok()?;
+                        apply_options(core.options(), &mut request);
+                        Some(request)
+                    });
                 let last_event_id = request
                     .as_ref()
                     .and_then(|request| {

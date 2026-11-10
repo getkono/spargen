@@ -209,8 +209,12 @@ pub async fn send_streaming(
 
 /// Add `options`' headers and extensions to `request`, leaving whatever it already carries as it
 /// is: a header name it carries keeps exactly its own values, and an extension type it carries its
-/// own value.
-fn apply_options(options: &crate::RequestOptions, request: &mut http::Request<HttpBody>) {
+/// own value. [`crate::EventStream`]'s reconnect applies them the same way to the request it
+/// resends.
+pub(crate) fn apply_options(
+    options: &crate::RequestOptions,
+    request: &mut http::Request<HttpBody>,
+) {
     let headers = request.headers_mut();
     for name in options.headers.keys() {
         if !headers.contains_key(name) {
