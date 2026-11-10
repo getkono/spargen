@@ -63,6 +63,8 @@ struct Args {
     error_body_cap: Option<usize>,
     batch_cap: Option<usize>,
     omit: spargen::Omit,
+    /// The operations a `keep { … }` block names, in the order it names them.
+    keep: Vec<(spargen::OmitMethod, String)>,
 }
 
 /// Parse the switch `key` into `slot`. Its own key takes `= true` or `= false`, and alone means
@@ -116,6 +118,7 @@ impl Parse for Args {
         let mut error_body_cap = None;
         let mut batch_cap = None;
         let mut omit = spargen::Omit::default();
+        let mut keep = Vec::new();
 
         while !input.is_empty() {
             if input.peek(LitStr) {
@@ -151,13 +154,18 @@ impl Parse for Args {
                     "error_body_cap" => parse_cap(input, &key, &mut error_body_cap)?,
                     "batch_cap" => parse_cap(input, &key, &mut batch_cap)?,
                     "omit" => parse_omit(input, &mut omit)?,
+                    "keep" => {
+                        let body;
+                        braced!(body in input);
+                        keep.extend(parse_method_paths(&body)?);
+                    }
                     other => {
                         return Err(syn::Error::new(
                             key.span(),
                             format!(
                                 "unknown argument `{other}`; expected a spec path or one of: \
                                  uuid, no_uuid, time, no_time, carve, open_narrowing, \
-                                 open_unions, error_body_cap, batch_cap, omit"
+                                 open_unions, error_body_cap, batch_cap, omit, keep"
                             ),
                         ));
                     }
@@ -183,6 +191,7 @@ impl Parse for Args {
             error_body_cap,
             batch_cap,
             omit,
+            keep,
         })
     }
 }
@@ -282,6 +291,9 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
     for rule in &args.omit.rules {
         config = config.omit_rule(rule.clone());
     }
+    for (method, path) in &args.keep {
+        config = config.keep_operation(*method, path.clone());
+    }
     if let Some(cap) = args.error_body_cap {
         config = config.error_body_cap(cap);
     }
@@ -342,6 +354,18 @@ fn parse_omit(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result<()> {
 fn parse_operations(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result<()> {
     let body;
     braced!(body in input);
+    for (method, path) in parse_method_paths(&body)? {
+        omit.rules.push(spargen::OmitRule::Operation {
+            method,
+            path: path.into(),
+        });
+    }
+    Ok(())
+}
+
+/// Every `method "/path";` entry of a block's body, as an `operations` or `keep` block writes them.
+fn parse_method_paths(body: ParseStream) -> syn::Result<Vec<(spargen::OmitMethod, String)>> {
+    let mut entries = Vec::new();
     while !body.is_empty() {
         let method: Ident = body.parse()?;
         // Delegated to `OmitMethod`'s own `FromStr` rather than matched here, so the macro cannot
@@ -352,12 +376,9 @@ fn parse_operations(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
             .map_err(|error| syn::Error::new(method.span(), error))?;
         let path: LitStr = body.parse()?;
         body.parse::<Token![;]>()?;
-        omit.rules.push(spargen::OmitRule::Operation {
-            method,
-            path: path.value().into(),
-        });
+        entries.push((method, path.value()));
     }
-    Ok(())
+    Ok(entries)
 }
 
 fn parse_paths(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result<()> {

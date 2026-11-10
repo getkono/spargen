@@ -82,7 +82,16 @@ const EVERY_CONTROL: &str = r#"spec = "openapi.yaml", no_uuid, no_time, carve, o
                    components { schemas { "Legacy"; } }
                    pointers { "/webhooks"; }
                    file("shared.yaml") { pointers { "/Legacy"; } }
-               }"#;
+               },
+               keep { get "/pets"; post "/pets"; }"#;
+
+/// The operations [`EVERY_CONTROL`]'s `keep` block names, in the order it names them.
+fn every_kept_operation() -> Vec<(OmitMethod, String)> {
+    vec![
+        (OmitMethod::Get, "/pets".to_owned()),
+        (OmitMethod::Post, "/pets".to_owned()),
+    ]
+}
 
 /// The rules [`EVERY_CONTROL`]'s `omit` block names, in the order it names them.
 fn every_omit_rule() -> Vec<OmitRule> {
@@ -108,6 +117,7 @@ fn parses_every_build_configuration_control() {
     assert_eq!(args.error_body_cap, Some(4096));
     assert_eq!(args.batch_cap, Some(7));
     assert_eq!(args.omit.rules, every_omit_rule());
+    assert_eq!(args.keep, every_kept_operation());
 }
 
 #[test]
@@ -123,6 +133,7 @@ fn a_bare_spec_path_sets_no_control() {
     assert_eq!(args.error_body_cap, None);
     assert_eq!(args.batch_cap, None);
     assert_eq!(args.omit.rules, Vec::new());
+    assert_eq!(args.keep, Vec::new());
 }
 
 /// Each argument reaches the `Spec` field it names, and nothing else changes.
@@ -140,6 +151,9 @@ fn every_argument_maps_onto_its_spec_field() {
     for rule in every_omit_rule() {
         expected = expected.omit_rule(rule);
     }
+    for (method, path) in every_kept_operation() {
+        expected = expected.keep_operation(method, path);
+    }
     assert_eq!(config(&args, Spec::new("openapi.yaml")), expected);
 }
 
@@ -155,19 +169,23 @@ fn an_absent_argument_keeps_the_config_files_value() {
         .open_unions(true)
         .error_body_cap(1024)
         .batch_cap(3)
-        .omit_rule(OmitRule::path("/from-file"));
+        .omit_rule(OmitRule::path("/from-file"))
+        .keep_operation(OmitMethod::Get, "/from-file");
 
     let bare: Args = syn::parse_str(r#""openapi.yaml""#).unwrap();
     assert_eq!(config(&bare, discovered.clone()), discovered);
 
-    let capped: Args =
-        syn::parse_str(r#""openapi.yaml", batch_cap = 9, omit { paths { "/from-macro"; } }"#)
-            .unwrap();
+    let capped: Args = syn::parse_str(
+        r#""openapi.yaml", batch_cap = 9, omit { paths { "/from-macro"; } },
+           keep { put "/from-macro"; }"#,
+    )
+    .unwrap();
     assert_eq!(
         config(&capped, discovered.clone()),
         discovered
             .batch_cap(9)
             .omit_rule(OmitRule::path("/from-macro"))
+            .keep_operation(OmitMethod::Put, "/from-macro")
     );
 }
 
@@ -533,7 +551,8 @@ fn every_argument_parse_error_names_what_was_wrong() {
         (
             r#""a.yaml", uuids"#,
             "unknown argument `uuids`; expected a spec path or one of: uuid, no_uuid, time, \
-                 no_time, carve, open_narrowing, open_unions, error_body_cap, batch_cap, omit",
+                 no_time, carve, open_narrowing, open_unions, error_body_cap, batch_cap, omit, \
+                 keep",
         ),
         (r#""a.yaml", uuid = 1"#, "expected boolean literal"),
         (r#""a.yaml", carve = "yes""#, "expected boolean literal"),
@@ -611,6 +630,13 @@ fn every_argument_parse_error_names_what_was_wrong() {
             r#""a.yaml", omit { file { pointers { "/a"; } } }"#,
             "expected parentheses",
         ),
+        (r#""a.yaml", keep ( )"#, "expected curly braces"),
+        (
+            r#""a.yaml", keep { fetch "/a"; }"#,
+            "unknown HTTP method: `fetch`; \
+                 expected one of get/put/post/delete/options/head/patch/trace/query",
+        ),
+        (r#""a.yaml", keep { get "/a" }"#, "expected `;`"),
     ];
     let mut mismatches = Vec::new();
     for (source, expected) in cases {

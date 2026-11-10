@@ -25,6 +25,7 @@
 
 mod carve;
 mod glob;
+mod keep;
 mod rule;
 
 use std::cmp::Ordering;
@@ -34,33 +35,48 @@ use crate::source::InputBundle;
 
 pub(crate) use carve::{carve_rules, MAX_CARVE_ROUNDS};
 use rule::RuleMatch;
-pub use rule::{ComponentKind, OmitMethod, OmitRule, UnknownOmitToken};
+pub use rule::{ComponentKind, KeepRule, OmitMethod, OmitRule, UnknownOmitToken};
 
 /// A compatibility omit profile.
 ///
 /// Build one with [`omit!`](crate::omit), or start from `Omit::default()` and push onto
-/// [`rules`](Omit::rules).
+/// [`rules`](Omit::rules) and [`keep`](Omit::keep).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Omit {
     /// Omit rules (exact or glob).
     pub rules: Vec<OmitRule>,
+    /// Keep (allow-list) rules. Empty, they change nothing; otherwise every operation none of
+    /// them names is omitted, and so is every root-document component the rest no longer
+    /// reaches. See [`KeepRule`].
+    pub keep: Vec<KeepRule>,
 }
 
 impl Omit {
-    /// Whether the profile contains no rules.
+    /// Whether the profile contains no omit rules and no keep rules.
     pub fn is_empty(&self) -> bool {
-        self.rules.is_empty()
+        self.rules.is_empty() && self.keep.is_empty()
     }
 
-    /// Apply the profile to the loaded input bundle.
+    /// Apply the profile to the loaded input bundle: resolve the keep rules against the document
+    /// as written, apply the omit rules, then narrow what remains to the kept operations.
     pub(crate) fn apply(
         &self,
         bundle: &mut InputBundle,
         diags: &mut Diagnostics,
     ) -> Result<(), Aborted> {
+        let kept = if self.keep.is_empty() {
+            None
+        } else {
+            // A keep rule that names nothing is an `E019`, which fails the run below; narrowing
+            // to the rules that did resolve would only add an `E020` for an empty `paths`.
+            Some(keep::resolve(&self.keep, bundle, diags))
+        };
         for rule in &self.rules {
             apply_rule(rule, bundle, diags);
+        }
+        if let Some(Some(kept)) = &kept {
+            keep::retain(kept, bundle, diags);
         }
         validate_remaining(bundle, diags);
         diags.result(())
@@ -76,8 +92,9 @@ impl Omit {
     /// The one canonical byte encoding of the profile, shared by [`Omit::fingerprint`] and the
     /// build cache's input fingerprint so the two cannot drift apart.
     ///
-    /// Rules encode in declaration order. Each is a variant tag byte (`0` path, `1` operation,
-    /// `2` component, `3` pointer) followed by its fields, every string length-prefixed (`u64`,
+    /// Omit rules encode in declaration order, then keep rules in theirs. Each is a variant tag
+    /// byte (`0` path, `1` operation, `2` component, `3` pointer, `4` kept operation) followed by
+    /// its fields, every string length-prefixed (`u64`,
     /// big-endian) so no two rule sets share an encoding; methods and component kinds encode as
     /// their OpenAPI key, and a `Pointer` rule's `file` as a presence byte (`0` absent,
     /// `1` present) followed by the string when present.
@@ -114,6 +131,15 @@ impl Omit {
                         None => out.push(0),
                     }
                     push_str(&mut out, pointer);
+                }
+            }
+        }
+        for rule in &self.keep {
+            match rule {
+                KeepRule::Operation { method, path } => {
+                    out.push(4);
+                    push_str(&mut out, method.as_oas_key());
+                    push_str(&mut out, path);
                 }
             }
         }
@@ -307,6 +333,7 @@ paths:
         let mut diags = Diagnostics::default();
         let omit = Omit {
             rules: vec![OmitRule::path(r"/a\b")],
+            keep: Vec::new(),
         };
         omit.apply(&mut bundle, &mut diags).unwrap();
         assert_eq!(keys_under(&bundle, "paths", None), vec![r"/a\b".to_owned()]);
@@ -379,6 +406,7 @@ components:
         let mut diags = Diagnostics::default();
         let omit = Omit {
             rules: vec![OmitRule::path("/admin/**")],
+            keep: Vec::new(),
         };
         omit.apply(&mut bundle, &mut diags).unwrap();
         let paths = keys_under(&bundle, "paths", None);
@@ -397,6 +425,7 @@ components:
         let mut diags = Diagnostics::default();
         let omit = Omit {
             rules: vec![OmitRule::component(ComponentKind::Schemas, "Legacy*")],
+            keep: Vec::new(),
         };
         omit.apply(&mut bundle, &mut diags).unwrap();
         let schemas = keys_under(&bundle, "components", Some("schemas"));
@@ -410,6 +439,7 @@ components:
         let mut diags = Diagnostics::default();
         let omit = Omit {
             rules: vec![OmitRule::path("/admin/users")],
+            keep: Vec::new(),
         };
         omit.apply(&mut bundle, &mut diags).unwrap();
         let paths = keys_under(&bundle, "paths", None);
@@ -427,6 +457,7 @@ components:
         let mut diags = Diagnostics::default();
         let omit = Omit {
             rules: vec![OmitRule::operation(OmitMethod::Get, "/admin/**")],
+            keep: Vec::new(),
         };
         omit.apply(&mut bundle, &mut diags).unwrap();
         // The two admin `get` operations are gone; the `delete` and the public `get` remain.
@@ -456,6 +487,7 @@ components:
         let mut diags = Diagnostics::default();
         let omit = Omit {
             rules: vec![OmitRule::path("/nope/**")],
+            keep: Vec::new(),
         };
         assert!(omit.apply(&mut bundle, &mut diags).is_err());
         assert!(!invalid_rule_messages(&diags).is_empty());
@@ -480,6 +512,7 @@ components:
         let mut diags = Diagnostics::default();
         let omit = Omit {
             rules: vec![OmitRule::path("/nope")],
+            keep: Vec::new(),
         };
         assert!(omit.apply(&mut bundle, &mut diags).is_err());
         let invalid = invalid_rule_messages(&diags);
@@ -498,6 +531,7 @@ components:
             let mut diags = Diagnostics::default();
             let omit = Omit {
                 rules: vec![rule.clone()],
+                keep: Vec::new(),
             };
             assert!(omit.apply(&mut bundle, &mut diags).is_err(), "{rule:?}");
             assert!(
@@ -689,7 +723,10 @@ components:
     }
 
     fn omit_of(rules: Vec<OmitRule>) -> Omit {
-        Omit { rules }
+        Omit {
+            rules,
+            keep: Vec::new(),
+        }
     }
 
     fn pointer_rule(file: Option<&'static str>, pointer: &'static str) -> OmitRule {

@@ -569,7 +569,12 @@ mod tests {
         );
 
         let mut diags = Diagnostics::default();
-        Omit { rules }.apply(&mut bundle, &mut diags).unwrap();
+        Omit {
+            rules,
+            keep: Vec::new(),
+        }
+        .apply(&mut bundle, &mut diags)
+        .unwrap();
         let lib_id = bundle.file_id_for_path("lib.yaml").unwrap();
         let remaining: Vec<_> = bundle
             .value_at(lib_id)
