@@ -64,7 +64,9 @@ fn the_include_site_needs_no_lint_attribute() {
         "routed by Router.",
         "as `Region` lists them.",
         "A token `crate::auth::mint` issues; see <https://example.com/auth>.",
-        "A report the ModerationStore holds, as a Vec\\<Entry>.",
+        "Client for Moderation, by `crate::App` v1.0.0.",
+        "A report the ModerationStore holds, as a Vec\\<Entry>, shaped as \
+         [Vec\\<Note>][Vec<Note>] and\n[Page\\<Report>](https://example.com/page).",
         "[kept] Vec<kept>",
         "List reports, as `ModerationStore::list` does.",
         "Reads the store and returns <b>every</b> report",
