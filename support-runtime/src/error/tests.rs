@@ -1384,3 +1384,21 @@ fn a_typed_body_reads_as_its_serialization() {
     assert_eq!(super::ProblemDetails::of("not an object"), None);
     assert_eq!(super::ProblemDetails::of(&Option::<u8>::None), None);
 }
+
+/// A closed enum's `FromStr` failure names the rejected text, quoted so an empty or padded value
+/// stays visible, and the enum it was parsed as; it is a leaf of the cause chain.
+#[test]
+fn an_unknown_variant_reads_back_its_text_and_type() {
+    let error = super::UnknownVariant::new("WireBlobRole", " derivative ");
+    assert_eq!(error.type_name(), "WireBlobRole");
+    assert_eq!(error.value(), " derivative ");
+    assert_eq!(
+        error.to_string(),
+        r#"" derivative " is not a value of WireBlobRole"#
+    );
+    assert!(std::error::Error::source(&error).is_none());
+    assert_eq!(
+        super::UnknownVariant::new("Empty", "").to_string(),
+        r#""" is not a value of Empty"#
+    );
+}

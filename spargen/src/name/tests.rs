@@ -534,6 +534,36 @@ fn a_component_keeps_its_type_name_from_an_inline_type_spelling_it() {
     }
 }
 
+#[test]
+fn a_closed_string_enum_variant_never_takes_the_all_constants_spelling() {
+    // `a_l_l` cases to `ALL`, the closed enum's inherent constant, which the variant would shadow.
+    // An open enum emits no such constant, so its variant keeps the spelling.
+    use crate::ir::{Openness, ScalarEnum, ScalarRepr, ScalarValue};
+    let mut api = api(Vec::new(), false);
+    let mut enumeration = |hint: &str, openness: Openness| {
+        api.types.insert(TypeDef {
+            name_hint: hint.to_owned(),
+            kind: TypeKind::Enum(ScalarEnum {
+                repr: ScalarRepr::String,
+                variants: vec![ScalarValue::String("a_l_l".to_owned())],
+                openness,
+            }),
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root().push(hint), None),
+            document: String::new(),
+        })
+    };
+    let closed = enumeration("Closed", Openness::Closed);
+    let open = enumeration("Open", Openness::Open);
+
+    let names = allocate(&api);
+
+    let variant = |id| names.variants[&(id, "a_l_l".to_owned())].as_str();
+    assert_eq!(super::CLOSED_ENUM_ALL, "ALL");
+    assert_ne!(variant(closed), "ALL");
+    assert_eq!(variant(open), "ALL");
+}
+
 /// Does `text` lex as exactly one Rust identifier token, spelled as itself? `Ident`'s
 /// `ToTokens` hands the text to `proc_macro2::Ident::new`, which panics on anything else.
 fn is_legal(text: &str) -> bool {
@@ -577,6 +607,7 @@ fn hint() -> impl proptest::strategy::Strategy<Value = String> {
             "Default", "default", "Into", "new", "core", "inner", "with_credential", "params",
             "body", "path", "query", "url", "request", "cookies", "replay", "additional", "other",
             "Other", "unknown", "Unknown", "1a", "-", "requestOperation", "getV2", "get_v_2",
+            "a_l_l",
         ])
         .prop_map(str::to_owned),
     ]
@@ -976,7 +1007,13 @@ proptest::proptest! {
                         variants.len(),
                         enumeration.variants.len() + usize::from(enumeration.is_open())
                     );
-                    assert_scope(&format!("variants of {}", def.name_hint), variants, &[])?;
+                    // A closed string enum's `ALL` constant shares its variants' namespace.
+                    let reserved: &[&str] = if enumeration.is_open() {
+                        &[]
+                    } else {
+                        &[super::CLOSED_ENUM_ALL]
+                    };
+                    assert_scope(&format!("variants of {}", def.name_hint), variants, reserved)?;
                 }
                 TypeKind::Union(union) => {
                     let variants: Vec<&Ident> = union

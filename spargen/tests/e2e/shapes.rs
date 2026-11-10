@@ -1,5 +1,6 @@
 //! Type shapes compiled and decoded in a fixture crate: tuples, alias cycles, deprecated
-//! components, an `allOf` beside a union, and object structs built through `new` and setters.
+//! components, an `allOf` beside a union, object structs built through `new` and setters, and
+//! closed string enums named, listed and parsed by their wire values.
 
 use super::*;
 
@@ -600,4 +601,138 @@ fn new_applies_a_default_whose_provider_a_required_member_is_named_after() {
         .status()
         .unwrap();
     assert!(status.success(), "the constructors fixture must lint clean");
+}
+
+/// Closed string enums reached as a component, a struct field, a query parameter and a response
+/// body, beside a deprecated one. `ALL` is listed as a value so the variant it names sits next to
+/// the `ALL` constant, `a_l_l` cases to the constant's own spelling, so its variant must take
+/// another, and `a b` and `derivative_manifest` are values whose spelling the variant identifier
+/// does not keep.
+const CLOSED_ENUMS_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /blobs:
+    get:
+      operationId: getBlobs
+      parameters:
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/WireBlobRole' } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Blob' }
+        '409':
+          description: legacy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Legacy' }
+components:
+  schemas:
+    WireBlobRole: { type: string, enum: [original, derivative_manifest, ALL, 'a b', a_l_l] }
+    Legacy: { type: string, enum: [old], deprecated: true }
+    Blob:
+      type: object
+      required: [role]
+      properties:
+        role: { $ref: '#/components/schemas/WireBlobRole' }
+"#;
+
+/// Issue #1266: a closed string enum is `Copy` and `Hash`, names its wire value through a `const`
+/// `as_str` that `Display` writes, lists its variants in `ALL`, and parses with `FromStr`, which
+/// accepts exactly the values serde decodes and fails with the root-nameable `UnknownVariant`.
+#[test]
+fn closed_string_enums_name_list_and_parse_their_wire_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", CLOSED_ENUMS_SPEC);
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "closed_enums_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/closed_enums.rs"),
+        r##"
+use std::collections::HashSet;
+
+use closed_enums_client::types::{Blob, WireBlobRole};
+use closed_enums_client::UnknownVariant;
+
+const MANIFEST: &str = WireBlobRole::DerivativeManifest.as_str();
+
+#[test]
+fn as_str_is_the_wire_value_display_writes_and_serde_uses() {
+    assert_eq!(MANIFEST, "derivative_manifest");
+    assert_eq!(WireBlobRole::AB.as_str(), "a b");
+    for role in WireBlobRole::ALL {
+        assert_eq!(role.to_string(), role.as_str());
+        assert_eq!(serde_json::to_value(role).unwrap(), role.as_str());
+    }
+}
+
+#[test]
+fn all_lists_every_variant_in_declaration_order() {
+    // `a_l_l`'s variant takes a disambiguated spelling, so `ALL` still names the constant.
+    let spelled_all: WireBlobRole = "a_l_l".parse().unwrap();
+    assert_eq!(spelled_all.as_str(), "a_l_l");
+    assert_eq!(
+        WireBlobRole::ALL,
+        &[
+            WireBlobRole::Original,
+            WireBlobRole::DerivativeManifest,
+            WireBlobRole::All,
+            WireBlobRole::AB,
+            spelled_all,
+        ]
+    );
+}
+
+#[test]
+fn from_str_accepts_exactly_what_serde_decodes() {
+    for role in WireBlobRole::ALL {
+        let parsed: WireBlobRole = role.as_str().parse().unwrap();
+        assert_eq!(parsed, *role);
+        let decoded: WireBlobRole = serde_json::from_value(role.as_str().into()).unwrap();
+        assert_eq!(decoded, parsed);
+    }
+    for text in ["", "Original", "derivative-manifest", "original ", "All"] {
+        let error: UnknownVariant = text.parse::<WireBlobRole>().unwrap_err();
+        assert_eq!(error.value(), text);
+        assert_eq!(error.type_name(), "WireBlobRole");
+        assert!(serde_json::from_value::<WireBlobRole>(text.into()).is_err());
+    }
+}
+
+#[test]
+fn a_field_is_copied_and_hashed() {
+    let blob: Blob = serde_json::from_value(serde_json::json!({ "role": "ALL" })).unwrap();
+    let borrowed = &blob;
+    let role = borrowed.role;
+    let roles: HashSet<WireBlobRole> = [role, blob.role, WireBlobRole::Original].into();
+    assert_eq!(roles.len(), 2);
+    assert!(roles.contains(&WireBlobRole::All));
+}
+"##,
+    )
+    .unwrap();
+
+    let status = fixture_cargo(&out).arg("test").status().unwrap();
+    assert!(
+        status.success(),
+        "a closed enum's as_str, ALL and FromStr must agree with its serde form"
+    );
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the closed enums fixture must lint clean");
 }
