@@ -176,6 +176,10 @@ Key points of the surface:
   `.into_inner()` unwraps the decoded body. Required string parameters take `impl Into<String>`
   and the `…Params` bundle takes `impl Into<Option<…>>`, so `None`, `Some(params)`, and `params`
   all compile.
+- An object struct is built with `types::Pet::new(..)`, taking its required members, then one
+  `with_<member>(value)` per optional member, and compares with `==`; the README's
+  [Generated surface](https://github.com/getkono/spargen#generated-surface) states what `new`
+  sets and when a struct implements `Default`.
 - `Client::with_credential(scheme, credential)` registers static secrets (via `secrecy`) or async
   token providers, which operation `security` requirements attach; the README's
   [Generated surface](https://github.com/getkono/spargen#generated-surface) states how an
