@@ -57,6 +57,11 @@ fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[
     // The omit profile's one canonical encoding, the same bytes its provenance-header
     // fingerprint hashes, so the two cannot drift apart.
     append(&mut hasher, &spec.omit.canonical_encoding());
+    // The bound header names: their count, then each name, in the order bound.
+    append(&mut hasher, &(spec.bind_headers.len() as u64).to_be_bytes());
+    for name in &spec.bind_headers {
+        append(&mut hasher, name.as_bytes());
+    }
     for (path, bytes) in inputs {
         append(&mut hasher, path.as_str().as_bytes());
         append(&mut hasher, bytes);
@@ -788,6 +793,7 @@ components:
             open_narrowing: false,
             open_unions: true,
             verbatim_docs: false,
+            bind_headers: vec!["X-Api-Version".to_owned()],
             config_files: Vec::new(),
         };
         // A file over a block long, so its bytes cross a block boundary of the hash.
@@ -817,6 +823,8 @@ components:
         frame(&[1]);
         frame(&[0]);
         frame(&spec.omit.canonical_encoding());
+        frame(&1u64.to_be_bytes());
+        frame(b"X-Api-Version");
         for (path, bytes) in inputs {
             frame(path.as_str().as_bytes());
             frame(bytes);
@@ -826,7 +834,7 @@ components:
         assert_eq!(digest, sha256_hex(&buffer));
         assert_eq!(
             digest,
-            "8d9bdb85a432e653938f6da87dac8eef3a2aeb256dcba54597b69d91d9c9796d"
+            "f09a08df3695356f4f5d12723bf761ce18b9eb1c3bf898493b4364cb062dacf6"
         );
     }
 
@@ -963,6 +971,7 @@ components:
             open_narrowing,
             open_unions,
             verbatim_docs,
+            bind_headers,
             config_files,
         } = &base;
         assert!(config_files.is_empty());
@@ -1046,6 +1055,17 @@ components:
                 "verbatim_docs",
                 Spec {
                     verbatim_docs: !verbatim_docs,
+                    ..base.clone()
+                },
+            ),
+            (
+                "bind_headers",
+                Spec {
+                    bind_headers: bind_headers
+                        .iter()
+                        .cloned()
+                        .chain(["X-Api-Version".to_owned()])
+                        .collect(),
                     ..base.clone()
                 },
             ),

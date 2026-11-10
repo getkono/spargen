@@ -18,9 +18,9 @@ use super::args::SpecArgs;
 ///
 /// The config file is either the explicit `--config` path or, when that is absent, `spargen.toml`
 /// beside the spec (a missing auto-discovered file is fine). Flags are applied last so they win,
-/// each switch pair in either direction and only when one of its flags was given, and omit and
-/// keep flags are unioned with the file's `[[omit]]` and `[[keep]]` rules rather than replacing
-/// them.
+/// each switch pair in either direction and only when one of its flags was given, and omit, keep
+/// and bind-header flags are unioned with the file's `[[omit]]`, `[[keep]]` and `bind_headers`
+/// rather than replacing them.
 pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, ConfigError> {
     let mut spec = match &args.config {
         Some(config) => Spec::new(path).config_file(config)?,
@@ -65,6 +65,9 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
     for value in &args.keep_operation {
         let (method, path) = parse_method_and_path("--keep-operation", value)?;
         spec = spec.keep_operation(method, path);
+    }
+    for name in &args.bind_header {
+        spec = spec.bind_header(name.clone());
     }
     Ok(spec)
 }
@@ -339,6 +342,7 @@ mod tests {
             ("--omit-component", "schema:Pet"),
             ("--omit-pointer", "/paths"),
             ("--keep-operation", "get /pets"),
+            ("--bind-header", "X-Api-Version"),
         ] {
             assert_eq!(ignored(&[flag, value]), [flag]);
         }
@@ -446,6 +450,23 @@ mod tests {
             2,
             "the file's rule and the flag's"
         );
+    }
+
+    /// `--bind-header` is repeatable, and its names follow the config file's `bind_headers`, a name
+    /// the file already binds in another letter case not bound twice.
+    #[test]
+    fn the_bind_header_flag_appends_after_the_config_file() {
+        let (_temp, dir) = with_config("bind_headers = [\"X-Tenant\"]\n");
+        let spec = resolved(
+            &dir,
+            &[
+                "--bind-header",
+                "X-Api-Version",
+                "--bind-header",
+                "x-tenant",
+            ],
+        );
+        assert_eq!(spec.bound_headers(), ["X-Tenant", "X-Api-Version"]);
     }
 
     /// The message a rejected flag value reports, which is what the user reads on stderr.

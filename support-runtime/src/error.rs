@@ -560,7 +560,9 @@ impl std::error::Error for MessageError {}
 /// when no registered credential satisfies the requirement,
 /// [`RequestError::CredentialMismatch`] when the selected alternative has a credential registered
 /// that its scheme cannot carry, and [`RequestError::CredentialProvider`] when a registered token
-/// provider fails. All three are raised before anything is sent. Every other
+/// provider fails. All three are raised before anything is sent, and so is
+/// [`RequestError::MissingBoundParameter`], when an operation declares a required header the
+/// client binds and no value is bound to it. Every other
 /// cause arrives as [`RequestError::Other`] with its source attached — and [`RequestError::Other`]
 /// is **not** uniformly pre-send; see its own documentation before retrying on it.
 ///
@@ -611,6 +613,14 @@ pub enum RequestError {
         scheme: &'static str,
         /// What the provider reported.
         source: AuthError,
+    },
+    /// The operation declares a required header that the generated client binds once, as a
+    /// `Spec::bind_header` build option named it, and no value is bound to it on the client
+    /// (`with_bound_header`). Raised before anything is sent. The payload is the whole cause, so
+    /// `source()` is `None`.
+    MissingBoundParameter {
+        /// The header's name, as the operation declares it.
+        name: &'static str,
     },
     /// Any other request-construction failure, with the cause reachable through `source()`.
     ///
@@ -912,6 +922,10 @@ impl std::fmt::Display for RequestError {
                 f,
                 "the token provider registered for security scheme `{scheme}` failed"
             ),
+            RequestError::MissingBoundParameter { name } => write!(
+                f,
+                "the operation requires header `{name}`, and the client binds no value to it"
+            ),
             RequestError::Other(cause) => write!(f, "{cause}"),
         }
     }
@@ -920,9 +934,9 @@ impl std::fmt::Display for RequestError {
 impl std::error::Error for RequestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            RequestError::MissingCredential { .. } | RequestError::CredentialMismatch { .. } => {
-                None
-            }
+            RequestError::MissingCredential { .. }
+            | RequestError::CredentialMismatch { .. }
+            | RequestError::MissingBoundParameter { .. } => None,
             RequestError::CredentialProvider { source, .. } => Some(source),
             // The boxed cause itself, not its wrapper, so `downcast_ref` reaches the cause's own
             // type.

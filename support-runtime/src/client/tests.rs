@@ -117,6 +117,36 @@ fn a_removed_credential_is_returned_and_no_longer_registered() {
     assert!(core.credential("token").is_some());
 }
 
+/// A bound header is matched in any letter case, as HTTP header names are: binding, reading and
+/// unbinding agree however each spells the name, the last binding wins, and unbinding returns
+/// the value it removes.
+#[test]
+fn a_bound_header_is_keyed_case_insensitively_and_the_last_binding_wins() {
+    let mut core = ClientCore::new("https://example.com").unwrap();
+    assert_eq!(core.bound_header("X-Api-Version"), None);
+
+    core.bind_header("X-Api-Version", "1");
+    assert_eq!(core.bound_header("x-api-version"), Some("1"));
+    core.bind_header("X-API-VERSION", String::from("2"));
+    assert_eq!(core.bound_header("X-Api-Version"), Some("2"));
+    assert_eq!(core.bound_header("X-Tenant"), None);
+
+    assert_eq!(core.unbind_header("x-api-VERSION"), Some("2".to_owned()));
+    assert_eq!(core.bound_header("X-Api-Version"), None);
+    assert_eq!(core.unbind_header("X-Api-Version"), None);
+}
+
+/// A bound header's value is redacted in `ClientCore`'s `Debug`, as a credential's is, so a core
+/// logged with a tenant or key header bound does not leak it; the bound name still prints.
+#[test]
+fn a_bound_header_value_is_redacted_in_debug() {
+    let mut core = ClientCore::new("https://example.com").unwrap();
+    core.bind_header("X-Tenant", "tenant-secret-7781");
+    let debug = format!("{core:?}");
+    assert!(debug.contains("x-tenant"), "{debug}");
+    assert!(!debug.contains("tenant-secret-7781"), "{debug}");
+}
+
 /// The supplied client is the one requests run on: an `https_only` client refuses a plain `http`
 /// request at execute, which a default client would instead try to send. reqwest refuses it
 /// without touching the network, so the future is ready on the first poll, and the refusal is a

@@ -51,6 +51,7 @@ mod bodies_binary;
 mod bodies_media_keys;
 mod bodies_streaming;
 mod bodies_unsupported;
+mod bound_headers;
 mod defaults;
 mod diagnostics_meta;
 mod discriminator;

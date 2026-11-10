@@ -127,9 +127,14 @@ the version it emits, and the idioms spargen handles.
   case: when its check reads a failed response as a rejection of the token it carried, the
   runtime asks it for a fresh token and sends the call once more, returning the original response
   when the body cannot be cloned, the refresh fails, or the replay is rejected again.
+- A header every operation repeats (an API version, a tenant) can be bound once on the client:
+  `Spec::bind_header("X-Api-Version")` drops it from every operation's arguments, and
+  `Client::with_bound_header(name, value)` sets the value each operation declaring it sends. An
+  operation that requires it while no value is bound fails before anything is sent, as
+  `RequestError::MissingBoundParameter`.
 - A closed error taxonomy, identical across all spargen output: request-construction
   (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
-  above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
+  above, the missing bound header above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
   (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
   error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
   preserved), decode failure (`Error::Decode`: status, headers, serde path + body, capped except

@@ -6,7 +6,7 @@ use quote::quote;
 use crate::ir::{Api, Operation};
 use crate::name::Names;
 
-use super::client::{default_server_docs, with_credential_docs};
+use super::client::{default_server_docs, with_bound_header_tokens, with_credential_docs};
 use super::operation::{url_accessor_tokens, Arg, OperationSig};
 
 /// The `cfg` every blocking item is emitted under, the facade here and the embedded
@@ -24,7 +24,8 @@ pub(super) fn blocking_cfg() -> TokenStream {
 /// request building and dispatch are the async client's. Its constructors are the async client's
 /// `new`, `with_config`, `with_default_server` (when a server is declared), `with_client`,
 /// `with_backend` and `with_client_and_backend`, and its `with_credential` carries the async
-/// client's documentation, declared schemes included.
+/// client's documentation, declared schemes included, as its `with_bound_header` does where the
+/// build bound a header.
 ///
 /// A `BlockingClient` must not be built or used from inside another async runtime (tokio's
 /// `block_on` panics when nested); the constructor building its own current-thread runtime is the
@@ -48,6 +49,10 @@ pub(super) fn emit_blocking_client(
         `tokio::task::spawn_blocking`).";
     let cfg = blocking_cfg();
     let credential_docs = with_credential_docs(api, options);
+    let with_bound_header = with_bound_header_tokens(
+        api,
+        quote! { self.inner = self.inner.with_bound_header(name, value); },
+    );
     let default_server = (!api.servers.is_empty()).then(|| {
         let docs = default_server_docs();
         quote! {
@@ -171,6 +176,8 @@ pub(super) fn emit_blocking_client(
                 self.inner = self.inner.without_credential(scheme);
                 self
             }
+
+            #with_bound_header
 
             /// Set the total timeout of every call made through this client value (mirrors the
             /// async client's `with_timeout`): an elapsed one is

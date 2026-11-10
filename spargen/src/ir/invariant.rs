@@ -320,6 +320,7 @@ mod tests {
                 docs: Default::default(),
                 server: None,
                 provenance: Provenance::new(JsonPointer::root(), None),
+                bound_headers: Vec::new(),
             }],
             types,
             security_schemes: IndexMap::new(),

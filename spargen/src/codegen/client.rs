@@ -42,6 +42,50 @@ pub(super) fn with_credential_docs(api: &Api, options: &CodegenOptions) -> Token
     }
 }
 
+/// `with_bound_header`, which `Client` emits, and `BlockingClient` too with `body` forwarding to
+/// it, when the build bound a header ([`Api::binds_headers`]); `None` otherwise. Its rustdoc names
+/// each bound header in the spelling the first operation declaring it uses.
+pub(super) fn with_bound_header_tokens(api: &Api, body: TokenStream) -> Option<TokenStream> {
+    if !api.binds_headers() {
+        return None;
+    }
+    let mut bound: Vec<&str> = Vec::new();
+    for header in api
+        .operations
+        .iter()
+        .flat_map(|operation| &operation.bound_headers)
+    {
+        if !bound
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&header.name))
+        {
+            bound.push(&header.name);
+        }
+    }
+    let list = bound
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let headers_doc = normalize_rustdoc(&format!("The bound headers: {list}."));
+    Some(quote! {
+        /// Bind `value` to the header `name`, matched in any letter case, on this client value,
+        /// replacing any value bound to it. The build bound these headers once on the client, so
+        /// no operation takes an argument for one: each operation declaring it sends this value
+        /// as written. An operation that requires a bound header fails before anything is sent,
+        /// with `RequestError::MissingBoundParameter`, while no value is bound to it; one that
+        /// declares it optional leaves it off. Binding checks nothing; a name no operation sends
+        /// is held and never read.
+        ///
+        #[doc = #headers_doc]
+        #[must_use]
+        pub fn with_bound_header(mut self, name: &str, value: impl Into<String>) -> Self {
+            #body
+            self
+        }
+    })
+}
+
 /// The declared security schemes, rendered as rustdoc for `with_credential`, for the reason
 /// [`crate::ir::SecuritySchemeDef`] gives. The lines carry the spec's scheme and scope
 /// descriptions, so they go through [`carried`] together, as the one Markdown text rustdoc joins
@@ -108,6 +152,8 @@ pub(super) fn emit_client(
         .iter()
         .map(|operation| emit_response_headers(operation, names, options));
     let client_docs = client_doc_tokens(api, options);
+    let with_bound_header =
+        with_bound_header_tokens(api, quote! { self.core.bind_header(name, value); });
     let error_body_cap = options.error_body_cap;
     let servers = emit_servers(api, names, options);
     let default_server = (!api.servers.is_empty()).then(|| {
@@ -234,6 +280,8 @@ pub(super) fn emit_client(
                 self.core.remove_credential(scheme);
                 self
             }
+
+            #with_bound_header
 
             /// Set the total timeout of every call made through this client value, replacing
             /// `ClientConfig::timeout` from `with_config` (or the default, none): a call that has
@@ -525,9 +573,9 @@ mod tests {
     use super::CodegenOptions;
     use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{
-        Api, Docs, HttpScheme, Info, Method, Operation, OperationId, PathSegment, PathTemplate,
-        Response, Responses, SchemeId, SecurityScheme, SecuritySchemeDef, Server, StatusSpec,
-        TypeGraph, UrlSegment,
+        Api, BoundHeader, Docs, HttpScheme, Info, Method, Operation, OperationId, PathSegment,
+        PathTemplate, Response, Responses, SchemeId, SecurityScheme, SecuritySchemeDef, Server,
+        StatusSpec, TypeGraph, UrlSegment,
     };
 
     /// The name of every `fn` in each inherent `impl <self_ty>` block among `items`, nested modules
@@ -560,7 +608,8 @@ mod tests {
     /// Issue #286: operation methods share `impl Client` and `impl BlockingClient` with the fixed
     /// constructors and accessors, so `name::CLIENT_METHODS` must be exactly the fixed methods
     /// emitted there, and an operation spelling each of them must yield rather than duplicate it.
-    /// The API declares a server so `with_default_server` is emitted.
+    /// The API declares a server so `with_default_server` is emitted, and one operation sends a
+    /// bound header so `with_bound_header` is.
     #[test]
     fn client_methods_are_exactly_the_fixed_methods_and_operations_yield_to_them() {
         let operation = |id: &str| Operation {
@@ -590,8 +639,9 @@ mod tests {
             docs: Docs::default(),
             server: None,
             provenance: Provenance::new(JsonPointer::root().push(id), None),
+            bound_headers: Vec::new(),
         };
-        let api = Api {
+        let mut api = Api {
             info: Info {
                 title: "T".to_owned(),
                 version: "1".to_owned(),
@@ -611,6 +661,10 @@ mod tests {
             types: TypeGraph::default(),
             security_schemes: IndexMap::new(),
         };
+        api.operations[0].bound_headers.push(BoundHeader {
+            name: "X-Api-Version".to_owned(),
+            required: true,
+        });
         let names = crate::name::allocate(&api);
         let options = CodegenOptions::default();
         let signatures = super::super::operation::signatures(&api, &names, &options);

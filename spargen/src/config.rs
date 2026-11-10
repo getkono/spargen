@@ -51,6 +51,9 @@ pub struct Spec {
     pub(crate) open_narrowing: bool,
     pub(crate) open_unions: bool,
     pub(crate) verbatim_docs: bool,
+    /// The header names [`Spec::bind_header`] bound, in the order bound, no two equal in any
+    /// letter case.
+    pub(crate) bind_headers: Vec<String>,
     /// Every config file applied through [`Spec::config_file`] (and so through
     /// [`Spec::discover_config_file`]), in the order applied. Generation reads them, so `build.rs`
     /// names each as a `cargo:rerun-if-changed` path and `generate_api!` tracks each.
@@ -59,8 +62,8 @@ pub struct Spec {
 
 impl Spec {
     /// A spec with defaults: `uuid` and `time` on, a 64 KiB error-body cap, a 100-diagnostic
-    /// batch, no omissions, no carving, no open narrowing, no open unions, and carried docs
-    /// rewritten for rustdoc rather than verbatim.
+    /// batch, no omissions, no carving, no open narrowing, no open unions, carried docs
+    /// rewritten for rustdoc rather than verbatim, and no bound headers.
     pub fn new(path: impl Into<Utf8PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -73,6 +76,7 @@ impl Spec {
             open_narrowing: false,
             open_unions: false,
             verbatim_docs: false,
+            bind_headers: Vec::new(),
             config_files: Vec::new(),
         }
     }
@@ -132,6 +136,11 @@ impl Spec {
     /// [`verbatim_docs`](Self::verbatim_docs) set it.
     pub fn verbatim_docs_enabled(&self) -> bool {
         self.verbatim_docs
+    }
+
+    /// The header names [`bind_header`](Self::bind_header) bound, in the order bound.
+    pub fn bound_headers(&self) -> &[String] {
+        &self.bind_headers
     }
 
     /// Every config file applied through [`config_file`](Self::config_file) or
@@ -289,6 +298,33 @@ impl Spec {
         self
     }
 
+    /// Bind the header parameter `name` once on the client, rather than at every call.
+    ///
+    /// Every operation that declares a header parameter of that name, matched in any letter case,
+    /// takes no argument for it: the generated client holds one value for it, set with
+    /// `Client::with_bound_header(name, value)`, and each such operation sends that value as
+    /// written. An operation that requires the header fails before anything is sent, with
+    /// `RequestError::MissingBoundParameter`, while no value is bound; one that declares it
+    /// optional leaves it off. Binding a name already bound, in any letter case, changes nothing.
+    /// A name no operation declares as a header parameter fails generation with `E026`.
+    ///
+    /// ```no_run
+    /// let spec = spargen::Spec::new("api/openapi.yaml")
+    ///     .bind_header("X-Api-Version")
+    ///     .bind_header("X-Tenant");
+    /// ```
+    pub fn bind_header(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        if !self
+            .bind_headers
+            .iter()
+            .any(|bound| bound.eq_ignore_ascii_case(&name))
+        {
+            self.bind_headers.push(name);
+        }
+        self
+    }
+
     /// Where to write the generated module. The result is the input to [`generate`](crate::generate).
     pub fn build(self, output: impl Into<Utf8PathBuf>) -> Build {
         Build::new(self, output)
@@ -389,6 +425,9 @@ impl Spec {
             self.omit
                 .keep
                 .push(KeepRule::operation(method, entry.path.clone()));
+        }
+        for name in file.bind_headers {
+            self = self.bind_header(name);
         }
         Ok(self)
     }
@@ -507,6 +546,8 @@ struct FileConfig {
     omit: Vec<OmitToml>,
     #[serde(default)]
     keep: Vec<KeepToml>,
+    #[serde(default)]
+    bind_headers: Vec<String>,
 }
 
 /// A `[[keep]]` entry: one operation, by `method` and `path`, both required.
@@ -641,8 +682,27 @@ mod tests {
         assert!(!spec.open_narrowing);
         assert!(!spec.open_unions);
         assert!(!spec.verbatim_docs);
+        assert!(spec.bind_headers.is_empty());
         assert!(spec.omit.is_empty());
         assert_eq!(Build::new(spec, "out.rs").cargo, CargoIntegration::Auto);
+    }
+
+    /// `bind_headers` in the file is appended to what the spec already binds, in order, and a
+    /// name already bound in another letter case is not bound twice, from the file or a setter.
+    #[test]
+    fn config_file_bound_headers_are_appended_and_deduplicated_in_any_case() {
+        let spec = Spec::new("openapi.yaml")
+            .bind_header("X-Api-Version")
+            .apply_config(
+                "bind_headers = [\"X-Tenant\", \"x-api-version\"]\n",
+                Utf8Path::new("spargen.toml"),
+            )
+            .unwrap()
+            .bind_header("X-TENANT");
+        assert_eq!(spec.bound_headers(), ["X-Api-Version", "X-Tenant"]);
+
+        let error = apply("bind_headers = \"X-Tenant\"\n").unwrap_err();
+        assert!(error.message().contains("bind_headers"), "{error}");
     }
 
     #[test]

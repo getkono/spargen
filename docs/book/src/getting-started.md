@@ -24,7 +24,7 @@ never ask for an output path they would not use. Both types have private fields 
 setters, so a new knob is additive rather than breaking.
 
 `Spec`'s knobs are `uuid`, `time`, `omit`/`omit_rule`, `error_body_cap`, `batch_cap`, `carve`,
-`open_narrowing`, `open_unions`, and `verbatim_docs`. They can equally be read from a
+`open_narrowing`, `open_unions`, `verbatim_docs`, and `bind_header`. They can equally be read from a
 [`spargen.toml`](./cli.md#spargentoml-reference) (`Spec::config_file`,
 `Spec::discover_config_file`) — the same file the CLI and the macro read, parsed by the library
 so the three cannot drift. Setters called afterwards still win, so build code stays
@@ -191,6 +191,10 @@ Key points of the surface:
   token providers, which operation `security` requirements attach; the README's
   [Generated surface](https://github.com/getkono/spargen#generated-surface) states how an
   alternative is selected and how each credential failure is typed.
+- `Client::with_bound_header(name, value)` sets a header every operation declares once on the
+  client, where the build bound it with `Spec::bind_header("X-Api-Version")`: no operation takes
+  an argument for it, and one that requires it fails before anything is sent, as
+  `RequestError::MissingBoundParameter`, while no value is bound.
 - A closed error taxonomy, `Error<E>`, identical across all spargen output; every generated error
   type is a `std::error::Error`. The README's
   [Generated surface](https://github.com/getkono/spargen#generated-surface) lists every variant

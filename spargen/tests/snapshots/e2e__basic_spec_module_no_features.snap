@@ -728,7 +728,10 @@ mod support {
         use std::sync::Arc;
         use std::time::Duration;
         use reqwest::Url;
-        use super::{Credential, Error, HttpBackend, LinkPaginator, ReqwestBackend};
+        use super::{
+            Credential, Error, ExposeSecret, HttpBackend, LinkPaginator, ReqwestBackend,
+            SecretString,
+        };
         /// Client-wide configuration.
         #[derive(Debug, Clone)]
         pub struct ClientConfig {
@@ -876,6 +879,9 @@ mod support {
             config: ClientConfig,
             options: RequestOptions,
             credentials: HashMap<String, Credential>,
+            /// Bound header values, keyed by the header name in ASCII lowercase. Held as `SecretString`s,
+            /// as credentials' secrets are, so `Debug` prints each bound name and redacts its value.
+            bound_headers: HashMap<String, SecretString>,
         }
         impl ClientCore {
             /// Build a core with the default [`ClientConfig`] and the given base URL, as
@@ -955,6 +961,7 @@ mod support {
                     config,
                     options: RequestOptions::default(),
                     credentials: HashMap::new(),
+                    bound_headers: HashMap::new(),
                 })
             }
             /// The retention/config settings.
@@ -1012,6 +1019,28 @@ mod support {
             /// Retrieve a registered credential by scheme name.
             pub fn credential(&self, scheme: &str) -> Option<&Credential> {
                 self.credentials.get(scheme)
+            }
+            /// Bind `value` to the header `name`, matched in any letter case, replacing any value already
+            /// bound to it. An operation of a generated client whose header parameter the build bound
+            /// (`Spec::bind_header`) sends this value, as written, instead of taking an argument for it.
+            /// `ClientCore`'s `Debug` prints the bound name and redacts the value.
+            pub fn bind_header(&mut self, name: &str, value: impl Into<String>) {
+                self.bound_headers
+                    .insert(name.to_ascii_lowercase(), SecretString::from(value.into()));
+            }
+            /// Unbind the header `name`, matched in any letter case, returning the value bound to it if
+            /// there was one. An operation that requires the header then fails with
+            /// [`super::RequestError::MissingBoundParameter`] before anything is sent.
+            pub fn unbind_header(&mut self, name: &str) -> Option<String> {
+                self.bound_headers
+                    .remove(&name.to_ascii_lowercase())
+                    .map(|value| value.expose_secret().to_owned())
+            }
+            /// The value bound to the header `name`, matched in any letter case.
+            pub fn bound_header(&self, name: &str) -> Option<&str> {
+                self.bound_headers
+                    .get(&name.to_ascii_lowercase())
+                    .map(ExposeSecret::expose_secret)
             }
             /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
             /// See the `paginate` module's docs for the full pattern and the authentication caveat.
@@ -2191,7 +2220,9 @@ mod support {
         /// when no registered credential satisfies the requirement,
         /// [`RequestError::CredentialMismatch`] when the selected alternative has a credential registered
         /// that its scheme cannot carry, and [`RequestError::CredentialProvider`] when a registered token
-        /// provider fails. All three are raised before anything is sent. Every other
+        /// provider fails. All three are raised before anything is sent, and so is
+        /// [`RequestError::MissingBoundParameter`], when an operation declares a required header the
+        /// client binds and no value is bound to it. Every other
         /// cause arrives as [`RequestError::Other`] with its source attached — and [`RequestError::Other`]
         /// is **not** uniformly pre-send; see its own documentation before retrying on it.
         ///
@@ -2242,6 +2273,14 @@ mod support {
                 scheme: &'static str,
                 /// What the provider reported.
                 source: AuthError,
+            },
+            /// The operation declares a required header that the generated client binds once, as a
+            /// `Spec::bind_header` build option named it, and no value is bound to it on the client
+            /// (`with_bound_header`). Raised before anything is sent. The payload is the whole cause, so
+            /// `source()` is `None`.
+            MissingBoundParameter {
+                /// The header's name, as the operation declares it.
+                name: &'static str,
             },
             /// Any other request-construction failure, with the cause reachable through `source()`.
             ///
@@ -2516,6 +2555,12 @@ mod support {
                             "the token provider registered for security scheme `{scheme}` failed"
                         )
                     }
+                    RequestError::MissingBoundParameter { name } => {
+                        write!(
+                            f,
+                            "the operation requires header `{name}`, and the client binds no value to it"
+                        )
+                    }
                     RequestError::Other(cause) => write!(f, "{cause}"),
                 }
             }
@@ -2524,7 +2569,8 @@ mod support {
             fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
                 match self {
                     RequestError::MissingCredential { .. }
-                    | RequestError::CredentialMismatch { .. } => None,
+                    | RequestError::CredentialMismatch { .. }
+                    | RequestError::MissingBoundParameter { .. } => None,
                     RequestError::CredentialProvider { source, .. } => Some(source),
                     RequestError::Other(cause) => {
                         Some(cause.0.as_ref() as &(dyn std::error::Error + 'static))

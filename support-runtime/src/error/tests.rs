@@ -108,7 +108,7 @@ fn a_request_cause_forwards_source_to_the_boxed_causes_own_source() {
 
 /// How many variants `RequestError` has. `every_request_variant` returns an array of exactly
 /// this length, so raising it will not compile until a value of the new variant is listed.
-const REQUEST_VARIANTS: usize = 4;
+const REQUEST_VARIANTS: usize = 5;
 
 /// Each variant's position in `every_request_variant`. Indices are dense and unique, which is
 /// what `every_request_variant_lists_each_variant_exactly_once` checks.
@@ -134,6 +134,7 @@ fn request_variant_index(error: &RequestError) -> usize {
         RequestError::CredentialProvider { .. } => 1,
         RequestError::Other(_) => 2,
         RequestError::CredentialMismatch { .. } => 3,
+        RequestError::MissingBoundParameter { .. } => 4,
     }
 }
 
@@ -158,6 +159,9 @@ fn every_request_variant() -> [RequestError; REQUEST_VARIANTS] {
             scheme: "login",
             required: "http basic",
             registered: "Provider",
+        },
+        RequestError::MissingBoundParameter {
+            name: "X-Api-Version",
         },
     ]
 }
@@ -215,21 +219,25 @@ fn every_request_variant_displays_exactly_what_names_its_cause() {
                 "the `Credential::Provider` registered for security scheme `login` cannot \
                  satisfy its `http basic` type"
             }
+            RequestError::MissingBoundParameter { .. } => {
+                "the operation requires header `X-Api-Version`, and the client binds no value to \
+                 it"
+            }
         };
         assert_eq!(rendered, expected, "a variant does not name its cause");
     }
 }
 
-/// `MissingCredential` and `CredentialMismatch` *are* the whole cause, so they end the chain;
-/// the other two carry a separate cause and must hand it over. A consumer walking the chain
+/// `MissingCredential`, `CredentialMismatch` and `MissingBoundParameter` *are* the whole cause,
+/// so they end the chain; the other two carry a separate cause and must hand it over. A consumer walking the chain
 /// must not find a phantom source, nor lose a real one.
 #[test]
 fn request_source_is_present_exactly_where_the_cause_is_separate() {
     for error in every_request_variant() {
         let expected = match &error {
-            RequestError::MissingCredential { .. } | RequestError::CredentialMismatch { .. } => {
-                false
-            }
+            RequestError::MissingCredential { .. }
+            | RequestError::CredentialMismatch { .. }
+            | RequestError::MissingBoundParameter { .. } => false,
             RequestError::CredentialProvider { .. } | RequestError::Other(_) => true,
         };
         assert_eq!(

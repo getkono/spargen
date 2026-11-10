@@ -1012,6 +1012,7 @@ fn the_getters_read_back_the_defaults() {
     assert!(!spec.open_narrowing_enabled());
     assert!(!spec.open_unions_enabled());
     assert!(!spec.verbatim_docs_enabled());
+    assert!(spec.bound_headers().is_empty());
     assert!(spec.config_files().is_empty());
     assert_eq!(
         spec.build("out.rs").cargo_integration(),
@@ -1043,7 +1044,9 @@ fn the_getters_read_back_what_the_setters_wrote() {
         .carve(true)
         .open_narrowing(true)
         .open_unions(true)
-        .verbatim_docs(true);
+        .verbatim_docs(true)
+        .bind_header("X-Api-Version")
+        .bind_header("X-Tenant");
     assert!(!spec.uuid_enabled());
     assert!(!spec.time_enabled());
     assert_eq!(spec.omissions().rules, [rule, appended]);
@@ -1053,6 +1056,7 @@ fn the_getters_read_back_what_the_setters_wrote() {
     assert!(spec.open_narrowing_enabled());
     assert!(spec.open_unions_enabled());
     assert!(spec.verbatim_docs_enabled());
+    assert_eq!(spec.bound_headers(), ["X-Api-Version", "X-Tenant"]);
     for integration in [
         spargen::CargoIntegration::Required,
         spargen::CargoIntegration::Off,

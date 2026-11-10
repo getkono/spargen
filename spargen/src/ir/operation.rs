@@ -1,6 +1,6 @@
 use crate::diag::Provenance;
 
-use super::{Docs, MediaType, RequestBody, Responses, SecurityRequirement, Ty};
+use super::{Api, Docs, MediaType, RequestBody, Responses, SecurityRequirement, Ty};
 
 /// The `operationId` (or synthesized name); the Rust method name is allocated by `name`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -91,6 +91,47 @@ pub(crate) struct Operation {
     pub(crate) server: Option<String>,
     /// Where the operation came from.
     pub(crate) provenance: Provenance,
+    /// The header parameters the build bound once on the client (`Spec::bind_header`), in
+    /// declaration order. Lowering takes each out of [`Self::params`]: it is sent from the client's
+    /// bound value rather than taken as an argument.
+    pub(crate) bound_headers: Vec<BoundHeader>,
+}
+
+/// A header parameter an operation declares and the build bound once on the client: the method
+/// takes no argument for it, and sends the value the client binds to `name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundHeader {
+    /// The header name, as the operation declares it.
+    pub(crate) name: String,
+    /// Whether the operation requires it: with no value bound, a required header fails the call
+    /// before anything is sent, and an optional one is left off the request.
+    pub(crate) required: bool,
+}
+
+impl Api {
+    /// The header bindings in `names` that no operation's [`Operation::bound_headers`] holds,
+    /// matched in any letter case, in the order given: bindings that bound nothing, for the
+    /// caller to report.
+    pub(crate) fn unmatched_bindings<'a>(&self, names: &'a [String]) -> Vec<&'a str> {
+        names
+            .iter()
+            .filter(|name| {
+                !self
+                    .operations
+                    .iter()
+                    .flat_map(|operation| &operation.bound_headers)
+                    .any(|header| header.name.eq_ignore_ascii_case(name))
+            })
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Whether any operation sends a bound header, so the client emits `with_bound_header`.
+    pub(crate) fn binds_headers(&self) -> bool {
+        self.operations
+            .iter()
+            .any(|operation| !operation.bound_headers.is_empty())
+    }
 }
 
 impl Operation {
