@@ -67,17 +67,30 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
                 old.method_name, new.method_name
             ),
         ));
-    } else if old.url_accessor_name != new.url_accessor_name {
-        // The accessor was renamed although its method was not (see `OperationNames::url_accessor`):
-        // its callers break just as a method's would.
-        changes.push(Change::new(
-            ChangeKind::MethodRenamed,
-            key,
-            format!(
-                "URL accessor renamed `{}` -> `{}`",
-                old.url_accessor_name, new.url_accessor_name
+    } else {
+        // A companion was renamed although its method was not (see `OperationNames::url_accessor`
+        // and the companions allocated after it): its callers break just as a method's would.
+        for (label, old_name, new_name) in [
+            (
+                "URL accessor",
+                &old.url_accessor_name,
+                &new.url_accessor_name,
             ),
-        ));
+            (
+                "request builder",
+                &old.request_builder_name,
+                &new.request_builder_name,
+            ),
+            ("decoder", &old.decoder_name, &new.decoder_name),
+        ] {
+            if old_name != new_name {
+                changes.push(Change::new(
+                    ChangeKind::MethodRenamed,
+                    key,
+                    format!("{label} renamed `{old_name}` -> `{new_name}`"),
+                ));
+            }
+        }
     }
     if old.url_args != new.url_args {
         changes.push(Change::new(
