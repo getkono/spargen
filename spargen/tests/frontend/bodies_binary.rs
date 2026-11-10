@@ -191,7 +191,7 @@ paths:
     // The point of the fix: a byte body must not degrade to `serde_json::Value`, and retyping the
     // untyped schema must not leave a second alias behind.
     assert!(
-        code.contains("pub type RequestBody = bytes::Bytes;"),
+        code.contains("pub type PutBlobBody = bytes::Bytes;"),
         "{code}"
     );
     assert!(
@@ -351,7 +351,7 @@ paths:
     );
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        code.contains("pub type RequestBody = bytes::Bytes;"),
+        code.contains("pub type PutAvatarBody = bytes::Bytes;"),
         "{code}"
     );
     assert!(code.contains("\"image/png\""), "{code}");
@@ -419,7 +419,7 @@ paths:
     );
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        code.contains("pub type RequestBody = bytes::Bytes;"),
+        code.contains("pub type PutAvatarBody = bytes::Bytes;"),
         "{code}"
     );
     assert!(code.contains("\"application/octet-stream\""), "{code}");
@@ -543,7 +543,7 @@ paths:
             "{range}: {report:#?}"
         );
         assert!(
-            code.contains("pub type RequestBody = bytes::Bytes;"),
+            code.contains("pub type PutClipBody = bytes::Bytes;"),
             "{range}: {code}"
         );
         assert!(code.contains("\"image/png\""), "{range}: {code}");
@@ -756,7 +756,7 @@ paths:
         "{report:#?}"
     );
     assert!(
-        code.contains("pub type RequestBody = bytes::Bytes;"),
+        code.contains("pub type PutClipBody = bytes::Bytes;"),
         "{code}"
     );
     assert!(code.contains("\"image/png\""), "{code}");
@@ -799,7 +799,7 @@ paths:
         "{report:#?}"
     );
     assert!(
-        code.contains("pub type RequestBody = bytes::Bytes;"),
+        code.contains("pub type PutAvatarBody = bytes::Bytes;"),
         "{code}"
     );
     assert!(code.contains("\"image/png\""), "{code}");
@@ -1432,11 +1432,11 @@ paths:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        code.contains("pub struct RequestBodyTyped(pub bytes::Bytes);"),
+        code.contains("pub struct UploadBodyTyped(pub bytes::Bytes);"),
         "{code}"
     );
     assert!(
-        code.contains("pub typed: Option<RequestBodyTyped>,"),
+        code.contains("pub typed: Option<UploadBodyTyped>,"),
         "{code}"
     );
     assert!(code.contains("pub united: Option<"), "{code}");
@@ -1457,4 +1457,88 @@ paths:
 "#,
     );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+}
+
+/// An inline request body is named after its operation (#1270): every operation's body type
+/// spells the call it belongs to, rather than one taking a bare `RequestBody` and the rest a
+/// pointer-seeded suffix decided by ranking across the whole document. Only a residual collision
+/// with another type of the same spelling takes the suffix, and a component keeps its bare name.
+#[test]
+fn an_inline_request_body_is_named_after_its_operation() {
+    let (report, code) = generate_with_code(
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /escrow:
+    put:
+      operationId: storeEscrow
+      requestBody:
+        required: true
+        content: { application/octet-stream: {} }
+      responses: { "204": { description: ok } }
+  /drops/{id}/chunks:
+    post:
+      operationId: append_drop_chunk
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/octet-stream: { schema: { type: string, format: binary } } }
+      responses: { "204": { description: ok } }
+  /forms:
+    post:
+      operationId: submitForm
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tags]
+              properties:
+                tags: { type: array, items: { type: object, properties: { name: { type: string } } } }
+      responses: { "204": { description: ok } }
+  /colliding:
+    post:
+      operationId: collide
+      requestBody:
+        required: true
+        content: { application/octet-stream: {} }
+      responses: { "204": { description: ok } }
+components:
+  schemas:
+    CollideBody: { type: object, properties: { id: { type: string } } }
+"#,
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    for expected in [
+        "pub type StoreEscrowBody = bytes::Bytes;",
+        "pub type AppendDropChunkBody = bytes::Bytes;",
+        "pub struct SubmitFormBody {",
+        "pub struct SubmitFormBodyTagsItem {",
+        "body: &types::StoreEscrowBody,",
+        "body: &types::AppendDropChunkBody,",
+        "body: &types::SubmitFormBody,",
+        "pub struct CollideBody {",
+    ] {
+        assert!(code.contains(expected), "missing `{expected}` in {code}");
+    }
+    assert!(!code.contains("RequestBody"), "{code}");
+    // The inline body whose spelling a component already holds yields it, taking the suffix.
+    let suffixed = code
+        .split("body: &types::CollideBody")
+        .nth(1)
+        .and_then(|rest| rest.split_once(','))
+        .map(|(suffix, _)| suffix)
+        .expect("the colliding operation takes its inline body");
+    assert!(
+        suffixed.len() == 8 && suffixed.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "{suffixed:?} in {code}"
+    );
+    assert!(
+        code.contains(&format!("pub type CollideBody{suffixed} = bytes::Bytes;")),
+        "{code}"
+    );
 }

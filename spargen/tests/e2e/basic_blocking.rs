@@ -356,7 +356,7 @@ fn form_urlencoded_body_bytes_follow_the_encoding_object() {
 
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .submit_form(&basic_client::types::RequestBody75618f63 {
+        .submit_form(&basic_client::types::SubmitFormBody {
             name: "Ada Lovelace".to_owned(),
             tags: vec!["a".to_owned(), "b".to_owned()],
             blob: basic_client::types::DeepFilter {
@@ -438,7 +438,7 @@ fn additional_properties_reach_form_and_multipart_bodies() {
     let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .submit_form_additional(&basic_client::types::RequestBody3c5761a3 {
+        .submit_form_additional(&basic_client::types::SubmitFormAdditionalBody {
             a: "x".to_owned(),
             additional: [
                 ("z".to_owned(), "last".to_owned()),
@@ -456,7 +456,7 @@ fn additional_properties_reach_form_and_multipart_bodies() {
     let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .upload_additional(&basic_client::types::RequestBody1654af29 {
+        .upload_additional(&basic_client::types::UploadAdditionalBody {
             caption: "c".to_owned(),
             additional: [
                 ("scores".to_owned(), vec![1, 2]),
