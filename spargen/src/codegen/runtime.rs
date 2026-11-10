@@ -97,7 +97,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
             #base64_module
             #blocking_module
 
-            pub use auth::{attach_auth, AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
+            pub use auth::{attach_auth, attach_auth_replayable, replay_rejected, token_provider, AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, RejectionCheck, Replay, SecretString, TokenFuture, TokenProvider, TokenRefresher};
             pub use client::{ClientConfig, ClientCore};
             pub use dispatch::{build_url_on, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, classify_with, decode_success, decode_success_bytes, decode_success_text, decode_success_with, decode_text_body, send, send_streaming, unexpected_status, StatusSpec};
             pub use error::{ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind, TransportError};

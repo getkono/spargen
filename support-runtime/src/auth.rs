@@ -1,11 +1,13 @@
 use std::convert::Infallible;
+use std::future::Future;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use reqwest::header::HeaderValue;
 use reqwest::RequestBuilder;
 
-use crate::wasm::BoxFuture;
-use crate::{ClientCore, Error, RequestError};
+use crate::wasm::{BoxFuture, MaybeSend, MaybeSync};
+use crate::{ClientCore, Error, HttpBody, RequestError};
 
 // Secret handling is delegated to `secrecy` rather than hand-rolled: it zeroizes on drop and
 // redacts `Debug`. Re-exported so generated code and consumers use one vocabulary.
@@ -46,6 +48,37 @@ pub type TokenProvider = Arc<dyn Fn() -> TokenFuture + Send + Sync>;
 #[cfg(target_arch = "wasm32")]
 pub type TokenProvider = Arc<dyn Fn() -> TokenFuture>;
 
+/// Decides whether a failed response rejected the token a [`Credential::Refreshable`] attached
+/// (for example a 401 whose problem `code` is `expired_token`), rather than refusing the call for
+/// some other reason, such as a wrong password. It reads the whole response, its body buffered.
+/// `Send + Sync` on native; vacuous on `wasm32`, matching [`TokenProvider`].
+#[cfg(not(target_arch = "wasm32"))]
+pub type RejectionCheck = Arc<dyn Fn(&http::Response<Bytes>) -> bool + Send + Sync>;
+/// Decides whether a failed response rejected the token it carried (the wasm variant: no
+/// `Send + Sync`).
+#[cfg(target_arch = "wasm32")]
+pub type RejectionCheck = Arc<dyn Fn(&http::Response<Bytes>) -> bool>;
+
+/// An async callback that, given the token a rejected call carried, yields a fresh one, for a
+/// [`Credential::Refreshable`]. `Send + Sync` on native; vacuous on `wasm32`, matching
+/// [`TokenProvider`].
+#[cfg(not(target_arch = "wasm32"))]
+pub type TokenRefresher = Arc<dyn Fn(SecretString) -> TokenFuture + Send + Sync>;
+/// An async callback that, given a rejected token, yields a fresh one (the wasm variant: no
+/// `Send + Sync`).
+#[cfg(target_arch = "wasm32")]
+pub type TokenRefresher = Arc<dyn Fn(SecretString) -> TokenFuture>;
+
+/// A [`TokenProvider`] from an async closure, without boxing its future by hand:
+/// `token_provider(|| async { Ok(SecretString::from("t0k")) })`.
+pub fn token_provider<F, Fut>(provider: F) -> TokenProvider
+where
+    F: Fn() -> Fut + MaybeSend + MaybeSync + 'static,
+    Fut: Future<Output = Result<SecretString, AuthError>> + MaybeSend + 'static,
+{
+    Arc::new(move || -> TokenFuture { Box::pin(provider()) })
+}
+
 /// A per-scheme credential supplied at client construction: a static secret or a token provider
 /// for rotation.
 ///
@@ -58,15 +91,16 @@ pub type TokenProvider = Arc<dyn Fn() -> TokenFuture>;
 ///   [`super::RequestError::MissingCredential`];
 /// - the selected alternative has a credential of a variant its scheme cannot carry:
 ///   [`super::RequestError::CredentialMismatch`];
-/// - the selected alternative's [`Credential::Provider`] fails:
-///   [`super::RequestError::CredentialProvider`].
+/// - the selected alternative's [`Credential::Provider`], or the token provider of its
+///   [`Credential::Refreshable`], fails: [`super::RequestError::CredentialProvider`].
 ///
 /// Which variant a scheme accepts:
 ///
 /// - `http basic` ([`AuthKind::Basic`]) accepts only [`Credential::Basic`];
 /// - every scheme that carries a token — `http bearer`, `oauth2` and `openIdConnect` (all three
 ///   [`AuthKind::Bearer`]) and `apiKey` in a header, query or cookie — accepts [`Credential::Bearer`],
-///   [`Credential::ApiKey`] and [`Credential::Provider`], and rejects [`Credential::Basic`];
+///   [`Credential::ApiKey`], [`Credential::Provider`] and [`Credential::Refreshable`], and rejects
+///   [`Credential::Basic`];
 /// - `mutualTLS` ([`AuthKind::MutualTls`]) is satisfied by the transport and never reads a
 ///   registered credential, so one registered under it is ignored.
 #[derive(Clone)]
@@ -96,6 +130,30 @@ pub enum Credential {
     /// `registered: "Provider"`, and the provider is never called. Under a `mutualTLS` scheme it is
     /// ignored and never called, since the transport's client certificate satisfies the scheme.
     Provider(TokenProvider),
+    /// A token the runtime refreshes and replays once when the server rejects it.
+    ///
+    /// It attaches like [`Credential::Provider`]: `token` is asked for a token each time a call
+    /// attaches it, under the same schemes, with the same failures. What it adds is the reactive
+    /// case. When the call's response is not a success and `is_rejection` reads it as a rejection
+    /// of the token, `on_rejected` is given the token that was sent and yields a fresh one, and the
+    /// call is sent once more with it. `token` is not asked again for that replay; a refresh that
+    /// should outlive it is `on_rejected`'s to store where `token` reads it.
+    ///
+    /// The replay happens at most once per call, and only when the request's body could be cloned
+    /// before it was sent (a streaming upload cannot be). The call then returns the replay's
+    /// response, unless the replay is rejected again. In every other case — a body that cannot be
+    /// cloned, `on_rejected` failing, the replay failing to send, or the replay rejected again —
+    /// the call returns the original response, which decodes as the operation's typed error as
+    /// it would have without a refresh. A streaming response's reconnect resends the token the
+    /// first request carried.
+    Refreshable {
+        /// Yields the token each call attaches.
+        token: TokenProvider,
+        /// Whether a failed response means the token it carried is stale.
+        is_rejection: RejectionCheck,
+        /// Given the stale token, yields a fresh one.
+        on_rejected: TokenRefresher,
+    },
 }
 
 /// How a security scheme carries its credential on the wire. Generated code builds these as
@@ -138,6 +196,23 @@ impl Credential {
             Credential::Basic { .. } => "Basic",
             Credential::ApiKey(_) => "ApiKey",
             Credential::Provider(_) => "Provider",
+            Credential::Refreshable { .. } => "Refreshable",
+        }
+    }
+
+    /// A [`Credential::Refreshable`] from closures: `token` as for [`token_provider`],
+    /// `is_rejection` reading a failed response, and `on_rejected` an async closure given the
+    /// rejected token.
+    pub fn refreshable<P, R, Fut>(token: TokenProvider, is_rejection: P, on_rejected: R) -> Self
+    where
+        P: Fn(&http::Response<Bytes>) -> bool + MaybeSend + MaybeSync + 'static,
+        R: Fn(SecretString) -> Fut + MaybeSend + MaybeSync + 'static,
+        Fut: Future<Output = Result<SecretString, AuthError>> + MaybeSend + 'static,
+    {
+        Credential::Refreshable {
+            token,
+            is_rejection: Arc::new(is_rejection),
+            on_rejected: Arc::new(move |stale| -> TokenFuture { Box::pin(on_rejected(stale)) }),
         }
     }
 }
@@ -173,10 +248,192 @@ pub async fn attach_auth(
     request: RequestBuilder,
     requirements: &[&[AuthScheme]],
 ) -> Result<RequestBuilder, Error<Infallible>> {
+    let Some(chosen) = select(core, requirements)? else {
+        return Ok(request);
+    };
+    let mut request = request;
+    for scheme in chosen {
+        if let Resolution::Registered(credential) = resolve(core, scheme) {
+            (request, _) = apply_credential(request, scheme, credential, None).await?;
+        }
+    }
+    Ok(request)
+}
+
+/// What a call needs to send itself once more after a [`Credential::Refreshable`] it carried was
+/// rejected: a clone of the request taken before any credential was attached, the security
+/// alternative that was selected, and the token each refreshable credential of it attached.
+/// [`attach_auth_replayable`] builds it and [`replay_rejected`] spends it.
+pub struct Replay {
+    /// The request as it stood before [`attach_auth_replayable`] attached anything.
+    unauthenticated: RequestBuilder,
+    /// The selected alternative's schemes, in declared order.
+    alternative: Vec<AuthScheme>,
+    /// Each refreshable scheme of `alternative`, with the token it attached.
+    sent: Vec<(&'static str, SecretString)>,
+}
+
+/// [`attach_auth`], also returning the [`Replay`] [`replay_rejected`] needs when the selected
+/// alternative holds a [`Credential::Refreshable`] under a scheme that takes a token. There is no
+/// `Replay` when it holds none, or when the request's body cannot be cloned (a streaming upload),
+/// so a call that cannot be replayed costs nothing extra. Selection and every failure are
+/// [`attach_auth`]'s.
+pub async fn attach_auth_replayable(
+    core: &ClientCore,
+    request: RequestBuilder,
+    requirements: &[&[AuthScheme]],
+) -> Result<(RequestBuilder, Option<Replay>), Error<Infallible>> {
+    let Some(chosen) = select(core, requirements)? else {
+        return Ok((request, None));
+    };
+    let refreshable = chosen.iter().any(|scheme| {
+        takes_token(scheme)
+            && matches!(
+                resolve(core, scheme),
+                Resolution::Registered(Credential::Refreshable { .. })
+            )
+    });
+    let unauthenticated = if refreshable {
+        request.try_clone()
+    } else {
+        None
+    };
+    let mut request = request;
+    let mut sent = Vec::new();
+    for scheme in chosen {
+        if let Resolution::Registered(credential) = resolve(core, scheme) {
+            let attached;
+            (request, attached) = apply_credential(request, scheme, credential, None).await?;
+            if let (Credential::Refreshable { .. }, Some(token)) = (credential, attached) {
+                sent.push((scheme.name, token));
+            }
+        }
+    }
+    let replay = unauthenticated.map(|unauthenticated| Replay {
+        unauthenticated,
+        alternative: chosen.to_vec(),
+        sent,
+    });
+    Ok((request, replay))
+}
+
+/// Replay a call once if a [`Credential::Refreshable`] it carried was rejected, given the
+/// response the call received and the [`Replay`] [`attach_auth_replayable`] returned for it.
+/// `streaming` sends the replay as [`crate::send_streaming`] would, and otherwise as
+/// [`crate::send`].
+///
+/// A success, or a call with no `Replay`, is returned as it came. Otherwise the response's body is
+/// read into memory, and each refreshable credential whose `is_rejection` holds for the response
+/// is handed the token it sent to its `on_rejected`. When none holds, the response is returned.
+/// When one does, the request is signed again — a refreshed scheme with its fresh token, another
+/// refreshable scheme with the token it sent, any other credential attached as it was the first
+/// time — and sent once more. Its response is returned unless it is rejected again.
+///
+/// A refresh that fails, a credential that can no longer attach, a replay that fails to send or
+/// whose failed body cannot be read, and a replay rejected again each return the original response,
+/// so the operation's typed error decodes from it as if no refresh had been tried. The one error
+/// returned is a failure to read the original response's body, which reading it to classify the
+/// error would have met as well.
+pub async fn replay_rejected(
+    core: &ClientCore,
+    response: http::Response<HttpBody>,
+    replay: Option<Replay>,
+    streaming: bool,
+) -> Result<http::Response<HttpBody>, Error<Infallible>> {
+    let Some(replay) = replay else {
+        return Ok(response);
+    };
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let original = buffered(response).await.map_err(Error::from_transport)?;
+    let mut tokens = Vec::with_capacity(replay.sent.len());
+    let mut refreshed = Vec::new();
+    for (name, sent) in replay.sent {
+        let token = match core.credential(name) {
+            Some(Credential::Refreshable {
+                is_rejection,
+                on_rejected,
+                ..
+            }) if is_rejection(&original) => match on_rejected(sent).await {
+                Ok(fresh) => {
+                    refreshed.push(name);
+                    fresh
+                }
+                Err(_) => return Ok(unbuffered(original)),
+            },
+            _ => sent,
+        };
+        tokens.push((name, token));
+    }
+    if refreshed.is_empty() {
+        return Ok(unbuffered(original));
+    }
+    let mut request = replay.unauthenticated;
+    for scheme in &replay.alternative {
+        let Resolution::Registered(credential) = resolve(core, scheme) else {
+            continue;
+        };
+        let supplied = tokens
+            .iter()
+            .find(|(name, _)| *name == scheme.name)
+            .map(|(_, token)| token);
+        match apply_credential(request, scheme, credential, supplied).await {
+            Ok((signed, _)) => request = signed,
+            Err(_) => return Ok(unbuffered(original)),
+        }
+    }
+    let Ok(request) = request.build() else {
+        return Ok(unbuffered(original));
+    };
+    let sent = if streaming {
+        crate::send_streaming(core, request).await
+    } else {
+        crate::send(core, request).await
+    };
+    let Ok(replayed) = sent else {
+        return Ok(unbuffered(original));
+    };
+    if replayed.status().is_success() {
+        return Ok(replayed);
+    }
+    let Ok(replayed) = buffered(replayed).await else {
+        return Ok(unbuffered(original));
+    };
+    let rejected_again = refreshed.iter().any(|name| {
+        matches!(
+            core.credential(name),
+            Some(Credential::Refreshable { is_rejection, .. }) if is_rejection(&replayed)
+        )
+    });
+    Ok(unbuffered(if rejected_again { original } else { replayed }))
+}
+
+/// `response` with its body read into memory, for a [`RejectionCheck`] to read.
+async fn buffered(
+    response: http::Response<HttpBody>,
+) -> Result<http::Response<Bytes>, crate::TransportError> {
+    let (parts, body) = response.into_parts();
+    let body = body.collect().await?;
+    Ok(http::Response::from_parts(parts, body))
+}
+
+/// A [`buffered`] response back on the transport seam, its body in memory.
+fn unbuffered(response: http::Response<Bytes>) -> http::Response<HttpBody> {
+    response.map(HttpBody::from)
+}
+
+/// The security alternative [`attach_auth`] attaches: `None` for an operation with no
+/// requirement, and otherwise the first alternative with no scheme missing, or the
+/// [`RequestError::MissingCredential`] that reports each alternative's missing schemes.
+fn select<'r>(
+    core: &ClientCore,
+    requirements: &[&'r [AuthScheme]],
+) -> Result<Option<&'r [AuthScheme]>, Error<Infallible>> {
     // No requirement attaches nothing, rather than failing as a `MissingCredential` naming no
     // scheme.
     if requirements.is_empty() {
-        return Ok(request);
+        return Ok(None);
     }
     // Selection and reporting read the one predicate `is_missing`: an alternative is chosen
     // exactly when none of its schemes is missing, and its missing schemes are what
@@ -202,13 +459,7 @@ pub async fn attach_auth(
             RequestError::MissingCredential { alternatives },
         ));
     };
-    let mut request = request;
-    for scheme in *chosen {
-        if let Resolution::Registered(credential) = resolve(core, scheme) {
-            request = apply_credential(request, scheme, credential).await?;
-        }
-    }
-    Ok(request)
+    Ok(Some(*chosen))
 }
 
 /// How one scheme of a security alternative is satisfied, if at all.
@@ -240,32 +491,60 @@ fn resolve<'a>(core: &'a ClientCore, scheme: &AuthScheme) -> Resolution<'a> {
     }
 }
 
+/// Whether `scheme` carries a token, and so asks a provider for one. `attach_auth` skips
+/// `MutualTls` before reaching [`apply_credential`], so its term is never evaluated from there; it
+/// is deliberate defence, so a caller that bypasses the skip still never fetches a token.
+fn takes_token(scheme: &AuthScheme) -> bool {
+    !matches!(scheme.kind, AuthKind::Basic | AuthKind::MutualTls)
+}
+
+/// Attach `credential` under `scheme`, returning the request and the token a provider (a
+/// [`Credential::Provider`] or a [`Credential::Refreshable`]'s `token`) yielded for it. `supplied`
+/// stands in for that provider: a replay passes the token it already holds, and the provider is
+/// not asked.
 async fn apply_credential(
     request: RequestBuilder,
     scheme: &AuthScheme,
     credential: &Credential,
-) -> Result<RequestBuilder, Error<Infallible>> {
+    supplied: Option<&SecretString>,
+) -> Result<(RequestBuilder, Option<SecretString>), Error<Infallible>> {
     // A provider yields a single secret, usable anywhere a bearer token or apiKey fits. Only a kind
     // that takes a token asks it for one, so a provider registered under a scheme that takes none
-    // is the same mismatch whether or not a refresh would have succeeded. `attach_auth` skips
-    // `MutualTls` before calling this, so the `MutualTls` term below is never evaluated from there;
-    // it is deliberate defence, so a caller that bypasses the skip still never fetches a token.
-    let takes_token = !matches!(scheme.kind, AuthKind::Basic | AuthKind::MutualTls);
+    // is the same mismatch whether or not a refresh would have succeeded.
+    let takes_token = takes_token(scheme);
     // A static secret is borrowed; only a provider's fresh token is owned, here.
-    let fetched: SecretString;
+    let mut fetched: Option<SecretString> = None;
     let token: Option<&SecretString> = match credential {
         Credential::Bearer(secret) | Credential::ApiKey(secret) => Some(secret),
-        Credential::Provider(provider) if takes_token => {
-            fetched = provider().await.map_err(|source| {
-                Error::RequestConstruction(RequestError::CredentialProvider {
-                    scheme: scheme.name,
-                    source,
-                })
-            })?;
-            Some(&fetched)
+        Credential::Provider(provider)
+        | Credential::Refreshable {
+            token: provider, ..
+        } if takes_token => {
+            let token = match supplied {
+                Some(token) => token.clone(),
+                None => provider().await.map_err(|source| {
+                    Error::RequestConstruction(RequestError::CredentialProvider {
+                        scheme: scheme.name,
+                        source,
+                    })
+                })?,
+            };
+            Some(&*fetched.insert(token))
         }
-        Credential::Provider(_) | Credential::Basic { .. } => None,
+        Credential::Provider(_) | Credential::Refreshable { .. } | Credential::Basic { .. } => None,
     };
+    let request = attach_token(request, scheme, credential, token)?;
+    Ok((request, fetched))
+}
+
+/// Install `token` (or `credential`'s username and password, for `http basic`) where `scheme`
+/// carries it, or report the mismatch of a credential its scheme cannot carry.
+fn attach_token(
+    request: RequestBuilder,
+    scheme: &AuthScheme,
+    credential: &Credential,
+    token: Option<&SecretString>,
+) -> Result<RequestBuilder, Error<Infallible>> {
     match scheme.kind {
         AuthKind::Basic => match credential {
             Credential::Basic { username, password } => {
