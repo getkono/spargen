@@ -470,4 +470,144 @@ fn an_alias_equal_error_body_is_one_body_type() {
     assert_eq!(text(&not_found), Some("gone"));
     assert_eq!(text(&conflict), Some("dup"));
 }
+
+// #1257: a status enum whose variants are all exact statuses names the status each variant was
+// dispatched on, on both sides and on the single-body newtype, without the caller's own match.
+#[test]
+fn an_exact_status_enum_names_its_status_without_a_match() {
+    let ok = basic_client::types::MultiOk { ok: "yes".to_owned() };
+    assert_eq!(
+        basic_client::GetPartialResponse::Status206(Box::new(ok.clone())).status(),
+        reqwest::StatusCode::PARTIAL_CONTENT
+    );
+    assert_eq!(
+        basic_client::GetMaybeEmptyResponse::Status204.status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        basic_client::GetMaybeEmptyResponse::Status200(Box::new(ok)).status(),
+        reqwest::StatusCode::OK
+    );
+    let problem = basic_client::types::Problem { title: "nope".to_owned(), detail: "gone".to_owned() };
+    assert_eq!(
+        basic_client::GetSharedError::Status401.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        basic_client::GetSharedError::Status409(Box::new(problem)).status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    // An enum whose statuses carry different body types still names its status.
+    let multi = basic_client::GetMultiError::Status404(Box::new(
+        basic_client::types::NotFoundError { reason: "gone".to_owned() },
+    ));
+    assert_eq!(multi.status(), reqwest::StatusCode::NOT_FOUND);
+    // The newtype's one documented error status.
+    assert_eq!(
+        basic_client::GetTextErrorError("nope".to_owned()).status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+}
+
+// #1257: a success enum whose variants all carry one body type hands it back bare, borrowed or
+// owned, whichever status carried it; one beside a bodyless status hands back an `Option`.
+#[test]
+fn a_uniform_body_success_enum_hands_back_its_body_from_any_status() {
+    let whole = basic_client::GetPartialResponse::Status200(Box::new(basic_client::types::MultiOk {
+        ok: "whole".to_owned(),
+    }));
+    let part = basic_client::GetPartialResponse::Status206(Box::new(basic_client::types::MultiOk {
+        ok: "part".to_owned(),
+    }));
+    assert_eq!(whole.body().ok, "whole");
+    assert_eq!(part.body().ok, "part");
+    let owned: basic_client::types::MultiOk = part.into_body();
+    assert_eq!(owned.ok, "part");
+    assert_eq!(whole.into_body().ok, "whole");
+
+    let bodied = basic_client::GetMaybeEmptyResponse::Status200(Box::new(
+        basic_client::types::MultiOk { ok: "yes".to_owned() },
+    ));
+    assert_eq!(bodied.body().map(|body| body.ok.as_str()), Some("yes"));
+    assert_eq!(bodied.into_body().map(|body| body.ok), Some("yes".to_owned()));
+    assert!(basic_client::GetMaybeEmptyResponse::Status204.body().is_none());
+    assert!(basic_client::GetMaybeEmptyResponse::Status204.into_body().is_none());
+}
+
+// #1257: the owned error body, from the enum, from the trait on every shape, and from the
+// taxonomy, generically over the operation.
+#[test]
+fn the_error_body_moves_out_of_every_shape_and_of_the_taxonomy() {
+    use basic_client::ApiErrorBody;
+    let problem = basic_client::types::Problem { title: "conflict".to_owned(), detail: "dup".to_owned() };
+    // The enum: inherent and trait agree, and a bodyless status moves out nothing.
+    let conflict = basic_client::GetSharedError::Status409(Box::new(problem.clone()));
+    assert_eq!(conflict.clone().into_body().map(|p| p.detail), Some("dup".to_owned()));
+    assert_eq!(ApiErrorBody::into_body(conflict).map(|p| p.detail), Some("dup".to_owned()));
+    assert!(basic_client::GetSharedError::Status401.into_body().is_none());
+    // A nullable payload: `null` is `None`, a value moves out bare.
+    assert!(basic_client::GetMaybeError::Status404(None).into_body().is_none());
+    let maybe = basic_client::types::MaybeProblem { title: "nope".to_owned() };
+    let fallback = basic_client::GetMaybeError::Default(Some(Box::new(maybe.clone())));
+    assert_eq!(fallback.into_body().map(|p| p.title), Some("nope".to_owned()));
+    // The newtype, non-nullable and nullable.
+    let wrapped = basic_client::GetTextErrorError("nope".to_owned());
+    assert_eq!(ApiErrorBody::into_body(wrapped), Some("nope".to_owned()));
+    assert!(ApiErrorBody::into_body(basic_client::GetMaybeSingleError(None)).is_none());
+    let single = basic_client::GetMaybeSingleError(Some(maybe));
+    assert_eq!(ApiErrorBody::into_body(single).map(|p| p.title), Some("nope".to_owned()));
+    // The taxonomy, generic over `E`: the owned body of `Api`, and nothing from any other class.
+    fn owned<E>(error: basic_client::Error<E>) -> Option<basic_client::types::Problem>
+    where
+        E: basic_client::ApiErrorBody<Body = basic_client::types::Problem>,
+    {
+        error.into_api_body()
+    }
+    let error = basic_client::Error::Api(basic_client::ResponseValue::new(
+        reqwest::StatusCode::CONFLICT,
+        Default::default(),
+        basic_client::GetSharedError::Status409(Box::new(problem)),
+    ));
+    assert_eq!(owned(error).map(|p| p.detail), Some("dup".to_owned()));
+    let transport: basic_client::Error<basic_client::GetSharedError> =
+        basic_client::Error::request_message("boom");
+    assert!(owned(transport).is_none());
+    let never: basic_client::Error<std::convert::Infallible> =
+        basic_client::Error::request_message("x");
+    assert!(never.into_api_body().is_none());
+}
+
+// #1257: `Error::headers` reads a response header from whichever class carried the response.
+#[test]
+fn the_taxonomy_reads_response_headers_from_every_class_that_received_one() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::RETRY_AFTER, reqwest::header::HeaderValue::from_static("7"));
+    let retry_after = |error: &basic_client::Error<basic_client::GetSharedError>| {
+        error
+            .headers()
+            .and_then(|headers| headers.get(reqwest::header::RETRY_AFTER))
+            .map(|value| value.as_bytes().to_vec())
+    };
+    let api = basic_client::Error::Api(basic_client::ResponseValue::new(
+        reqwest::StatusCode::CONFLICT,
+        headers.clone(),
+        basic_client::GetSharedError::Status401,
+    ));
+    let unexpected = basic_client::Error::UnexpectedStatus {
+        status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+        headers: headers.clone(),
+        body: bytes::Bytes::new(),
+    };
+    let decode = basic_client::Error::Decode {
+        status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        headers,
+        path: String::new(),
+        body: bytes::Bytes::new(),
+        truncated: false,
+    };
+    for error in [api, unexpected, decode] {
+        assert_eq!(retry_after(&error), Some(b"7".to_vec()), "{error}");
+    }
+    assert!(retry_after(&basic_client::Error::request_message("boom")).is_none());
+}
 "##;

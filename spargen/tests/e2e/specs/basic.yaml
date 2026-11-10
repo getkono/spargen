@@ -1028,6 +1028,24 @@ paths:
                 $ref: "#/components/schemas/xml-receipt"
         "204":
           description: No Content
+  # Two success statuses carrying one body type: the enum's `body()`/`into_body()` hand that body
+  # back bare, with no `Option`, whichever status carried it (#1257).
+  /partial:
+    get:
+      operationId: getPartial
+      responses:
+        "200":
+          description: The whole resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        "206":
+          description: A range of it
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
   # An exact `200` beside an overlapping `2XX` range, each with its own body: dispatch is exact
   # before range, so a `200` is `Status200` and any other 2xx is `Status2xx`.
   /exact-or-range:

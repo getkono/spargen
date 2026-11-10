@@ -90,7 +90,7 @@ pub(super) fn emit_client(
     let response_enums = api
         .operations
         .iter()
-        .map(|operation| emit_response_enum(operation, names));
+        .map(|operation| emit_response_enum(operation, api, names));
     let methods = api
         .operations
         .iter()
