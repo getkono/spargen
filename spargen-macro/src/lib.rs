@@ -60,6 +60,7 @@ struct Args {
     carve: Option<bool>,
     open_narrowing: Option<bool>,
     open_unions: Option<bool>,
+    verbatim_docs: Option<bool>,
     error_body_cap: Option<usize>,
     batch_cap: Option<usize>,
     omit: spargen::Omit,
@@ -115,6 +116,7 @@ impl Parse for Args {
         let mut carve = None;
         let mut open_narrowing = None;
         let mut open_unions = None;
+        let mut verbatim_docs = None;
         let mut error_body_cap = None;
         let mut batch_cap = None;
         let mut omit = spargen::Omit::default();
@@ -151,6 +153,7 @@ impl Parse for Args {
                     "carve" => parse_switch(input, &key, &mut carve, false)?,
                     "open_narrowing" => parse_switch(input, &key, &mut open_narrowing, false)?,
                     "open_unions" => parse_switch(input, &key, &mut open_unions, false)?,
+                    "verbatim_docs" => parse_switch(input, &key, &mut verbatim_docs, false)?,
                     "error_body_cap" => parse_cap(input, &key, &mut error_body_cap)?,
                     "batch_cap" => parse_cap(input, &key, &mut batch_cap)?,
                     "omit" => parse_omit(input, &mut omit)?,
@@ -165,7 +168,7 @@ impl Parse for Args {
                             format!(
                                 "unknown argument `{other}`; expected a spec path or one of: \
                                  uuid, no_uuid, time, no_time, carve, open_narrowing, \
-                                 open_unions, error_body_cap, batch_cap, omit, keep"
+                                 open_unions, verbatim_docs, error_body_cap, batch_cap, omit, keep"
                             ),
                         ));
                     }
@@ -188,6 +191,7 @@ impl Parse for Args {
             carve,
             open_narrowing,
             open_unions,
+            verbatim_docs,
             error_body_cap,
             batch_cap,
             omit,
@@ -287,6 +291,9 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
     }
     if let Some(open) = args.open_unions {
         config = config.open_unions(open);
+    }
+    if let Some(verbatim) = args.verbatim_docs {
+        config = config.verbatim_docs(verbatim);
     }
     for rule in &args.omit.rules {
         config = config.omit_rule(rule.clone());

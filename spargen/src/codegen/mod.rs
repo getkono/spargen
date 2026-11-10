@@ -45,6 +45,9 @@ pub(crate) struct CodegenOptions {
     /// Max bytes of a response body retained on error variants; stamped into the
     /// generated client's default configuration.
     pub(crate) error_body_cap: usize,
+    /// Render spec-carried prose as written, skipping [`docs::sanitize_carried`]: the
+    /// `Spec::verbatim_docs` knob.
+    pub(crate) verbatim_docs: bool,
 }
 
 /// The default cap on bytes of a response body retained on generated error variants, which
@@ -59,6 +62,7 @@ impl Default for CodegenOptions {
             feature_uuid: true,
             feature_time: true,
             error_body_cap: DEFAULT_ERROR_BODY_CAP,
+            verbatim_docs: false,
         }
     }
 }
@@ -100,10 +104,10 @@ pub(crate) fn generate(
     let features = api.runtime_features(options.feature_time);
     let support = runtime::emit_support(features);
     let models = models::emit_models(api, names, options, features.time);
-    let signatures = operation::signatures(api, names);
+    let signatures = operation::signatures(api, names, options);
     let client = client::emit_client(api, &signatures, names, options);
     // The synchronous facade is always emitted; `blocking::blocking_cfg` compiles its items out.
-    let blocking = blocking::emit_blocking_client(api, &signatures, names);
+    let blocking = blocking::emit_blocking_client(api, &signatures, names, options);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
     // output unusable via `include!` from OUT_DIR, the build.rs consumption path.
     // The root surface is emitted from the lists `name` owns, whose root scope reserves them before
@@ -139,9 +143,71 @@ pub(crate) fn generate(
 /// `prettyplease`, or the [`CodegenError`] its tokens raise when they are not a parseable Rust
 /// file.
 fn render(tokens: proc_macro2::TokenStream) -> Result<GeneratedCode, CodegenError> {
-    let file = syn::parse2(tokens).map_err(CodegenError)?;
+    let mut file: syn::File = syn::parse2(tokens).map_err(CodegenError)?;
+    for item in &mut file.items {
+        if let Some(attrs) = item_attrs(item) {
+            allow_unsatisfiable_lints(attrs);
+        }
+    }
     Ok(GeneratedCode {
         contents: prettyplease::unparse(&file),
+    })
+}
+
+/// The lints every top-level item of the generated module allows, so the `include!` site needs no
+/// lint attribute of its own: they judge what the spec chose — its names, its undocumented
+/// members, the operations a consumer never calls — or where the consumer puts the module, which
+/// no generated text can satisfy for every spec and every include site. They ride on each item
+/// rather than in an inner attribute on the file, which `include!` refuses; an item's lint levels
+/// reach every item nested inside it.
+const UNSATISFIABLE_LINTS: &[&str] = &[
+    "missing_docs",
+    "unreachable_pub",
+    "dead_code",
+    "clippy::pedantic",
+    "clippy::nursery",
+];
+
+/// Allow [`UNSATISFIABLE_LINTS`] in `attrs`: appended to the item's own `#[allow(…)]` where it has
+/// one, less the lints it already names (Clippy's `duplicated_attributes` refuses a repeat), and
+/// as a new `#[allow(…)]` otherwise.
+fn allow_unsatisfiable_lints(attrs: &mut Vec<syn::Attribute>) {
+    type Lints = syn::punctuated::Punctuated<syn::Path, syn::Token![,]>;
+    let spelled = |path: &syn::Path| quote!(#path).to_string().replace(' ', "");
+    let existing = attrs.iter().position(|attr| attr.path().is_ident("allow"));
+    let mut lints = match existing {
+        Some(index) => attrs[index]
+            .parse_args_with(Lints::parse_terminated)
+            .expect("codegen's own `#[allow]` names lint paths"),
+        None => Lints::new(),
+    };
+    for lint in UNSATISFIABLE_LINTS {
+        if !lints.iter().any(|path| spelled(path) == *lint) {
+            lints.push(syn::parse_str(lint).expect("a lint path"));
+        }
+    }
+    let attr: syn::Attribute = syn::parse_quote! { #[allow(#lints)] };
+    match existing {
+        Some(index) => attrs[index] = attr,
+        None => attrs.push(attr),
+    }
+}
+
+/// The attribute list of a top-level item, for every item kind codegen emits.
+fn item_attrs(item: &mut syn::Item) -> Option<&mut Vec<syn::Attribute>> {
+    Some(match item {
+        syn::Item::Const(item) => &mut item.attrs,
+        syn::Item::Enum(item) => &mut item.attrs,
+        syn::Item::Fn(item) => &mut item.attrs,
+        syn::Item::Impl(item) => &mut item.attrs,
+        syn::Item::Macro(item) => &mut item.attrs,
+        syn::Item::Mod(item) => &mut item.attrs,
+        syn::Item::Static(item) => &mut item.attrs,
+        syn::Item::Struct(item) => &mut item.attrs,
+        syn::Item::Trait(item) => &mut item.attrs,
+        syn::Item::Type(item) => &mut item.attrs,
+        syn::Item::Use(item) => &mut item.attrs,
+        _ => return None,
     })
 }
 
@@ -157,6 +223,31 @@ mod tests {
         let error = render(quote! { fn }).expect_err("`fn` alone is not a Rust file");
         assert!(error.to_string().starts_with(CODEGEN_FAILURE), "{error}");
         assert!(render(quote! { fn f() {} }).is_ok());
+    }
+
+    /// Every top-level item leaves `render` allowing the unsatisfiable lints exactly once: merged
+    /// into an `#[allow]` it already carries, without repeating a lint that one names, and as an
+    /// `#[allow]` of its own otherwise. Items nested inside are reached through their parent.
+    #[test]
+    fn every_top_level_item_allows_the_unsatisfiable_lints_once() {
+        let rendered = render(quote! {
+            #[allow(dead_code, unused_imports)]
+            mod support { pub struct Inner; }
+            #[derive(Debug)]
+            pub struct Client;
+            impl Client { pub fn new() -> Self { Self } }
+            pub use support::Inner;
+        })
+        .expect("a Rust file")
+        .contents;
+        let merged =
+            "#[allow(\n    dead_code,\n    unused_imports,\n    missing_docs,\n    unreachable_pub,\n    clippy::pedantic,\n    clippy::nursery\n)]\nmod support";
+        let own =
+            "#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]";
+        assert!(rendered.contains(merged), "{rendered}");
+        assert_eq!(rendered.matches(own).count(), 3, "{rendered}");
+        assert_eq!(rendered.matches("#[allow").count(), 4, "{rendered}");
+        assert!(rendered.contains("pub struct Inner;"), "{rendered}");
     }
 
     /// The shared test oracles match this very literal, and every harness that runs `generate`

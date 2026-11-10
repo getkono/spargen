@@ -172,7 +172,7 @@ fn emit_type_def(
     options: &CodegenOptions,
 ) -> TokenStream {
     let ident = names.types.get(&id).expect("type name allocated");
-    let docs = doc_tokens(&def.docs);
+    let docs = doc_tokens(&def.docs, options);
     let deprecated = def.docs.deprecated.then(|| quote! { #[deprecated] });
     match types.emission(id, def) {
         Emission::Struct(object) => {

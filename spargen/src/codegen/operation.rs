@@ -324,10 +324,14 @@ fn takes_into_string(api: &Api, ty: Ty) -> bool {
 }
 
 /// Every operation's [`OperationSig`], in `api.operations` order.
-pub(super) fn signatures(api: &Api, names: &Names) -> Vec<OperationSig> {
+pub(super) fn signatures(
+    api: &Api,
+    names: &Names,
+    options: &super::CodegenOptions,
+) -> Vec<OperationSig> {
     api.operations
         .iter()
-        .map(|operation| OperationSig::new(operation, api, names))
+        .map(|operation| OperationSig::new(operation, api, names, options))
         .collect()
 }
 
@@ -371,12 +375,17 @@ pub(super) struct OperationSig {
 
 impl OperationSig {
     /// The signature of `operation`'s method.
-    pub(super) fn new(operation: &Operation, api: &Api, names: &Names) -> Self {
+    pub(super) fn new(
+        operation: &Operation,
+        api: &Api,
+        names: &Names,
+        options: &super::CodegenOptions,
+    ) -> Self {
         let operation_names = names.operation(&operation.id);
         let bindings = &operation_names.bindings;
         let params_ident = &operation_names.params_struct;
 
-        let docs = doc_tokens(&operation.docs);
+        let docs = doc_tokens(&operation.docs, options);
         // Required parameters are positional method arguments with no attribute slot of their
         // own, so a required parameter's deprecation and `default` are surfaced in the method
         // rustdoc instead, in the order an optional parameter's `…Params` field carries them.

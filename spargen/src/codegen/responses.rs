@@ -17,7 +17,11 @@ use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 /// body has already been decoded and handed back before a caller opts in, so a malformed or absent
 /// header can never turn a successful call into a failed one. Every header also stays reachable
 /// raw through `ResponseValue::headers`.
-pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> TokenStream {
+pub(super) fn emit_response_headers(
+    operation: &Operation,
+    names: &Names,
+    options: &super::CodegenOptions,
+) -> TokenStream {
     let responses = operation
         .responses
         .entries()
@@ -38,7 +42,7 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
             if !header.required {
                 ty = quote! { Option<#ty> };
             }
-            let docs = doc_tokens(&header.docs);
+            let docs = doc_tokens(&header.docs, options);
             let deprecated = header.deprecated.then(|| quote! { #[deprecated] });
             quote! { #docs #deprecated pub #field: #ty }
         });

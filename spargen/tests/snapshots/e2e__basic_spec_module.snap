@@ -8,7 +8,14 @@ expression: basic_spec_module(|spec| spec)
 // source: [spec]
 // deterministic: same spargen version + spec + config => same bytes
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ClientConfig, ClientCore, Credential,
     Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
@@ -18,16 +25,39 @@ pub use support::{
     SecretString, TimeoutKind, TokenFuture, TokenProvider, TransportError,
     exponential_backoff, next_link,
 };
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub use support::{
     EventStream, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
 };
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub use support::{Date, DateParseError, DateTime};
 /// The freestanding runtime embedded into this output; no spargen crate is a runtime
 /// dependency.
 #[forbid(unsafe_code)]
-#[allow(dead_code, unexpected_cfgs, unused_imports, clippy::result_large_err)]
+#[allow(
+    dead_code,
+    unexpected_cfgs,
+    unused_imports,
+    clippy::result_large_err,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 mod support {
     mod auth {
         use std::convert::Infallible;
@@ -5888,7 +5918,15 @@ mod support {
     pub use blocking::BlockingRuntime;
 }
 #[forbid(unsafe_code)]
-#[allow(dead_code, deprecated, unused_imports)]
+#[allow(
+    dead_code,
+    deprecated,
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub mod types {
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
@@ -9316,13 +9354,28 @@ pub mod types {
     pub type XTraceId = String;
     pub type Session977138f7 = String;
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct BindingCollisionsParams {
     #[serde(rename = "optional", skip_serializing_if = "Option::is_none")]
     pub optional: Option<types::Optional>,
 }
-#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
+#[allow(
+    dead_code,
+    deprecated,
+    clippy::wrong_self_convention,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl BindingCollisionsParams {
     ///Set the `optional` parameter.
     #[must_use]
@@ -9331,13 +9384,28 @@ impl BindingCollisionsParams {
         self
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SignatureBindingCollisionsParams {
     #[serde(rename = "optional", skip_serializing_if = "Option::is_none")]
     pub optional: Option<types::Optional5db2f3f3>,
 }
-#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
+#[allow(
+    dead_code,
+    deprecated,
+    clippy::wrong_self_convention,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl SignatureBindingCollisionsParams {
     ///Set the `optional` parameter.
     #[must_use]
@@ -9346,7 +9414,14 @@ impl SignatureBindingCollisionsParams {
         self
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SerializeParamsParams {
     #[serde(rename = "labels", skip_serializing_if = "Option::is_none")]
@@ -9356,7 +9431,15 @@ pub struct SerializeParamsParams {
     #[serde(rename = "session", skip_serializing_if = "Option::is_none")]
     pub session: Option<types::Session>,
 }
-#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
+#[allow(
+    dead_code,
+    deprecated,
+    clippy::wrong_self_convention,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl SerializeParamsParams {
     ///Set the `labels` parameter.
     #[must_use]
@@ -9377,7 +9460,14 @@ impl SerializeParamsParams {
         self
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct GetUserParams {
     ///Default: `1`.
@@ -9388,7 +9478,15 @@ pub struct GetUserParams {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub r#type: Option<types::Type>,
 }
-#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
+#[allow(
+    dead_code,
+    deprecated,
+    clippy::wrong_self_convention,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetUserParams {
     ///Set the `page` parameter.
     #[must_use]
@@ -9409,13 +9507,28 @@ impl GetUserParams {
         self
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct GetBlobParams {
     #[serde(rename = "cursor", skip_serializing_if = "Option::is_none")]
     pub cursor: Option<types::Cursor84222325>,
 }
-#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
+#[allow(
+    dead_code,
+    deprecated,
+    clippy::wrong_self_convention,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetBlobParams {
     ///Set the `cursor` parameter.
     #[must_use]
@@ -9424,13 +9537,28 @@ impl GetBlobParams {
         self
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PostNullableBytesParams {
     #[serde(rename = "cursor", skip_serializing_if = "Option::is_none")]
     pub cursor: Option<types::Cursor842223252>,
 }
-#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
+#[allow(
+    dead_code,
+    deprecated,
+    clippy::wrong_self_convention,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl PostNullableBytesParams {
     ///Set the `cursor` parameter.
     #[must_use]
@@ -9439,7 +9567,14 @@ impl PostNullableBytesParams {
         self
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SerializeStylesParams {
     #[serde(rename = "space", skip_serializing_if = "Option::is_none")]
@@ -9451,7 +9586,15 @@ pub struct SerializeStylesParams {
     #[serde(rename = "reserved", skip_serializing_if = "Option::is_none")]
     pub reserved: Option<types::Reserved>,
 }
-#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
+#[allow(
+    dead_code,
+    deprecated,
+    clippy::wrong_self_convention,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl SerializeStylesParams {
     ///Set the `space` parameter.
     #[must_use]
@@ -9478,7 +9621,14 @@ impl SerializeStylesParams {
         self
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct GetTracedParams {
     #[serde(rename = "X-Trace-Id", skip_serializing_if = "Option::is_none")]
@@ -9486,7 +9636,15 @@ pub struct GetTracedParams {
     #[serde(rename = "session", skip_serializing_if = "Option::is_none")]
     pub session: Option<types::Session977138f7>,
 }
-#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
+#[allow(
+    dead_code,
+    deprecated,
+    clippy::wrong_self_convention,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetTracedParams {
     ///Set the `X-Trace-Id` parameter.
     #[must_use]
@@ -9501,24 +9659,32 @@ impl GetTracedParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type ReadFileError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type BindingCollisionsError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type SignatureBindingCollisionsError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type SerializeParamsError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type GetConjunctionError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type GetUserError = std::convert::Infallible;
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetMultiError {
     Status404(Box<types::NotFoundError>),
     Status409(Box<types::ConflictError>),
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetMultiError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -9530,7 +9696,9 @@ impl std::fmt::Display for GetMultiError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetMultiError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetMultiError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -9539,7 +9707,14 @@ impl support::ApiErrorProblem for GetMultiError {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetMultiError {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -9563,13 +9738,21 @@ impl GetMultiError {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetSharedError {
     Status401,
     Status404(Box<types::Problem>),
     Status409(Box<types::Problem>),
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetSharedError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -9582,7 +9765,9 @@ impl std::fmt::Display for GetSharedError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetSharedError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetSharedError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -9592,7 +9777,14 @@ impl support::ApiErrorProblem for GetSharedError {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetSharedError {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -9640,7 +9832,14 @@ impl GetSharedError {
         }
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetSharedError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -9650,13 +9849,21 @@ impl support::ApiErrorBody for GetSharedError {
         GetSharedError::into_body(self)
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetMaybeError {
     Status404(Option<Box<types::MaybeProblem>>),
     Status409(Option<Box<types::MaybeProblem>>),
     Default(Option<Box<types::MaybeProblem>>),
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetMaybeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -9669,7 +9876,9 @@ impl std::fmt::Display for GetMaybeError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetMaybeError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetMaybeError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -9679,7 +9888,14 @@ impl support::ApiErrorProblem for GetMaybeError {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetMaybeError {
     /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::MaybeProblem> {
@@ -9698,7 +9914,14 @@ impl GetMaybeError {
         }
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetMaybeError {
     type Body = types::MaybeProblem;
     fn body(&self) -> Option<&types::MaybeProblem> {
@@ -9709,49 +9932,94 @@ impl support::ApiErrorBody for GetMaybeError {
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetMultiDefaultError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetMultiDefaultError(pub types::Problem);
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetMultiDefaultError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::Problem {
         self.0
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl std::ops::Deref for GetMultiDefaultError {
     type Target = types::Problem;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::ops::DerefMut for GetMultiDefaultError {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<types::Problem> for GetMultiDefaultError {
     fn from(inner: types::Problem) -> Self {
         Self(inner)
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<GetMultiDefaultError> for types::Problem {
     fn from(outer: GetMultiDefaultError) -> Self {
         outer.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetMultiDefaultError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("documented error response")
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetMultiDefaultError {}
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetMultiDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -9761,55 +10029,101 @@ impl support::ApiErrorBody for GetMultiDefaultError {
         Some(self.0)
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetMultiDefaultError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         support::ProblemDetails::of(&self.0)
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetPlainDefaultError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetPlainDefaultError(pub types::Problem);
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetPlainDefaultError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::Problem {
         self.0
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl std::ops::Deref for GetPlainDefaultError {
     type Target = types::Problem;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::ops::DerefMut for GetPlainDefaultError {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<types::Problem> for GetPlainDefaultError {
     fn from(inner: types::Problem) -> Self {
         Self(inner)
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<GetPlainDefaultError> for types::Problem {
     fn from(outer: GetPlainDefaultError) -> Self {
         outer.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetPlainDefaultError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("documented error response")
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetPlainDefaultError {}
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetPlainDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -9819,55 +10133,101 @@ impl support::ApiErrorBody for GetPlainDefaultError {
         Some(self.0)
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetPlainDefaultError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         support::ProblemDetails::of(&self.0)
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetUnitDefaultError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetUnitDefaultError(pub types::Problem);
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetUnitDefaultError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::Problem {
         self.0
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl std::ops::Deref for GetUnitDefaultError {
     type Target = types::Problem;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::ops::DerefMut for GetUnitDefaultError {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<types::Problem> for GetUnitDefaultError {
     fn from(inner: types::Problem) -> Self {
         Self(inner)
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<GetUnitDefaultError> for types::Problem {
     fn from(outer: GetUnitDefaultError) -> Self {
         outer.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetUnitDefaultError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("documented error response")
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetUnitDefaultError {}
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetUnitDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -9877,17 +10237,26 @@ impl support::ApiErrorBody for GetUnitDefaultError {
         Some(self.0)
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetUnitDefaultError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         support::ProblemDetails::of(&self.0)
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetBodylessDefaultError {
     Status404(Box<types::Problem>),
     Default,
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetBodylessDefaultError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -9903,7 +10272,9 @@ impl std::fmt::Display for GetBodylessDefaultError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetBodylessDefaultError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetBodylessDefaultError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -9912,7 +10283,14 @@ impl support::ApiErrorProblem for GetBodylessDefaultError {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetBodylessDefaultError {
     /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::Problem> {
@@ -9929,7 +10307,14 @@ impl GetBodylessDefaultError {
         }
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetBodylessDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -9939,13 +10324,21 @@ impl support::ApiErrorBody for GetBodylessDefaultError {
         GetBodylessDefaultError::into_body(self)
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetBodylessDefaultMultiError {
     Status404(Box<types::Problem>),
     Status409(Box<types::Problem>),
     Default,
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetBodylessDefaultMultiError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -9964,7 +10357,9 @@ impl std::fmt::Display for GetBodylessDefaultMultiError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetBodylessDefaultMultiError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetBodylessDefaultMultiError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -9978,7 +10373,14 @@ impl support::ApiErrorProblem for GetBodylessDefaultMultiError {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetBodylessDefaultMultiError {
     /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::Problem> {
@@ -9997,7 +10399,14 @@ impl GetBodylessDefaultMultiError {
         }
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetBodylessDefaultMultiError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -10007,12 +10416,20 @@ impl support::ApiErrorBody for GetBodylessDefaultMultiError {
         GetBodylessDefaultMultiError::into_body(self)
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetBodylessSiblingError {
     Status403,
     Status404(Box<types::Problem>),
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetBodylessSiblingError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -10028,7 +10445,9 @@ impl std::fmt::Display for GetBodylessSiblingError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetBodylessSiblingError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetBodylessSiblingError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -10037,7 +10456,14 @@ impl support::ApiErrorProblem for GetBodylessSiblingError {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetBodylessSiblingError {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -10075,7 +10501,14 @@ impl GetBodylessSiblingError {
         }
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetBodylessSiblingError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -10085,12 +10518,20 @@ impl support::ApiErrorBody for GetBodylessSiblingError {
         GetBodylessSiblingError::into_body(self)
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetXmlBodylessSiblingError {
     Status403,
     Status404(Box<types::XmlReceipt>),
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetXmlBodylessSiblingError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -10106,7 +10547,9 @@ impl std::fmt::Display for GetXmlBodylessSiblingError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetXmlBodylessSiblingError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetXmlBodylessSiblingError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -10117,7 +10560,14 @@ impl support::ApiErrorProblem for GetXmlBodylessSiblingError {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetXmlBodylessSiblingError {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -10155,7 +10605,14 @@ impl GetXmlBodylessSiblingError {
         }
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetXmlBodylessSiblingError {
     type Body = types::XmlReceipt;
     fn body(&self) -> Option<&types::XmlReceipt> {
@@ -10165,12 +10622,20 @@ impl support::ApiErrorBody for GetXmlBodylessSiblingError {
         GetXmlBodylessSiblingError::into_body(self)
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetConditionalError {
     Status304,
     Default(Box<types::Problem>),
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetConditionalError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -10184,7 +10649,9 @@ impl std::fmt::Display for GetConditionalError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetConditionalError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetConditionalError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -10193,7 +10660,14 @@ impl support::ApiErrorProblem for GetConditionalError {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetConditionalError {
     /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::Problem> {
@@ -10210,7 +10684,14 @@ impl GetConditionalError {
         }
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetConditionalError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -10221,12 +10702,26 @@ impl support::ApiErrorBody for GetConditionalError {
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetMaybeSingleError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetMaybeSingleError(pub Option<types::MaybeProblem>);
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetMaybeSingleError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> Option<types::MaybeProblem> {
@@ -10243,37 +10738,68 @@ impl GetMaybeSingleError {
         }
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl std::ops::Deref for GetMaybeSingleError {
     type Target = Option<types::MaybeProblem>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::ops::DerefMut for GetMaybeSingleError {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<Option<types::MaybeProblem>> for GetMaybeSingleError {
     fn from(inner: Option<types::MaybeProblem>) -> Self {
         Self(inner)
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<GetMaybeSingleError> for Option<types::MaybeProblem> {
     fn from(outer: GetMaybeSingleError) -> Self {
         outer.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetMaybeSingleError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("documented error response")
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetMaybeSingleError {}
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetMaybeSingleError {
     type Body = types::MaybeProblem;
     fn body(&self) -> Option<&types::MaybeProblem> {
@@ -10283,17 +10809,26 @@ impl support::ApiErrorBody for GetMaybeSingleError {
         self.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetMaybeSingleError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         support::ProblemDetails::of(&self.0)
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetAliasSharedError {
     Status404(Box<types::PlainMessage>),
     Status409(Box<types::ResponseBody>),
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetAliasSharedError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -10309,7 +10844,9 @@ impl std::fmt::Display for GetAliasSharedError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetAliasSharedError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetAliasSharedError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -10318,7 +10855,14 @@ impl support::ApiErrorProblem for GetAliasSharedError {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetAliasSharedError {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -10356,7 +10900,14 @@ impl GetAliasSharedError {
         }
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetAliasSharedError {
     type Body = types::PlainMessage;
     fn body(&self) -> Option<&types::PlainMessage> {
@@ -10366,35 +10917,49 @@ impl support::ApiErrorBody for GetAliasSharedError {
         GetAliasSharedError::into_body(self)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type UploadFileError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type GetBlobError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type PostRawError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type PostNullableBytesError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type PostNullablePartsError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type RenderHtmlError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type GetOctocatError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type DownloadRawError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type PutRangedError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type GetArtworkError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type PutArtworkError = std::convert::Infallible;
 ///The documented error body of this operation, wrapped so `Error<GetTextErrorError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetTextErrorError(pub types::ResponseBodyD00b95d0);
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetTextErrorError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::ResponseBodyD00b95d0 {
@@ -10411,37 +10976,68 @@ impl GetTextErrorError {
         }
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl std::ops::Deref for GetTextErrorError {
     type Target = types::ResponseBodyD00b95d0;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::ops::DerefMut for GetTextErrorError {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<types::ResponseBodyD00b95d0> for GetTextErrorError {
     fn from(inner: types::ResponseBodyD00b95d0) -> Self {
         Self(inner)
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<GetTextErrorError> for types::ResponseBodyD00b95d0 {
     fn from(outer: GetTextErrorError) -> Self {
         outer.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetTextErrorError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("documented error response")
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetTextErrorError {}
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetTextErrorError {
     type Body = types::ResponseBodyD00b95d0;
     fn body(&self) -> Option<&types::ResponseBodyD00b95d0> {
@@ -10451,17 +11047,26 @@ impl support::ApiErrorBody for GetTextErrorError {
         Some(self.0)
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetTextErrorError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         support::ProblemDetails::of(&self.0)
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetRawMultiError {
     Status400(Box<types::ResponseBody48bb7a8a>),
     Status409(Box<types::ResponseBodyDbe5ca3a>),
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetRawMultiError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -10473,7 +11078,9 @@ impl std::fmt::Display for GetRawMultiError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetRawMultiError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetRawMultiError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -10482,7 +11089,14 @@ impl support::ApiErrorProblem for GetRawMultiError {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetRawMultiError {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -10506,42 +11120,50 @@ impl GetRawMultiError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type SubmitOrderError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type PatchMergeDocumentError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type SubmitLegacyOrderError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type PostJsonMetaError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type StreamChatError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type StreamChatLinesError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type StreamChatSequenceError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type GetAlternateAuthError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type SerializeStylesError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type SerializeContentParamsError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type SubmitFormError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type SubmitFormAdditionalError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type SubmitNullableFormAdditionalError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type UploadAdditionalError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type DocumentedHeadersError = std::convert::Infallible;
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetNoSuccessError {
     Status404(Box<types::ResponseBody2a32723f>),
     Default(Box<types::DeepFilter>),
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetNoSuccessError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -10555,7 +11177,9 @@ impl std::fmt::Display for GetNoSuccessError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetNoSuccessError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetNoSuccessError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -10564,20 +11188,28 @@ impl support::ApiErrorProblem for GetNoSuccessError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type GetMaybeEmptyError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type GetXmlMaybeEmptyError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type GetPartialError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type GetRangedError = std::convert::Infallible;
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetErrorRangedError {
     Status409(Box<types::ConflictError>),
     Status4xx(Box<types::NotFoundError>),
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetErrorRangedError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -10593,7 +11225,9 @@ impl std::fmt::Display for GetErrorRangedError {
             )
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetErrorRangedError {}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetErrorRangedError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         match self {
@@ -10603,49 +11237,94 @@ impl support::ApiErrorProblem for GetErrorRangedError {
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetRangeOnlyError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetRangeOnlyError(pub types::NotFoundError);
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetRangeOnlyError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::NotFoundError {
         self.0
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl std::ops::Deref for GetRangeOnlyError {
     type Target = types::NotFoundError;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::ops::DerefMut for GetRangeOnlyError {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<types::NotFoundError> for GetRangeOnlyError {
     fn from(inner: types::NotFoundError) -> Self {
         Self(inner)
     }
 }
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl From<GetRangeOnlyError> for types::NotFoundError {
     fn from(outer: GetRangeOnlyError) -> Self {
         outer.0
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::fmt::Display for GetRangeOnlyError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("documented error response")
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl std::error::Error for GetRangeOnlyError {}
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl support::ApiErrorBody for GetRangeOnlyError {
     type Body = types::NotFoundError;
     fn body(&self) -> Option<&types::NotFoundError> {
@@ -10655,21 +11334,36 @@ impl support::ApiErrorBody for GetRangeOnlyError {
         Some(self.0)
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
 impl support::ApiErrorProblem for GetRangeOnlyError {
     fn problem(&self) -> Option<support::ProblemDetails> {
         support::ProblemDetails::of(&self.0)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub type GetTracedError = std::convert::Infallible;
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetMultiResponse {
     Status200(Box<types::MultiOk>),
     Status201(Box<types::MultiCreated>),
     Status204,
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetMultiResponse {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -10701,13 +11395,27 @@ impl GetMultiResponse {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetMultiDefaultResponse {
     Status200(Box<types::MultiOk>),
     Status201(Box<types::MultiCreated>),
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetMultiDefaultResponse {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -10731,13 +11439,27 @@ impl GetMultiDefaultResponse {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetRawMultiResponse {
     Status200(Box<types::ResponseBody4450a524>),
     Status201(Box<types::ResponseBody6bf58d24>),
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetRawMultiResponse {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -10761,13 +11483,27 @@ impl GetRawMultiResponse {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetMaybeEmptyResponse {
     Status200(Box<types::MultiOk>),
     Status204,
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetMaybeEmptyResponse {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -10805,13 +11541,27 @@ impl GetMaybeEmptyResponse {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetXmlMaybeEmptyResponse {
     Status200(Box<types::XmlReceipt>),
     Status204,
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetXmlMaybeEmptyResponse {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -10849,13 +11599,27 @@ impl GetXmlMaybeEmptyResponse {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetPartialResponse {
     Status200(Box<types::MultiOk>),
     Status206(Box<types::MultiOk>),
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl GetPartialResponse {
     /// The HTTP status this value was dispatched on: each variant names exactly one.
     pub fn status(&self) -> reqwest::StatusCode {
@@ -10893,19 +11657,40 @@ impl GetPartialResponse {
         }
     }
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetRangedResponse {
     Status200(Box<types::MultiOk>),
     Status2xx(Box<types::MultiCreated>),
 }
 ///Documented response headers for `putRanged` `Status206`.
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub struct PutRangedStatus206Headers {
     pub content_range: Option<types::HeaderContentRange>,
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl PutRangedStatus206Headers {
     /// Read the documented headers out of a raw header map.
     pub fn from_headers(
@@ -10928,12 +11713,26 @@ impl PutRangedStatus206Headers {
     }
 }
 ///Documented response headers for `documentedHeaders` `Status204`.
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub struct DocumentedHeadersStatus204Headers {
     pub x_trace_ids: Option<types::HeaderXTraceIds>,
 }
-#[allow(dead_code, deprecated)]
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl DocumentedHeadersStatus204Headers {
     /// Read the documented headers out of a raw header map.
     pub fn from_headers(
@@ -10956,7 +11755,7 @@ impl DocumentedHeadersStatus204Headers {
     }
 }
 /// Base URLs declared by the API description.
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub mod servers {
     ///Server `https://example.com/api`.
     #[derive(Debug, Clone, Default)]
@@ -11051,12 +11850,22 @@ Servers declared by the spec:
 - `https://example.com/api`
 - `https://{host}:{port}/{stage}`*/
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, unreachable_pub, clippy::pedantic, clippy::nursery)]
 pub struct Client {
     core: support::ClientCore,
 }
 #[forbid(unsafe_code)]
-#[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
+#[allow(
+    dead_code,
+    deprecated,
+    unused_mut,
+    unused_variables,
+    clippy::result_large_err,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 impl Client {
     /// Build a client on the default `ClientConfig`: a 30 s connect timeout, a 5 min read
     /// (stall) timeout, and no total timeout. [`Self::with_config`] changes any of them.
@@ -14978,7 +15787,15 @@ Response `5XX`: Any server error*/
         support::build_url_on(&self.core, None, &path, &query)
     }
 }
-#[allow(unexpected_cfgs, unused_imports)]
+#[allow(
+    unexpected_cfgs,
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 mod __spargen_blocking {
     use super::*;
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
@@ -16166,5 +16983,12 @@ Response `5XX`: Any server error*/
         }
     }
 }
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub use __spargen_blocking::*;
