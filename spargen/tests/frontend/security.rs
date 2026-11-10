@@ -248,7 +248,7 @@ paths:
     let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
         compact.contains(
-            "support::attach_auth(&self.core,request,&[&[support::AuthScheme{\
+            "support::attach_auth_replayable(&self.core,request,&[&[support::AuthScheme{\
              name:\"./bearer.yaml\",kind:support::AuthKind::Bearer,},][..],],)"
         ),
         "the URI requirement must attach as `AuthKind::Bearer`:\n{code}"
