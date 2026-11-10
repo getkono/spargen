@@ -233,7 +233,7 @@ async fn main() {
     let stored = client
         .upload_photo(
             "1",
-            &types::RequestBody {
+            &types::UploadPhotoBody {
                 photo: bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\n"),
                 meta: types::PhotoMeta {
                     caption: "Rex at the park".to_owned(),

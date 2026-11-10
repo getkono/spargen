@@ -21,8 +21,13 @@ use super::LowerCtx;
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Choose the `content` entry a request sends ([`choose_media`]) and lower it, or `None` when
     /// no entry can be chosen or the chosen one is refused. The `W014`s for the entries passed
-    /// over are emitted only once the chosen one has lowered.
-    pub(super) fn lower_request_body(&mut self, body: &RequestBodyObject) -> Option<RequestBody> {
+    /// over are emitted only once the chosen one has lowered. `hint` names an inline body schema
+    /// after its operation ([`crate::name::request_body_hint`]).
+    pub(super) fn lower_request_body(
+        &mut self,
+        body: &RequestBodyObject,
+        hint: &str,
+    ) -> Option<RequestBody> {
         // A structured-suffix range such as `application/*+json` ranks with the concrete types its
         // suffix covers, so it could win a tie or a rank and then be refused below as a range. While
         // a sibling can be sent, it is withheld from the choice and reported as not selected.
@@ -38,7 +43,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             BodyPosition::Request,
             |object: &&crate::oas31::MediaTypeObject| media_object_is_opaque(object),
         )?;
-        let lowered = self.lower_chosen_request_body(body, media_name, object)?;
+        let lowered = self.lower_chosen_request_body(body, media_name, object, hint)?;
         // Both `W014`s are emitted only now that every gate above has accepted the selection: a
         // refused one is reported by its `E009` alone, since no method narrows to a body that is
         // not lowered. First the alternatives `choose_media` passed over, then the withheld suffix
@@ -61,6 +66,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         body: &RequestBodyObject,
         media_name: &str,
         object: &MediaTypeObject,
+        hint: &str,
     ) -> Option<RequestBody> {
         let object = self.resolve_media_object(object, media_name)?;
         let media = lower_media_type(media_name, &body.provenance, self.diags)?;
@@ -119,8 +125,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let ty = object
             .schema
             .as_ref()
-            .and_then(|schema| self.lower_schema_ref(schema, "RequestBody"))
-            .map(|ty| self.raw_body_bytes(ty, "RequestBody", &body.provenance, mark));
+            .and_then(|schema| self.lower_schema_ref(schema, hint))
+            .map(|ty| self.raw_body_bytes(ty, hint, &body.provenance, mark));
         if let Some(schema) = object.schema.as_ref() {
             self.warn_structural_default_ref(schema, "a request body schema");
         }
@@ -148,7 +154,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return None;
         }
         let ty = if media == MediaType::OctetStream {
-            self.opaque_octets("RequestBody", ty, object.schema.is_some(), &body.provenance)
+            self.opaque_octets(hint, ty, object.schema.is_some(), &body.provenance)
         } else {
             ty
         };

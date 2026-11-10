@@ -592,7 +592,7 @@ mod common;
 fn rfc6570_multipart_parts_are_not_percent_encoded() {
     let (base, server) = common::serve_no_content();
     let client = multipart_client::BlockingClient::new(&base).unwrap();
-    let body = multipart_client::types::RequestBody {
+    let body = multipart_client::types::UploadBody {
         tags: vec!["blue".into(), "black".into()],
         paths: vec!["a/b".into(), "c".into()],
         names: vec!["ada".into(), "grace".into()],

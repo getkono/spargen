@@ -146,7 +146,7 @@ fn a_union_and_a_component_stay_closed() {
     );
     // A request body is never opened.
     assert_refused(
-        serde_json::from_str::<open_problems::types::RequestBody>(
+        serde_json::from_str::<open_problems::types::PostProblemsBody>(
             r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
         ),
         "a request body stays closed",
