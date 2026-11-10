@@ -375,7 +375,7 @@ impl From<&'static [u8]> for HttpBody {
 /// in-memory bytes move over without a copy, and a streaming body ([`HttpBody::wrap`]) is sent as
 /// it is read. A streaming body is never replayed: the request it rides on does not clone, so a
 /// retry or a credential refresh does not resend it. reqwest's `fetch` backend on `wasm32` takes
-/// no stream, so there a streaming body is refused as [`Error::RequestConstruction`].
+/// no stream, so there a streaming body is refused as [`crate::Error::RequestConstruction`].
 pub fn request_body(
     body: impl Into<HttpBody>,
 ) -> Result<reqwest::Body, crate::Error<std::convert::Infallible>> {
