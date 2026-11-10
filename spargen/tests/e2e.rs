@@ -610,7 +610,8 @@ fn the_provenance_header_stamps_this_spargen_version() {
 /// the construct it changes, so enabling it emits the default module byte for byte.
 #[test]
 fn basic_spec_module_without_type_mapping_features_is_pinned() {
-    let module = basic_spec_module(|spec| spec.uuid(false).time(false));
+    let module =
+        basic_spec_module(|spec| spec.uuid(false).datetime(spargen::DateTimeBackend::String));
     assert_ne!(
         module,
         basic_spec_module(|spec| spec),

@@ -103,14 +103,42 @@ pub(crate) fn xml_runtime_file() -> SupportFile {
     }
 }
 
-/// The RFC 3339 date-time runtime source, embedded only when an output maps `format: date-time` or
-/// `format: date` to a typed value (see [`crate::ir::Api::uses_time`] and the `time` config knob).
-/// Kept out of [`runtime_files`] so an output with no dates never carries a `time` reference; its
-/// bytes still ship inside the published crate through the `runtime/datetime.rs` symlink.
+/// The RFC 3339 date-time runtime source over the `time` crate, embedded only when an output maps
+/// `format: date-time` or `format: date` to a typed value under the `time` backend (see
+/// [`crate::ir::Api::uses_time`] and the `datetime` config knob). Kept out of [`runtime_files`] so an
+/// output with no dates never carries a `time` reference; its bytes still ship inside the published
+/// crate through the `runtime/datetime.rs` symlink.
 pub(crate) fn datetime_runtime_file() -> SupportFile {
     SupportFile {
         name: "datetime.rs",
         contents: include_str!("runtime/datetime.rs"),
+    }
+}
+
+/// The same newtypes over the `jiff` crate, embedded in place of [`datetime_runtime_file`] (under
+/// its module name, `datetime`) under the `jiff` backend, beside [`rfc3339_runtime_file`].
+pub(crate) fn datetime_jiff_runtime_file() -> SupportFile {
+    SupportFile {
+        name: "datetime.rs",
+        contents: include_str!("runtime/datetime_jiff.rs"),
+    }
+}
+
+/// The same newtypes over the `chrono` crate, embedded in place of [`datetime_runtime_file`] (under
+/// its module name, `datetime`) under the `chrono` backend, beside [`rfc3339_runtime_file`].
+pub(crate) fn datetime_chrono_runtime_file() -> SupportFile {
+    SupportFile {
+        name: "datetime.rs",
+        contents: include_str!("runtime/datetime_chrono.rs"),
+    }
+}
+
+/// The RFC 3339 codec the `jiff` and `chrono` newtypes share, embedded beside either of them and
+/// under no other backend. It adds no dependency.
+pub(crate) fn rfc3339_runtime_file() -> SupportFile {
+    SupportFile {
+        name: "rfc3339.rs",
+        contents: include_str!("runtime/rfc3339.rs"),
     }
 }
 

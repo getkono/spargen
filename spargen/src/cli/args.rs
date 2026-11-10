@@ -57,14 +57,10 @@ pub(crate) struct SpecArgs {
     /// `spargen.toml`.
     #[arg(long)]
     pub(crate) no_uuid: bool,
-    /// Map `format: date-time`/`date` to the `time` crate, overriding `time = false` in
-    /// `spargen.toml`.
-    #[arg(long, conflicts_with = "no_time")]
-    pub(crate) time: bool,
-    /// Map `format: date-time`/`date` to `String` instead of the `time` crate, overriding
-    /// `time = true` in `spargen.toml`.
-    #[arg(long)]
-    pub(crate) no_time: bool,
+    /// The crate `format: date-time`/`date` map to: `time` (the default), `jiff`, `chrono`, or
+    /// `string` for no date-time crate, overriding `datetime` in `spargen.toml`.
+    #[arg(long, value_name = "BACKEND")]
+    pub(crate) datetime: Option<spargen::DateTimeBackend>,
     /// Max bytes of a response body retained on generated error variants (default 65536).
     #[arg(long, value_name = "BYTES")]
     pub(crate) error_body_cap: Option<usize>,
@@ -132,8 +128,7 @@ impl SpecArgs {
             no_carve,
             uuid,
             no_uuid,
-            time,
-            no_time,
+            datetime,
             error_body_cap,
             open_narrowing,
             no_open_narrowing,
@@ -153,8 +148,7 @@ impl SpecArgs {
             (*no_carve, "--no-carve"),
             (*uuid, "--uuid"),
             (*no_uuid, "--no-uuid"),
-            (*time, "--time"),
-            (*no_time, "--no-time"),
+            (datetime.is_some(), "--datetime"),
             (error_body_cap.is_some(), "--error-body-cap"),
             (*open_narrowing, "--open-narrowing"),
             (*no_open_narrowing, "--no-open-narrowing"),

@@ -223,7 +223,7 @@ fn the_macro_preview_emits_the_module_generate_writes() {
     let out = temp.path().join("client");
     let configure = |spec: Spec| {
         spec.uuid(false)
-            .time(false)
+            .datetime(spargen::DateTimeBackend::String)
             .open_narrowing(true)
             .error_body_cap(4096)
             .batch_cap(7)

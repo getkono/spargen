@@ -14,8 +14,8 @@ are in the contract linked below:
 | A raw `bytes` value serde encodes (a `format: binary` value in a model, a JSON `content` parameter, or a serde-encoded body; a [`contentEncoding: base64`](#binary-content) one carries its own codec) | `bytes`' `serde` feature |
 | [Streaming](#streaming) (sequential responses) | `futures-core` and reqwest's `stream` feature |
 | [XML bodies](#xml-bodies) | `quick-xml` |
-| [`format: date-time` / `date`](#uuid-and-time) | `time` |
-| [`format: uuid`](#uuid-and-time) | `uuid` |
+| [`format: date-time` / `date`](#uuid-and-dates) | `time`, or the `jiff` or `chrono` crate the `datetime` backend selects |
+| [`format: uuid`](#uuid-and-dates) | `uuid` |
 | [Blocking client](#blocking-feature-blocking) | an optional, native-only `tokio`, behind the consumer's own `blocking` feature |
 
 Beyond that core set, the transport seam, retry, middleware, pagination, problem details and
@@ -321,20 +321,36 @@ dependency, and Cargo's feature unification applies it to the generated client:
 serde_json = { version = "1", features = ["float_roundtrip"] }
 ```
 
-### `uuid` and `time`
+### `uuid` and dates
 
-`format: uuid` maps to the `uuid` crate and `format: date-time` / `date` to `time`, as opt-out
-mappings in generated code. Call `Spec::uuid(false)` / `Spec::time(false)` (or use
-the macro's `no_uuid` / `no_time`, or `uuid = false` / `time = false` in `spargen.toml`) to fall
-back to `String`. The corresponding dependency is
-required only when that mapping is enabled and actually occurs in the compiled API.
+`format: uuid` maps to the `uuid` crate, as an opt-out mapping: call `Spec::uuid(false)` (or use the
+macro's `no_uuid`, or `uuid = false` in `spargen.toml`) to fall back to `String`.
 
-Dates are emitted as the embedded `DateTime(pub time::OffsetDateTime)` and `Date(pub time::Date)`
-newtypes rather than `time`'s own types, because `time`'s serde output is not the RFC 3339 text
-these formats are defined as. They carry a hand-written RFC 3339 codec, so only `time`'s
-`formatting` and `parsing` features are needed; they `Deref` to and convert with `From` from the
-inner type, and parse with `FromStr`, failing with `DateParseError`, which the generated root
-re-exports beside them. The [`datetime` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/datetime.rs)
+`format: date-time` / `date` map to the crate the date-time backend names: `Spec::datetime`
+(`spargen::DateTimeBackend`), `datetime = "…"` in `spargen.toml`, `--datetime …` on the CLI, or
+the macro's `datetime = "…"`.
+
+| Backend | `DateTime` wraps | `Date` wraps | Requires |
+| --- | --- | --- | --- |
+| `time` (default) | `time::OffsetDateTime` | `time::Date` | `time` with `formatting` and `parsing` |
+| `jiff` | `jiff::Timestamp` | `jiff::civil::Date` | `jiff` |
+| `chrono` | `chrono::DateTime<chrono::FixedOffset>` | `chrono::NaiveDate` | `chrono` |
+| `string` | — (`String`) | — (`String`) | nothing |
+
+Each dependency is required only when its mapping is selected and actually occurs in the compiled
+API.
+
+Dates are emitted as the embedded `DateTime` and `Date` newtypes rather than the crate's own types,
+because `time`'s serde output is not the RFC 3339 text these formats are defined as, and so that
+every backend reads and writes one wire form. They carry a hand-written RFC 3339 codec, so no
+backend's `serde` feature is needed (only `time`'s `formatting` and `parsing`); they `Deref` to and
+convert with `From` from the inner type, and parse with `FromStr`, failing with `DateParseError`,
+which the generated root re-exports beside them. The `jiff` and `chrono` newtypes share the
+[`rfc3339` codec](https://github.com/getkono/spargen/blob/master/support-runtime/src/rfc3339.rs),
+which states the grammar they accept and write. `jiff::Timestamp` has no offset, so the `jiff`
+backend normalizes a decoded `date-time` to UTC and always writes `Z`; `time` and `chrono` keep
+the offset the value was written with. The
+[`datetime` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/datetime.rs)
 sets out why `time`'s own representation is not RFC 3339.
 
 ### Binary content

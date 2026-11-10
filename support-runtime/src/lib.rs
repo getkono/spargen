@@ -40,6 +40,14 @@ mod client;
 // has a `format: date-time` or `format: date`.
 #[cfg(feature = "time")]
 mod datetime;
+// The same two newtypes over `chrono` and `jiff`, the other typed date-time backends, each compiled
+// under the feature of its crate. A generated client embeds the one its backend selects, in place of
+// `datetime`, under that module's name; here they sit beside it under their own names, reached by
+// path, so every backend is built and tested together.
+#[cfg(feature = "chrono")]
+pub mod datetime_chrono;
+#[cfg(feature = "jiff")]
+pub mod datetime_jiff;
 mod dispatch;
 mod error;
 mod header;
@@ -48,6 +56,10 @@ mod paginate;
 mod parameter;
 mod response;
 mod retry;
+// The RFC 3339 codec the `chrono` and `jiff` backends share; a generated client embeds it beside
+// either of them.
+#[cfg(any(feature = "chrono", feature = "jiff"))]
+mod rfc3339;
 // Typed streaming of sequential response bodies pulls in the optional `futures-core` dependency
 // and reqwest's `stream` feature, so it is compiled only under the `stream` feature; a generated
 // client embeds this module only when its spec has a sequential (SSE, ndjson or JSON-seq) response.

@@ -5,6 +5,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use super::blocking::blocking_cfg;
+use crate::ir::DateTimeBackend;
 
 /// Emit the private `support` module, one submodule per freestanding runtime source: each file's
 /// text up to its `#[cfg(test)]` module, with `crate::` rewritten to `super::`, re-parsed as
@@ -13,13 +14,14 @@ use super::blocking::blocking_cfg;
 /// `application/xml` / `text/xml` body), the XML codec module is embedded and its helpers
 /// re-exported; otherwise it is omitted entirely, so a non-XML output carries no `quick-xml`
 /// reference. `features.streams` embeds the sequential-response `stream` module,
-/// `features.time` the RFC 3339 `DateTime`/`Date` newtypes, and `features.base64` the
+/// `features.datetime` the RFC 3339 `DateTime`/`Date` newtypes over the selected backend's crate
+/// (with the shared `rfc3339` codec for `jiff` and `chrono`), and `features.base64` the
 /// `contentEncoding: base64` codec, on the same terms.
 pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream {
     let crate::ir::RuntimeFeatures {
         xml: uses_xml,
         streams: uses_streams,
-        time: uses_time,
+        datetime,
         base64: uses_base64,
     } = features;
     let embed = |file: &crate::support::SupportFile| {
@@ -58,10 +60,30 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
     let xml_reexport = uses_xml.then(|| {
         quote! { pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml}; }
     });
-    // The RFC 3339 newtypes are embedded only when a date-typed primitive survives lowering with the
-    // `time` mapping enabled; only then does the audit require `time` of the consumer.
-    let datetime_module = uses_time.then(|| embed(&crate::support::datetime_runtime_file()));
-    let datetime_reexport = uses_time.then(|| {
+    // The RFC 3339 newtypes are embedded only when a date-typed primitive survives lowering with a
+    // typed backend selected; only then does the audit require that backend's crate of the
+    // consumer. Every backend's file is embedded as `datetime`, so the re-export is one spelling.
+    let datetime_module = datetime.map(|backend| {
+        let codec = || embed(&crate::support::rfc3339_runtime_file());
+        match backend {
+            DateTimeBackend::Jiff => {
+                let codec = codec();
+                let newtypes = embed(&crate::support::datetime_jiff_runtime_file());
+                quote! { #newtypes #codec }
+            }
+            DateTimeBackend::Chrono => {
+                let codec = codec();
+                let newtypes = embed(&crate::support::datetime_chrono_runtime_file());
+                quote! { #newtypes #codec }
+            }
+            // `runtime_features` never selects `String` (it embeds no newtypes), so the arm it
+            // shares is `Time`'s.
+            DateTimeBackend::Time | DateTimeBackend::String => {
+                embed(&crate::support::datetime_runtime_file())
+            }
+        }
+    });
+    let datetime_reexport = datetime.is_some().then(|| {
         quote! { pub use datetime::{Date, DateParseError, DateTime}; }
     });
     // The base64 codec is embedded only when a `contentEncoding: base64` newtype survives lowering;

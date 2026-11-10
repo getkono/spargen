@@ -17,16 +17,17 @@ direction, the two caps replace its values, `omit { ... }` adds rules to its `[[
 operation, and every component the kept ones do not reach, is omitted), and each
 `bind_header = "..."` adds a header to its `bind_headers`, bound once on the client rather than
 taken at every call.
-Each switch — `uuid`, `time`, `carve`, `open_narrowing`, `open_unions`, `verbatim_docs` — takes `= true` or `= false`; written
-alone it means `= true`, and `no_uuid` / `no_time` are shorthand for `uuid = false` /
-`time = false`. A switch or cap the macro is not given leaves the file's value, and one given
-twice is a compile error:
+Each switch — `uuid`, `carve`, `open_narrowing`, `open_unions`, `verbatim_docs` — takes `= true` or `= false`; written
+alone it means `= true`, and `no_uuid` is shorthand for `uuid = false`. `datetime = "…"` names the
+crate `format: date-time`/`date` map to — `"time"`, `"jiff"`, `"chrono"`, or `"string"` for none —
+and replaces the file's `datetime`. A switch, cap or backend the macro is not given leaves the
+file's value, and one given twice is a compile error:
 
 ```rust,ignore
 spargen_macro::generate_api!(
     spec = "openapi.yaml",
     uuid = false,
-    time = false,
+    datetime = "jiff",
     carve = true,
     open_narrowing = true,
     open_unions = true,

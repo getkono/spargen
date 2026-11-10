@@ -32,8 +32,8 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
     if let Some(uuid) = switch(args.uuid, args.no_uuid) {
         spec = spec.uuid(uuid);
     }
-    if let Some(time) = switch(args.time, args.no_time) {
-        spec = spec.time(time);
+    if let Some(backend) = args.datetime {
+        spec = spec.datetime(backend);
     }
     if let Some(cap) = args.error_body_cap {
         spec = spec.error_body_cap(cap);
@@ -167,6 +167,7 @@ mod tests {
     use clap::Parser;
 
     use super::super::args::{Cli, Command};
+    use spargen::DateTimeBackend;
 
     /// The [`Spec`] `spargen check` resolves for `openapi.yaml` in `dir` under `flags`.
     fn resolved(dir: &camino::Utf8Path, flags: &[&str]) -> Spec {
@@ -196,12 +197,11 @@ mod tests {
     #[test]
     fn each_switch_pair_overrides_the_config_file_either_way() {
         let (_on, on) = with_config(
-            "carve = true\nuuid = true\ntime = true\nopen_narrowing = true\nopen_unions = true\n\
+            "carve = true\nuuid = true\nopen_narrowing = true\nopen_unions = true\n\
              verbatim_docs = true\n",
         );
-        let (_off, off) =
-            with_config(
-            "carve = false\nuuid = false\ntime = false\nopen_narrowing = false\nopen_unions = false\n\
+        let (_off, off) = with_config(
+            "carve = false\nuuid = false\nopen_narrowing = false\nopen_unions = false\n\
              verbatim_docs = false\n",
         );
         let file_on = Spec::new(on.join("openapi.yaml"))
@@ -219,7 +219,6 @@ mod tests {
                 &[
                     "--no-carve",
                     "--no-uuid",
-                    "--no-time",
                     "--no-open-narrowing",
                     "--no-open-unions",
                     "--no-verbatim-docs"
@@ -229,7 +228,6 @@ mod tests {
                 .clone()
                 .carve(false)
                 .uuid(false)
-                .time(false)
                 .open_narrowing(false)
                 .open_unions(false)
                 .verbatim_docs(false)
@@ -240,7 +238,6 @@ mod tests {
                 &[
                     "--carve",
                     "--uuid",
-                    "--time",
                     "--open-narrowing",
                     "--open-unions",
                     "--verbatim-docs"
@@ -250,7 +247,6 @@ mod tests {
                 .clone()
                 .carve(true)
                 .uuid(true)
-                .time(true)
                 .open_narrowing(true)
                 .open_unions(true)
                 .verbatim_docs(true)
@@ -259,17 +255,16 @@ mod tests {
         assert_eq!(resolved(&off, &["--uuid"]), file_off.uuid(true));
     }
 
-    /// Each of the twelve switch flags, alone, moves its own setting off the file's value and
-    /// leaves the other five where the file put them.
+    /// Each of the ten switch flags, alone, moves its own setting off the file's value and leaves
+    /// the other four where the file put them.
     #[test]
     fn each_switch_flag_moves_only_its_own_setting() {
         let (_on, on) = with_config(
-            "carve = true\nuuid = true\ntime = true\nopen_narrowing = true\nopen_unions = true\n\
+            "carve = true\nuuid = true\nopen_narrowing = true\nopen_unions = true\n\
              verbatim_docs = true\n",
         );
-        let (_off, off) =
-            with_config(
-            "carve = false\nuuid = false\ntime = false\nopen_narrowing = false\nopen_unions = false\n\
+        let (_off, off) = with_config(
+            "carve = false\nuuid = false\nopen_narrowing = false\nopen_unions = false\n\
              verbatim_docs = false\n",
         );
         let file = |dir: &Utf8PathBuf| {
@@ -278,10 +273,9 @@ mod tests {
                 .unwrap()
         };
         type Moved = fn(Spec) -> Spec;
-        let rows: [(&str, &Utf8PathBuf, Moved); 12] = [
+        let rows: [(&str, &Utf8PathBuf, Moved); 10] = [
             ("--no-carve", &on, |spec| spec.carve(false)),
             ("--no-uuid", &on, |spec| spec.uuid(false)),
-            ("--no-time", &on, |spec| spec.time(false)),
             ("--no-open-narrowing", &on, |spec| {
                 spec.open_narrowing(false)
             }),
@@ -289,7 +283,6 @@ mod tests {
             ("--no-verbatim-docs", &on, |spec| spec.verbatim_docs(false)),
             ("--carve", &off, |spec| spec.carve(true)),
             ("--uuid", &off, |spec| spec.uuid(true)),
-            ("--time", &off, |spec| spec.time(true)),
             ("--open-narrowing", &off, |spec| spec.open_narrowing(true)),
             ("--open-unions", &off, |spec| spec.open_unions(true)),
             ("--verbatim-docs", &off, |spec| spec.verbatim_docs(true)),
@@ -299,6 +292,38 @@ mod tests {
             assert_ne!(resolved, file(dir), "{flag} moves its setting");
             assert_eq!(resolved, moved(file(dir)), "{flag} moves nothing else");
         }
+    }
+
+    /// `--datetime` overrides the file's backend with any of the four, leaves it in place when not
+    /// given, and refuses a spelling it does not know as a clap value error.
+    #[test]
+    fn the_datetime_flag_overrides_the_file_backend() {
+        let (_dir, dir) = with_config("datetime = \"jiff\"\n");
+        let file = Spec::new(dir.join("openapi.yaml"))
+            .config_file(dir.join("spargen.toml"))
+            .unwrap();
+        assert_eq!(file.datetime_backend(), DateTimeBackend::Jiff);
+        assert_eq!(resolved(&dir, &[]), file);
+        for &backend in DateTimeBackend::ALL {
+            assert_eq!(
+                resolved(&dir, &["--datetime", backend.as_str()]),
+                file.clone().datetime(backend),
+                "{backend}"
+            );
+        }
+        let error = Cli::try_parse_from(["spargen", "check", "openapi.yaml", "--datetime", "Jiff"])
+            .expect_err("an unknown backend must not parse");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::ValueValidation,
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("expected time, jiff, chrono or string"),
+            "{error}"
+        );
     }
 
     /// `lock` names every spec flag but `--config` and `--batch-cap` as ignored, each once
@@ -324,8 +349,6 @@ mod tests {
             "--no-carve",
             "--uuid",
             "--no-uuid",
-            "--time",
-            "--no-time",
             "--open-narrowing",
             "--no-open-narrowing",
             "--open-unions",
@@ -336,6 +359,7 @@ mod tests {
             assert_eq!(ignored(&[flag]), [flag]);
         }
         for (flag, value) in [
+            ("--datetime", "jiff"),
             ("--error-body-cap", "10"),
             ("--omit-path", "/pets"),
             ("--omit-operation", "get /pets"),
@@ -367,7 +391,6 @@ mod tests {
         for (on, off) in [
             ("--carve", "--no-carve"),
             ("--uuid", "--no-uuid"),
-            ("--time", "--no-time"),
             ("--open-narrowing", "--no-open-narrowing"),
             ("--open-unions", "--no-open-unions"),
             ("--verbatim-docs", "--no-verbatim-docs"),

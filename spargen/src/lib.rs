@@ -82,6 +82,7 @@ pub use diag::{
     Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, OutcomeClaim, Severity, Span, UnknownCode,
 };
 pub use diff_api::{DiffRejection, DiffSides, Side};
+pub use ir::DateTimeBackend;
 pub use report::{Outcome, Report};
 pub use runtime_contract::{RequiredDependency, Requirements};
 #[cfg(feature = "remote-fetch")]

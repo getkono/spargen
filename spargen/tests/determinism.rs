@@ -160,7 +160,7 @@ fn the_e2e_basic_spec_is_byte_identical_across_runs_under_default_and_non_defaul
     let (outcome, module) =
         assert_configured_generates_identically(&spec_path, "e2e BASIC_SPEC, options", |spec| {
             spec.uuid(false)
-                .time(false)
+                .datetime(spargen::DateTimeBackend::String)
                 .open_narrowing(true)
                 .open_unions(true)
                 .verbatim_docs(true)
