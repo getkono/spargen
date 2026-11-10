@@ -278,6 +278,74 @@ fn a_failed_token_provider_is_a_typed_request_construction_error() {
     assert!(provider.downcast_ref::<basic_client::AuthError>().is_some());
 }
 
+// A refreshable credential rejected by the server is refreshed and the call replayed once, from
+// generated dispatch: the replay's success decodes as the operation's value. A refresh that fails
+// leaves the original 401 to decode as the call's error. The backend answers at once, so one poll
+// with a no-op waker drives each call.
+#[test]
+fn a_rejected_refreshable_credential_is_refreshed_and_the_call_replayed() {
+    use std::future::Future;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Default)]
+    struct Scripted {
+        sent: Mutex<Vec<String>>,
+    }
+    impl basic_client::HttpBackend for Scripted {
+        fn execute(&self, request: http::Request<basic_client::HttpBody>) -> basic_client::ExecuteFuture<'_> {
+            let bearer = request.headers()[http::header::AUTHORIZATION].to_str().unwrap().to_owned();
+            let response = if bearer == "Bearer fresh" {
+                http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(basic_client::HttpBody::from(r#"{"id":"1","name":"Ada"}"#))
+            } else {
+                http::Response::builder()
+                    .status(401)
+                    .body(basic_client::HttpBody::from("expired"))
+            };
+            self.sent.lock().unwrap().push(bearer);
+            Box::pin(async move { Ok(response.unwrap()) })
+        }
+    }
+
+    let credential = |refreshed: Option<&'static str>| {
+        basic_client::Credential::refreshable(
+            basic_client::token_provider(|| async { Ok(basic_client::SecretString::from("stale")) }),
+            |response| response.status() == 401 && &response.body()[..] == b"expired",
+            move |_stale| async move {
+                refreshed
+                    .map(basic_client::SecretString::from)
+                    .ok_or_else(|| basic_client::AuthError::new("session ended"))
+            },
+        )
+    };
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+
+    let backend = Arc::new(Scripted::default());
+    let client = basic_client::Client::with_backend(backend.clone(), "https://example.com")
+        .unwrap()
+        .with_credential("bearer", credential(Some("fresh")));
+    let mut call = std::pin::pin!(client.get_user("1", None));
+    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+        panic!("the scripted backend answers at once");
+    };
+    assert_eq!(result.unwrap().into_inner().name, "Ada");
+    assert_eq!(*backend.sent.lock().unwrap(), ["Bearer stale", "Bearer fresh"]);
+
+    let backend = Arc::new(Scripted::default());
+    let client = basic_client::Client::with_backend(backend.clone(), "https://example.com")
+        .unwrap()
+        .with_credential("bearer", credential(None));
+    let mut call = std::pin::pin!(client.get_user("1", None));
+    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+        panic!("the scripted backend answers at once");
+    };
+    let error = result.err().expect("the original 401 is the call's answer");
+    assert_eq!(error.status().map(|status| status.as_u16()), Some(401));
+    assert_eq!(*backend.sent.lock().unwrap(), ["Bearer stale"]);
+}
+
 // The third credential state: a credential is registered and selects its alternative, but it is of
 // a kind the scheme cannot carry. It is typed from generated output too, with nothing beneath it,
 // so a consumer never has to match on its text.
