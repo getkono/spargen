@@ -84,7 +84,9 @@ pub enum Error<E> {
     },
     /// #12 — a non-streaming operation's response body exceeded the limit the call was made
     /// under: [`crate::RequestOptions::max_body`], or for a success body
-    /// `ClientConfig::max_success_body`. A `Content-Length` past it is refused before the body is
+    /// `ClientConfig::max_success_body`, and for a raw binary success body where neither is set
+    /// `ClientConfig::DEFAULT_MAX_BINARY_BODY`; or the limit a [`crate::ByteStream`]'s
+    /// `collect_bounded` was given. A `Content-Length` past it is refused before the body is
     /// read; a body that grows past it is abandoned at the chunk that crosses it. Nothing of the
     /// body is retained. Not transient: the same limit refuses the same response again.
     BodyTooLarge {

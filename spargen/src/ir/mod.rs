@@ -127,6 +127,33 @@ impl Api {
         })
     }
 
+    /// Whether `operation`'s success is one raw `bytes` body read whole: the body its method reads
+    /// within a default limit, and its `_stream` twin returns as a `ByteStream`.
+    pub(crate) fn streams_binary_success(&self, operation: &Operation) -> bool {
+        operation.responses.stream_success().is_none()
+            && matches!(
+                operation.responses.success(),
+                SuccessShape::Plain(ty) if self.is_raw_bytes(ty)
+            )
+    }
+
+    /// Whether `operation`'s typed request body is raw `bytes`, which its method takes as anything
+    /// that converts into the runtime's `HttpBody`, in memory or streamed.
+    pub(crate) fn sends_binary_body(&self, operation: &Operation) -> bool {
+        operation
+            .typed_body()
+            .is_some_and(|(_, ty)| self.is_raw_bytes(ty))
+    }
+
+    /// Whether `ty` is a non-nullable raw `bytes` value (`bytes::Bytes` itself).
+    fn is_raw_bytes(&self, ty: Ty) -> bool {
+        !ty.nullable
+            && matches!(
+                self.types.get(ty.id).map(|definition| &definition.kind),
+                Some(TypeKind::Bytes(BytesEncoding::Raw))
+            )
+    }
+
     /// Whether any operation returns a sequential response as a typed stream. Drives conditional
     /// stream-runtime embedding and the `futures-core` / reqwest `stream` requirements.
     pub(crate) fn uses_streams(&self) -> bool {
@@ -592,6 +619,127 @@ mod tests {
                 ),
             ],
             Api::uses_streams,
+        );
+    }
+
+    /// Issue #1263: only a single raw `bytes` success body read whole is streamed by a twin.
+    #[test]
+    fn streams_binary_success_follows_the_table() {
+        check(
+            &[
+                ("no body", |_| {}, false),
+                (
+                    "an octet-stream success",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(api, OK, MediaType::OctetStream, ty);
+                    },
+                    true,
+                ),
+                (
+                    "a raw bytes success under a range",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(api, Some(StatusSpec::Range(2)), MediaType::OctetStream, ty);
+                    },
+                    true,
+                ),
+                (
+                    "a base64 bytes success",
+                    |api| {
+                        let ty = insert(api, TypeKind::Bytes(super::BytesEncoding::Base64));
+                        respond(api, OK, MediaType::OctetStream, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a JSON string success",
+                    |api| {
+                        let ty = string(api);
+                        respond(api, OK, MediaType::Json, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a bytes success beside a second bodied success",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(api, OK, MediaType::OctetStream, ty);
+                        respond(
+                            api,
+                            Some(StatusSpec::Exact(206)),
+                            MediaType::OctetStream,
+                            ty,
+                        );
+                    },
+                    false,
+                ),
+                (
+                    "a bytes body on the error side only",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(
+                            api,
+                            Some(StatusSpec::Exact(500)),
+                            MediaType::OctetStream,
+                            ty,
+                        );
+                    },
+                    false,
+                ),
+            ],
+            |api| api.streams_binary_success(&api.operations[0]),
+        );
+    }
+
+    /// Issue #1263: only a raw `bytes` request body is taken as an `HttpBody`.
+    #[test]
+    fn sends_binary_body_follows_the_table() {
+        check(
+            &[
+                ("no body", |_| {}, false),
+                (
+                    "an octet-stream request body",
+                    |api| {
+                        let ty = bytes(api);
+                        request(api, MediaType::OctetStream, ty);
+                    },
+                    true,
+                ),
+                (
+                    "a nullable bytes request body",
+                    |api| {
+                        let ty = bytes(api);
+                        request(
+                            api,
+                            MediaType::Json,
+                            Ty {
+                                nullable: true,
+                                ..ty
+                            },
+                        );
+                    },
+                    false,
+                ),
+                (
+                    "a base64 request body",
+                    |api| {
+                        let ty = insert(api, TypeKind::Bytes(super::BytesEncoding::Base64));
+                        request(api, MediaType::OctetStream, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a JSON object request body",
+                    |api| {
+                        let field = string(api);
+                        let ty = object(api, field, AdditionalProps::Deny);
+                        request(api, MediaType::Json, ty);
+                    },
+                    false,
+                ),
+            ],
+            |api| api.sends_binary_body(&api.operations[0]),
         );
     }
 

@@ -36,10 +36,20 @@ pub(super) fn body_send_tokens(
         // through `.to_string()`. This must be checked before the media match so a `text/plain` (or
         // any) media over a `Bytes` schema does not miscompile. This one raw-bytes send is shared
         // with the octet-stream arm below, so no path sends raw bytes without `Content-Type`.
-        let raw_bytes_send = quote! {
-            #request_binding = #request_binding
-                .header(reqwest::header::CONTENT_TYPE, #content_type)
-                .body(#body_binding.clone());
+        // A raw binary body arrives as anything `Into<HttpBody>` (`Api::sends_binary_body`) and
+        // moves into the request without a copy, or is streamed; a base64 newtype is cloned.
+        let raw_bytes_send = if api.sends_binary_body(operation) {
+            quote! {
+                #request_binding = #request_binding
+                    .header(reqwest::header::CONTENT_TYPE, #content_type)
+                    .body(support::request_body(#body_binding).map_err(support::Error::widen)?);
+            }
+        } else {
+            quote! {
+                #request_binding = #request_binding
+                    .header(reqwest::header::CONTENT_TYPE, #content_type)
+                    .body(#body_binding.clone());
+            }
         };
         if matches!(
             api.types.get(ty.id).map(|def| &def.kind),

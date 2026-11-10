@@ -245,11 +245,20 @@ struct BodyLimits {
 /// Whether `headers` declare a `Content-Length` past `limit`. A missing or malformed one declares
 /// nothing, and the body is bounded as it is read instead.
 fn declares_more_than(headers: &reqwest::header::HeaderMap, limit: usize) -> bool {
+    declared_length(headers).is_some_and(|length| exceeds(length, limit))
+}
+
+/// The body length `headers` declare in a well-formed `Content-Length`.
+pub(crate) fn declared_length(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::CONTENT_LENGTH)
         .and_then(|length| length.to_str().ok())
         .and_then(|length| length.parse::<u64>().ok())
-        .is_some_and(|length| u64::try_from(limit).is_ok_and(|limit| length > limit))
+}
+
+/// Whether `length` bytes are more than `limit`.
+pub(crate) fn exceeds(length: u64, limit: usize) -> bool {
+    u64::try_from(limit).is_ok_and(|limit| length > limit)
 }
 
 /// Read `body` whole, or fail with [`Error::BodyTooLarge`] once it is known to hold more than
@@ -322,18 +331,31 @@ where
 /// past it is [`Error::BodyTooLarge`], before `decode` runs.
 ///
 /// Generated code for a multi-status success enum calls it from the arm whose selector matched,
-/// with a `decode` that builds that arm's variant. `decode` receives the `Bytes` itself so a raw
-/// binary variant keeps it without a copy.
+/// with a `decode` that builds that arm's variant from the `Bytes` it receives. An arm whose variant
+/// holds a raw binary body reads it through [`decode_success_bytes`] instead, within the binary
+/// default where the call set no limit.
 pub async fn decode_success_with<T>(
     core: &ClientCore,
     response: Response,
+    decode: impl FnOnce(&Bytes) -> Result<T, String>,
+) -> Result<ResponseValue<T>, Error<Infallible>> {
+    decode_success_within(core, response, None, decode).await
+}
+
+/// [`decode_success_with`], reading the body within `default_limit` where the call set no
+/// success-body limit of its own.
+async fn decode_success_within<T>(
+    core: &ClientCore,
+    response: Response,
+    default_limit: Option<usize>,
     decode: impl FnOnce(&Bytes) -> Result<T, String>,
 ) -> Result<ResponseValue<T>, Error<Infallible>> {
     let (parts, body) = response.into_parts();
     let limit = parts
         .extensions
         .get::<BodyLimits>()
-        .and_then(|limits| limits.success);
+        .and_then(|limits| limits.success)
+        .or(default_limit);
     let (status, headers) = (parts.status, parts.headers);
     let body = match limit {
         Some(limit) => read_within(limit, status, &headers, body).await?,
@@ -356,12 +378,23 @@ pub async fn decode_success_with<T>(
 
 /// Decode a raw binary success body without attempting JSON deserialization. Every byte sequence
 /// is a valid binary body, so a zero-length one is an empty `Bytes`, never an error.
+///
+/// The body is read within the success-body limit the call was made under, as
+/// [`decode_success_with`] reads one, and where the call set none, within
+/// [`crate::ClientConfig::DEFAULT_MAX_BINARY_BODY`]: a binary body is never read whole without a
+/// bound. One past it is [`Error::BodyTooLarge`].
 pub async fn decode_success_bytes(
     core: &ClientCore,
     response: Response,
 ) -> Result<ResponseValue<Bytes>, Error<Infallible>> {
     // The decoder cannot fail, so `Error::Decode` is unreachable and the body is never capped.
-    decode_success_with(core, response, |body| Ok(body.clone())).await
+    decode_success_within(
+        core,
+        response,
+        Some(crate::ClientConfig::DEFAULT_MAX_BINARY_BODY),
+        |body| Ok(body.clone()),
+    )
+    .await
 }
 
 /// Deserialize a raw UTF-8 body through a JSON string value. Exposed to the generated shim so

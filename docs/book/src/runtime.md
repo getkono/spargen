@@ -116,11 +116,13 @@ let page = client
 - `max_body` bounds the response body of a non-streaming operation. A `Content-Length` past it is
   refused before the body is read, and a body that grows past it is abandoned at the chunk that
   crosses it; either is `Error::BodyTooLarge { limit, status }`, which is not transient. It
-  replaces `ClientConfig::max_success_body` (default none: a success body is read whole), which
+  replaces `ClientConfig::max_success_body` (default none: a structured success body is read whole,
+  and a raw binary one within `ClientConfig::DEFAULT_MAX_BINARY_BODY`, 64 MiB), which
   `with_config` sets for every call. An error body is read no further than `max_error_body` in any
   case; where `max_body` is the smaller of the two, an error body past it is `BodyTooLarge` instead
   of truncated. An operation returning an `EventStream` is exempt, its error body included:
-  `max_stream_frame` bounds its items.
+  `max_stream_frame` bounds its items. So is a binary operation's `_stream` twin, which returns a
+  [`ByteStream`](#binary-content).
 - `extensions` are copied onto each request, where a caller-supplied `HttpBackend` reads them from
   the `http::Request` it executes. An extension type the request already carries keeps its value.
 - `headers` are added to each request, streaming operations' included. A header the request already
@@ -347,3 +349,30 @@ is a sequence of numbers, so the newtype carries the embedded
 codec instead, which adds no dependency and is embedded only when such a schema is emitted. A
 whole request or response body and a multipart part carry the octets themselves under either
 keyword: a whole body is typed `bytes::Bytes`, and a part is read through the newtype's `Deref`.
+
+A whole `format: binary` request body is taken by value as `impl Into<HttpBody>` (an optional one
+as `Option<HttpBody>`): `Bytes` and `Vec<u8>` move in without a copy, and `HttpBody::wrap` sends any
+`http_body::Body` as it is read, for an upload produced incrementally or larger than it should be
+held in memory. A streaming body does not clone, so neither a retry nor a credential refresh
+resends it; reqwest's `fetch` backend on `wasm32` refuses one as `Error::RequestConstruction`.
+
+```rust,ignore
+client.put_blob(Bytes::from(sealed)).await?;              // in memory, no copy
+client.put_blob(HttpBody::wrap(paced_upload)).await?;     // streamed as it is read
+```
+
+An operation whose success is one whole `format: binary` body reads it within
+`ClientConfig::DEFAULT_MAX_BINARY_BODY` (64 MiB) unless `max_body` or `max_success_body` sets
+another limit, so a large or hostile download fails as `Error::BodyTooLarge` instead of growing
+without bound. Each such operation also has a `{method}_stream` twin returning
+`ResponseValue<ByteStream>`, the body handed over unread: `next()` yields it chunk by chunk,
+`collect_bounded(limit)` reads the rest whole within a limit of the caller's choosing (a
+`Content-Length` past it refused unread), and `into_body()` hands over the `HttpBody` for a reader
+of the caller's own. `collect_bounded` is its only collector. Like an `EventStream`, the
+twin is exempt from the total timeout and the body limits; the connect and read timeouts still
+apply. Its errors are `Error<Infallible>`, which `Error::widen` turns into the operation's.
+
+```rust,ignore
+let blob = client.get_blob_stream(id).await?.into_inner();
+let bytes = blob.collect_bounded(MAX_BLOB).await.map_err(Error::widen)?;
+```

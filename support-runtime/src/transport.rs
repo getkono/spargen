@@ -371,6 +371,19 @@ impl From<&'static [u8]> for HttpBody {
     }
 }
 
+/// A binary operation's request body, as the `reqwest::RequestBuilder` it is built on takes it:
+/// in-memory bytes move over without a copy, and a streaming body ([`HttpBody::wrap`]) is sent as
+/// it is read. A streaming body is never replayed: the request it rides on does not clone, so a
+/// retry or a credential refresh does not resend it. reqwest's `fetch` backend on `wasm32` takes
+/// no stream, so there a streaming body is refused as [`crate::Error::RequestConstruction`].
+pub fn request_body(
+    body: impl Into<HttpBody>,
+) -> Result<reqwest::Body, crate::Error<std::convert::Infallible>> {
+    body.into()
+        .into_reqwest()
+        .map_err(crate::Error::from_transport)
+}
+
 /// An adopted body: its data read as `Bytes`, and its failures as [`TransportError`]s.
 struct SourceBody<B> {
     inner: Pin<Box<B>>,
@@ -749,6 +762,44 @@ mod tests {
         assert!(seam.body().try_clone().is_none());
         let body = poll_ready(seam.into_body().collect()).unwrap();
         assert_eq!(body, "abcd");
+    }
+
+    /// Issue #1263: a binary operation's body in memory reaches the seam in memory, sharing its
+    /// bytes, so the request clones for a retry or a credential refresh.
+    #[test]
+    fn an_in_memory_request_body_crosses_the_seam_without_a_copy() {
+        let bytes = Bytes::from(vec![7_u8; 32]);
+        let built = reqwest::Client::new()
+            .request(Method::PUT, "https://example.com/op")
+            .body(super::request_body(bytes.clone()).unwrap())
+            .build()
+            .unwrap();
+        assert!(built.try_clone().is_some());
+        let seam = request_from_reqwest(built).unwrap();
+        let on_seam = seam.body().as_bytes().unwrap();
+        assert_eq!(on_seam.as_ptr(), bytes.as_ptr());
+        assert_eq!(on_seam.len(), 32);
+        let owned = super::request_body(vec![1_u8, 2]).unwrap();
+        assert_eq!(owned.as_bytes(), Some(&[1_u8, 2][..]));
+    }
+
+    /// Issue #1263: a binary operation's streaming body is sent as it is read, and the request it
+    /// rides on does not clone, so nothing replays it.
+    #[test]
+    fn a_streaming_request_body_is_sent_as_read_and_never_replayed() {
+        let source = Chunks::new([Chunk::data("ab"), Chunk::data("cd")]);
+        let pulled = source.pulled();
+        let built = reqwest::Client::new()
+            .request(Method::POST, "https://example.com/op")
+            .body(super::request_body(HttpBody::wrap(source)).unwrap())
+            .build()
+            .unwrap();
+        assert!(built.try_clone().is_none());
+        assert_eq!(pulled.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let seam = request_from_reqwest(built).unwrap();
+        assert!(seam.body().try_clone().is_none());
+        assert_eq!(poll_ready(seam.into_body().collect()).unwrap(), "abcd");
+        assert_eq!(pulled.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     /// A request URI that is not a URL reqwest accepts is refused before anything is sent, as a

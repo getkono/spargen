@@ -921,7 +921,7 @@ fn cbor_and_cbor_suffixed_bodies_are_byte_bodies_announced_by_their_own_name() {
         signature
     };
     assert!(
-        signature(octets).contains("body: &bytes::Bytes"),
+        signature(octets).contains("body: impl Into<support::HttpBody>"),
         "{octets}"
     );
     for (name, error, key) in [
@@ -1518,8 +1518,10 @@ components:
         "pub type AppendDropChunkBody = bytes::Bytes;",
         "pub struct SubmitFormBody {",
         "pub struct SubmitFormBodyTagsItem {",
-        "body: &types::StoreEscrowBody,",
-        "body: &types::AppendDropChunkBody,",
+        // A binary body is taken as `impl Into<HttpBody>`; the rustdoc names its own type.
+        "body is a `types::StoreEscrowBody`",
+        "body is a `types::AppendDropChunkBody`",
+        "body: impl Into<support::HttpBody>,",
         "body: &types::SubmitFormBody,",
         "pub struct CollideBody {",
     ] {
@@ -1528,9 +1530,9 @@ components:
     assert!(!code.contains("RequestBody"), "{code}");
     // The inline body whose spelling a component already holds yields it, taking the suffix.
     let suffixed = code
-        .split("body: &types::CollideBody")
+        .split("body is a `types::CollideBody")
         .nth(1)
-        .and_then(|rest| rest.split_once(','))
+        .and_then(|rest| rest.split_once('`'))
         .map(|(suffix, _)| suffix)
         .expect("the colliding operation takes its inline body");
     assert!(
