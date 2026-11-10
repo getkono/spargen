@@ -273,6 +273,17 @@ pub struct Replay {
     sent: Vec<(&'static str, SecretString)>,
 }
 
+impl std::fmt::Debug for Replay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The request carries no credential yet, but its headers may hold other secrets, and the
+        // tokens are secrets: neither is printed.
+        let schemes: Vec<&str> = self.alternative.iter().map(|scheme| scheme.name).collect();
+        f.debug_struct("Replay")
+            .field("alternative", &schemes)
+            .finish_non_exhaustive()
+    }
+}
+
 /// [`attach_auth`], also returning the [`Replay`] [`replay_rejected`] needs when the selected
 /// alternative holds a [`Credential::Refreshable`] under a scheme that takes a token. There is no
 /// `Replay` when it holds none, or when the request's body cannot be cloned (a streaming upload),
