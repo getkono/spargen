@@ -123,3 +123,27 @@ fn a_binding_no_operation_declares_is_rejected() {
     }
     assert!(code.is_empty(), "nothing is written: {code}");
 }
+
+/// A header parameter the specification says to ignore (`W011`) is never sent, so binding it
+/// binds nothing and is rejected with `E026` too.
+#[test]
+fn binding_an_ignored_header_parameter_is_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - { name: Authorization, in: header, required: true, schema: { type: string } }
+      responses:
+        '204': { description: ok }
+"##;
+    let temp = tempfile::tempdir().unwrap();
+    let (report, _) = generate_spec_with_code(
+        Spec::new(write_spec(temp.path(), "openapi.yaml", spec)).bind_header("authorization"),
+    );
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(codes(&report), ["E026", "W011"], "{report:#?}");
+}
