@@ -514,10 +514,25 @@ impl OperationSig {
                 let note = normalize_rustdoc(&note);
                 quote! { #[doc = #note] }
             });
+        // A binary body is taken as `impl Into<HttpBody>`, so the signature no longer names the
+        // body's own type; the rustdoc does, as the in-memory value the call accepts.
+        let binary_body_doc = operation
+            .typed_body()
+            .filter(|_| api.sends_binary_body(operation))
+            .map(|(_, ty)| {
+                let ty = ty_tokens(ty, names, true).to_string().replace(' ', "");
+                let note = normalize_rustdoc(&format!(
+                    "The request body is a `{ty}` (`bytes::Bytes`) or a `Vec<u8>`, moved in \
+                     without a copy, or an `HttpBody::wrap` stream, sent as it is read and never \
+                     replayed."
+                ));
+                quote! { #[doc = #note] }
+            });
         let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
         let attrs = quote! {
             #docs
             #(#param_docs)*
+            #binary_body_doc
             #deprecated
         };
 

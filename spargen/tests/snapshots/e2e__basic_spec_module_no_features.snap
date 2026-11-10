@@ -14288,6 +14288,7 @@ Response `409`: Conflict*/
         support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `204`: No Content
+    ///The request body is a `types::PostRawBody` (`bytes::Bytes`) or a `Vec<u8>`, moved in without a copy, or an `HttpBody::wrap` stream, sent as it is read and never replayed.
     #[inline]
     pub async fn post_raw(
         &self,
@@ -14588,6 +14589,7 @@ Response `409`: Conflict*/
         }
     }
     ///Response `206`: partial content
+    ///The request body is a `types::PutRangedBody` (`bytes::Bytes`) or a `Vec<u8>`, moved in without a copy, or an `HttpBody::wrap` stream, sent as it is read and never replayed.
     #[inline]
     pub async fn put_ranged(
         &self,
@@ -14750,6 +14752,7 @@ Response `409`: Conflict*/
         }
     }
     ///Response `204`: stored
+    ///The request body is a `types::PutArtworkBody` (`bytes::Bytes`) or a `Vec<u8>`, moved in without a copy, or an `HttpBody::wrap` stream, sent as it is read and never replayed.
     #[inline]
     pub async fn put_artwork(
         &self,
@@ -16994,6 +16997,7 @@ Response `409`: Conflict*/
             self.inner.get_blob_url(token, params)
         }
         ///Response `204`: No Content
+        ///The request body is a `types::PostRawBody` (`bytes::Bytes`) or a `Vec<u8>`, moved in without a copy, or an `HttpBody::wrap` stream, sent as it is read and never replayed.
         #[inline]
         pub fn post_raw(
             &self,
@@ -17095,6 +17099,7 @@ Response `409`: Conflict*/
             self.inner.download_raw_url()
         }
         ///Response `206`: partial content
+        ///The request body is a `types::PutRangedBody` (`bytes::Bytes`) or a `Vec<u8>`, moved in without a copy, or an `HttpBody::wrap` stream, sent as it is read and never replayed.
         #[inline]
         pub fn put_ranged(
             &self,
@@ -17132,6 +17137,7 @@ Response `409`: Conflict*/
             self.inner.get_artwork_url(id)
         }
         ///Response `204`: stored
+        ///The request body is a `types::PutArtworkBody` (`bytes::Bytes`) or a `Vec<u8>`, moved in without a copy, or an `HttpBody::wrap` stream, sent as it is read and never replayed.
         #[inline]
         pub fn put_artwork(
             &self,
