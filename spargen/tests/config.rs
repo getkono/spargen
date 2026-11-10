@@ -1004,7 +1004,7 @@ fn cargo_integration_off_reports_neither_degradation_nor_failure() {
 fn the_getters_read_back_the_defaults() {
     let spec = spargen::Spec::new("openapi.yaml");
     assert!(spec.uuid_enabled());
-    assert!(spec.time_enabled());
+    assert_eq!(spec.datetime_backend(), spargen::DateTimeBackend::Time);
     assert!(spec.omissions().is_empty());
     assert_eq!(spec.error_body_cap_bytes(), 64 * 1024);
     assert_eq!(spec.batch_cap_count(), 100);
@@ -1034,7 +1034,7 @@ fn the_getters_read_back_what_the_setters_wrote() {
     omit.rules.push(rule.clone());
     let spec = spargen::Spec::new("openapi.yaml")
         .uuid(false)
-        .time(false)
+        .datetime(spargen::DateTimeBackend::String)
         // `omit` replaces the rule set `omit_rule` started, and a later `omit_rule` appends to it.
         .omit_rule(appended.clone())
         .omit(omit)
@@ -1048,7 +1048,7 @@ fn the_getters_read_back_what_the_setters_wrote() {
         .bind_header("X-Api-Version")
         .bind_header("X-Tenant");
     assert!(!spec.uuid_enabled());
-    assert!(!spec.time_enabled());
+    assert_eq!(spec.datetime_backend(), spargen::DateTimeBackend::String);
     assert_eq!(spec.omissions().rules, [rule, appended]);
     assert_eq!(spec.error_body_cap_bytes(), 11);
     assert_eq!(spec.batch_cap_count(), 7);

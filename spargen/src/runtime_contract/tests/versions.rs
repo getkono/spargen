@@ -8,7 +8,7 @@ use super::*;
 #[test]
 fn the_time_requirement_never_asks_for_serde() {
     let requirements = RuntimeRequirements {
-        time: true,
+        datetime: Some(DateTimeBackend::Time),
         ..RuntimeRequirements::default()
     };
     let time = requirement_table(&requirements)
@@ -25,6 +25,46 @@ fn the_time_requirement_never_asks_for_serde() {
     assert!(time.features.contains(&"parsing"), "{:?}", time.features);
 }
 
+/// Each backend requires exactly its own crate (`jiff` and `chrono` with no feature, since the
+/// embedded codec writes the text) and no other date-time crate; `String` and an API without dates
+/// require none.
+#[test]
+fn each_datetime_backend_requires_exactly_its_own_crate() {
+    let crates = ["time", "jiff", "chrono"];
+    let cases = [
+        (Some(DateTimeBackend::Time), Some("time")),
+        (Some(DateTimeBackend::Jiff), Some("jiff")),
+        (Some(DateTimeBackend::Chrono), Some("chrono")),
+        (Some(DateTimeBackend::String), None),
+        (None, None),
+    ];
+    for (datetime, expected) in cases {
+        let requirements = RuntimeRequirements {
+            datetime,
+            ..RuntimeRequirements::default()
+        };
+        let required: Vec<Requirement> = requirement_table(&requirements)
+            .into_iter()
+            .filter(|requirement| crates.contains(&requirement.dependency.name))
+            .collect();
+        assert_eq!(
+            required
+                .iter()
+                .map(|requirement| requirement.dependency.name)
+                .collect::<Vec<_>>(),
+            expected.into_iter().collect::<Vec<_>>(),
+            "{datetime:?}"
+        );
+        for requirement in required
+            .iter()
+            .filter(|requirement| requirement.dependency.name != "time")
+        {
+            assert!(requirement.features.is_empty(), "{datetime:?}");
+            assert!(!requirement.no_default_features, "{datetime:?}");
+        }
+    }
+}
+
 #[test]
 fn exact_floors_and_higher_compatible_caret_requirements_are_supported() {
     for dependency in [
@@ -39,6 +79,8 @@ fn exact_floors_and_higher_compatible_caret_requirements_are_supported() {
         QUICK_XML,
         UUID,
         TIME,
+        JIFF,
+        CHRONO,
         TOKIO,
     ] {
         assert!(supported_requirement(dependency.floor, dependency));
@@ -218,7 +260,7 @@ fn conditional_dependencies_and_features_are_required_only_when_used() {
         streams: true,
         xml: true,
         uuid: true,
-        time: true,
+        datetime: Some(DateTimeBackend::Time),
     };
     let diagnostics = audit_manifest(CORE_MANIFEST, &requirements, &TargetContext::Unknown);
     let messages = diagnostics

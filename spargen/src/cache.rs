@@ -5,6 +5,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
+use crate::ir::DateTimeBackend;
 use crate::output::atomic_write;
 use crate::runtime_contract::RuntimeRequirements;
 use crate::source::{sha256_hex, InputBundle, Sha256, LOCK_FILE_NAME};
@@ -47,7 +48,7 @@ fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[
     append(&mut hasher, build.as_bytes());
     append(&mut hasher, spec.path.as_str().as_bytes());
     append(&mut hasher, &[u8::from(spec.uuid)]);
-    append(&mut hasher, &[u8::from(spec.time)]);
+    append(&mut hasher, &[datetime_byte(spec.datetime)]);
     append(&mut hasher, &(spec.error_body_cap as u64).to_be_bytes());
     append(&mut hasher, &(spec.batch_cap as u64).to_be_bytes());
     append(&mut hasher, &[u8::from(spec.carve)]);
@@ -67,6 +68,18 @@ fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[
         append(&mut hasher, bytes);
     }
     hasher.finalize()
+}
+
+/// The date-time backend's one fingerprint byte. `Time` and `String` keep the bytes the boolean
+/// `time` switch they replace hashed (`1` and `0`), so a build from before the backend choice
+/// stays a cache hit.
+fn datetime_byte(backend: DateTimeBackend) -> u8 {
+    match backend {
+        DateTimeBackend::String => 0,
+        DateTimeBackend::Time => 1,
+        DateTimeBackend::Jiff => 2,
+        DateTimeBackend::Chrono => 3,
+    }
 }
 
 /// The paths [`InputSnapshot::load`] fingerprints, read without hashing them.
@@ -408,7 +421,7 @@ mod tests {
         CachedDiagnostic, Diagnostic, InputSnapshot, JsonPointer, OutcomeClaim, Sha256,
     };
     use crate::runtime_contract::rerun_if_changed_lines;
-    use crate::{Build, CargoIntegration, OmitRule, Outcome, Spec};
+    use crate::{Build, CargoIntegration, DateTimeBackend, OmitRule, Outcome, Spec};
     use camino::{Utf8Path, Utf8PathBuf};
 
     /// The `cargo:rerun-if-changed` lines a build prints for its inputs and output.
@@ -785,7 +798,7 @@ components:
         let spec = Spec {
             path: Utf8PathBuf::from("/work/openapi.yaml"),
             uuid: true,
-            time: false,
+            datetime: DateTimeBackend::String,
             omit: crate::Omit::default(),
             error_body_cap: 4096,
             batch_cap: 64,
@@ -963,7 +976,7 @@ components:
         let Spec {
             path,
             uuid,
-            time,
+            datetime,
             omit,
             error_body_cap,
             batch_cap,
@@ -987,7 +1000,7 @@ components:
             path: "/things".into(),
         });
 
-        let variants: Vec<(&str, Spec)> = vec![
+        let mut variants: Vec<(&str, Spec)> = vec![
             (
                 "path",
                 Spec {
@@ -999,13 +1012,6 @@ components:
                 "uuid",
                 Spec {
                     uuid: !uuid,
-                    ..base.clone()
-                },
-            ),
-            (
-                "time",
-                Spec {
-                    time: !time,
                     ..base.clone()
                 },
             ),
@@ -1078,6 +1084,21 @@ components:
                 },
             ),
         ];
+        // Every backend other than the base's is its own build input.
+        variants.extend(
+            DateTimeBackend::ALL
+                .into_iter()
+                .filter(|backend| backend != datetime)
+                .map(|backend| {
+                    (
+                        "datetime",
+                        Spec {
+                            datetime: backend,
+                            ..base.clone()
+                        },
+                    )
+                }),
+        );
 
         for (field, spec) in variants {
             assert_ne!(

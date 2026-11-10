@@ -35,6 +35,7 @@ pub(crate) use responses::{
     ApiErrorBodyImpl, ErrorShape, HeaderShape, Response, ResponseHeader, Responses, StatusSpec,
     SuccessShape,
 };
+pub use types::DateTimeBackend;
 pub(crate) use types::{
     AdditionalProps, BytesEncoding, DefaultValue, DisjointFeature, Field, FieldDefault,
     JsonCategory, Openness, Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty,
@@ -66,21 +67,22 @@ pub(crate) struct RuntimeFeatures {
     pub(crate) xml: bool,
     /// The sequential-response `stream` module: [`Api::uses_streams`].
     pub(crate) streams: bool,
-    /// The RFC 3339 `Date`/`DateTime` newtypes: [`Api::uses_time`], with the `time` mapping on.
-    pub(crate) time: bool,
+    /// The RFC 3339 `Date`/`DateTime` newtypes and the crate they wrap: [`Api::uses_time`], with
+    /// a typed [`DateTimeBackend`] selected. Never `Some(DateTimeBackend::String)`.
+    pub(crate) datetime: Option<DateTimeBackend>,
     /// The `contentEncoding: base64` codec: [`Api::uses_base64`].
     pub(crate) base64: bool,
 }
 
 impl Api {
-    /// The conditional runtime modules the module generated from this API embeds, with the `time`
-    /// mapping on or off as `time_mapping` says. With it off, the date primitives stay `String` and
-    /// the newtypes would be dead weight.
-    pub(crate) fn runtime_features(&self, time_mapping: bool) -> RuntimeFeatures {
+    /// The conditional runtime modules the module generated from this API embeds, with the date
+    /// formats mapped by `datetime`. Under [`DateTimeBackend::String`] the date primitives stay
+    /// `String` and the newtypes would be dead weight.
+    pub(crate) fn runtime_features(&self, datetime: DateTimeBackend) -> RuntimeFeatures {
         RuntimeFeatures {
             xml: self.uses_xml(),
             streams: self.uses_streams(),
-            time: time_mapping && self.uses_time(),
+            datetime: (datetime.is_typed() && self.uses_time()).then_some(datetime),
             base64: self.uses_base64(),
         }
     }
@@ -113,11 +115,11 @@ impl Api {
 
     /// Whether the types the output carries contain a `format: date-time` or `format: date`
     /// primitive. Drives the conditional embedding of the RFC 3339 `DateTime`/`Date` runtime
-    /// newtypes and the `time` requirement. An [elided](TypeGraph::elide) definition is no type of
+    /// newtypes and the requirement of the crate they wrap. An [elided](TypeGraph::elide) definition is no type of
     /// the output, so it counts for nothing here, as in `check_invariants` (#723).
     ///
     /// This is a property of the API alone; whether those primitives actually *become* the newtypes
-    /// additionally depends on the `time` config knob, which callers apply themselves.
+    /// additionally depends on the `datetime` config knob, which callers apply themselves.
     pub(crate) fn uses_time(&self) -> bool {
         self.types.emitted().any(|(_, definition)| {
             matches!(
@@ -330,10 +332,10 @@ pub(crate) struct Docs {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdditionalProps, Api, BodyEncoding, BoundHeader, Field, Info, MediaType, Method, Operation,
-        OperationId, ParamLoc, ParamStyle, Parameter, PathTemplate, Prim, PropertyName,
-        RequestBody, Response, Responses, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeKind,
-        Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch,
+        AdditionalProps, Api, BodyEncoding, BoundHeader, DateTimeBackend, Field, Info, MediaType,
+        Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathTemplate, Prim,
+        PropertyName, RequestBody, Response, Responses, StatusSpec, Struct, Ty, TypeDef, TypeGraph,
+        TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch,
     };
     use crate::diag::{JsonPointer, Provenance};
 
@@ -548,22 +550,20 @@ mod tests {
     }
 
     /// `runtime_features` embeds the date newtypes only when the API uses a date primitive *and*
-    /// the `time` mapping is on, and takes the other two modules from their predicates whatever
-    /// the mapping says.
+    /// a typed backend is selected, carrying that backend, and takes the other two modules from
+    /// their predicates whatever the backend.
     #[test]
     fn runtime_features_gate_time_on_the_mapping_and_the_api_alike() {
         let plain = api();
         let mut dated = api();
         insert(&mut dated, TypeKind::Primitive(Prim::DateTime));
-        for (case, api, mapping, time) in [
-            ("no date, mapping off", &plain, false, false),
-            ("no date, mapping on", &plain, true, false),
-            ("a date, mapping off", &dated, false, false),
-            ("a date, mapping on", &dated, true, true),
-        ] {
-            let features = api.runtime_features(mapping);
-            assert_eq!(features.time, time, "{case}");
-            assert!(!features.xml && !features.streams, "{case}");
+        for backend in DateTimeBackend::ALL {
+            let typed = (backend != DateTimeBackend::String).then_some(backend);
+            for (case, api, expected) in [("no date", &plain, None), ("a date", &dated, typed)] {
+                let features = api.runtime_features(backend);
+                assert_eq!(features.datetime, expected, "{case}, {backend}");
+                assert!(!features.xml && !features.streams, "{case}, {backend}");
+            }
         }
     }
 
@@ -987,7 +987,7 @@ mod tests {
         );
         let mut api = api();
         base64(&mut api);
-        assert!(api.runtime_features(false).base64);
+        assert!(api.runtime_features(DateTimeBackend::String).base64);
     }
 
     fn base64(api: &mut Api) -> Ty {

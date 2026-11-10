@@ -1,5 +1,5 @@
 use super::{config, failure_message, spec_for, tracking, Args, Consumer};
-use spargen::{ComponentKind, OmitMethod, OmitRule, Spec};
+use spargen::{ComponentKind, DateTimeBackend, OmitMethod, OmitRule, Spec};
 
 fn os(value: &str) -> Option<std::ffi::OsString> {
     Some(value.into())
@@ -74,8 +74,8 @@ fn a_non_utf8_location_is_an_error_not_a_lossy_path() {
 }
 
 /// Every argument the keyed form accepts, each set away from its default.
-const EVERY_CONTROL: &str = r#"spec = "openapi.yaml", no_uuid, no_time, carve, open_narrowing,
-               open_unions, verbatim_docs, error_body_cap = 4096, batch_cap = 7,
+const EVERY_CONTROL: &str = r#"spec = "openapi.yaml", no_uuid, datetime = "jiff", carve,
+               open_narrowing, open_unions, verbatim_docs, error_body_cap = 4096, batch_cap = 7,
                omit {
                    operations { post "/legacy"; }
                    paths { "/internal/**"; }
@@ -111,7 +111,7 @@ fn parses_every_build_configuration_control() {
 
     assert_eq!(args.spec.value(), "openapi.yaml");
     assert_eq!(args.uuid, Some(false));
-    assert_eq!(args.time, Some(false));
+    assert_eq!(args.datetime, Some(DateTimeBackend::Jiff));
     assert_eq!(args.carve, Some(true));
     assert_eq!(args.open_narrowing, Some(true));
     assert_eq!(args.open_unions, Some(true));
@@ -129,7 +129,7 @@ fn a_bare_spec_path_sets_no_control() {
 
     assert_eq!(args.spec.value(), "openapi.yaml");
     assert_eq!(args.uuid, None);
-    assert_eq!(args.time, None);
+    assert_eq!(args.datetime, None);
     assert_eq!(args.carve, None);
     assert_eq!(args.open_narrowing, None);
     assert_eq!(args.open_unions, None);
@@ -147,7 +147,7 @@ fn every_argument_maps_onto_its_spec_field() {
     let args: Args = syn::parse_str(EVERY_CONTROL).unwrap();
     let mut expected = Spec::new("openapi.yaml")
         .uuid(false)
-        .time(false)
+        .datetime(DateTimeBackend::Jiff)
         .carve(true)
         .open_narrowing(true)
         .open_unions(true)
@@ -172,7 +172,7 @@ fn every_argument_maps_onto_its_spec_field() {
 fn an_absent_argument_keeps_the_config_files_value() {
     let discovered = Spec::new("openapi.yaml")
         .uuid(false)
-        .time(false)
+        .datetime(DateTimeBackend::Chrono)
         .carve(true)
         .open_narrowing(true)
         .open_unions(true)
@@ -208,42 +208,58 @@ fn an_absent_argument_keeps_the_config_files_value() {
 }
 
 /// Each switch overrides the config file in both directions: its `= bool` form sets either
-/// value, its bare key sets `true`, and `no_uuid` / `no_time` set `false`.
+/// value, its bare key sets `true`, and `no_uuid` sets `false`.
 #[test]
 fn each_switch_overrides_the_config_file_either_way() {
     let on = Spec::new("openapi.yaml")
         .uuid(true)
-        .time(true)
         .carve(true)
         .open_narrowing(true)
         .open_unions(true)
         .verbatim_docs(true);
     let off = Spec::new("openapi.yaml")
         .uuid(false)
-        .time(false)
         .carve(false)
         .open_narrowing(false)
         .open_unions(false)
         .verbatim_docs(false);
 
     let turn_off = args(
-        r#""openapi.yaml", uuid = false, time = false, carve = false, open_narrowing = false,
-           open_unions = false, verbatim_docs = false"#,
+        r#""openapi.yaml", uuid = false, carve = false, open_narrowing = false, open_unions = false,
+           verbatim_docs = false"#,
     );
     assert_eq!(config(&turn_off, on.clone()), off);
     let turn_on = args(
-        r#""openapi.yaml", uuid = true, time = true, carve = true, open_narrowing = true,
-           open_unions = true, verbatim_docs = true"#,
+        r#""openapi.yaml", uuid = true, carve = true, open_narrowing = true, open_unions = true,
+           verbatim_docs = true"#,
     );
     assert_eq!(config(&turn_on, off.clone()), on);
-    let bare =
-        args(r#""openapi.yaml", uuid, time, carve, open_narrowing, open_unions, verbatim_docs"#);
+    let bare = args(r#""openapi.yaml", uuid, carve, open_narrowing, open_unions, verbatim_docs"#);
     assert_eq!(config(&bare, off.clone()), on);
-    let negated = args(r#""openapi.yaml", no_uuid, no_time"#);
-    assert_eq!(config(&negated, on.clone()), on.uuid(false).time(false));
+    let negated = args(r#""openapi.yaml", no_uuid"#);
+    assert_eq!(config(&negated, on.clone()), on.uuid(false));
 }
 
-/// Each switch sets its own `Spec` field: `uuid` and `time`, `carve` and `open_narrowing`, and
+/// `datetime = "…"` replaces the config file's backend with any of the four, and leaves it in
+/// place when not given.
+#[test]
+fn the_datetime_argument_overrides_the_config_file() {
+    let discovered = Spec::new("openapi.yaml").datetime(DateTimeBackend::Chrono);
+    assert_eq!(
+        config(&args(r#""openapi.yaml""#), discovered.clone()),
+        discovered
+    );
+    for backend in DateTimeBackend::ALL {
+        let given = args(&format!(r#""openapi.yaml", datetime = "{backend}""#));
+        assert_eq!(
+            config(&given, discovered.clone()),
+            discovered.clone().datetime(backend),
+            "{backend}"
+        );
+    }
+}
+
+/// Each switch sets its own `Spec` field: `uuid` and `carve`, `carve` and `open_narrowing`, and
 /// `open_narrowing` and `open_unions`, and `open_unions` and `verbatim_docs`, are given opposite
 /// values over a base holding the inverse of each, so a switch wired to another's setting changes
 /// the result.
@@ -251,26 +267,24 @@ fn each_switch_overrides_the_config_file_either_way() {
 fn each_switch_reaches_its_own_field_when_the_values_differ() {
     let base = Spec::new("openapi.yaml")
         .uuid(true)
-        .time(false)
         .carve(false)
         .open_narrowing(true)
         .open_unions(false)
         .verbatim_docs(true);
     let expected = Spec::new("openapi.yaml")
         .uuid(false)
-        .time(true)
         .carve(true)
         .open_narrowing(false)
         .open_unions(true)
         .verbatim_docs(false);
 
     let valued = args(
-        r#""openapi.yaml", uuid = false, time = true, carve = true, open_narrowing = false,
-           open_unions = true, verbatim_docs = false"#,
+        r#""openapi.yaml", uuid = false, carve = true, open_narrowing = false, open_unions = true,
+           verbatim_docs = false"#,
     );
     assert_eq!(config(&valued, base.clone()), expected);
     let spelled = args(
-        r#""openapi.yaml", no_uuid, time, carve, open_narrowing = false, open_unions,
+        r#""openapi.yaml", no_uuid, carve, open_narrowing = false, open_unions,
            verbatim_docs = false"#,
     );
     assert_eq!(config(&spelled, base), expected);
@@ -576,9 +590,9 @@ fn every_argument_parse_error_names_what_was_wrong() {
         (r#"42"#, "expected identifier"),
         (
             r#""a.yaml", uuids"#,
-            "unknown argument `uuids`; expected a spec path or one of: uuid, no_uuid, time, \
-                 no_time, carve, open_narrowing, open_unions, verbatim_docs, error_body_cap, \
-                 batch_cap, omit, keep, bind_header",
+            "unknown argument `uuids`; expected a spec path or one of: uuid, no_uuid, datetime, \
+                 carve, open_narrowing, open_unions, verbatim_docs, error_body_cap, batch_cap, \
+                 omit, keep, bind_header",
         ),
         (r#""a.yaml", uuid = 1"#, "expected boolean literal"),
         (r#""a.yaml", carve = "yes""#, "expected boolean literal"),
@@ -587,14 +601,18 @@ fn every_argument_parse_error_names_what_was_wrong() {
             "`no_uuid` takes no value; write `uuid = true` or `uuid = false`",
         ),
         (
-            r#""a.yaml", no_time = false"#,
-            "`no_time` takes no value; write `time = true` or `time = false`",
+            r#""a.yaml", datetime = "Jiff""#,
+            "unknown date-time backend `Jiff`; expected time, jiff, chrono or string",
         ),
+        (r#""a.yaml", datetime = jiff"#, "expected string literal"),
         (
             r#""a.yaml", no_uuid, uuid = true"#,
             "`uuid` given more than once",
         ),
-        (r#""a.yaml", time, no_time"#, "`time` given more than once"),
+        (
+            r#""a.yaml", datetime = "jiff", datetime = "time""#,
+            "`datetime` given more than once",
+        ),
         (
             r#""a.yaml", carve, carve = false"#,
             "`carve` given more than once",

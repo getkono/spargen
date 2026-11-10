@@ -56,7 +56,7 @@ impl Drop for FallbackGuard {
 struct Args {
     spec: LitStr,
     uuid: Option<bool>,
-    time: Option<bool>,
+    datetime: Option<spargen::DateTimeBackend>,
     carve: Option<bool>,
     open_narrowing: Option<bool>,
     open_unions: Option<bool>,
@@ -71,7 +71,7 @@ struct Args {
 }
 
 /// Parse the switch `key` into `slot`. Its own key takes `= true` or `= false`, and alone means
-/// `true`; a `negated` key (`no_uuid`, `no_time`) takes no value and means `false`, and names the
+/// `true`; a `negated` key (`no_uuid`) takes no value and means `false`, and names the
 /// switch without its `no_` prefix. A switch set twice, in either spelling, is an error rather than
 /// a silent last-wins.
 fn parse_switch(
@@ -114,7 +114,7 @@ impl Parse for Args {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut spec: Option<LitStr> = None;
         let mut uuid = None;
-        let mut time = None;
+        let mut datetime = None;
         let mut carve = None;
         let mut open_narrowing = None;
         let mut open_unions = None;
@@ -151,8 +151,7 @@ impl Parse for Args {
                     }
                     "uuid" => parse_switch(input, &key, &mut uuid, false)?,
                     "no_uuid" => parse_switch(input, &key, &mut uuid, true)?,
-                    "time" => parse_switch(input, &key, &mut time, false)?,
-                    "no_time" => parse_switch(input, &key, &mut time, true)?,
+                    "datetime" => parse_datetime(input, &key, &mut datetime)?,
                     "carve" => parse_switch(input, &key, &mut carve, false)?,
                     "open_narrowing" => parse_switch(input, &key, &mut open_narrowing, false)?,
                     "open_unions" => parse_switch(input, &key, &mut open_unions, false)?,
@@ -174,9 +173,8 @@ impl Parse for Args {
                             key.span(),
                             format!(
                                 "unknown argument `{other}`; expected a spec path or one of: \
-                                 uuid, no_uuid, time, no_time, carve, open_narrowing, \
-                                 open_unions, verbatim_docs, error_body_cap, batch_cap, omit, keep, \
-                                 bind_header"
+                                 uuid, no_uuid, datetime, carve, open_narrowing, open_unions, \
+                                 verbatim_docs, error_body_cap, batch_cap, omit, keep, bind_header"
                             ),
                         ));
                     }
@@ -195,7 +193,7 @@ impl Parse for Args {
         Ok(Args {
             spec,
             uuid,
-            time,
+            datetime,
             carve,
             open_narrowing,
             open_unions,
@@ -290,8 +288,8 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
     if let Some(uuid) = args.uuid {
         config = config.uuid(uuid);
     }
-    if let Some(time) = args.time {
-        config = config.time(time);
+    if let Some(backend) = args.datetime {
+        config = config.datetime(backend);
     }
     if let Some(carve) = args.carve {
         config = config.carve(carve);
@@ -325,6 +323,30 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
 
 /// Parse the cap `key` (`= <integer>`) into `slot`. A cap set twice is an error rather than a
 /// silent last-wins, as a repeated switch is.
+/// Parse `datetime = "<backend>"` into `slot`: the date-time backend by the spelling
+/// `spargen.toml` and the CLI take. An unknown spelling, or the argument given twice, is an error
+/// at the argument.
+fn parse_datetime(
+    input: ParseStream,
+    key: &Ident,
+    slot: &mut Option<spargen::DateTimeBackend>,
+) -> syn::Result<()> {
+    input.parse::<Token![=]>()?;
+    let value: LitStr = input.parse()?;
+    let backend = value
+        .value()
+        .parse()
+        .map_err(|message: String| syn::Error::new(value.span(), message))?;
+    if slot.is_some() {
+        return Err(syn::Error::new(
+            key.span(),
+            format!("`{key}` given more than once"),
+        ));
+    }
+    *slot = Some(backend);
+    Ok(())
+}
+
 fn parse_cap(input: ParseStream, key: &Ident, slot: &mut Option<usize>) -> syn::Result<()> {
     input.parse::<Token![=]>()?;
     let value: usize = input.parse::<LitInt>()?.base10_parse()?;

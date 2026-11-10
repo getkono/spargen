@@ -5,7 +5,7 @@
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-use crate::ir::{Api, MediaType, Prim, TypeKind};
+use crate::ir::{Api, DateTimeBackend, MediaType, Prim, TypeKind};
 use crate::Spec;
 
 pub(super) const BYTES: Dependency = Dependency::new("bytes", "1.12.1", 2, 0);
@@ -19,6 +19,8 @@ pub(super) const SERDE_JSON: Dependency = Dependency::new("serde_json", "1.0.151
 pub(super) const QUICK_XML: Dependency = Dependency::new("quick-xml", "0.42.0", 0, 43);
 pub(super) const UUID: Dependency = Dependency::new("uuid", "1.24.0", 2, 0);
 pub(super) const TIME: Dependency = Dependency::new("time", "0.3.55", 0, 4);
+pub(super) const JIFF: Dependency = Dependency::new("jiff", "0.2.42", 0, 3);
+pub(super) const CHRONO: Dependency = Dependency::new("chrono", "0.4.45", 0, 5);
 pub(super) const TOKIO: Dependency = Dependency::new("tokio", "1.53.3", 2, 0);
 
 #[derive(Debug, Clone, Copy)]
@@ -64,12 +66,13 @@ pub(crate) struct RuntimeRequirements {
     pub(crate) streams: bool,
     pub(crate) xml: bool,
     pub(crate) uuid: bool,
-    pub(crate) time: bool,
+    /// The crate the embedded date newtypes wrap, when the module embeds them.
+    pub(crate) datetime: Option<DateTimeBackend>,
 }
 
 impl RuntimeRequirements {
     pub(crate) fn for_api(api: &Api, spec: &Spec) -> Self {
-        let features = api.runtime_features(spec.time);
+        let features = api.runtime_features(spec.datetime);
         Self {
             reqwest_multipart: api.operations.iter().any(|operation| {
                 operation
@@ -84,7 +87,7 @@ impl RuntimeRequirements {
                 && api.types.emitted().any(|(_, definition)| {
                     matches!(definition.kind, TypeKind::Primitive(Prim::Uuid))
                 }),
-            time: features.time,
+            datetime: features.datetime,
         }
     }
 }
@@ -179,12 +182,17 @@ pub(super) fn requirement_table(requirements: &RuntimeRequirements) -> Vec<Requi
     if requirements.uuid {
         push(UUID, &["serde"], false);
     }
-    if requirements.time {
+    match requirements.datetime {
         // NOT `serde`: the embedded `DateTime`/`Date` newtypes write RFC 3339 themselves, because
         // `time`'s own serde representation is a nine-integer sequence without
         // `serde-human-readable` and a space-separated form with it — neither is what OpenAPI's
         // `format: date-time` means. `formatting`/`parsing` are what the RFC 3339 codec needs.
-        push(TIME, &["formatting", "parsing"], false);
+        Some(DateTimeBackend::Time) => push(TIME, &["formatting", "parsing"], false),
+        // The other backends need no feature: the embedded `rfc3339` codec reads and writes the
+        // text, and only each crate's calendar types and conversions are named.
+        Some(DateTimeBackend::Jiff) => push(JIFF, NONE, false),
+        Some(DateTimeBackend::Chrono) => push(CHRONO, NONE, false),
+        Some(DateTimeBackend::String) | None => {}
     }
     // The blocking client is opt-in: it is required only from a consumer that declares its own
     // `blocking` Cargo feature, and then only off wasm, where no thread-blocking runtime exists.

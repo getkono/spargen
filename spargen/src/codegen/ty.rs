@@ -47,7 +47,7 @@ pub(super) fn is_bytes_ty(api: &Api, ty: Ty) -> bool {
     )
 }
 
-/// The Rust type of a primitive, under the `uuid` and `time` mappings `options` selects.
+/// The Rust type of a primitive, under the `uuid` mapping and date-time backend `options` select.
 pub(super) fn prim_tokens(prim: Prim, options: &CodegenOptions) -> TokenStream {
     match prim {
         Prim::Bool => quote! { bool },
@@ -60,11 +60,12 @@ pub(super) fn prim_tokens(prim: Prim, options: &CodegenOptions) -> TokenStream {
         Prim::U64 => quote! { u64 },
         Prim::F64 => quote! { f64 },
         Prim::Uuid if options.feature_uuid => quote! { uuid::Uuid },
-        // The embedded newtypes, not `time`'s own types: OpenAPI fixes these to RFC 3339, which is
-        // not what `time`'s `Serialize`/`Display` produce. Named bare so one spelling works at the
+        // The embedded newtypes, not the backend crate's own types: OpenAPI fixes these to RFC 3339,
+        // which is not what `time`'s `Serialize`/`Display` produce, and every backend shares the
+        // one codec the newtypes carry. Named bare so one spelling works at the
         // generated root (via the prelude re-export) and inside `types` (via its `use super::`).
-        Prim::DateTime if options.feature_time => quote! { DateTime },
-        Prim::Date if options.feature_time => quote! { Date },
+        Prim::DateTime if options.datetime.is_typed() => quote! { DateTime },
+        Prim::Date if options.datetime.is_typed() => quote! { Date },
         Prim::Uuid | Prim::DateTime | Prim::Date => quote! { String },
     }
 }
@@ -204,48 +205,50 @@ mod tests {
         assert!(!super::is_bytes_ty(&api, ty(TypeId(99), false, false)));
     }
 
-    /// The `uuid` and `time` mappings each switch only their own primitives, to the type they
-    /// name or back to `String`; every other primitive names itself under any mapping.
+    /// The `uuid` mapping and the date-time backend each switch only their own primitives, to the
+    /// type they name or back to `String` (every typed backend names the same embedded newtypes);
+    /// every other primitive names itself under any mapping.
     #[test]
     fn prim_tokens_follow_the_uuid_and_time_mappings() {
-        for (feature_uuid, feature_time) in
-            [(false, false), (true, false), (false, true), (true, true)]
-        {
-            let options = CodegenOptions {
-                feature_uuid,
-                feature_time,
-                ..CodegenOptions::default()
-            };
-            let tokens = |prim| super::prim_tokens(prim, &options).to_string();
-            let case = format!("uuid {feature_uuid}, time {feature_time}");
-            assert_eq!(tokens(Prim::Bool), "bool", "{case}");
-            assert_eq!(tokens(Prim::String), "String", "{case}");
-            assert_eq!(tokens(Prim::I32), "i32", "{case}");
-            assert_eq!(tokens(Prim::I64), "i64", "{case}");
-            assert_eq!(tokens(Prim::U8), "u8", "{case}");
-            assert_eq!(tokens(Prim::U16), "u16", "{case}");
-            assert_eq!(tokens(Prim::U32), "u32", "{case}");
-            assert_eq!(tokens(Prim::U64), "u64", "{case}");
-            assert_eq!(tokens(Prim::F64), "f64", "{case}");
-            assert_eq!(
-                tokens(Prim::Uuid),
-                if feature_uuid {
-                    "uuid :: Uuid"
-                } else {
-                    "String"
-                },
-                "{case}"
-            );
-            assert_eq!(
-                tokens(Prim::DateTime),
-                if feature_time { "DateTime" } else { "String" },
-                "{case}"
-            );
-            assert_eq!(
-                tokens(Prim::Date),
-                if feature_time { "Date" } else { "String" },
-                "{case}"
-            );
+        for feature_uuid in [false, true] {
+            for datetime in crate::ir::DateTimeBackend::ALL {
+                let feature_time = datetime.is_typed();
+                let options = CodegenOptions {
+                    feature_uuid,
+                    datetime,
+                    ..CodegenOptions::default()
+                };
+                let tokens = |prim| super::prim_tokens(prim, &options).to_string();
+                let case = format!("uuid {feature_uuid}, datetime {datetime}");
+                assert_eq!(tokens(Prim::Bool), "bool", "{case}");
+                assert_eq!(tokens(Prim::String), "String", "{case}");
+                assert_eq!(tokens(Prim::I32), "i32", "{case}");
+                assert_eq!(tokens(Prim::I64), "i64", "{case}");
+                assert_eq!(tokens(Prim::U8), "u8", "{case}");
+                assert_eq!(tokens(Prim::U16), "u16", "{case}");
+                assert_eq!(tokens(Prim::U32), "u32", "{case}");
+                assert_eq!(tokens(Prim::U64), "u64", "{case}");
+                assert_eq!(tokens(Prim::F64), "f64", "{case}");
+                assert_eq!(
+                    tokens(Prim::Uuid),
+                    if feature_uuid {
+                        "uuid :: Uuid"
+                    } else {
+                        "String"
+                    },
+                    "{case}"
+                );
+                assert_eq!(
+                    tokens(Prim::DateTime),
+                    if feature_time { "DateTime" } else { "String" },
+                    "{case}"
+                );
+                assert_eq!(
+                    tokens(Prim::Date),
+                    if feature_time { "Date" } else { "String" },
+                    "{case}"
+                );
+            }
         }
     }
 

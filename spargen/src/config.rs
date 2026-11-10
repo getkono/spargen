@@ -24,6 +24,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::codegen::DEFAULT_ERROR_BODY_CAP;
 use crate::compat::{KeepRule, Omit, OmitMethod, OmitRule, UnknownOmitToken};
+use crate::ir::DateTimeBackend;
 
 /// The default cap on diagnostics collected before batching stops.
 const DEFAULT_BATCH_CAP: usize = 100;
@@ -43,7 +44,7 @@ const DEFAULT_BATCH_CAP: usize = 100;
 pub struct Spec {
     pub(crate) path: Utf8PathBuf,
     pub(crate) uuid: bool,
-    pub(crate) time: bool,
+    pub(crate) datetime: DateTimeBackend,
     pub(crate) omit: Omit,
     pub(crate) error_body_cap: usize,
     pub(crate) batch_cap: usize,
@@ -61,14 +62,15 @@ pub struct Spec {
 }
 
 impl Spec {
-    /// A spec with defaults: `uuid` and `time` on, a 64 KiB error-body cap, a 100-diagnostic
+    /// A spec with defaults: `uuid` on, dates mapped through the `time` crate
+    /// ([`DateTimeBackend::Time`]), a 64 KiB error-body cap, a 100-diagnostic
     /// batch, no omissions, no carving, no open narrowing, no open unions, carried docs
     /// rewritten for rustdoc rather than verbatim, and no bound headers.
     pub fn new(path: impl Into<Utf8PathBuf>) -> Self {
         Self {
             path: path.into(),
             uuid: true,
-            time: true,
+            datetime: DateTimeBackend::Time,
             omit: Omit::default(),
             error_body_cap: DEFAULT_ERROR_BODY_CAP,
             batch_cap: DEFAULT_BATCH_CAP,
@@ -91,10 +93,9 @@ impl Spec {
         self.uuid
     }
 
-    /// Whether `format: date-time`/`date` map to the RFC 3339 newtypes, as [`time`](Self::time)
-    /// set it.
-    pub fn time_enabled(&self) -> bool {
-        self.time
+    /// The crate `format: date-time`/`date` map to, as [`datetime`](Self::datetime) set it.
+    pub fn datetime_backend(&self) -> DateTimeBackend {
+        self.datetime
     }
 
     /// The compatibility omissions and keep rules, in chained order: [`omit`](Self::omit) replaces
@@ -157,11 +158,20 @@ impl Spec {
         self
     }
 
-    /// Map `format: date-time`/`date` to the embedded RFC 3339 `DateTime`/`Date` newtypes over
-    /// `time::OffsetDateTime`/`time::Date` (default `true`). Turning this off falls back to `String`
-    /// and drops `time` from the required dependencies.
-    pub fn time(mut self, enabled: bool) -> Self {
-        self.time = enabled;
+    /// Choose the crate `format: date-time`/`date` map to (default [`DateTimeBackend::Time`]).
+    ///
+    /// A typed backend maps them to the embedded RFC 3339 `DateTime`/`Date` newtypes over that
+    /// crate's types, with spargen's own RFC 3339 codec whichever crate it is, and the dependency
+    /// audit requires that crate. [`DateTimeBackend::String`] falls back to `String` and requires
+    /// no date-time crate.
+    ///
+    /// ```no_run
+    /// use spargen::DateTimeBackend;
+    ///
+    /// let spec = spargen::Spec::new("api/openapi.yaml").datetime(DateTimeBackend::Jiff);
+    /// ```
+    pub fn datetime(mut self, backend: DateTimeBackend) -> Self {
+        self.datetime = backend;
         self
     }
 
@@ -382,11 +392,20 @@ impl Spec {
                  move its keys (`carve`, `batch_cap`, …) to the top level of the file"
             )));
         }
+        if file.time.is_some() {
+            // The removed boolean's two values each have one spelling under its replacement, so
+            // the error states them rather than `deny_unknown_fields`' bare "unknown field".
+            return Err(ConfigError::new(format!(
+                "invalid config file `{path}`: the `time` key was replaced by `datetime`; write \
+                 `datetime = \"time\"` for `time = true` or `datetime = \"string\"` for \
+                 `time = false` (or `datetime = \"jiff\"` or `\"chrono\"`)"
+            )));
+        }
         if let Some(value) = file.uuid {
             self.uuid = value;
         }
-        if let Some(value) = file.time {
-            self.time = value;
+        if let Some(value) = file.datetime {
+            self.datetime = value;
         }
         if let Some(value) = file.carve {
             self.carve = value;
@@ -533,7 +552,9 @@ impl std::error::Error for ConfigError {}
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     uuid: Option<bool>,
-    time: Option<bool>,
+    datetime: Option<DateTimeBackend>,
+    /// Retained solely to give the removed `time` switch a targeted error naming `datetime`.
+    time: Option<toml::Value>,
     carve: Option<bool>,
     batch_cap: Option<usize>,
     error_body_cap: Option<usize>,
@@ -675,7 +696,7 @@ mod tests {
         // These are a published contract, so a changed default fails a test rather than only a doc.
         let spec = Spec::new("openapi.yaml");
         assert!(spec.uuid);
-        assert!(spec.time);
+        assert_eq!(spec.datetime, DateTimeBackend::Time);
         assert!(!spec.carve);
         assert_eq!(spec.batch_cap, 100);
         assert_eq!(spec.error_body_cap, 64 * 1024);
@@ -710,7 +731,7 @@ mod tests {
         let spec = apply(
             r#"
             uuid = false
-            time = false
+            datetime = "jiff"
             carve = true
             batch_cap = 7
             error_body_cap = 11
@@ -721,13 +742,36 @@ mod tests {
         )
         .unwrap();
         assert!(!spec.uuid);
-        assert!(!spec.time);
+        assert_eq!(spec.datetime, DateTimeBackend::Jiff);
         assert!(spec.carve);
         assert_eq!(spec.batch_cap, 7);
         assert_eq!(spec.error_body_cap, 11);
         assert!(spec.open_narrowing);
         assert!(spec.open_unions);
         assert!(spec.verbatim_docs);
+    }
+
+    /// The removed `time` switch is refused, whatever its value, with an error naming the
+    /// `datetime` spelling of each value; an unknown backend names the four accepted ones.
+    #[test]
+    fn the_removed_time_key_names_its_datetime_replacement() {
+        for text in ["time = true\n", "time = false\n"] {
+            let error = apply(text).unwrap_err();
+            assert!(
+                error
+                    .message()
+                    .contains("the `time` key was replaced by `datetime`")
+                    && error
+                        .message()
+                        .contains("`datetime = \"string\"` for `time = false`"),
+                "{error}"
+            );
+        }
+        let error = apply("datetime = \"Jiff\"\n").unwrap_err();
+        assert!(
+            error.message().contains("unknown variant `Jiff`"),
+            "{error}"
+        );
     }
 
     #[test]

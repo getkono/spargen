@@ -33,15 +33,15 @@ use crate::ir::Api;
 use crate::name::Names;
 use quote::{format_ident, quote};
 
-/// Options controlling code generation. The `uuid`/`time` flags carry the `Spec::uuid` /
-/// `Spec::time` knobs into the one generated module: when off, the corresponding `format`
-/// mappings fall back to `String`.
+/// Options controlling code generation. `feature_uuid` and `datetime` carry the `Spec::uuid` /
+/// `Spec::datetime` knobs into the one generated module: `uuid` off, or the `String` backend, falls
+/// the corresponding `format` mappings back to `String`.
 #[derive(Debug, Clone)]
 pub(crate) struct CodegenOptions {
     /// Map `format: uuid` to `uuid::Uuid` (else `String`).
     pub(crate) feature_uuid: bool,
-    /// Map `format: date-time`/`date` to the `time` crate (else `String`).
-    pub(crate) feature_time: bool,
+    /// The crate `format: date-time`/`date` map to, or `String`.
+    pub(crate) datetime: crate::ir::DateTimeBackend,
     /// Max bytes of a response body retained on error variants; stamped into the
     /// generated client's default configuration.
     pub(crate) error_body_cap: usize,
@@ -60,7 +60,7 @@ impl Default for CodegenOptions {
     fn default() -> Self {
         Self {
             feature_uuid: true,
-            feature_time: true,
+            datetime: crate::ir::DateTimeBackend::Time,
             error_body_cap: DEFAULT_ERROR_BODY_CAP,
             verbatim_docs: false,
         }
@@ -101,9 +101,9 @@ pub(crate) fn generate(
     names: &Names,
     options: &CodegenOptions,
 ) -> Result<GeneratedCode, CodegenError> {
-    let features = api.runtime_features(options.feature_time);
+    let features = api.runtime_features(options.datetime);
     let support = runtime::emit_support(features);
-    let models = models::emit_models(api, names, options, features.time);
+    let models = models::emit_models(api, names, options, features.datetime.is_some());
     let signatures = operation::signatures(api, names, options);
     let client = client::emit_client(api, &signatures, names, options);
     // The synchronous facade is always emitted; `blocking::blocking_cfg` compiles its items out.
@@ -124,7 +124,8 @@ pub(crate) fn generate(
         .streams
         .then(|| root_reexport(crate::name::STREAM_ROOT_REEXPORTS));
     let datetime_exports = features
-        .time
+        .datetime
+        .is_some()
         .then(|| root_reexport(crate::name::DATETIME_ROOT_REEXPORTS));
     let tokens = quote! {
         #root_exports

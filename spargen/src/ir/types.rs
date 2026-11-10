@@ -287,12 +287,90 @@ pub(crate) enum Prim {
     F64,
     /// `format: uuid` → `uuid::Uuid` (feature `uuid`, else `String`).
     Uuid,
-    /// `format: date-time` → the embedded RFC 3339 `DateTime` newtype over `time::OffsetDateTime`
-    /// (feature `time`, else `String`).
+    /// `format: date-time` → the embedded RFC 3339 `DateTime` newtype over the selected
+    /// [`DateTimeBackend`]'s instant type, or `String` under [`DateTimeBackend::String`].
     DateTime,
-    /// `format: date` → the embedded RFC 3339 `Date` newtype over `time::Date` (feature `time`,
-    /// else `String`).
+    /// `format: date` → the embedded RFC 3339 `Date` newtype over the selected
+    /// [`DateTimeBackend`]'s calendar-date type, or `String` under [`DateTimeBackend::String`].
     Date,
+}
+
+/// The crate `format: date-time` and `format: date` map to, chosen with
+/// [`Spec::datetime`](crate::Spec::datetime).
+///
+/// Every typed backend keeps the same generated surface: an embedded `DateTime` newtype for
+/// `date-time` and a `Date` newtype for `date`, each with spargen's own RFC 3339
+/// `Serialize`/`Deserialize`, `Display` and `FromStr`, `Deref` to the wrapped value, and `From` in
+/// both directions. Only the wrapped type, and so the crate the dependency audit (`E023`) requires,
+/// changes.
+///
+/// | backend | `DateTime` wraps | `Date` wraps | required crate |
+/// | --- | --- | --- | --- |
+/// | [`Time`](Self::Time) (default) | `time::OffsetDateTime` | `time::Date` | `time` |
+/// | [`Jiff`](Self::Jiff) | `jiff::Timestamp` | `jiff::civil::Date` | `jiff` |
+/// | [`Chrono`](Self::Chrono) | `chrono::DateTime<chrono::FixedOffset>` | `chrono::NaiveDate` | `chrono` |
+/// | [`String`](Self::String) | — (`String`) | — (`String`) | none |
+///
+/// `jiff::Timestamp` is an instant without an offset, so the `Jiff` backend normalizes a decoded
+/// value to UTC and always encodes it with `Z`; the other two keep the offset the value carried.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum DateTimeBackend {
+    /// The `time` crate: `time::OffsetDateTime` and `time::Date`.
+    #[default]
+    Time,
+    /// The `jiff` crate: `jiff::Timestamp` (normalized to UTC) and `jiff::civil::Date`.
+    Jiff,
+    /// The `chrono` crate: `chrono::DateTime<chrono::FixedOffset>` and `chrono::NaiveDate`.
+    Chrono,
+    /// No date-time crate: both formats stay `String`, a deliberate, documented loss of typing.
+    String,
+}
+
+impl DateTimeBackend {
+    /// Every backend, in declaration order.
+    pub const ALL: [Self; 4] = [Self::Time, Self::Jiff, Self::Chrono, Self::String];
+
+    /// The spelling `spargen.toml`'s `datetime` key, the CLI's `--datetime` flag and
+    /// `generate_api!`'s `datetime` argument take: `time`, `jiff`, `chrono` or `string`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Time => "time",
+            Self::Jiff => "jiff",
+            Self::Chrono => "chrono",
+            Self::String => "string",
+        }
+    }
+
+    /// Whether the date formats map to the embedded `DateTime`/`Date` newtypes rather than
+    /// `String`.
+    pub(crate) fn is_typed(self) -> bool {
+        self != Self::String
+    }
+}
+
+impl std::fmt::Display for DateTimeBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for DateTimeBackend {
+    type Err = String;
+
+    /// Reads the spelling [`as_str`](Self::as_str) writes; anything else is an error naming the
+    /// four it accepts.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|backend| backend.as_str() == text)
+            .ok_or_else(|| {
+                format!("unknown date-time backend `{text}`; expected time, jiff, chrono or string")
+            })
+    }
 }
 
 /// An object type: named fields plus an `additionalProperties` policy.
@@ -687,6 +765,35 @@ mod tests {
              unguarded `TypeKind::Reserved` arm above it, so a reservation falls through \
              undecided:\n{}",
             absorbers.join("\n")
+        );
+    }
+
+    /// Each backend's spelling reads back through `FromStr` and through the config file's serde
+    /// form, the default is `Time`, only `String` is untyped, and an unknown spelling names the
+    /// four accepted ones.
+    #[test]
+    fn datetime_backend_spellings_round_trip() {
+        use super::DateTimeBackend;
+
+        #[derive(serde::Deserialize)]
+        struct File {
+            datetime: DateTimeBackend,
+        }
+
+        assert_eq!(DateTimeBackend::default(), DateTimeBackend::Time);
+        let spellings: Vec<&str> = DateTimeBackend::ALL.iter().map(|b| b.as_str()).collect();
+        assert_eq!(spellings, ["time", "jiff", "chrono", "string"]);
+        for backend in DateTimeBackend::ALL {
+            assert_eq!(backend.as_str().parse::<DateTimeBackend>(), Ok(backend));
+            assert_eq!(backend.to_string(), backend.as_str());
+            let file: File = toml::from_str(&format!("datetime = \"{backend}\"")).unwrap();
+            assert_eq!(file.datetime, backend);
+            assert_eq!(backend.is_typed(), backend != DateTimeBackend::String);
+        }
+        let error = "Jiff".parse::<DateTimeBackend>().unwrap_err();
+        assert_eq!(
+            error,
+            "unknown date-time backend `Jiff`; expected time, jiff, chrono or string"
         );
     }
 }
