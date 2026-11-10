@@ -182,6 +182,27 @@ impl<E> Error<E> {
             | Error::PaginationCycle { .. } => None,
         }
     }
+
+    /// The headers of the response the failed call received: `Some` exactly when
+    /// [`Error::status`] is — for [`Error::Api`] (the same map as its `ResponseValue::headers()`),
+    /// [`Error::UnexpectedStatus`], and [`Error::Decode`] — and `None` for every class that
+    /// produced no response. A `Retry-After` on a `429` or `503` is read here whichever of those
+    /// classes carried it.
+    pub fn headers(&self) -> Option<&HeaderMap> {
+        match self {
+            Error::Api(value) => Some(value.headers()),
+            Error::UnexpectedStatus { headers, .. } | Error::Decode { headers, .. } => {
+                Some(headers)
+            }
+            Error::RequestConstruction(_)
+            | Error::Transport(_)
+            | Error::Timeout(_)
+            | Error::Protocol(_)
+            | Error::Redirect(_)
+            | Error::InterruptedBody(_)
+            | Error::PaginationCycle { .. } => None,
+        }
+    }
 }
 
 /// Whether a response status is transient: a `429` or any `5xx`. [`Error::is_transient`] applies
@@ -245,18 +266,26 @@ impl Error<std::convert::Infallible> {
 /// implementation: there is no single body to hand back, and the compile error is the signal.
 pub trait ApiErrorBody {
     /// The documented error body type.
-    type Body: ?Sized;
+    type Body;
     /// The documented body this value carries, if its status documents one.
     fn body(&self) -> Option<&Self::Body>;
+    /// The documented body this value carries, moved out, if its status documents one: `Some`
+    /// exactly when [`body`](Self::body) is.
+    fn into_body(self) -> Option<Self::Body>
+    where
+        Self: Sized;
 }
 
 impl ApiErrorBody for std::convert::Infallible {
     type Body = std::convert::Infallible;
-    // Mutation testing: replacing this body with `None` is an equivalent mutant, declared rather
-    // than killed. `Infallible` is uninhabited, so no `&self` exists to call it with and no
-    // test, or caller, can observe what it returns.
+    // Mutation testing: replacing either body with `None` is an equivalent mutant, declared rather
+    // than killed. `Infallible` is uninhabited, so no `self` exists to call them with and no
+    // test, or caller, can observe what they return.
     fn body(&self) -> Option<&Self::Body> {
         match *self {}
+    }
+    fn into_body(self) -> Option<Self::Body> {
+        match self {}
     }
 }
 
@@ -269,6 +298,25 @@ impl<E: ApiErrorBody> Error<E> {
             Error::Api(value) => value.inner().body(),
             // Every other class carries no typed body. Listed, not wildcarded, like every other
             // match over the taxonomy here: a new variant must decide whether it carries one.
+            Error::RequestConstruction(_)
+            | Error::Transport(_)
+            | Error::Timeout(_)
+            | Error::Protocol(_)
+            | Error::Redirect(_)
+            | Error::UnexpectedStatus { .. }
+            | Error::Decode { .. }
+            | Error::InterruptedBody(_)
+            | Error::PaginationCycle { .. } => None,
+        }
+    }
+
+    /// The documented API error body, moved out of the error: `Some` exactly when
+    /// [`Error::api_body`] is, for the same body. Read [`Error::status`] and [`Error::headers`]
+    /// first where they are wanted too, since this consumes the error.
+    pub fn into_api_body(self) -> Option<E::Body> {
+        match self {
+            Error::Api(value) => value.into_inner().into_body(),
+            // As in `api_body`: every other class carries no typed body.
             Error::RequestConstruction(_)
             | Error::Transport(_)
             | Error::Timeout(_)

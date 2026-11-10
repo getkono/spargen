@@ -1334,6 +1334,25 @@ mod support {
                     | Error::PaginationCycle { .. } => None,
                 }
             }
+            /// The headers of the response the failed call received: `Some` exactly when
+            /// [`Error::status`] is — for [`Error::Api`] (the same map as its `ResponseValue::headers()`),
+            /// [`Error::UnexpectedStatus`], and [`Error::Decode`] — and `None` for every class that
+            /// produced no response. A `Retry-After` on a `429` or `503` is read here whichever of those
+            /// classes carried it.
+            pub fn headers(&self) -> Option<&HeaderMap> {
+                match self {
+                    Error::Api(value) => Some(value.headers()),
+                    Error::UnexpectedStatus { headers, .. }
+                    | Error::Decode { headers, .. } => Some(headers),
+                    Error::RequestConstruction(_)
+                    | Error::Transport(_)
+                    | Error::Timeout(_)
+                    | Error::Protocol(_)
+                    | Error::Redirect(_)
+                    | Error::InterruptedBody(_)
+                    | Error::PaginationCycle { .. } => None,
+                }
+            }
         }
         /// Whether a response status is transient: a `429` or any `5xx`. [`Error::is_transient`] applies
         /// it to every class that carries a status, and `RetryOutcome::is_transient` to the undecoded
@@ -1387,14 +1406,22 @@ mod support {
         /// implementation: there is no single body to hand back, and the compile error is the signal.
         pub trait ApiErrorBody {
             /// The documented error body type.
-            type Body: ?Sized;
+            type Body;
             /// The documented body this value carries, if its status documents one.
             fn body(&self) -> Option<&Self::Body>;
+            /// The documented body this value carries, moved out, if its status documents one: `Some`
+            /// exactly when [`body`](Self::body) is.
+            fn into_body(self) -> Option<Self::Body>
+            where
+                Self: Sized;
         }
         impl ApiErrorBody for std::convert::Infallible {
             type Body = std::convert::Infallible;
             fn body(&self) -> Option<&Self::Body> {
                 match *self {}
+            }
+            fn into_body(self) -> Option<Self::Body> {
+                match self {}
             }
         }
         impl<E: ApiErrorBody> Error<E> {
@@ -1404,6 +1431,23 @@ mod support {
             pub fn api_body(&self) -> Option<&E::Body> {
                 match self {
                     Error::Api(value) => value.inner().body(),
+                    Error::RequestConstruction(_)
+                    | Error::Transport(_)
+                    | Error::Timeout(_)
+                    | Error::Protocol(_)
+                    | Error::Redirect(_)
+                    | Error::UnexpectedStatus { .. }
+                    | Error::Decode { .. }
+                    | Error::InterruptedBody(_)
+                    | Error::PaginationCycle { .. } => None,
+                }
+            }
+            /// The documented API error body, moved out of the error: `Some` exactly when
+            /// [`Error::api_body`] is, for the same body. Read [`Error::status`] and [`Error::headers`]
+            /// first where they are wanted too, since this consumes the error.
+            pub fn into_api_body(self) -> Option<E::Body> {
+                match self {
+                    Error::Api(value) => value.into_inner().into_body(),
                     Error::RequestConstruction(_)
                     | Error::Transport(_)
                     | Error::Timeout(_)
@@ -8199,6 +8243,30 @@ impl support::ApiErrorProblem for GetMultiError {
     }
 }
 #[allow(dead_code, deprecated)]
+impl GetMultiError {
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status404(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(404u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status409(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(409u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
+}
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetSharedError {
     Status401,
@@ -8229,14 +8297,49 @@ impl support::ApiErrorProblem for GetSharedError {
 }
 #[allow(dead_code, deprecated)]
 impl GetSharedError {
-    /// The documented error body, whichever status carried it; `None` for a
-    /// documented bodyless status. The status is on the `ResponseValue` that
-    /// wraps this value.
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status401 => {
+                const {
+                    match reqwest::StatusCode::from_u16(401u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status404(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(404u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status409(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(409u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
+    /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::Problem> {
         match self {
-            GetSharedError::Status401 => None,
-            GetSharedError::Status404(body) => Some(body.as_ref()),
-            GetSharedError::Status409(body) => Some(body.as_ref()),
+            Self::Status401 => None,
+            Self::Status404(body) => Some(body.as_ref()),
+            Self::Status409(body) => Some(body.as_ref()),
+        }
+    }
+    /// The body this value carries, moved out, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn into_body(self) -> Option<types::Problem> {
+        match self {
+            Self::Status401 => None,
+            Self::Status404(body) => Some(*body),
+            Self::Status409(body) => Some(*body),
         }
     }
 }
@@ -8245,6 +8348,9 @@ impl support::ApiErrorBody for GetSharedError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetSharedError::body(self)
+    }
+    fn into_body(self) -> Option<types::Problem> {
+        GetSharedError::into_body(self)
     }
 }
 #[allow(dead_code, deprecated)]
@@ -8278,14 +8384,20 @@ impl support::ApiErrorProblem for GetMaybeError {
 }
 #[allow(dead_code, deprecated)]
 impl GetMaybeError {
-    /// The documented error body, whichever status carried it; `None` for a
-    /// documented bodyless status. The status is on the `ResponseValue` that
-    /// wraps this value.
+    /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::MaybeProblem> {
         match self {
-            GetMaybeError::Status404(body) => body.as_deref(),
-            GetMaybeError::Status409(body) => body.as_deref(),
-            GetMaybeError::Default(body) => body.as_deref(),
+            Self::Status404(body) => body.as_deref(),
+            Self::Status409(body) => body.as_deref(),
+            Self::Default(body) => body.as_deref(),
+        }
+    }
+    /// The body this value carries, moved out, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn into_body(self) -> Option<types::MaybeProblem> {
+        match self {
+            Self::Status404(body) => body.map(|body| *body),
+            Self::Status409(body) => body.map(|body| *body),
+            Self::Default(body) => body.map(|body| *body),
         }
     }
 }
@@ -8294,6 +8406,9 @@ impl support::ApiErrorBody for GetMaybeError {
     type Body = types::MaybeProblem;
     fn body(&self) -> Option<&types::MaybeProblem> {
         GetMaybeError::body(self)
+    }
+    fn into_body(self) -> Option<types::MaybeProblem> {
+        GetMaybeError::into_body(self)
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetMultiDefaultError>` is a `std::error::Error`. Derefs and converts to the inner type.
@@ -8344,6 +8459,9 @@ impl support::ApiErrorBody for GetMultiDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         Some(&self.0)
+    }
+    fn into_body(self) -> Option<types::Problem> {
+        Some(self.0)
     }
 }
 impl support::ApiErrorProblem for GetMultiDefaultError {
@@ -8400,6 +8518,9 @@ impl support::ApiErrorBody for GetPlainDefaultError {
     fn body(&self) -> Option<&types::Problem> {
         Some(&self.0)
     }
+    fn into_body(self) -> Option<types::Problem> {
+        Some(self.0)
+    }
 }
 impl support::ApiErrorProblem for GetPlainDefaultError {
     fn problem(&self) -> Option<support::ProblemDetails> {
@@ -8455,6 +8576,9 @@ impl support::ApiErrorBody for GetUnitDefaultError {
     fn body(&self) -> Option<&types::Problem> {
         Some(&self.0)
     }
+    fn into_body(self) -> Option<types::Problem> {
+        Some(self.0)
+    }
 }
 impl support::ApiErrorProblem for GetUnitDefaultError {
     fn problem(&self) -> Option<support::ProblemDetails> {
@@ -8493,13 +8617,18 @@ impl support::ApiErrorProblem for GetBodylessDefaultError {
 }
 #[allow(dead_code, deprecated)]
 impl GetBodylessDefaultError {
-    /// The documented error body, whichever status carried it; `None` for a
-    /// documented bodyless status. The status is on the `ResponseValue` that
-    /// wraps this value.
+    /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::Problem> {
         match self {
-            GetBodylessDefaultError::Status404(body) => Some(body.as_ref()),
-            GetBodylessDefaultError::Default => None,
+            Self::Status404(body) => Some(body.as_ref()),
+            Self::Default => None,
+        }
+    }
+    /// The body this value carries, moved out, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn into_body(self) -> Option<types::Problem> {
+        match self {
+            Self::Status404(body) => Some(*body),
+            Self::Default => None,
         }
     }
 }
@@ -8508,6 +8637,9 @@ impl support::ApiErrorBody for GetBodylessDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetBodylessDefaultError::body(self)
+    }
+    fn into_body(self) -> Option<types::Problem> {
+        GetBodylessDefaultError::into_body(self)
     }
 }
 #[allow(dead_code, deprecated)]
@@ -8551,14 +8683,20 @@ impl support::ApiErrorProblem for GetBodylessDefaultMultiError {
 }
 #[allow(dead_code, deprecated)]
 impl GetBodylessDefaultMultiError {
-    /// The documented error body, whichever status carried it; `None` for a
-    /// documented bodyless status. The status is on the `ResponseValue` that
-    /// wraps this value.
+    /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::Problem> {
         match self {
-            GetBodylessDefaultMultiError::Status404(body) => Some(body.as_ref()),
-            GetBodylessDefaultMultiError::Status409(body) => Some(body.as_ref()),
-            GetBodylessDefaultMultiError::Default => None,
+            Self::Status404(body) => Some(body.as_ref()),
+            Self::Status409(body) => Some(body.as_ref()),
+            Self::Default => None,
+        }
+    }
+    /// The body this value carries, moved out, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn into_body(self) -> Option<types::Problem> {
+        match self {
+            Self::Status404(body) => Some(*body),
+            Self::Status409(body) => Some(*body),
+            Self::Default => None,
         }
     }
 }
@@ -8567,6 +8705,9 @@ impl support::ApiErrorBody for GetBodylessDefaultMultiError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetBodylessDefaultMultiError::body(self)
+    }
+    fn into_body(self) -> Option<types::Problem> {
+        GetBodylessDefaultMultiError::into_body(self)
     }
 }
 #[allow(dead_code, deprecated)]
@@ -8601,13 +8742,39 @@ impl support::ApiErrorProblem for GetBodylessSiblingError {
 }
 #[allow(dead_code, deprecated)]
 impl GetBodylessSiblingError {
-    /// The documented error body, whichever status carried it; `None` for a
-    /// documented bodyless status. The status is on the `ResponseValue` that
-    /// wraps this value.
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status403 => {
+                const {
+                    match reqwest::StatusCode::from_u16(403u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status404(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(404u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
+    /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::Problem> {
         match self {
-            GetBodylessSiblingError::Status403 => None,
-            GetBodylessSiblingError::Status404(body) => Some(body.as_ref()),
+            Self::Status403 => None,
+            Self::Status404(body) => Some(body.as_ref()),
+        }
+    }
+    /// The body this value carries, moved out, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn into_body(self) -> Option<types::Problem> {
+        match self {
+            Self::Status403 => None,
+            Self::Status404(body) => Some(*body),
         }
     }
 }
@@ -8616,6 +8783,9 @@ impl support::ApiErrorBody for GetBodylessSiblingError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetBodylessSiblingError::body(self)
+    }
+    fn into_body(self) -> Option<types::Problem> {
+        GetBodylessSiblingError::into_body(self)
     }
 }
 #[allow(dead_code, deprecated)]
@@ -8652,13 +8822,39 @@ impl support::ApiErrorProblem for GetXmlBodylessSiblingError {
 }
 #[allow(dead_code, deprecated)]
 impl GetXmlBodylessSiblingError {
-    /// The documented error body, whichever status carried it; `None` for a
-    /// documented bodyless status. The status is on the `ResponseValue` that
-    /// wraps this value.
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status403 => {
+                const {
+                    match reqwest::StatusCode::from_u16(403u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status404(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(404u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
+    /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::XmlReceipt> {
         match self {
-            GetXmlBodylessSiblingError::Status403 => None,
-            GetXmlBodylessSiblingError::Status404(body) => Some(body.as_ref()),
+            Self::Status403 => None,
+            Self::Status404(body) => Some(body.as_ref()),
+        }
+    }
+    /// The body this value carries, moved out, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn into_body(self) -> Option<types::XmlReceipt> {
+        match self {
+            Self::Status403 => None,
+            Self::Status404(body) => Some(*body),
         }
     }
 }
@@ -8667,6 +8863,9 @@ impl support::ApiErrorBody for GetXmlBodylessSiblingError {
     type Body = types::XmlReceipt;
     fn body(&self) -> Option<&types::XmlReceipt> {
         GetXmlBodylessSiblingError::body(self)
+    }
+    fn into_body(self) -> Option<types::XmlReceipt> {
+        GetXmlBodylessSiblingError::into_body(self)
     }
 }
 #[allow(dead_code, deprecated)]
@@ -8699,13 +8898,18 @@ impl support::ApiErrorProblem for GetConditionalError {
 }
 #[allow(dead_code, deprecated)]
 impl GetConditionalError {
-    /// The documented error body, whichever status carried it; `None` for a
-    /// documented bodyless status. The status is on the `ResponseValue` that
-    /// wraps this value.
+    /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::Problem> {
         match self {
-            GetConditionalError::Status304 => None,
-            GetConditionalError::Default(body) => Some(body.as_ref()),
+            Self::Status304 => None,
+            Self::Default(body) => Some(body.as_ref()),
+        }
+    }
+    /// The body this value carries, moved out, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn into_body(self) -> Option<types::Problem> {
+        match self {
+            Self::Status304 => None,
+            Self::Default(body) => Some(*body),
         }
     }
 }
@@ -8714,6 +8918,9 @@ impl support::ApiErrorBody for GetConditionalError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetConditionalError::body(self)
+    }
+    fn into_body(self) -> Option<types::Problem> {
+        GetConditionalError::into_body(self)
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetMaybeSingleError>` is a `std::error::Error`. Derefs and converts to the inner type.
@@ -8727,6 +8934,16 @@ impl GetMaybeSingleError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> Option<types::MaybeProblem> {
         self.0
+    }
+    /// The HTTP status this value was dispatched on: the operation's one
+    /// documented error status.
+    pub fn status(&self) -> reqwest::StatusCode {
+        const {
+            match reqwest::StatusCode::from_u16(400u16) {
+                Ok(status) => status,
+                Err(_) => panic!("a documented status is a valid status code"),
+            }
+        }
     }
 }
 #[allow(deprecated)]
@@ -8764,6 +8981,9 @@ impl support::ApiErrorBody for GetMaybeSingleError {
     type Body = types::MaybeProblem;
     fn body(&self) -> Option<&types::MaybeProblem> {
         self.0.as_ref()
+    }
+    fn into_body(self) -> Option<types::MaybeProblem> {
+        self.0
     }
 }
 impl support::ApiErrorProblem for GetMaybeSingleError {
@@ -8803,13 +9023,39 @@ impl support::ApiErrorProblem for GetAliasSharedError {
 }
 #[allow(dead_code, deprecated)]
 impl GetAliasSharedError {
-    /// The documented error body, whichever status carried it; `None` for a
-    /// documented bodyless status. The status is on the `ResponseValue` that
-    /// wraps this value.
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status404(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(404u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status409(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(409u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
+    /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
     pub fn body(&self) -> Option<&types::PlainMessage> {
         match self {
-            GetAliasSharedError::Status404(body) => Some(body.as_ref()),
-            GetAliasSharedError::Status409(body) => Some(body.as_ref()),
+            Self::Status404(body) => Some(body.as_ref()),
+            Self::Status409(body) => Some(body.as_ref()),
+        }
+    }
+    /// The body this value carries, moved out, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn into_body(self) -> Option<types::PlainMessage> {
+        match self {
+            Self::Status404(body) => Some(*body),
+            Self::Status409(body) => Some(*body),
         }
     }
 }
@@ -8818,6 +9064,9 @@ impl support::ApiErrorBody for GetAliasSharedError {
     type Body = types::PlainMessage;
     fn body(&self) -> Option<&types::PlainMessage> {
         GetAliasSharedError::body(self)
+    }
+    fn into_body(self) -> Option<types::PlainMessage> {
+        GetAliasSharedError::into_body(self)
     }
 }
 #[allow(dead_code)]
@@ -8853,6 +9102,16 @@ impl GetTextErrorError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::ResponseBodyD00b95d0 {
         self.0
+    }
+    /// The HTTP status this value was dispatched on: the operation's one
+    /// documented error status.
+    pub fn status(&self) -> reqwest::StatusCode {
+        const {
+            match reqwest::StatusCode::from_u16(400u16) {
+                Ok(status) => status,
+                Err(_) => panic!("a documented status is a valid status code"),
+            }
+        }
     }
 }
 #[allow(deprecated)]
@@ -8891,6 +9150,9 @@ impl support::ApiErrorBody for GetTextErrorError {
     fn body(&self) -> Option<&types::ResponseBodyD00b95d0> {
         Some(&self.0)
     }
+    fn into_body(self) -> Option<types::ResponseBodyD00b95d0> {
+        Some(self.0)
+    }
 }
 impl support::ApiErrorProblem for GetTextErrorError {
     fn problem(&self) -> Option<support::ProblemDetails> {
@@ -8920,6 +9182,30 @@ impl support::ApiErrorProblem for GetRawMultiError {
         match self {
             GetRawMultiError::Status400(body) => support::ProblemDetails::of(body),
             GetRawMultiError::Status409(_) => None,
+        }
+    }
+}
+#[allow(dead_code, deprecated)]
+impl GetRawMultiError {
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status400(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(400u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status409(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(409u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
         }
     }
 }
@@ -8985,6 +9271,8 @@ impl support::ApiErrorProblem for GetNoSuccessError {
 pub type GetMaybeEmptyError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type GetXmlMaybeEmptyError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type GetPartialError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type GetRangedError = std::convert::Infallible;
 #[allow(dead_code, deprecated)]
@@ -9066,6 +9354,9 @@ impl support::ApiErrorBody for GetRangeOnlyError {
     fn body(&self) -> Option<&types::NotFoundError> {
         Some(&self.0)
     }
+    fn into_body(self) -> Option<types::NotFoundError> {
+        Some(self.0)
+    }
 }
 impl support::ApiErrorProblem for GetRangeOnlyError {
     fn problem(&self) -> Option<support::ProblemDetails> {
@@ -9082,10 +9373,66 @@ pub enum GetMultiResponse {
     Status204,
 }
 #[allow(dead_code, deprecated)]
+impl GetMultiResponse {
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status200(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(200u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status201(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(201u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status204 => {
+                const {
+                    match reqwest::StatusCode::from_u16(204u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
+}
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMultiDefaultResponse {
     Status200(Box<types::MultiOk>),
     Status201(Box<types::MultiCreated>),
+}
+#[allow(dead_code, deprecated)]
+impl GetMultiDefaultResponse {
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status200(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(200u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status201(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(201u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
 }
 #[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
@@ -9094,16 +9441,160 @@ pub enum GetRawMultiResponse {
     Status201(Box<types::ResponseBody6bf58d24>),
 }
 #[allow(dead_code, deprecated)]
+impl GetRawMultiResponse {
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status200(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(200u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status201(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(201u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
+}
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMaybeEmptyResponse {
     Status200(Box<types::MultiOk>),
     Status204,
 }
 #[allow(dead_code, deprecated)]
+impl GetMaybeEmptyResponse {
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status200(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(200u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status204 => {
+                const {
+                    match reqwest::StatusCode::from_u16(204u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
+    /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn body(&self) -> Option<&types::MultiOk> {
+        match self {
+            Self::Status200(body) => Some(body.as_ref()),
+            Self::Status204 => None,
+        }
+    }
+    /// The body this value carries, moved out, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn into_body(self) -> Option<types::MultiOk> {
+        match self {
+            Self::Status200(body) => Some(*body),
+            Self::Status204 => None,
+        }
+    }
+}
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetXmlMaybeEmptyResponse {
     Status200(Box<types::XmlReceipt>),
     Status204,
+}
+#[allow(dead_code, deprecated)]
+impl GetXmlMaybeEmptyResponse {
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status200(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(200u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status204 => {
+                const {
+                    match reqwest::StatusCode::from_u16(204u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
+    /// The body this value carries, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn body(&self) -> Option<&types::XmlReceipt> {
+        match self {
+            Self::Status200(body) => Some(body.as_ref()),
+            Self::Status204 => None,
+        }
+    }
+    /// The body this value carries, moved out, whichever status carried it; `None` for a documented bodyless status or a `null` body.
+    pub fn into_body(self) -> Option<types::XmlReceipt> {
+        match self {
+            Self::Status200(body) => Some(*body),
+            Self::Status204 => None,
+        }
+    }
+}
+#[allow(dead_code, deprecated)]
+#[derive(Debug, Clone)]
+pub enum GetPartialResponse {
+    Status200(Box<types::MultiOk>),
+    Status206(Box<types::MultiOk>),
+}
+#[allow(dead_code, deprecated)]
+impl GetPartialResponse {
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status200(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(200u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status206(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(206u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
+    /// The body this value carries, whichever status carried it.
+    pub fn body(&self) -> &types::MultiOk {
+        match self {
+            Self::Status200(body) => body.as_ref(),
+            Self::Status206(body) => body.as_ref(),
+        }
+    }
+    /// The body this value carries, moved out, whichever status carried it.
+    pub fn into_body(self) -> types::MultiOk {
+        match self {
+            Self::Status200(body) => *body,
+            Self::Status206(body) => *body,
+        }
+    }
 }
 #[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
@@ -12886,6 +13377,71 @@ Response `204`: No Content*/
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
     }
+    /**Response `200`: The whole resource
+
+Response `206`: A range of it*/
+    #[inline]
+    pub async fn get_partial(
+        &self,
+    ) -> Result<
+        support::ResponseValue<GetPartialResponse>,
+        support::Error<GetPartialError>,
+    > {
+        let mut path = "/partial".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            if support::StatusSpec::Exact(200u16).matches(status) {
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiOk>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetPartialResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
+            }
+            if support::StatusSpec::Exact(206u16).matches(status) {
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiOk>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetPartialResponse::Status206)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
+            }
+            Err(
+                support::unexpected_status::<GetPartialError>(&self.core, response).await,
+            )
+        } else {
+            Err(
+                support::unexpected_status::<GetPartialError>(&self.core, response).await,
+            )
+        }
+    }
+    ///The URL `get_partial` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_partial_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/partial".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `2XX`: Any other success
 
 Response `200`: OK*/
@@ -14217,6 +14773,25 @@ Response `204`: No Content*/
             &self,
         ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_xml_maybe_empty_url()
+        }
+        /**Response `200`: The whole resource
+
+Response `206`: A range of it*/
+        #[inline]
+        pub fn get_partial(
+            &self,
+        ) -> Result<
+            support::ResponseValue<GetPartialResponse>,
+            support::Error<GetPartialError>,
+        > {
+            self.runtime.block_on(self.inner.get_partial())
+        }
+        ///The URL `get_partial` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_partial_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_partial_url()
         }
         /**Response `2XX`: Any other success
 
