@@ -157,6 +157,8 @@ pub struct ClientCore {
     config: ClientConfig,
     options: RequestOptions,
     credentials: HashMap<String, Credential>,
+    /// Bound header values, keyed by the header name in ASCII lowercase.
+    bound_headers: HashMap<String, String>,
 }
 
 impl ClientCore {
@@ -235,6 +237,7 @@ impl ClientCore {
             config,
             options: RequestOptions::default(),
             credentials: HashMap::new(),
+            bound_headers: HashMap::new(),
         })
     }
 
@@ -299,6 +302,29 @@ impl ClientCore {
     /// Retrieve a registered credential by scheme name.
     pub fn credential(&self, scheme: &str) -> Option<&Credential> {
         self.credentials.get(scheme)
+    }
+
+    /// Bind `value` to the header `name`, matched in any letter case, replacing any value already
+    /// bound to it. An operation of a generated client whose header parameter the build bound
+    /// (`Spec::bind_header`) sends this value, as written, instead of taking an argument for it.
+    /// `ClientCore`'s `Debug` prints bound values.
+    pub fn bind_header(&mut self, name: &str, value: impl Into<String>) {
+        self.bound_headers
+            .insert(name.to_ascii_lowercase(), value.into());
+    }
+
+    /// Unbind the header `name`, matched in any letter case, returning the value bound to it if
+    /// there was one. An operation that requires the header then fails with
+    /// [`crate::RequestError::MissingBoundParameter`] before anything is sent.
+    pub fn unbind_header(&mut self, name: &str) -> Option<String> {
+        self.bound_headers.remove(&name.to_ascii_lowercase())
+    }
+
+    /// The value bound to the header `name`, matched in any letter case.
+    pub fn bound_header(&self, name: &str) -> Option<&str> {
+        self.bound_headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
     }
 
     /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
