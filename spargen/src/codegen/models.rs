@@ -159,6 +159,8 @@ fn emit_closed_string_enum(
         quote! { #value => Ok(#ident::#variant_ident), }
     });
     let type_name = ident.as_str();
+    // Reserved in the variant scope, so no variant shadows it.
+    let all_const = format_ident!("{}", crate::name::CLOSED_ENUM_ALL);
     quote! {
         #docs
         #deprecated
@@ -169,7 +171,7 @@ fn emit_closed_string_enum(
 
         impl #ident {
             /// Every variant, in the order the description lists its values.
-            pub const ALL: &'static [Self] = &[#(#all)*];
+            pub const #all_const: &'static [Self] = &[#(#all)*];
 
             /// The wire value.
             pub const fn as_str(self) -> &'static str {

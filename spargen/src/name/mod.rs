@@ -15,7 +15,7 @@ mod synth;
 
 use std::collections::HashMap;
 
-use crate::ir::{AdditionalProps, Api, OperationId, TypeId, TypeKind};
+use crate::ir::{AdditionalProps, Api, OperationId, ScalarRepr, TypeId, TypeKind};
 
 pub(crate) use casing::hint_segment;
 use casing::{to_pascal_case, to_snake_case};
@@ -58,6 +58,11 @@ pub(crate) struct Names {
     /// Setter/field name per `(server index, variable name)`.
     pub(crate) server_variable_fields: HashMap<(usize, String), Ident>,
 }
+
+/// The inherent associated `const` listing a closed string enum's variants. It shares the
+/// variants' namespace, so [`allocate`] reserves it in each closed string enum's variant scope and
+/// codegen emits it under this spelling.
+pub(crate) const CLOSED_ENUM_ALL: &str = "ALL";
 
 impl Names {
     /// The names allocated for the operation `id`, which every operation of the allocated [`Api`]
@@ -544,6 +549,11 @@ pub(crate) fn allocate(api: &Api) -> Names {
             }
             TypeKind::Enum(enumeration) => {
                 let mut scope = Scope::default();
+                // A closed string enum's inherent `ALL` constant shares the variants' namespace,
+                // and a variant spelled `ALL` (the value `a_l_l`) would shadow it.
+                if enumeration.repr == ScalarRepr::String && !enumeration.is_open() {
+                    scope.reserve_exact(CLOSED_ENUM_ALL);
+                }
                 for variant in &enumeration.variants {
                     let value = variant.wire();
                     names.variants.insert(
