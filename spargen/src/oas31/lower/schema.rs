@@ -418,6 +418,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 hint,
                 TypeKind::Primitive(match schema.format.as_deref() {
                     Some("int32") => Prim::I32,
+                    Some("uint8") => Prim::U8,
+                    Some("uint16") => Prim::U16,
+                    Some("uint32") => Prim::U32,
+                    Some("uint64") => Prim::U64,
                     _ => Prim::I64,
                 }),
             ),
