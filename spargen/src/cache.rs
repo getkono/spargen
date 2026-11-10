@@ -826,7 +826,7 @@ components:
         assert_eq!(digest, sha256_hex(&buffer));
         assert_eq!(
             digest,
-            "f4b711d10bb596b851ed5f4e6d9cabad9b267e25dfcbc546af242743221e7e9d"
+            "8d9bdb85a432e653938f6da87dac8eef3a2aeb256dcba54597b69d91d9c9796d"
         );
     }
 

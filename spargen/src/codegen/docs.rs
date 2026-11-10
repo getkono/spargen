@@ -66,8 +66,8 @@ pub(super) fn doc_tokens(docs: &crate::ir::Docs, options: &CodegenOptions) -> To
 ///   no path from the generated module reaches, so no such link is kept. A link reference
 ///   definition whose destination is a path (`[Foo]: crate::Foo`) is dropped with it;
 /// - a link to a URL (`[text](https://…)`, or a reference whose definition is one), a bracketed
-///   text rustdoc does not read as a path (`[see below]`, `[1.5]`), and an autolink (`<https://…>`)
-///   are kept as written;
+///   text rustdoc does not read as a path (`[see below]`, `[1.5]`), a task-list marker
+///   (`- [x] done`) and an autolink (`<https://…>`) are kept as written;
 /// - a bare `http://` or `https://` URL is wrapped in `<…>`, which makes it an autolink;
 /// - an HTML tag with no partner (`Vec<T>`'s `<T>`, an unopened `</b>`, a `<` that never closes)
 ///   has its `<` escaped as `\<`, so it renders as text; a void element (`<br>`), a self-closing tag
@@ -78,10 +78,16 @@ pub(super) fn sanitize_carried(text: &str) -> String {
     let mut kinds = Vec::with_capacity(lines.len());
     let mut fence: Option<char> = None;
     let mut previous_blank = true;
-    let mut previous_code = false;
+    let mut previous_indented_code = false;
     let mut in_list = false;
     for line in &lines {
         let trimmed = line.trim_start_matches([' ', '\t']);
+        let blank = trimmed.trim_end().is_empty();
+        let indented_code = fence.is_none()
+            && !blank
+            && code_indented(line)
+            && (previous_blank || previous_indented_code)
+            && !in_list;
         let kind = if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             let marker = trimmed.chars().next().expect("non-empty fence");
             fence = match fence {
@@ -90,11 +96,7 @@ pub(super) fn sanitize_carried(text: &str) -> String {
                 active => active,
             };
             LineKind::Code
-        } else if fence.is_some() {
-            LineKind::Code
-        } else if trimmed.trim_end().is_empty() {
-            LineKind::Prose
-        } else if code_indented(line) && (previous_blank || previous_code) && !in_list {
+        } else if fence.is_some() || indented_code {
             LineKind::Code
         } else if let Some((label, destination)) = link_definition(line) {
             LineKind::Definition {
@@ -104,13 +106,13 @@ pub(super) fn sanitize_carried(text: &str) -> String {
         } else {
             LineKind::Prose
         };
-        let blank = trimmed.trim_end().is_empty();
+        // A list's content may be indented as far as code; a line back at the margin ends it.
         if list_indent(line).is_some() {
             in_list = true;
         } else if !blank && line.len() - trimmed.len() < 2 && !matches!(kind, LineKind::Code) {
             in_list = false;
         }
-        previous_code = matches!(kind, LineKind::Code) && fence.is_none() && !blank;
+        previous_indented_code = indented_code;
         previous_blank = blank;
         kinds.push(kind);
     }
@@ -328,6 +330,15 @@ impl<'a> Scanner<'a> {
         };
         let label = &rest[1..close];
         let after = &rest[close + 1..];
+        // A task-list marker (`- [x] done`) is no link.
+        let line = self.text.rsplit('\n').next().unwrap_or_default();
+        if matches!(label, " " | "x" | "X")
+            && after.starts_with(' ')
+            && list_indent(line) == Some(line.len())
+        {
+            self.text.push_str(&rest[..=close]);
+            return close + 1;
+        }
         if after.starts_with('(') {
             if let Some(end) = closing_paren(after) {
                 let end = close + 1 + end;
@@ -980,6 +991,17 @@ mod tests {
                 "- a\n\n    [Store]",
                 "- a\n\n    Store",
             ),
+            (
+                "an indented line straight after a fence is prose",
+                "```\nx\n```\n    [Store]",
+                "```\nx\n```\n    Store",
+            ),
+            (
+                "task-list markers are no links",
+                "- [x] done\n- [ ] open\n1. [X] [Store]",
+                "- [x] done\n- [ ] open\n1. [X] Store",
+            ),
+            ("a lone `[x]` mid-line is a path", "a [x] b", "a x b"),
             (
                 "backslash escapes",
                 "\\[Store\\] \\<T>",
