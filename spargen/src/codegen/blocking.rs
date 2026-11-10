@@ -23,8 +23,8 @@ pub(super) fn blocking_cfg() -> TokenStream {
 /// compiled under [`blocking_cfg`]. Each method is a shim over the async client's method, so the
 /// request building and dispatch are the async client's. Its constructors are the async client's
 /// `new`, `with_config`, `with_default_server` (when a server is declared), `with_client`,
-/// `with_backend` and `with_client_and_backend`, and its `with_credential` carries the async client's documentation, declared
-/// schemes included.
+/// `with_backend` and `with_client_and_backend`, and its `with_credential` carries the async
+/// client's documentation, declared schemes included.
 ///
 /// A `BlockingClient` must not be built or used from inside another async runtime (tokio's
 /// `block_on` panics when nested); the constructor building its own current-thread runtime is the

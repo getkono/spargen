@@ -440,7 +440,8 @@ mod support {
             /// `reqwest::Client`, so changing it through [`ClientCore::config_mut`] afterwards changes
             /// nothing. A client injected with [`ClientCore::with_client`] keeps its own connect timeout
             /// instead, and a backend installed with [`ClientCore::with_backend`] or
-            /// [`ClientCore::with_client_and_backend`] executes requests on its own terms. reqwest's `fetch` backend has no connect timeout, so on `wasm32` it is ignored.
+            /// [`ClientCore::with_client_and_backend`] executes requests on its own terms. reqwest's
+            /// `fetch` backend has no connect timeout, so on `wasm32` it is ignored.
             pub connect_timeout: Option<Duration>,
             /// How long a read on an established connection may wait for its next bytes — the response
             /// head, or the next chunk of a body, a streamed one included — before the request fails with
