@@ -103,6 +103,13 @@ the version it emits, and the idioms spargen handles.
   attaches no credential. This is for a URL handed to a fetcher of its own, such as a media player
   or a browser (`client.stream_file_url(id)`). Where another operation's method already spells
   `{method}_url`, that method keeps it and the accessor takes a disambiguated name.
+- Every object struct in `types` derives `PartialEq`, as does every type it can hold, so a test
+  compares a decoded value with an expected one by `assert_eq!`. `Type::new(..)` takes the
+  required members by value in declaration order and sets each optional member as decoding an
+  absent one does (its schema `default`, else `None`); a consuming `with_<member>(value)` per
+  optional member, and per typed `additionalProperties` map, sets the rest, so a new optional
+  member leaves code built that way compiling. A struct with no required member implements
+  `Default` as `new()`.
 - `Client::with_credential(scheme, credential)` registers static secrets (via
   [`secrecy`](https://docs.rs/secrecy)) or async token providers; operation `security`
   requirements pick the first satisfiable alternative and attach bearer/basic/apiKey credentials.
