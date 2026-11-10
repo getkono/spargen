@@ -71,8 +71,8 @@ fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[
 }
 
 /// The date-time backend's one fingerprint byte. `Time` and `String` keep the bytes the boolean
-/// `time` switch they replace hashed (`1` and `0`), so a build from before the backend choice
-/// stays a cache hit.
+/// `time` switch they replace hashed (`1` and `0`), so the pinned digest literal in this module's
+/// tests stays valid.
 fn datetime_byte(backend: DateTimeBackend) -> u8 {
     match backend {
         DateTimeBackend::String => 0,

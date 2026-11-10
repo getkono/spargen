@@ -9,9 +9,10 @@
 //!
 //! The grammar accepted is RFC 3339's `date-time`: `YYYY-MM-DD`, `T` (or `t`), `HH:MM:SS`, an
 //! optional `.` and one or more fraction digits, then `Z` (or `z`) or `±HH:MM`. Fraction digits past
-//! the ninth (below a nanosecond) are dropped. A leap second (`:60`) reads as the last nanosecond
-//! of its minute (`59.999999999`), as `time` reads it, since neither `jiff` nor `chrono`'s fixed
-//! offset types carry it otherwise. Writing gives `T`, the fraction trimmed of trailing zeros (and
+//! the ninth (below a nanosecond) are dropped. A leap second (`:60`) is accepted only where `time`
+//! accepts it, in the minute that is 23:59 UTC on a month's last day, and reads as the last
+//! nanosecond of that minute (`59.999999999`), as `time` reads it, since neither `jiff` nor
+//! `chrono`'s fixed offset types carry it otherwise. Writing gives `T`, the fraction trimmed of trailing zeros (and
 //! no fraction at all for a whole second), and `Z` for a zero offset.
 
 use std::fmt;
@@ -186,6 +187,9 @@ pub(crate) fn parse_date_time(text: &str) -> Option<DateTimeFields> {
         return None;
     }
     if second == 60 {
+        if !is_leap_second_minute(date, hour * 60 + minute, offset_seconds) {
+            return None;
+        }
         second = 59;
         nanosecond = 999_999_999;
     }
@@ -197,6 +201,36 @@ pub(crate) fn parse_date_time(text: &str) -> Option<DateTimeFields> {
         nanosecond,
         offset_seconds,
     })
+}
+
+/// The number of days in `month` of `year`, under the proleptic Gregorian calendar.
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// Whether the wall-clock minute `local_minute` (minutes past midnight) of `date`, at
+/// `offset_seconds` east of UTC, is 23:59 UTC on the last day of a month: the only minute a leap
+/// second can end, and the only one `time` accepts `:60` in. An offset is under a day, so 23:59 UTC
+/// falls on the local date or the day before it, never the day after.
+fn is_leap_second_minute(date: FullDate, local_minute: u32, offset_seconds: i32) -> bool {
+    let Ok(local_minute) = i32::try_from(local_minute) else {
+        return false;
+    };
+    let utc_minute = local_minute - offset_seconds / 60;
+    if utc_minute.rem_euclid(24 * 60) != 23 * 60 + 59 {
+        return false;
+    }
+    match utc_minute.div_euclid(24 * 60) {
+        // The UTC date is the day before: a month's last day exactly when the local date is a 1st.
+        -1 => date.day == 1,
+        0 => date.day == days_in_month(date.year, date.month),
+        _ => false,
+    }
 }
 
 /// `fields` as an RFC 3339 `date-time`, or `None` where RFC 3339 cannot express it: a year outside

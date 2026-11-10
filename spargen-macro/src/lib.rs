@@ -321,8 +321,6 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
     config
 }
 
-/// Parse the cap `key` (`= <integer>`) into `slot`. A cap set twice is an error rather than a
-/// silent last-wins, as a repeated switch is.
 /// Parse `datetime = "<backend>"` into `slot`: the date-time backend by the spelling
 /// `spargen.toml` and the CLI take. An unknown spelling, or the argument given twice, is an error
 /// at the argument.
@@ -347,6 +345,8 @@ fn parse_datetime(
     Ok(())
 }
 
+/// Parse the cap `key` (`= <integer>`) into `slot`. A cap set twice is an error rather than a
+/// silent last-wins, as a repeated switch is.
 fn parse_cap(input: ParseStream, key: &Ident, slot: &mut Option<usize>) -> syn::Result<()> {
     input.parse::<Token![=]>()?;
     let value: usize = input.parse::<LitInt>()?.base10_parse()?;
