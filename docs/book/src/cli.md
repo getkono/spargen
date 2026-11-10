@@ -50,9 +50,9 @@ Options:
 `check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, the switch pairs
 `--carve`/`--no-carve`, `--uuid`/`--no-uuid`, `--time`/`--no-time` and
 `--open-narrowing`/`--no-open-narrowing`, `--open-unions`/`--no-open-unions`, `--error-body-cap`, `--batch-cap`, and the repeatable
-`--omit-path`, `--omit-operation`, `--omit-component`, `--omit-pointer`. The group mirrors the
-setter list on `spargen::Spec` and the keys of [`spargen.toml`](#spargentoml-reference). `lock`
-fetches every remote `$ref` the spec reaches whatever the omit rules and switches say, so of the
+`--omit-path`, `--omit-operation`, `--omit-component`, `--omit-pointer` and `--keep-operation`. The
+group mirrors the setter list on `spargen::Spec` and the keys of [`spargen.toml`](#spargentoml-reference). `lock`
+fetches every remote `$ref` the spec reaches whatever the omit and keep rules and switches say, so of the
 group it reads only `--config` and `--batch-cap` (and the file's `batch_cap`); the rest are
 accepted there and have no effect.
 
@@ -60,8 +60,8 @@ accepted there and have no effect.
 
 Each spec is resolved as built-in defaults, then its `spargen.toml` (the `--config` path, or the
 file beside the spec when there is one), then the flags. `--error-body-cap` and `--batch-cap`
-replace the file's value. The `--omit-*` flags add rules to the file's `[[omit]]` rules rather
-than replacing them. Each switch pair sets its setting in either direction, so `--no-carve`
+replace the file's value. The `--omit-*` flags add rules to the file's `[[omit]]` rules, and `--keep-operation` to its
+`[[keep]]` rules, rather than replacing them. Each switch pair sets its setting in either direction, so `--no-carve`
 overrides `carve = true` in the file and `--uuid` overrides `uuid = false`; with neither flag of a
 pair given, the file's value stands, and giving both is rejected by argument parsing (exit status
 `2`). `diff` resolves each of its two specs this way on its own: absent `--config`, each side
@@ -88,8 +88,8 @@ one statement of what it bounds on each target and which paths it does not cap. 
 described under [auto-carve](./compatibility.md#auto-carve), `open_narrowing` under
 [problem details](./runtime.md#problem-details), `open_unions` on `Spec::open_unions` (a
 discriminator value no variant lists decodes into the `Unknown` variant instead of failing; a
-union with a 3.2 `defaultMapping` keeps its fallback), and the `[[omit]]` rules the file may also
-carry under [`spargen.toml` and the analysis CLI](./compatibility.md#spargentoml-and-the-analysis-cli).
+union with a 3.2 `defaultMapping` keeps its fallback), and the `[[omit]]` and `[[keep]]` rules the file may
+also carry under [keep rules](./compatibility.md#keep-rules-allow-list) and [`spargen.toml` and the analysis CLI](./compatibility.md#spargentoml-and-the-analysis-cli).
 An unknown key is a configuration error (exit status `3`).
 
 ### Exit status
@@ -99,7 +99,7 @@ An unknown key is a configuration error (exit status `3`).
 | `0` | Success, including a run that reported only warnings, and `--help` / `--version`. |
 | `1` | An error-severity diagnostic was reported (`check`, `deps`, `lock`, or a `diff` spec that cannot lower), or `diff --exit-code` found a breaking (`major`) change. |
 | `2` | The command line did not parse: an unknown subcommand or flag, a missing argument, or two conflicting flags. |
-| `3` | A configuration or flag value was rejected (a missing `--config` target, a malformed `spargen.toml`, bad `--omit-*` syntax), or `explain` was given an unknown code. |
+| `3` | A configuration or flag value was rejected (a missing `--config` target, a malformed `spargen.toml`, bad `--omit-*` or `--keep-operation` syntax), or `explain` was given an unknown code. |
 
 ## `spargen check`
 
