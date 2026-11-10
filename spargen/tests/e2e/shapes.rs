@@ -605,8 +605,9 @@ fn new_applies_a_default_whose_provider_a_required_member_is_named_after() {
 
 /// Closed string enums reached as a component, a struct field, a query parameter and a response
 /// body, beside a deprecated one. `ALL` is listed as a value so the variant it names sits next to
-/// the `ALL` constant, and `a b` and `derivative_manifest` are values whose spelling the variant
-/// identifier does not keep.
+/// the `ALL` constant, `a_l_l` cases to the constant's own spelling, so its variant must take
+/// another, and `a b` and `derivative_manifest` are values whose spelling the variant identifier
+/// does not keep.
 const CLOSED_ENUMS_SPEC: &str = r#"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -629,7 +630,7 @@ paths:
               schema: { $ref: '#/components/schemas/Legacy' }
 components:
   schemas:
-    WireBlobRole: { type: string, enum: [original, derivative_manifest, ALL, 'a b'] }
+    WireBlobRole: { type: string, enum: [original, derivative_manifest, ALL, 'a b', a_l_l] }
     Legacy: { type: string, enum: [old], deprecated: true }
     Blob:
       type: object
@@ -673,6 +674,9 @@ fn as_str_is_the_wire_value_display_writes_and_serde_uses() {
 
 #[test]
 fn all_lists_every_variant_in_declaration_order() {
+    // `a_l_l`'s variant takes a disambiguated spelling, so `ALL` still names the constant.
+    let spelled_all: WireBlobRole = "a_l_l".parse().unwrap();
+    assert_eq!(spelled_all.as_str(), "a_l_l");
     assert_eq!(
         WireBlobRole::ALL,
         &[
@@ -680,6 +684,7 @@ fn all_lists_every_variant_in_declaration_order() {
             WireBlobRole::DerivativeManifest,
             WireBlobRole::All,
             WireBlobRole::AB,
+            spelled_all,
         ]
     );
 }
