@@ -721,10 +721,10 @@ fn cbor_is_sent_and_asked_for_under_its_own_media_type() {
         (
             "application/cbor",
             (|client: &cbor_client::BlockingClient, body: &bytes::Bytes| {
-                client.publish_directory(body)
+                client.publish_directory(body.clone())
             }) as fn(&_, &_) -> _,
         ),
-        ("application/cose+cbor", |client, body| client.fetch_receipt(body)),
+        ("application/cose+cbor", |client, body| client.fetch_receipt(body.clone())),
     ] {
         let (base, server) = common::serve_once(media, "200 OK", SIGNED);
         let client = cbor_client::BlockingClient::new(&base).unwrap();
@@ -746,7 +746,7 @@ fn octet_stream_still_leaves_accept_to_the_http_stack() {
     let (base, server) = common::serve_once("application/octet-stream", "200 OK", SIGNED);
     let client = cbor_client::BlockingClient::new(&base).unwrap();
     client
-        .put_blob(&bytes::Bytes::from_static(SIGNED))
+        .put_blob(bytes::Bytes::from_static(SIGNED))
         .expect("the octet-stream call round-trips");
     let request = server.join().unwrap();
     let head = &request.head;

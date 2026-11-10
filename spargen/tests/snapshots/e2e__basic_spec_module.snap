@@ -17,8 +17,8 @@ expression: basic_spec_module(|spec| spec)
     clippy::nursery
 )]
 pub use support::{
-    ApiErrorBody, ApiErrorProblem, AuthError, ClientConfig, ClientCore, Credential,
-    Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
+    ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
+    Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
     LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next,
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
     RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
@@ -816,7 +816,8 @@ mod support {
             /// each reconnect resends that same request.
             pub timeout: Option<Duration>,
             /// Maximum bytes of a success body a non-streaming operation reads before it fails with
-            /// [`Error::BodyTooLarge`] (default `None`: a success body is read whole, however large).
+            /// [`Error::BodyTooLarge`] (default `None`: a structured success body is read whole, however
+            /// large, and a raw binary one up to [`Self::DEFAULT_MAX_BINARY_BODY`]).
             ///
             /// A response whose `Content-Length` declares more is refused before any of its body is read,
             /// and one that grows past it is abandoned at the chunk that crosses it, which forgoes reuse
@@ -824,8 +825,17 @@ mod support {
             /// [`RequestOptions::max_body`], set per client value with a generated client's
             /// `with_options`, replaces it. It is read each time [`super::send`] sends a request, as
             /// [`Self::timeout`] is. An operation returning an `EventStream` is exempt: its items are
-            /// bounded by [`Self::max_stream_frame`] instead.
+            /// bounded by [`Self::max_stream_frame`] instead. So is a binary operation's `_stream` twin,
+            /// which returns a [`super::ByteStream`] whose reader picks its own limit.
             pub max_success_body: Option<usize>,
+        }
+        impl ClientConfig {
+            /// The most bytes a raw binary success body (`application/octet-stream`, `image/*`, …) read
+            /// whole is allowed to hold where neither [`RequestOptions::max_body`] nor
+            /// [`Self::max_success_body`] sets a limit: 64 MiB. Either of those replaces it, larger or
+            /// smaller; a body past it fails with [`Error::BodyTooLarge`]. A download it would refuse is
+            /// read through the operation's `_stream` twin instead, as a [`super::ByteStream`].
+            pub const DEFAULT_MAX_BINARY_BODY: usize = 64 * 1024 * 1024;
         }
         impl Default for ClientConfig {
             fn default() -> Self {
@@ -1315,13 +1325,20 @@ mod support {
             headers: &reqwest::header::HeaderMap,
             limit: usize,
         ) -> bool {
+            declared_length(headers).is_some_and(|length| exceeds(length, limit))
+        }
+        /// The body length `headers` declare in a well-formed `Content-Length`.
+        pub(crate) fn declared_length(
+            headers: &reqwest::header::HeaderMap,
+        ) -> Option<u64> {
             headers
                 .get(reqwest::header::CONTENT_LENGTH)
                 .and_then(|length| length.to_str().ok())
                 .and_then(|length| length.parse::<u64>().ok())
-                .is_some_and(|length| {
-                    u64::try_from(limit).is_ok_and(|limit| length > limit)
-                })
+        }
+        /// Whether `length` bytes are more than `limit`.
+        pub(crate) fn exceeds(length: u64, limit: usize) -> bool {
+            u64::try_from(limit).is_ok_and(|limit| length > limit)
         }
         /// Read `body` whole, or fail with [`Error::BodyTooLarge`] once it is known to hold more than
         /// `limit` bytes: up front from a `Content-Length` past it, or at the chunk that carries it past.
@@ -1404,11 +1421,22 @@ mod support {
             response: Response,
             decode: impl FnOnce(&Bytes) -> Result<T, String>,
         ) -> Result<ResponseValue<T>, Error<Infallible>> {
+            decode_success_within(core, response, None, decode).await
+        }
+        /// [`decode_success_with`], reading the body within `default_limit` where the call set no
+        /// success-body limit of its own.
+        async fn decode_success_within<T>(
+            core: &ClientCore,
+            response: Response,
+            default_limit: Option<usize>,
+            decode: impl FnOnce(&Bytes) -> Result<T, String>,
+        ) -> Result<ResponseValue<T>, Error<Infallible>> {
             let (parts, body) = response.into_parts();
             let limit = parts
                 .extensions
                 .get::<BodyLimits>()
-                .and_then(|limits| limits.success);
+                .and_then(|limits| limits.success)
+                .or(default_limit);
             let (status, headers) = (parts.status, parts.headers);
             let body = match limit {
                 Some(limit) => read_within(limit, status, &headers, body).await?,
@@ -1430,11 +1458,22 @@ mod support {
         }
         /// Decode a raw binary success body without attempting JSON deserialization. Every byte sequence
         /// is a valid binary body, so a zero-length one is an empty `Bytes`, never an error.
+        ///
+        /// The body is read within the success-body limit the call was made under, as
+        /// [`decode_success_with`] reads one, and where the call set none, within
+        /// [`super::ClientConfig::DEFAULT_MAX_BINARY_BODY`]: a binary body is never read whole without a
+        /// bound. One past it is [`Error::BodyTooLarge`].
         pub async fn decode_success_bytes(
             core: &ClientCore,
             response: Response,
         ) -> Result<ResponseValue<Bytes>, Error<Infallible>> {
-            decode_success_with(core, response, |body| Ok(body.clone())).await
+            decode_success_within(
+                    core,
+                    response,
+                    Some(super::ClientConfig::DEFAULT_MAX_BINARY_BODY),
+                    |body| Ok(body.clone()),
+                )
+                .await
         }
         /// Deserialize a raw UTF-8 body through a JSON string value. Exposed to the generated shim so
         /// multi-status response variants use exactly the same textual codec as single-body responses.
@@ -1771,7 +1810,9 @@ mod support {
             },
             /// #12 — a non-streaming operation's response body exceeded the limit the call was made
             /// under: [`super::RequestOptions::max_body`], or for a success body
-            /// `ClientConfig::max_success_body`. A `Content-Length` past it is refused before the body is
+            /// `ClientConfig::max_success_body`, and for a raw binary success body where neither is set
+            /// `ClientConfig::DEFAULT_MAX_BINARY_BODY`; or the limit a [`super::ByteStream`]'s
+            /// `collect_bounded` was given. A `Content-Length` past it is refused before the body is
             /// read; a body that grows past it is abandoned at the chunk that crosses it. Nothing of the
             /// body is retained. Not transient: the same limit refuses the same response again.
             BodyTooLarge {
@@ -3999,8 +4040,11 @@ mod support {
         }
     }
     mod response {
+        use std::convert::Infallible;
+        use bytes::Bytes;
         use reqwest::header::HeaderMap;
         use reqwest::StatusCode;
+        use super::{Error, HttpBody};
         /// A successful response body paired with its status and headers. Returned inside
         /// `Result<ResponseValue<T>, Error<E>>` from every generated operation method.
         #[derive(Debug, Clone)]
@@ -4038,6 +4082,81 @@ mod support {
                     inner: f(self.inner),
                 }
             }
+        }
+        /// A raw binary success body read as it arrives, which a binary operation's `_stream` twin
+        /// returns in place of the whole `Bytes` its buffered method reads.
+        ///
+        /// [`Self::next`] yields the body a chunk at a time, and [`Self::collect_bounded`] reads the rest
+        /// of it into one `Bytes` within a limit the caller names; no collector reads it without one.
+        /// [`Self::into_body`] hands the body over as an [`HttpBody`], an `http_body::Body`, for a reader
+        /// of the caller's own. Dropping it abandons the rest of the body.
+        pub struct ByteStream {
+            body: HttpBody,
+            status: StatusCode,
+            /// The `Content-Length` the response declared, until the first chunk is read.
+            declared: Option<u64>,
+        }
+        impl ByteStream {
+            /// The next chunk of the body, `None` once it has ended, or the failure that interrupted it.
+            pub async fn next(&mut self) -> Option<Result<Bytes, Error<Infallible>>> {
+                self.declared = None;
+                self.body.chunk().await.map_err(Error::from_transport).transpose()
+            }
+            /// The rest of the body as one `Bytes`, or [`Error::BodyTooLarge`] once it is known to hold
+            /// more than `limit` bytes: before anything is read, where nothing has been and the response
+            /// declared a `Content-Length` past `limit`, and otherwise at the chunk that carries it past
+            /// `limit`, which is never buffered. Nothing of an over-limit body is returned.
+            pub async fn collect_bounded(
+                self,
+                limit: usize,
+            ) -> Result<Bytes, Error<Infallible>> {
+                if self
+                    .declared
+                    .is_some_and(|length| super::dispatch::exceeds(length, limit))
+                {
+                    return Err(Error::BodyTooLarge {
+                        limit,
+                        status: self.status,
+                    });
+                }
+                self.body
+                    .collect_within(limit)
+                    .await
+                    .map_err(Error::from_transport)?
+                    .ok_or(Error::BodyTooLarge {
+                        limit,
+                        status: self.status,
+                    })
+            }
+            /// The body as the transport seam carries it, for a reader of the caller's own.
+            pub fn into_body(self) -> HttpBody {
+                self.body
+            }
+        }
+        impl std::fmt::Debug for ByteStream {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("ByteStream")
+                    .field("body", &self.body)
+                    .field("status", &self.status)
+                    .finish_non_exhaustive()
+            }
+        }
+        /// Wrap a raw binary success response as a [`ByteStream`] beside its status and headers, reading
+        /// none of its body: the success branch of a binary operation's `_stream` twin.
+        pub fn stream_success_bytes(
+            response: http::Response<HttpBody>,
+        ) -> ResponseValue<ByteStream> {
+            let (parts, body) = response.into_parts();
+            let declared = super::dispatch::declared_length(&parts.headers);
+            ResponseValue::new(
+                parts.status,
+                parts.headers,
+                ByteStream {
+                    body,
+                    status: parts.status,
+                    declared,
+                },
+            )
         }
     }
     mod retry {
@@ -4849,6 +4968,16 @@ mod support {
             fn from(bytes: &'static [u8]) -> Self {
                 Self::from(Bytes::from_static(bytes))
             }
+        }
+        /// A binary operation's request body, as the `reqwest::RequestBuilder` it is built on takes it:
+        /// in-memory bytes move over without a copy, and a streaming body ([`HttpBody::wrap`]) is sent as
+        /// it is read. A streaming body is never replayed: the request it rides on does not clone, so a
+        /// retry or a credential refresh does not resend it. reqwest's `fetch` backend on `wasm32` takes
+        /// no stream, so there a streaming body is refused as [`Error::RequestConstruction`].
+        pub fn request_body(
+            body: impl Into<HttpBody>,
+        ) -> Result<reqwest::Body, super::Error<std::convert::Infallible>> {
+            body.into().into_reqwest().map_err(super::Error::from_transport)
         }
         /// An adopted body: its data read as `Bytes`, and its failures as [`TransportError`]s.
         struct SourceBody<B> {
@@ -6489,11 +6618,13 @@ mod support {
         FormStyle, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
-    pub use response::ResponseValue;
+    pub use response::{stream_success_bytes, ByteStream, ResponseValue};
     pub use retry::{
         exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
     };
-    pub use transport::{ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend};
+    pub use transport::{
+        request_body, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend,
+    };
     pub use wasm::{MaybeSend, MaybeSync};
     pub use stream::{
         EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait,
@@ -14372,7 +14503,7 @@ Response `409`: Conflict*/
     #[inline]
     pub async fn post_raw(
         &self,
-        body: &types::PostRawBody,
+        body: impl Into<support::HttpBody>,
     ) -> Result<support::ResponseValue<()>, support::Error<PostRawError>> {
         let mut path = "/raw".to_owned();
         let mut query: Vec<String> = Vec::new();
@@ -14381,7 +14512,7 @@ Response `409`: Conflict*/
         let mut request = self.core.http().request(reqwest::Method::POST, url);
         request = request
             .header(reqwest::header::CONTENT_TYPE, "text/plain")
-            .body(body.clone());
+            .body(support::request_body(body).map_err(support::Error::widen)?);
         let request = request.build().map_err(support::Error::request_construction)?;
         let response = support::send(&self.core, request)
             .await
@@ -14642,11 +14773,37 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
     }
+    ///`download_raw`, with its success body handed over unread as a `ByteStream`, to read as it arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The request and the error branch are `download_raw`'s. Like an `EventStream`, the call is exempt from the client's total timeout and its body limits; its connect and read timeouts still apply.
+    #[inline]
+    pub async fn download_raw_stream(
+        &self,
+    ) -> Result<
+        support::ResponseValue<support::ByteStream>,
+        support::Error<DownloadRawError>,
+    > {
+        let mut path = "/download".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send_streaming(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            Ok(support::stream_success_bytes(response))
+        } else {
+            Err(
+                support::unexpected_status::<DownloadRawError>(&self.core, response)
+                    .await,
+            )
+        }
+    }
     ///Response `206`: partial content
     #[inline]
     pub async fn put_ranged(
         &self,
-        body: &types::PutRangedBody,
+        body: impl Into<support::HttpBody>,
     ) -> Result<
         support::ResponseValue<types::ResponseBody8dacd797>,
         support::Error<PutRangedError>,
@@ -14658,7 +14815,7 @@ Response `409`: Conflict*/
         let mut request = self.core.http().request(reqwest::Method::PUT, url);
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(body.clone());
+            .body(support::request_body(body).map_err(support::Error::widen)?);
         let request = request.build().map_err(support::Error::request_construction)?;
         let response = support::send(&self.core, request)
             .await
@@ -14679,6 +14836,33 @@ Response `409`: Conflict*/
         let mut path = "/ranged".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
+    }
+    ///`put_ranged`, with its success body handed over unread as a `ByteStream`, to read as it arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The request and the error branch are `put_ranged`'s. Like an `EventStream`, the call is exempt from the client's total timeout and its body limits; its connect and read timeouts still apply.
+    #[inline]
+    pub async fn put_ranged_stream(
+        &self,
+        body: impl Into<support::HttpBody>,
+    ) -> Result<
+        support::ResponseValue<support::ByteStream>,
+        support::Error<PutRangedError>,
+    > {
+        let mut path = "/ranged".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::PUT, url);
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(support::request_body(body).map_err(support::Error::widen)?);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send_streaming(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            Ok(support::stream_success_bytes(response))
+        } else {
+            Err(support::unexpected_status::<PutRangedError>(&self.core, response).await)
+        }
     }
     ///Response `200`: the image
     #[inline]
@@ -14740,12 +14924,49 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
     }
+    ///`get_artwork`, with its success body handed over unread as a `ByteStream`, to read as it arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The request and the error branch are `get_artwork`'s. Like an `EventStream`, the call is exempt from the client's total timeout and its body limits; its connect and read timeouts still apply.
+    #[inline]
+    pub async fn get_artwork_stream(
+        &self,
+        id: impl Into<types::Id>,
+    ) -> Result<
+        support::ResponseValue<support::ByteStream>,
+        support::Error<GetArtworkError>,
+    > {
+        let id: types::Id = id.into();
+        let mut path = "/artwork/{id}".to_owned();
+        path = path
+            .replace(
+                "{id}",
+                &support::serialize_simple(
+                        &id,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send_streaming(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            Ok(support::stream_success_bytes(response))
+        } else {
+            Err(
+                support::unexpected_status::<GetArtworkError>(&self.core, response).await,
+            )
+        }
+    }
     ///Response `204`: stored
     #[inline]
     pub async fn put_artwork(
         &self,
         id: impl Into<types::Id4f0a4fba>,
-        body: &types::PutArtworkBody,
+        body: impl Into<support::HttpBody>,
     ) -> Result<support::ResponseValue<()>, support::Error<PutArtworkError>> {
         let id: types::Id4f0a4fba = id.into();
         let mut path = "/artwork/{id}".to_owned();
@@ -14765,7 +14986,7 @@ Response `409`: Conflict*/
         let mut request = self.core.http().request(reqwest::Method::PUT, url);
         request = request
             .header(reqwest::header::CONTENT_TYPE, "image/png")
-            .body(body.clone());
+            .body(support::request_body(body).map_err(support::Error::widen)?);
         let request = request.build().map_err(support::Error::request_construction)?;
         let response = support::send(&self.core, request)
             .await
@@ -14881,17 +15102,11 @@ Response `409`: binary error*/
                     .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(201u16).matches(status) {
-                return support::decode_success_with(
-                        &self.core,
-                        response,
-                        |body| {
-                            Ok::<
-                                _,
-                                String,
-                            >(GetRawMultiResponse::Status201(Box::new(body.clone())))
-                        },
-                    )
+                return support::decode_success_bytes(&self.core, response)
                     .await
+                    .map(|value| {
+                        value.map(|body| GetRawMultiResponse::Status201(Box::new(body)))
+                    })
                     .map_err(support::Error::widen);
             }
             Err(
@@ -16994,7 +17209,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn post_raw(
             &self,
-            body: &types::PostRawBody,
+            body: impl Into<support::HttpBody>,
         ) -> Result<support::ResponseValue<()>, support::Error<PostRawError>> {
             self.runtime.block_on(self.inner.post_raw(body))
         }
@@ -17095,7 +17310,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn put_ranged(
             &self,
-            body: &types::PutRangedBody,
+            body: impl Into<support::HttpBody>,
         ) -> Result<
             support::ResponseValue<types::ResponseBody8dacd797>,
             support::Error<PutRangedError>,
@@ -17133,7 +17348,7 @@ Response `409`: Conflict*/
         pub fn put_artwork(
             &self,
             id: impl Into<types::Id4f0a4fba>,
-            body: &types::PutArtworkBody,
+            body: impl Into<support::HttpBody>,
         ) -> Result<support::ResponseValue<()>, support::Error<PutArtworkError>> {
             self.runtime.block_on(self.inner.put_artwork(id, body))
         }

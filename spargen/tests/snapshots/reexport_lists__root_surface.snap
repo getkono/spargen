@@ -13,8 +13,8 @@ expression: surface
     clippy::nursery
 )]
 pub use support::{
-    ApiErrorBody, ApiErrorProblem, AuthError, ClientConfig, ClientCore, Credential,
-    Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
+    ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
+    Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
     LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next,
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
     RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
@@ -43,8 +43,8 @@ pub use __spargen_blocking::*;
     clippy::nursery
 )]
 pub use support::{
-    ApiErrorBody, ApiErrorProblem, AuthError, ClientConfig, ClientCore, Credential,
-    Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
+    ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
+    Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
     LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next,
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
     RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,

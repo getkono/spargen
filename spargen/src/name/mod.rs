@@ -81,6 +81,11 @@ pub(crate) struct OperationNames {
     /// operation's own method, so an operation whose method already spells `{method}_url` keeps
     /// that name and the accessor takes a pointer-seeded suffix instead.
     pub(crate) url_accessor: Ident,
+    /// The `{method}_stream` twin on `Client` reading a raw binary success body as a `ByteStream`,
+    /// present exactly when [`Api::streams_binary_success`](crate::ir::Api::streams_binary_success)
+    /// holds. Allocated in the method scope after every URL accessor, so an operation or accessor
+    /// that already spells it keeps that name and the twin takes a pointer-seeded suffix instead.
+    pub(crate) byte_stream: Option<Ident>,
     /// The optional-parameters `…Params` struct.
     pub(crate) params_struct: Ident,
     /// The error type: `{Method}Error`, or `{Method}OperationError` where the first form would
@@ -240,6 +245,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "ApiErrorBody",
     "ApiErrorProblem",
     "AuthError",
+    "ByteStream",
     "ClientConfig",
     "ClientCore",
     "Credential",
@@ -492,18 +498,42 @@ pub(crate) fn allocate(api: &Api) -> Names {
         .collect();
     let url_accessors =
         operation_scope.alloc_ranked(&operation_requests(api, &accessor_hints), IdentRole::Method);
+    // After every accessor, so the twin yields to both (see `OperationNames::byte_stream`).
+    let stream_hints: Vec<String> = signatures
+        .iter()
+        .map(|(method, ..)| format!("{}_stream", method.unraw()))
+        .collect();
+    let stream_requests: Vec<_> = operation_requests(api, &stream_hints)
+        .into_iter()
+        .zip(&api.operations)
+        .filter(|(_, operation)| api.streams_binary_success(operation))
+        .map(|(request, _)| request)
+        .collect();
+    let mut byte_streams = operation_scope
+        .alloc_ranked(&stream_requests, IdentRole::Method)
+        .into_iter();
+    let byte_streams: Vec<Option<Ident>> = api
+        .operations
+        .iter()
+        .map(|operation| {
+            api.streams_binary_success(operation)
+                .then(|| byte_streams.next().expect("one twin per binary success"))
+        })
+        .collect();
     let methods: Vec<&Ident> = signatures.iter().map(|(method, ..)| method).collect();
     let (errors, success_enums) = allocate_operation_types(api, &methods, &mut root_scope);
     let records = api
         .operations
         .iter()
         .zip(signatures)
-        .zip(url_accessors)
+        .zip(url_accessors.into_iter().zip(byte_streams))
         .zip(errors)
         .zip(success_enums)
         .zip(response_headers);
-    for (((((operation, signature), url_accessor), error), success_enum), response_headers) in
-        records
+    for (
+        ((((operation, signature), (url_accessor, byte_stream)), error), success_enum),
+        response_headers,
+    ) in records
     {
         let (method, params_struct, parameters, bindings) = signature;
         names.operations.insert(
@@ -511,6 +541,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
             OperationNames {
                 method,
                 url_accessor,
+                byte_stream,
                 params_struct,
                 error,
                 success_enum,
