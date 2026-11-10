@@ -120,7 +120,10 @@ the version it emits, and the idioms spargen handles.
   `RequestError::CredentialProvider` — never a silent 401. A failure inside the selected
   alternative never falls through to a later one; `Client::without_credential(scheme)`
   unregisters a scheme, so a client derived with it (`client.clone().without_credential("oauth")`)
-  selects the next fully registered alternative.
+  selects the next fully registered alternative. A `Credential::Refreshable` adds the reactive
+  case: when its check reads a failed response as a rejection of the token it carried, the
+  runtime asks it for a fresh token and sends the call once more, returning the original response
+  when the body cannot be cloned, the refresh fails, or the replay is rejected again.
 - A closed error taxonomy, identical across all spargen output: request-construction
   (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
   above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout

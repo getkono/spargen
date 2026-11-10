@@ -12,16 +12,21 @@ use crate::name::{Names, OperationBindings};
 use super::idents::status_variant_ident;
 use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 
-/// The statement that attaches the operation's credentials to `request_binding`: the first
-/// `security` alternative whose schemes are all registered, through `support::attach_auth`. Empty
-/// for an operation with no `security` requirement.
+/// The statements that attach the operation's credentials to `request_binding` and replay a call
+/// a refreshable credential was rejected on: the first `security` alternative whose schemes are all
+/// registered is attached through `support::attach_auth_replayable`, which binds `replay_binding`,
+/// and the second statement, emitted after the send, hands the `response` to
+/// `support::replay_rejected` (as a stream's send when `streaming`). Both are empty for an
+/// operation with no `security` requirement.
 pub(super) fn attach_auth_tokens(
     operation: &Operation,
     api: &Api,
     request_binding: &crate::name::Ident,
-) -> TokenStream {
+    replay_binding: &crate::name::Ident,
+    streaming: bool,
+) -> (TokenStream, TokenStream) {
     if operation.security.is_empty() {
-        quote! {}
+        (quote! {}, quote! {})
     } else {
         let alternatives = operation.security.iter().map(|requirement| {
             let schemes = requirement.0.iter().map(|id| {
@@ -48,15 +53,27 @@ pub(super) fn attach_auth_tokens(
             });
             quote! { &[#(#schemes),*][..] }
         });
-        quote! {
-            #request_binding = support::attach_auth(
+        let attach = quote! {
+            let #replay_binding;
+            (#request_binding, #replay_binding) = support::attach_auth_replayable(
                 &self.core,
                 #request_binding,
                 &[#(#alternatives),*],
             )
                 .await
                 .map_err(support::Error::widen)?;
-        }
+        };
+        let replay = quote! {
+            let response = support::replay_rejected(
+                &self.core,
+                response,
+                #replay_binding,
+                #streaming,
+            )
+                .await
+                .map_err(support::Error::widen)?;
+        };
+        (attach, replay)
     }
 }
 
@@ -446,8 +463,11 @@ paths:
         let xml = method(&generated, "get_xml");
         for fragment in [
             "->Result<support::ResponseValue<types::Item>,support::Error<GetXmlError>>",
-            "request=support::attach_auth(&self.core,request,&[&[support::AuthScheme{name:\"token\",\
-             kind:support::AuthKind::Bearer,},][..],],).await.map_err(support::Error::widen)?;",
+            "letreplay;(request,replay)=support::attach_auth_replayable(&self.core,request,\
+             &[&[support::AuthScheme{name:\"token\",kind:support::AuthKind::Bearer,},][..],],)\
+             .await.map_err(support::Error::widen)?;",
+            "letresponse=support::replay_rejected(&self.core,response,replay,false).await\
+             .map_err(support::Error::widen)?;ifresponse.status().is_success()",
             "support::decode_success_xml::<types::Item>(&self.core,response).await\
              .map_err(support::Error::widen)",
             "Err(support::classify_error_xml::<GetXmlError,>(&self.core,response,\
@@ -465,6 +485,7 @@ paths:
             assert!(text.contains(fragment), "`{fragment}` in {text}");
         }
         assert!(!text.contains("attach_auth"), "{text}");
+        assert!(!text.contains("replay_rejected"), "{text}");
 
         let many = method(&generated, "get_many");
         for fragment in [

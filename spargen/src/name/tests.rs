@@ -235,6 +235,7 @@ fn generator_bindings_yield_to_every_parameter() {
         "request",
         "reconnect_request",
         "cookies",
+        "replay",
     ];
     let mut params: Vec<Parameter> = bindings
         .iter()
@@ -262,6 +263,7 @@ fn generator_bindings_yield_to_every_parameter() {
         &allocated.request,
         &allocated.reconnect_request,
         &allocated.cookies,
+        &allocated.replay,
     ];
     for (binding, ident) in bindings.iter().zip(generated) {
         assert_ne!(
@@ -572,7 +574,7 @@ fn hint() -> impl proptest::strategy::Strategy<Value = String> {
         1 => proptest::sample::select(vec![
             "", "type", "self", "Self", "super", "crate", "String", "Box", "Option", "Vec",
             "Default", "default", "Into", "new", "core", "inner", "with_credential", "params",
-            "body", "path", "query", "url", "request", "cookies", "additional", "other",
+            "body", "path", "query", "url", "request", "cookies", "replay", "additional", "other",
             "Other", "unknown", "Unknown", "1a", "-", "requestOperation", "getV2", "get_v_2",
         ])
         .prop_map(str::to_owned),
@@ -1019,6 +1021,7 @@ proptest::proptest! {
                     &bindings.request,
                     &bindings.reconnect_request,
                     &bindings.cookies,
+                    &bindings.replay,
                 ]);
             assert_scope(&format!("arguments of {}", operation.id.0), arguments, &[])?;
             let fields = operation
@@ -1149,6 +1152,7 @@ proptest::proptest! {
                 &bindings.request,
                 &bindings.reconnect_request,
                 &bindings.cookies,
+                &bindings.replay,
             ]);
         assert_scope("arguments", arguments, &[])?;
         let fields = params

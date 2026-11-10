@@ -91,14 +91,16 @@ pub(super) fn emit_operation(
     });
     let accept = accept_tokens(operation, bindings);
     let body_send = body_send_tokens(operation, api, names, bindings);
-    let attach_auth = attach_auth_tokens(operation, api, request_binding);
+    let streaming = operation.responses.stream_success().is_some();
+    let (attach_auth, replay_rejected) =
+        attach_auth_tokens(operation, api, request_binding, &bindings.replay, streaming);
     let error_branch = error_branch_tokens(operation, api, names, error_ident);
     let (success_decode, reconnect_request_init) =
         success_decode_tokens(operation, api, names, bindings, success_ty, error_ident);
     let url_accessor = emit_operation_url(operation_names, sig, &url_building);
     // A streaming success response is exempt from the client's total timeout, which would cut a
     // long-lived stream off; `send_streaming` is `send` without it.
-    let send = if operation.responses.stream_success().is_some() {
+    let send = if streaming {
         quote! { support::send_streaming }
     } else {
         quote! { support::send }
@@ -130,6 +132,7 @@ pub(super) fn emit_operation(
             let response = #send(&self.core, #request_binding)
                 .await
                 .map_err(support::Error::widen)?;
+            #replay_rejected
             if response.status().is_success() {
                 #success_decode
             } else {

@@ -254,6 +254,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "ProblemDetails",
     "ProtocolError",
     "RedirectError",
+    "RejectionCheck",
     "RequestCause",
     "RequestError",
     "ReqwestBackend",
@@ -266,9 +267,11 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "TimeoutKind",
     "TokenFuture",
     "TokenProvider",
+    "TokenRefresher",
     "TransportError",
     "exponential_backoff",
     "next_link",
+    "token_provider",
 ];
 
 /// The root re-exports emitted only when the API has a sequential (streaming) response.
@@ -306,6 +309,9 @@ pub(crate) struct OperationBindings {
     pub(crate) reconnect_request: Ident,
     /// Mutable cookie-fragment collection.
     pub(crate) cookies: Ident,
+    /// What a secured operation needs to replay itself once after a refreshable credential is
+    /// rejected.
+    pub(crate) replay: Ident,
 }
 
 /// Allocate every identifier the API needs, in one deterministic pass. Allocation is total: each
@@ -470,6 +476,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
             request: binding_scope.alloc("request", IdentRole::Param, pointer),
             reconnect_request: binding_scope.alloc("reconnect_request", IdentRole::Param, pointer),
             cookies: binding_scope.alloc("cookies", IdentRole::Param, pointer),
+            replay: binding_scope.alloc("replay", IdentRole::Param, pointer),
         };
         signatures.push((method, params_struct, parameters, bindings));
     }

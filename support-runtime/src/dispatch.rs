@@ -477,20 +477,35 @@ pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
 /// only *retention* is bounded, not peak memory. `ReqwestBackend` delivers every `fetch` body on
 /// `wasm32` whole, including an error body of a streaming operation and of a reconnect, because
 /// only `EventStream` reads a body chunk by chunk there.
-async fn read_capped<E>(cap: usize, mut body: HttpBody) -> Result<(Bytes, bool), Error<E>> {
+async fn read_capped<E>(cap: usize, body: HttpBody) -> Result<(Bytes, bool), Error<E>> {
+    let prefix = read_prefix(cap, body)
+        .await
+        .map_err(Error::from_transport)?;
+    // `read_prefix`'s `freeze` hands the buffer over at its doubled capacity, so an under-cap body
+    // would pin up to twice its length. `cap_body` copies unconditionally, which is what settles
+    // that here.
+    Ok(cap_body(prefix, cap))
+}
+
+/// The bytes of `body` up to the first chunk that carries it past `cap`, or all of it when it
+/// ends first: [`read_capped`]'s read step, before the retention copy. More than `cap` bytes come
+/// back exactly when the body held more, so a later [`read_capped`] over them reports the same
+/// truncation the whole body would have. Peak memory is the cap plus one transport chunk.
+pub(crate) async fn read_prefix(
+    cap: usize,
+    mut body: HttpBody,
+) -> Result<Bytes, crate::TransportError> {
     // Pre-size to the cap, but do not honour an enormous configured cap up front — the point is to
     // avoid large speculative allocations.
     let mut buffered = bytes::BytesMut::with_capacity(cap.min(16 * 1024));
     while buffered.len() <= cap {
         // One byte past the cap is enough to know the remainder is being dropped.
-        match body.chunk().await.map_err(Error::from_transport)? {
+        match body.chunk().await? {
             Some(chunk) => buffered.extend_from_slice(&chunk),
             None => break,
         }
     }
-    // `freeze` hands the buffer over at its doubled capacity, so an under-cap body would pin up to
-    // twice its length. `cap_body` copies unconditionally, which is what settles that here.
-    Ok(cap_body(buffered.freeze(), cap))
+    Ok(buffered.freeze())
 }
 
 #[cfg(test)]
