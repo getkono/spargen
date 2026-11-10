@@ -106,6 +106,7 @@ pub(crate) fn generate(
     let models = models::emit_models(api, names, options, features.time);
     let signatures = operation::signatures(api, names, options);
     let client = client::emit_client(api, &signatures, names, options);
+    let ops = operation::emit_ops(api, names);
     // The synchronous facade is always emitted; `blocking::blocking_cfg` compiles its items out.
     let blocking = blocking::emit_blocking_client(api, &signatures, names, options);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
@@ -133,6 +134,7 @@ pub(crate) fn generate(
 
         #support
         #models
+        #ops
         #client
         #blocking
     };

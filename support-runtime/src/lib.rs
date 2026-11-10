@@ -77,7 +77,8 @@ pub use datetime::{Date, DateParseError, DateTime};
 pub use dispatch::{
     build_url_on, build_url_with_query_string_on, classify_error, classify_error_bytes,
     classify_error_text, classify_with, decode_success, decode_success_bytes, decode_success_text,
-    decode_success_with, decode_text_body, send, send_streaming, unexpected_status, StatusSpec,
+    decode_success_with, decode_text_body, execute, prepare, send, send_streaming,
+    unexpected_status, with_body_limits, StatusSpec,
 };
 pub use error::{
     ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError,
@@ -97,7 +98,7 @@ pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, Re
 pub use stream::{
     EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
 };
-pub use transport::{ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend};
+pub use transport::{try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend};
 pub use wasm::{MaybeSend, MaybeSync};
 #[cfg(feature = "xml")]
 pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml};

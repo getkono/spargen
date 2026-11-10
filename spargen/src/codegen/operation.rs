@@ -49,7 +49,7 @@ pub(super) fn emit_operation(
         error_ty,
         ..
     } = sig;
-    let decls = args.iter().map(|arg| &arg.decl);
+    let decls: Vec<&TokenStream> = args.iter().map(|arg| &arg.decl).collect();
     let normalizations = args.iter().filter_map(|arg| arg.normalize.as_ref());
     let url_building = url_building(operation, operation_names);
     let UrlBuilding {
@@ -93,27 +93,53 @@ pub(super) fn emit_operation(
     let accept = accept_tokens(operation, bindings);
     let body_send = body_send_tokens(operation, api, names, bindings);
     let streaming = operation.responses.stream_success().is_some();
-    let (attach_auth, replay_rejected) =
-        attach_auth_tokens(operation, api, request_binding, &bindings.replay, streaming);
+    let replay_binding = &bindings.replay;
+    let attach_auth = attach_auth_tokens(operation, api, request_binding, replay_binding);
     let error_branch = error_branch_tokens(operation, api, names, error_ident);
-    let (success_decode, reconnect_request_init) =
-        success_decode_tokens(operation, api, names, bindings, success_ty, error_ident);
+    let success_decode = success_decode_tokens(operation, api, names, success_ty, error_ident);
     let url_accessor = emit_operation_url(operation_names, sig, &url_building);
-    // A streaming success response is exempt from the client's total timeout, which would cut a
-    // long-lived stream off; `send_streaming` is `send` without it.
-    let send = if streaming {
-        quote! { support::send_streaming }
+    let preparer = &operation_names.preparer;
+    let request_builder = &operation_names.request_builder;
+    let decoder = &operation_names.decoder;
+    let operation_const = ops_const_ident(operation_names);
+    let forwards = sig.forwards();
+    let builder_forwards = sig.forwards();
+    let builder_doc = request_builder_doc(&operation_names.method);
+    let decoder_doc = decoder_doc(&operation_names.method, &operation_const);
+    let deprecated = &sig.deprecated;
+    // A streaming success keeps a clone of the request it sent, which its stream resends to
+    // reconnect; the decoder alone, which never saw the request, has none to give it.
+    let reconnect_request_binding = &bindings.reconnect_request;
+    let (reconnect_request_init, resend) = if streaming {
+        (
+            Some(quote! {
+                let #reconnect_request_binding = support::try_clone_request(&#request_binding);
+            }),
+            Some(quote! {
+                .map(|stream| stream.resending(&self.core, #reconnect_request_binding))
+            }),
+        )
     } else {
-        quote! { support::send }
+        (None, None)
     };
+    // A non-streaming response is read under the client's body limits, which `execute` gives the
+    // responses it returns; a response the caller obtained some other way is given them here.
+    let body_limits = (!streaming).then(|| {
+        quote! { let response = support::with_body_limits(&self.core, response); }
+    });
 
     quote! {
-        #attrs
+        /// The request the operation method sends, credentials attached and the client's
+        /// `RequestOptions` and the operation's `ops::Operation` on it, and the replay a rejected
+        /// refreshable credential spends.
         #[inline]
-        pub async fn #method_ident(
+        async fn #preparer(
             &self,
             #(#decls),*
-        ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
+        ) -> Result<
+            (http::Request<support::HttpBody>, Option<support::Replay>),
+            support::Error<std::convert::Infallible>,
+        > {
             #(#normalizations)*
             #url_statements
             let #url_binding = #build_url
@@ -130,11 +156,53 @@ pub(super) fn emit_operation(
             let #request_binding = #request_binding
                 .build()
                 .map_err(support::Error::request_construction)?;
-            #reconnect_request_init
-            let response = #send(&self.core, #request_binding)
+            let mut #request_binding = support::prepare(&self.core, #request_binding, #streaming)?;
+            #request_binding.extensions_mut().insert(ops::#operation_const);
+            Ok((#request_binding, #replay_binding))
+        }
+
+        #attrs
+        #[inline]
+        pub async fn #method_ident(
+            &self,
+            #(#decls),*
+        ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
+            let (#request_binding, #replay_binding) = self
+                .#preparer(#(#forwards),*)
                 .await
                 .map_err(support::Error::widen)?;
-            #replay_rejected
+            #reconnect_request_init
+            let response = support::execute(
+                &self.core,
+                #request_binding,
+                #replay_binding,
+                #streaming,
+            )
+                .await
+                .map_err(support::Error::widen)?;
+            self.#decoder(response).await #resend
+        }
+
+        #[doc = #builder_doc]
+        #deprecated
+        #[inline]
+        pub async fn #request_builder(
+            &self,
+            #(#decls),*
+        ) -> Result<http::Request<support::HttpBody>, support::Error<std::convert::Infallible>> {
+            self.#preparer(#(#builder_forwards),*)
+                .await
+                .map(|(#request_binding, _)| #request_binding)
+        }
+
+        #[doc = #decoder_doc]
+        #deprecated
+        #[inline]
+        pub async fn #decoder(
+            &self,
+            response: http::Response<support::HttpBody>,
+        ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
+            #body_limits
             if response.status().is_success() {
                 #success_decode
             } else {
@@ -143,6 +211,87 @@ pub(super) fn emit_operation(
         }
 
         #url_accessor
+    }
+}
+
+/// The name of an operation's constant in the `ops` module: its method, upper-cased. Methods are
+/// distinct `snake_case` identifiers, so their upper-cased spellings are distinct too.
+pub(super) fn ops_const_ident(names: &OperationNames) -> proc_macro2::Ident {
+    quote::format_ident!("{}", names.method.unraw().to_ascii_uppercase())
+}
+
+/// The rustdoc of an operation's request builder.
+fn request_builder_doc(method_ident: &crate::name::Ident) -> String {
+    let method = method_ident.unraw();
+    normalize_rustdoc(&format!(
+        "The request `{method}` sends, built exactly as it builds it — its URL, headers, \
+         credentials and body, the client's `RequestOptions` headers and extensions, and its \
+         `ops::Operation` among the extensions — without sending it, for a caller that sends it \
+         itself (signing it, pacing it, or over another transport) and hands the response to \
+         its decoder. Nothing is replayed after a rejected refreshable credential: that is \
+         `{method}`'s own send."
+    ))
+}
+
+/// The rustdoc of an operation's response decoder.
+fn decoder_doc(method_ident: &crate::name::Ident, operation_const: &proc_macro2::Ident) -> String {
+    let method = method_ident.unraw();
+    normalize_rustdoc(&format!(
+        "Decode a response to the request `{method}` sends (`ops::{operation_const}`), obtained \
+         however the caller sent it, exactly as `{method}` decodes its own: the same status \
+         dispatch, typed error, and body limits from this client's configuration. `{method}` \
+         itself sends its request builder's request through the client's backend, replays it \
+         once where a refreshable credential was rejected, and decodes the response with this."
+    ))
+}
+
+/// Emit the `ops` module: the `Operation` type, and one constant per operation naming its
+/// identity, in `api.operations` order.
+pub(super) fn emit_ops(api: &Api, names: &Names) -> TokenStream {
+    let constants = api.operations.iter().map(|operation| {
+        let operation_names = names.operation(&operation.id);
+        let ident = ops_const_ident(operation_names);
+        let id = &operation.id.0;
+        let method = match &operation.method {
+            crate::ir::Method::Custom(method) => method.clone(),
+            method => method.as_str().to_ascii_uppercase(),
+        };
+        let path = &operation.path.raw;
+        let doc = normalize_rustdoc(&format!(
+            "`{}`: `{method} {path}`.",
+            operation_names.method.unraw()
+        ));
+        quote! {
+            #[doc = #doc]
+            pub const #ident: Operation = Operation {
+                id: #id,
+                method: #method,
+                path_template: #path,
+            };
+        }
+    });
+    quote! {
+        /// Each operation's identity as data: one `Operation` constant per operation, named for
+        /// its client method in upper case. Every request an operation method or request builder
+        /// builds carries its `Operation` among its extensions, so a transport backend can tell
+        /// operations apart without parsing paths.
+        pub mod ops {
+            /// One operation's identity: its id, HTTP method and path template, as the
+            /// description declares them.
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+            pub struct Operation {
+                /// The operation's `operationId`, or the id derived from its method and path where
+                /// it declares none.
+                pub id: &'static str,
+                /// The HTTP method token the request is sent with: a standard method in upper case,
+                /// an `additionalOperations` method as declared.
+                pub method: &'static str,
+                /// The path template, `{name}` placeholders included, relative to the server URL.
+                pub path_template: &'static str,
+            }
+
+            #(#constants)*
+        }
     }
 }
 
@@ -565,6 +714,12 @@ impl OperationSig {
     /// The method's rustdoc, required-parameter deprecation and `default` notes, and deprecation.
     pub(super) fn attrs(&self) -> &TokenStream {
         &self.attrs
+    }
+
+    /// `#[deprecated]` where the operation is, for a companion of the method: its URL accessor,
+    /// request builder and decoder.
+    pub(super) fn deprecated(&self) -> Option<&TokenStream> {
+        self.deprecated.as_ref()
     }
 
     /// The `Ok` and `E` types of the method's `Result<Ok, support::Error<E>>`.
