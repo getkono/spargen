@@ -10,11 +10,13 @@
 use std::convert::Infallible;
 
 use bytes::Bytes;
-use reqwest::{Request, Url};
 use serde::de::DeserializeOwned;
+use url::Url;
 
-use crate::transport::request_from_reqwest;
-use crate::{ClientCore, Error, HttpBackend, HttpBody, ResponseValue};
+use crate::{ClientCore, Error, HttpBackend, HttpBody, ResponseValue, TotalTimeout};
+
+/// A request as the transport seam carries it.
+type Request = http::Request<HttpBody>;
 
 /// A response as the transport seam carries it.
 type Response = http::Response<HttpBody>;
@@ -160,14 +162,12 @@ pub fn build_url_with_query_string_on(
     Ok(url)
 }
 
-/// Send a request built on the core's `reqwest::Client` through the core's transport
+/// Send a request ([`crate::RequestBuilder`] builds one) through the core's transport
 /// [`crate::HttpBackend`], mapping transport/timeout/protocol/redirect failures into the taxonomy.
-/// The request crosses the seam as an [`http::Request`] whose in-memory body moves without a copy
-/// off `wasm32`; a URL that is not a valid URI is refused first, as
-/// [`Error::RequestConstruction`]. The backend reports failures as a [`crate::TransportError`]
-/// carrying its taxonomy class, which picks the variant here. Non-generic.
+/// The backend reports failures as a [`crate::TransportError`] carrying its taxonomy class, which
+/// picks the variant here. Non-generic.
 ///
-/// A request that carries no total timeout of its own is given the core's
+/// A request that carries no [`TotalTimeout`] of its own is given the core's
 /// [`crate::ClientConfig::timeout`], read now, which bounds it until its whole response body has
 /// been read. The body limits [`crate::RequestOptions::max_body`] and
 /// [`crate::ClientConfig::max_success_body`] set are read now too, and travel on the response to
@@ -177,8 +177,10 @@ pub async fn send(
     core: &ClientCore,
     mut request: Request,
 ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
-    if request.timeout().is_none() {
-        *request.timeout_mut() = core.config().timeout;
+    if request.extensions().get::<TotalTimeout>().is_none() {
+        if let Some(timeout) = core.config().timeout {
+            request.extensions_mut().insert(TotalTimeout(timeout));
+        }
     }
     let mut response = send_streaming(core, request).await?;
     let max_body = core.options().max_body;
@@ -200,9 +202,8 @@ pub async fn send(
 /// executes it.
 pub async fn send_streaming(
     core: &ClientCore,
-    request: Request,
+    mut request: Request,
 ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
-    let mut request = request_from_reqwest(request).map_err(Error::from_reqwest)?;
     apply_options(core.options(), &mut request);
     send_on(core.backend().as_ref(), request).await
 }

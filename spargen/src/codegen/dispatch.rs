@@ -306,7 +306,7 @@ pub(super) fn success_decode_tokens(
     };
     let reconnect_request_init = stream_framing.map(|_| {
         quote! {
-            let #reconnect_request_binding = #request_binding.try_clone();
+            let #reconnect_request_binding = support::try_clone_request(&#request_binding);
         }
     });
     (success_decode, reconnect_request_init)

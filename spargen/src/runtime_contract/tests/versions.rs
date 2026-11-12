@@ -255,7 +255,6 @@ fn conditional_dependencies_and_features_are_required_only_when_used() {
     .is_empty());
 
     let requirements = RuntimeRequirements {
-        reqwest_multipart: true,
         bytes_serde: true,
         streams: true,
         xml: true,
@@ -268,10 +267,7 @@ fn conditional_dependencies_and_features_are_required_only_when_used() {
         .map(|diagnostic| diagnostic.message.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        messages.contains("feature `multipart` on `reqwest`"),
-        "{messages}"
-    );
+    assert!(!messages.contains("feature `multipart`"), "{messages}");
     assert!(
         messages.contains("feature `serde` on `bytes`"),
         "{messages}"
@@ -635,25 +631,31 @@ paths:
             "a multipart body and a uuid type, mapping on",
             MULTIPART_AND_UUID,
             true,
-            (true, true),
+            true,
         ),
         (
             "a multipart body and a uuid type, mapping off",
             MULTIPART_AND_UUID,
             false,
-            (true, false),
+            false,
         ),
         (
             "a JSON body and no uuid type, mapping on",
             JSON_ONLY,
             true,
-            (false, false),
+            false,
         ),
     ] {
         let requirements = requirements(source, uuid);
+        assert_eq!(requirements.uuid, expected, "{case}");
+        // Issue #1287: the runtime encodes a multipart body itself, so it requires nothing a
+        // JSON body does not.
         assert_eq!(
-            (requirements.reqwest_multipart, requirements.uuid),
-            expected,
+            RuntimeRequirements {
+                uuid: false,
+                ..requirements
+            },
+            RuntimeRequirements::default(),
             "{case}"
         );
     }

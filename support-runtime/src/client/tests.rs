@@ -5,7 +5,10 @@ use secrecy::SecretString;
 
 use super::{ClientConfig, ClientCore};
 use crate::tests::poll_ready;
-use crate::{send, send_streaming, Credential, Error, ExecuteFuture, HttpBackend, HttpBody};
+use crate::{
+    send, send_streaming, Credential, Error, ExecuteFuture, HttpBackend, HttpBody, RequestBuilder,
+    TotalTimeout,
+};
 
 #[test]
 fn an_invalid_base_url_is_a_request_construction_error() {
@@ -158,26 +161,23 @@ fn with_client_runs_requests_on_the_supplied_client() {
         .build()
         .expect("build an https-only client");
     let core = ClientCore::with_client(client, "http://example.com").unwrap();
-    let request = core
-        .http()
-        .request(reqwest::Method::GET, "http://example.com/x")
-        .build()
-        .expect("reqwest builds the request; it refuses it only at execute");
-    let error = poll_ready(send(&core, request)).expect_err("the https-only client refuses http");
+    let error =
+        poll_ready(send(&core, get(&core))).expect_err("the https-only client refuses http");
     assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
 }
 
-/// `http` hands back the caller's client, not a default one: its configuration is what the
-/// caller injected it for. reqwest's `Debug` is the one view of a client's configuration that
-/// needs no I/O, and it prints a configured total timeout only when one is set.
+/// The installed backend runs on the caller's client, not a default one: its configuration is
+/// what the caller injected it for. reqwest's `Debug` is the one view of a client's configuration
+/// that needs no I/O, and it prints a configured total timeout only when one is set.
 #[test]
-fn http_returns_the_injected_client_with_its_configuration() {
+fn with_client_installs_a_backend_on_the_injected_client() {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(7))
         .build()
         .expect("build a configured client");
     let core = ClientCore::with_client(client, "https://example.com").unwrap();
-    let injected = format!("{:?}", core.http());
+    let injected = format!("{:?}", core.backend());
+    assert!(injected.starts_with("ReqwestBackend {"), "{injected}");
     assert!(injected.contains("7s"), "{injected}");
     let default = format!("{:?}", reqwest::Client::new());
     assert!(!default.contains("7s"), "{default}");
@@ -197,14 +197,15 @@ fn the_default_timeouts_are_a_30_s_connect_a_5_min_read_and_no_total() {
     assert_eq!(core.config().timeout, None);
 }
 
-/// The client a core builds for itself carries the configured read timeout, and one built on
-/// `with_config` the caller's. reqwest's `Debug` of a client prints its read timeout and only when
-/// one is set; its connect timeout is printed nowhere, so this is the one observable without I/O.
+/// The client a core builds for its default backend carries the configured read timeout, and one
+/// built on `with_config` the caller's. reqwest's `Debug` of a client prints its read timeout and
+/// only when one is set; its connect timeout is printed nowhere, so this is the one observable
+/// without I/O.
 #[test]
 fn the_built_client_carries_the_configured_read_timeout() {
     let default = format!(
         "{:?}",
-        ClientCore::new("https://example.com").unwrap().http()
+        ClientCore::new("https://example.com").unwrap().backend()
     );
     assert!(default.contains("read_timeout: 300s"), "{default}");
 
@@ -213,7 +214,7 @@ fn the_built_client_carries_the_configured_read_timeout() {
         ..ClientConfig::default()
     };
     let core = ClientCore::with_config("https://example.com", config).unwrap();
-    let configured = format!("{:?}", core.http());
+    let configured = format!("{:?}", core.backend());
     assert!(configured.contains("read_timeout: 7s"), "{configured}");
     assert_eq!(core.config().read_timeout, Some(Duration::from_secs(7)));
 
@@ -222,13 +223,8 @@ fn the_built_client_carries_the_configured_read_timeout() {
         ..ClientConfig::default()
     };
     let core = ClientCore::with_config("https://example.com", config).unwrap();
-    let unbounded = format!("{:?}", core.http());
+    let unbounded = format!("{:?}", core.backend());
     assert!(!unbounded.contains("read_timeout"), "{unbounded}");
-
-    // `with_backend` builds requests on a client configured as `new`'s is.
-    let core = ClientCore::with_backend(Recorder::new(), "https://example.com").unwrap();
-    let building = format!("{:?}", core.http());
-    assert!(building.contains("read_timeout: 300s"), "{building}");
 }
 
 /// `with_client` keeps the caller's client as it is: none of the configured timeouts is added to
@@ -236,35 +232,30 @@ fn the_built_client_carries_the_configured_read_timeout() {
 #[test]
 fn with_client_adds_no_timeout_to_the_injected_client() {
     let core = ClientCore::with_client(reqwest::Client::new(), "https://example.com").unwrap();
-    let injected = format!("{:?}", core.http());
+    let injected = format!("{:?}", core.backend());
     assert!(!injected.contains("timeout"), "{injected}");
 }
 
-/// Issue #1259: `with_client_and_backend` keeps both pieces it is given: `http` is the caller's
-/// client (its configured total timeout, which no core-built client carries, shows in its
-/// `Debug`), and `send` executes on the caller's backend, which records the request.
+/// Issue #1287: `with_backend` builds nothing besides the core: the backend it is given is the one
+/// installed, and `ClientCore`'s `Debug` names no other (no `reqwest::Client` sits under it);
+/// `send` executes on it, with the default configuration's total timeout (none). An invalid base
+/// URL is a request-construction error.
 #[test]
-fn with_client_and_backend_builds_on_the_given_client_and_runs_on_the_given_backend() {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(7))
-        .build()
-        .expect("build a configured client");
+fn with_backend_runs_on_the_given_backend_and_builds_no_client() {
     let backend = Recorder::new();
-    let core = ClientCore::with_client_and_backend(client, backend.clone(), "https://example.com")
-        .unwrap();
+    let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
     let installed: Arc<dyn HttpBackend> = backend.clone();
     assert!(Arc::ptr_eq(core.backend(), &installed));
-    let injected = format!("{:?}", core.http());
-    assert!(injected.contains("7s"), "{injected}");
-    assert!(!injected.contains("read_timeout"), "{injected}");
+    let debug = format!("{core:?}");
+    assert!(debug.contains("backend: Recorder"), "{debug}");
+    assert!(!debug.contains("Client {"), "{debug}");
     assert_eq!(core.base_url().as_str(), "https://example.com/");
     assert_eq!(core.config().timeout, None);
 
     poll_ready(send(&core, get(&core))).unwrap();
     assert_eq!(backend.timeouts(), [None]);
 
-    let error = ClientCore::with_client_and_backend(reqwest::Client::new(), backend, "not a url")
-        .unwrap_err();
+    let error = ClientCore::with_backend(backend, "not a url").unwrap_err();
     assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
 }
 
@@ -287,7 +278,7 @@ fn set_base_url_repoints_the_core_and_keeps_its_credentials() {
 }
 
 /// A transport that answers `204` and records the total timeout each request carries across the
-/// seam, read back the way `ReqwestBackend` reads it.
+/// seam, read from its `TotalTimeout` extension as `ReqwestBackend` reads it.
 #[derive(Debug, Default)]
 struct Recorder {
     timeouts: Mutex<Vec<Option<Duration>>>,
@@ -305,12 +296,12 @@ impl Recorder {
 
 impl HttpBackend for Recorder {
     fn execute(&self, request: http::Request<HttpBody>) -> ExecuteFuture<'_> {
-        let request = reqwest::Request::try_from(request.map(|_| reqwest::Body::from("")))
-            .expect("the seam's request converts back");
-        self.timeouts
-            .lock()
-            .unwrap()
-            .push(request.timeout().copied());
+        self.timeouts.lock().unwrap().push(
+            request
+                .extensions()
+                .get::<TotalTimeout>()
+                .map(|timeout| timeout.0),
+        );
         Box::pin(async {
             Ok(http::Response::builder()
                 .status(204)
@@ -320,11 +311,17 @@ impl HttpBackend for Recorder {
     }
 }
 
-fn get(core: &ClientCore) -> reqwest::Request {
-    core.http()
-        .get("https://example.com/x")
+fn get(core: &ClientCore) -> http::Request<HttpBody> {
+    RequestBuilder::new(http::Method::GET, core.base_url().join("x").unwrap())
         .build()
         .expect("a valid request")
+}
+
+/// `get`, carrying a total timeout of its own.
+fn get_within(core: &ClientCore, timeout: Duration) -> http::Request<HttpBody> {
+    let mut request = get(core);
+    request.extensions_mut().insert(TotalTimeout(timeout));
+    request
 }
 
 /// `send` gives a request the core's total timeout as it is when the request is sent, so a
@@ -339,8 +336,7 @@ fn send_applies_the_configured_total_timeout_read_at_send_time() {
     core.config_mut().timeout = Some(Duration::from_secs(9));
     poll_ready(send(&core, get(&core))).unwrap();
 
-    let mut own = get(&core);
-    *own.timeout_mut() = Some(Duration::from_secs(2));
+    let own = get_within(&core, Duration::from_secs(2));
     poll_ready(send(&core, own)).unwrap();
 
     assert_eq!(
@@ -362,8 +358,7 @@ fn send_streaming_leaves_the_configured_total_timeout_off() {
     core.config_mut().timeout = Some(Duration::from_secs(9));
     poll_ready(send_streaming(&core, get(&core))).unwrap();
 
-    let mut own = get(&core);
-    *own.timeout_mut() = Some(Duration::from_secs(2));
+    let own = get_within(&core, Duration::from_secs(2));
     poll_ready(send_streaming(&core, own)).unwrap();
 
     assert_eq!(backend.timeouts(), [None, Some(Duration::from_secs(2))]);

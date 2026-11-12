@@ -33,6 +33,7 @@ time = "0.3.55"
 jiff = { version = "0.2.42", default-features = false }
 chrono = { version = "0.4.45", default-features = false }
 tokio = "1.53.3"
+url = "2.5.8"
 semver = "1.0"
 camino = "1.1"
 indexmap = "2.2"

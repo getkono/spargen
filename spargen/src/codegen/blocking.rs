@@ -22,8 +22,8 @@ pub(super) fn blocking_cfg() -> TokenStream {
 /// current-thread tokio runtime and drives each async operation to completion with `block_on`,
 /// compiled under [`blocking_cfg`]. Each method is a shim over the async client's method, so the
 /// request building and dispatch are the async client's. Its constructors are the async client's
-/// `new`, `with_config`, `with_default_server` (when a server is declared), `with_client`,
-/// `with_backend` and `with_client_and_backend`, and its `with_credential` carries the async
+/// `new`, `with_config`, `with_default_server` (when a server is declared), `with_client` and
+/// `with_backend`, and its `with_credential` carries the async
 /// client's documentation, declared schemes included, as its `with_bound_header` does where the
 /// build bound a header.
 ///
@@ -133,18 +133,6 @@ pub(super) fn emit_blocking_client(
                 base_url: &str,
             ) -> Result<Self, support::Error<std::convert::Infallible>> {
                 let inner = Client::with_backend(backend, base_url)?;
-                let runtime = new_runtime()?;
-                Ok(Self { inner, runtime })
-            }
-
-            /// Build a blocking client over a caller-supplied `reqwest::Client` and transport
-            /// backend, as `Client::with_client_and_backend` does.
-            pub fn with_client_and_backend(
-                client: reqwest::Client,
-                backend: std::sync::Arc<dyn support::HttpBackend>,
-                base_url: &str,
-            ) -> Result<Self, support::Error<std::convert::Infallible>> {
-                let inner = Client::with_client_and_backend(client, backend, base_url)?;
                 let runtime = new_runtime()?;
                 Ok(Self { inner, runtime })
             }

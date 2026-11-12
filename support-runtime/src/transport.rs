@@ -83,10 +83,6 @@ enum Inner {
     Full(Bytes),
     /// A body read frame by frame.
     Streaming(BoxBody),
-    /// A request body reqwest's `fetch` backend holds as something other than bytes (a multipart
-    /// form), which only [`ReqwestBackend`] can send.
-    #[cfg(target_arch = "wasm32")]
-    Reqwest(reqwest::Body),
     /// A response body reqwest's `fetch` backend received.
     #[cfg(target_arch = "wasm32")]
     Fetch(FetchBody),
@@ -121,8 +117,6 @@ impl HttpBody {
             Inner::Streaming(_) => None,
             #[cfg(target_arch = "wasm32")]
             Inner::Fetch(_) => None,
-            #[cfg(target_arch = "wasm32")]
-            Inner::Reqwest(body) => body.as_bytes(),
         }
     }
 
@@ -134,8 +128,6 @@ impl HttpBody {
             Inner::Streaming(_) => None,
             #[cfg(target_arch = "wasm32")]
             Inner::Fetch(_) => None,
-            #[cfg(target_arch = "wasm32")]
-            Inner::Reqwest(_) => None,
         }
     }
 
@@ -208,36 +200,6 @@ impl HttpBody {
         Ok(Some(buffered.freeze()))
     }
 
-    /// A request body reqwest built, as the seam carries it. Off `wasm32` an in-memory body
-    /// moves over without a copy, and anything else is read as a stream. On `wasm32` an in-memory
-    /// body is copied, and a multipart form stays reqwest's, for [`ReqwestBackend`] to send.
-    ///
-    /// One function for both targets, with the target-specific steps `cfg`-gated inside it, so a
-    /// native test reaches it and no mutation of it survives by being compiled out.
-    fn from_reqwest_request(#[allow(unused_mut)] mut body: reqwest::Body) -> Self {
-        #[cfg(target_arch = "wasm32")]
-        return match body.as_bytes() {
-            Some(bytes) => Self::from(Bytes::copy_from_slice(bytes)),
-            None => Self {
-                inner: Inner::Reqwest(body),
-            },
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if body.as_bytes().is_none() {
-                return Self::from_reqwest_stream(body);
-            }
-            // reqwest's in-memory body yields its bytes, without copying them, as the one frame
-            // its first poll answers with; it never waits, so a no-op waker is enough.
-            let mut cx = Context::from_waker(std::task::Waker::noop());
-            match Pin::new(&mut body).poll_frame(&mut cx) {
-                Poll::Ready(Some(Ok(frame))) => Self::from(frame.into_data().unwrap_or_default()),
-                Poll::Ready(None) => Self::empty(),
-                Poll::Ready(Some(Err(_))) | Poll::Pending => Self::from_reqwest_stream(body),
-            }
-        }
-    }
-
     /// A body reqwest reads, read through [`TransportError::from_reqwest_body`].
     #[cfg(not(target_arch = "wasm32"))]
     fn from_reqwest_stream(body: reqwest::Body) -> Self {
@@ -269,8 +231,6 @@ impl HttpBody {
             Inner::Streaming(_) | Inner::Fetch(_) => Err(TransportError::request(
                 "reqwest's fetch backend cannot send a streaming request body",
             )),
-            #[cfg(target_arch = "wasm32")]
-            Inner::Reqwest(body) => Ok(body),
         }
     }
 }
@@ -289,13 +249,6 @@ impl http_body::Body for HttpBody {
             Inner::Streaming(body) => body.as_mut().poll_frame(cx),
             #[cfg(target_arch = "wasm32")]
             Inner::Fetch(body) => Pin::new(body).poll_frame(cx),
-            #[cfg(target_arch = "wasm32")]
-            Inner::Reqwest(_) => {
-                self.inner = Inner::Full(Bytes::new());
-                Poll::Ready(Some(Err(TransportError::request(
-                    "a multipart request body built by reqwest is sent only by ReqwestBackend",
-                ))))
-            }
         }
     }
 
@@ -303,8 +256,6 @@ impl http_body::Body for HttpBody {
         match &self.inner {
             Inner::Full(bytes) => bytes.is_empty(),
             Inner::Streaming(body) => body.is_end_stream(),
-            #[cfg(target_arch = "wasm32")]
-            Inner::Reqwest(_) => false,
             #[cfg(target_arch = "wasm32")]
             Inner::Fetch(_) => false,
         }
@@ -315,7 +266,7 @@ impl http_body::Body for HttpBody {
             Inner::Full(bytes) => SizeHint::with_exact(bytes.len() as u64),
             Inner::Streaming(body) => body.size_hint(),
             #[cfg(target_arch = "wasm32")]
-            Inner::Reqwest(_) | Inner::Fetch(_) => SizeHint::default(),
+            Inner::Fetch(_) => SizeHint::default(),
         }
     }
 }
@@ -331,8 +282,6 @@ impl std::fmt::Debug for HttpBody {
         match &self.inner {
             Inner::Full(bytes) => f.debug_tuple("HttpBody").field(&bytes.len()).finish(),
             Inner::Streaming(_) => f.write_str("HttpBody(streaming)"),
-            #[cfg(target_arch = "wasm32")]
-            Inner::Reqwest(_) => f.write_str("HttpBody(reqwest)"),
             #[cfg(target_arch = "wasm32")]
             Inner::Fetch(_) => f.write_str("HttpBody(fetch)"),
         }
@@ -369,19 +318,6 @@ impl From<&'static [u8]> for HttpBody {
     fn from(bytes: &'static [u8]) -> Self {
         Self::from(Bytes::from_static(bytes))
     }
-}
-
-/// A binary operation's request body, as the `reqwest::RequestBuilder` it is built on takes it:
-/// in-memory bytes move over without a copy, and a streaming body ([`HttpBody::wrap`]) is sent as
-/// it is read. A streaming body is never replayed: the request it rides on does not clone, so a
-/// retry or a credential refresh does not resend it. reqwest's `fetch` backend on `wasm32` takes
-/// no stream, so there a streaming body is refused as [`crate::Error::RequestConstruction`].
-pub fn request_body(
-    body: impl Into<HttpBody>,
-) -> Result<reqwest::Body, crate::Error<std::convert::Infallible>> {
-    body.into()
-        .into_reqwest()
-        .map_err(crate::Error::from_transport)
 }
 
 /// An adopted body: its data read as `Bytes`, and its failures as [`TransportError`]s.
@@ -500,40 +436,17 @@ impl http_body::Body for FetchBody {
     }
 }
 
-/// A request reqwest built, as the seam carries it. A URL that is not a valid URI is refused here
-/// as reqwest refuses it at `execute`, as a builder-kind error.
-///
-/// The request's total timeout crosses with it: off `wasm32` reqwest keeps it among the request's
-/// extensions, which the conversion carries; on `wasm32` it is a field the conversion drops, so it
-/// is carried as a `FetchTimeout` extension, which [`request_into_reqwest`] reads back.
-pub(crate) fn request_from_reqwest(
-    request: reqwest::Request,
-) -> Result<http::Request<HttpBody>, reqwest::Error> {
-    #[cfg(target_arch = "wasm32")]
-    let timeout = request.timeout().copied();
-    let request = http::Request::<reqwest::Body>::try_from(request)?;
-    #[allow(unused_mut)]
-    let mut request = request.map(HttpBody::from_reqwest_request);
-    #[cfg(target_arch = "wasm32")]
-    if let Some(timeout) = timeout {
-        request.extensions_mut().insert(FetchTimeout(timeout));
-    }
-    Ok(request)
-}
-
-/// A request's total timeout as it crosses the seam on `wasm32`, where reqwest's own request
-/// keeps it outside the extensions its conversion carries.
-// Mutation testing: `FetchTimeout` and the steps that carry it are compiled only for `wasm32`,
-// so no native test reaches them, as `FetchBody`'s note says.
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone, Copy, Debug)]
-struct FetchTimeout(std::time::Duration);
+/// The total timeout of one request, from connecting until its whole response body has been
+/// read, carried among the request's extensions. [`crate::send`] gives a request without one the
+/// client's [`crate::ClientConfig::timeout`] this way, and [`ReqwestBackend`] enforces it; a
+/// backend on another HTTP stack reads it from the request it executes and bounds the exchange by
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TotalTimeout(pub std::time::Duration);
 
 /// A copy of `request` to send again, its method, URI, version, headers, extensions and body
 /// alike; `None` when its body is a stream, which can be read only once.
-pub(crate) fn try_clone_request(
-    request: &http::Request<HttpBody>,
-) -> Option<http::Request<HttpBody>> {
+pub fn try_clone_request(request: &http::Request<HttpBody>) -> Option<http::Request<HttpBody>> {
     let mut clone = http::Request::new(request.body().try_clone()?);
     *clone.method_mut() = request.method().clone();
     *clone.uri_mut() = request.uri().clone();
@@ -543,22 +456,20 @@ pub(crate) fn try_clone_request(
     Some(clone)
 }
 
-/// A request from the seam, as reqwest sends it. The URI is parsed back into a URL; one that does
-/// not parse is refused as a request-kind failure, before anything is sent.
+/// A request from the seam, as reqwest sends it, its [`TotalTimeout`] become reqwest's own request
+/// timeout. The URI is parsed back into a URL; one that does not parse is refused as a
+/// request-kind failure, before anything is sent.
 fn request_into_reqwest(
     request: http::Request<HttpBody>,
 ) -> Result<reqwest::Request, TransportError> {
     let (parts, body) = request.into_parts();
-    #[cfg(target_arch = "wasm32")]
     let timeout = parts
         .extensions
-        .get::<FetchTimeout>()
+        .get::<TotalTimeout>()
         .map(|timeout| timeout.0);
     let body = body.into_reqwest()?;
-    #[allow(unused_mut)]
     let mut request = reqwest::Request::try_from(http::Request::from_parts(parts, body))
         .map_err(TransportError::from_reqwest)?;
-    #[cfg(target_arch = "wasm32")]
     if timeout.is_some() {
         *request.timeout_mut() = timeout;
     }
@@ -567,8 +478,9 @@ fn request_into_reqwest(
 
 /// A response reqwest received, as the seam carries it. Off `wasm32` the body is reqwest's own,
 /// read as it arrives; on `wasm32` it is the `fetch` response's, read whole unless `EventStream`
-/// takes it back to stream it. One
-/// function for both targets, as [`HttpBody::from_reqwest_request`] is, and for the same reason.
+/// takes it back to stream it. One function for both targets, with the target-specific steps
+/// `cfg`-gated inside it, so a native test reaches it and no mutation of it survives by being
+/// compiled out.
 pub(crate) fn response_from_reqwest(
     #[allow(unused_mut)] mut response: reqwest::Response,
 ) -> http::Response<HttpBody> {
@@ -630,14 +542,18 @@ impl HttpBackend for ReqwestBackend {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use bytes::Bytes;
     use http_body::Body as _;
     use reqwest::Method;
 
-    use super::{request_from_reqwest, request_into_reqwest, response_from_reqwest};
+    use super::{request_into_reqwest, response_from_reqwest, TotalTimeout};
     use crate::tests::{poll_ready, request, reqwest_response, Chunk, Chunks, SequenceBackend};
-    use crate::{send, ClientCore, Error, HttpBackend, HttpBody, ReqwestBackend, TransportError};
+    use crate::{
+        send, ClientCore, Error, HttpBackend, HttpBody, RequestBuilder, ReqwestBackend,
+        TransportError,
+    };
 
     // On native, ClientCore and the seam trait objects/futures are Send + Sync, so the client
     // works under tokio::spawn / axum (#21). A `+ Send` boxed future or trait-object bound turned
@@ -662,13 +578,7 @@ mod tests {
     fn send_routes_through_the_installed_backend() {
         let backend = SequenceBackend::statuses([203]);
         let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
-        // Requests are still BUILT on a reqwest client; only the execute step goes through the seam.
-        let request = core
-            .http()
-            .request(Method::GET, "https://example.com/op")
-            .build()
-            .unwrap();
-        let response = poll_ready(send(&core, request)).unwrap();
+        let response = poll_ready(send(&core, request())).unwrap();
         assert_eq!(response.status().as_u16(), 203);
         assert_eq!(backend.urls(), ["https://example.com/op"]);
     }
@@ -711,95 +621,48 @@ mod tests {
         );
     }
 
-    /// A request reqwest built crosses the seam and back with its method, URL, headers and
-    /// in-memory body intact, and the body is still in memory on the seam, so it clones.
+    /// A request from the seam reaches reqwest with its method, URL, headers and in-memory body
+    /// intact, the body sharing its bytes rather than copied, and with no timeout of its own
+    /// unless it carries a `TotalTimeout`, which becomes reqwest's request timeout.
     #[test]
-    fn a_reqwest_request_round_trips_through_the_seam() {
-        let built = reqwest::Client::new()
-            .request(Method::PUT, "https://example.com/op?q=1")
-            .header("x-trace", "abc")
-            .body("payload")
-            .build()
-            .unwrap();
-        let seam = request_from_reqwest(built).unwrap();
-        assert_eq!(seam.method(), Method::PUT);
-        assert_eq!(seam.uri(), "https://example.com/op?q=1");
-        assert_eq!(seam.headers()["x-trace"], "abc");
-        assert_eq!(seam.body().as_bytes(), Some(&b"payload"[..]));
-        assert!(seam.body().try_clone().is_some());
-
+    fn a_seam_request_crosses_into_reqwest_intact() {
+        let bytes = Bytes::from_static(b"payload");
+        let seam = RequestBuilder::new(
+            Method::PUT,
+            url::Url::parse("https://example.com/op?q=1").unwrap(),
+        )
+        .header("x-trace", "abc")
+        .body(bytes.clone())
+        .build()
+        .unwrap();
         let back = request_into_reqwest(seam).unwrap();
         assert_eq!(back.method(), Method::PUT);
         assert_eq!(back.url().as_str(), "https://example.com/op?q=1");
         assert_eq!(back.headers()["x-trace"], "abc");
-        assert_eq!(
-            back.body().and_then(reqwest::Body::as_bytes),
-            Some(&b"payload"[..])
-        );
+        let sent = back.body().and_then(reqwest::Body::as_bytes).unwrap();
+        assert_eq!(sent, b"payload");
+        assert_eq!(sent.as_ptr(), bytes.as_ptr());
+        assert_eq!(back.timeout(), None);
+
+        let mut timed = request();
+        timed
+            .extensions_mut()
+            .insert(TotalTimeout(Duration::from_secs(7)));
+        let back = request_into_reqwest(timed).unwrap();
+        assert_eq!(back.timeout(), Some(&Duration::from_secs(7)));
     }
 
-    /// A request with no body reaches the seam with an empty in-memory one.
+    /// A streaming request body reaches reqwest as a stream, its bytes all there when read.
     #[test]
-    fn a_bodyless_reqwest_request_has_an_empty_body_on_the_seam() {
-        let seam = request_from_reqwest(request()).unwrap();
-        assert_eq!(seam.body().as_bytes(), Some(&b""[..]));
-    }
-
-    /// A streaming request body stays a stream across the seam: it does not clone, and its bytes
-    /// are still all there when read.
-    #[test]
-    fn a_streaming_reqwest_request_body_stays_a_stream() {
-        let built = reqwest::Client::new()
-            .request(Method::POST, "https://example.com/op")
-            .body(reqwest::Body::wrap_stream(Chunks::new([
-                Chunk::data("ab"),
-                Chunk::data("cd"),
-            ])))
-            .build()
-            .unwrap();
-        let seam = request_from_reqwest(built).unwrap();
-        assert!(seam.body().as_bytes().is_none());
-        assert!(seam.body().try_clone().is_none());
-        let body = poll_ready(seam.into_body().collect()).unwrap();
-        assert_eq!(body, "abcd");
-    }
-
-    /// Issue #1263: a binary operation's body in memory reaches the seam in memory, sharing its
-    /// bytes, so the request clones for a retry or a credential refresh.
-    #[test]
-    fn an_in_memory_request_body_crosses_the_seam_without_a_copy() {
-        let bytes = Bytes::from(vec![7_u8; 32]);
-        let built = reqwest::Client::new()
-            .request(Method::PUT, "https://example.com/op")
-            .body(super::request_body(bytes.clone()).unwrap())
-            .build()
-            .unwrap();
-        assert!(built.try_clone().is_some());
-        let seam = request_from_reqwest(built).unwrap();
-        let on_seam = seam.body().as_bytes().unwrap();
-        assert_eq!(on_seam.as_ptr(), bytes.as_ptr());
-        assert_eq!(on_seam.len(), 32);
-        let owned = super::request_body(vec![1_u8, 2]).unwrap();
-        assert_eq!(owned.as_bytes(), Some(&[1_u8, 2][..]));
-    }
-
-    /// Issue #1263: a binary operation's streaming body is sent as it is read, and the request it
-    /// rides on does not clone, so nothing replays it.
-    #[test]
-    fn a_streaming_request_body_is_sent_as_read_and_never_replayed() {
+    fn a_streaming_request_body_crosses_into_reqwest_as_a_stream() {
         let source = Chunks::new([Chunk::data("ab"), Chunk::data("cd")]);
-        let pulled = source.pulled();
-        let built = reqwest::Client::new()
-            .request(Method::POST, "https://example.com/op")
-            .body(super::request_body(HttpBody::wrap(source)).unwrap())
-            .build()
-            .unwrap();
-        assert!(built.try_clone().is_none());
-        assert_eq!(pulled.load(std::sync::atomic::Ordering::SeqCst), 0);
-        let seam = request_from_reqwest(built).unwrap();
-        assert!(seam.body().try_clone().is_none());
-        assert_eq!(poll_ready(seam.into_body().collect()).unwrap(), "abcd");
-        assert_eq!(pulled.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let mut seam = request();
+        *seam.body_mut() = HttpBody::wrap(source);
+        let mut back = request_into_reqwest(seam).unwrap();
+        let body = back.body_mut().take().expect("a body");
+        assert!(body.as_bytes().is_none());
+        let body = HttpBody::wrap(body);
+        assert_eq!(poll_ready(body.collect()).unwrap(), "abcd");
     }
 
     /// A request URI that is not a URL reqwest accepts is refused before anything is sent, as a

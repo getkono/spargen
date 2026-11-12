@@ -8,10 +8,8 @@ use crate::tests::{
     poll_ready, poll_to_completion, refused_at_execute, seam_request as request, Chunk, Chunks,
     PendingOnce, Reply, RetryTransient, SequenceBackend,
 };
-use crate::transport::{
-    request_from_reqwest, try_clone_request, ExecuteFuture, HttpBackend, ReqwestBackend,
-};
-use crate::HttpBody;
+use crate::transport::{try_clone_request, ExecuteFuture, HttpBackend, ReqwestBackend};
+use crate::{HttpBody, RequestBuilder};
 
 /// A request as the transport seam carries it.
 type Request = http::Request<HttpBody>;
@@ -226,7 +224,6 @@ impl HttpBackend for CountingBackend {
 #[test]
 fn a_request_reqwest_refuses_to_send_is_executed_exactly_once() {
     for (client, request) in refused_at_execute() {
-        let request = request_from_reqwest(request).expect("a valid URI");
         let url = request.uri().to_string();
         let probe = try_clone_request(&request).expect("a bodyless request clones");
         let inner = Arc::new(CountingBackend {
@@ -329,13 +326,13 @@ fn exponential_backoff_never_exceeds_max_even_at_attempt_zero() {
 
 /// A request with `method` and, where `key` is `Some`, that `Idempotency-Key`.
 fn request_with(method: Method, key: Option<&str>) -> Request {
-    let builder = reqwest::Client::new().request(method, "https://example.com/op");
+    let url = url::Url::parse("https://example.com/op").expect("a valid URL");
+    let builder = RequestBuilder::new(method, url);
     let builder = match key {
         Some(key) => builder.header("Idempotency-Key", key),
         None => builder,
     };
-    request_from_reqwest(builder.body("payload").build().expect("build request"))
-        .expect("a valid URI")
+    builder.body("payload").build().expect("build request")
 }
 
 /// The fixture for the bug: a `POST` that drew a `503` may already have been applied, so the

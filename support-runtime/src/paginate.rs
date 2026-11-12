@@ -66,10 +66,13 @@ use std::convert::Infallible;
 use std::marker::PhantomData;
 
 use reqwest::header::HeaderMap;
-use reqwest::Url;
 use serde::de::DeserializeOwned;
+use url::Url;
 
-use crate::{decode_success, send, unexpected_status, ClientCore, Error, HttpBody, ResponseValue};
+use crate::{
+    decode_success, send, unexpected_status, ClientCore, Error, HttpBody, RequestBuilder,
+    ResponseValue,
+};
 
 /// A manual async iterator over the pages of a `Link`-header-paginated collection.
 ///
@@ -158,9 +161,9 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
         if !self.fetched.insert(key) {
             return Some(Err(Error::PaginationCycle { url }));
         }
-        let request = match self.core.http().get(url.clone()).build() {
+        let request = match RequestBuilder::new(http::Method::GET, url.clone()).build() {
             Ok(request) => request,
-            Err(error) => return Some(Err(Error::request_construction(error))),
+            Err(error) => return Some(Err(error)),
         };
         let response = match send(&self.core, request).await {
             Ok(response) => response,

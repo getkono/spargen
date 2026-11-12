@@ -399,28 +399,29 @@ fn every_variant() -> [Error<ApiBody>; ERROR_VARIANTS] {
     ]
 }
 
-/// `from_reqwest` is the taxonomy: every failure a [`crate::HttpBackend`] reports is mapped
-/// through it, which is what keeps a custom transport classifying identically to executing on
-/// a `reqwest::Client` directly. Its timeout, redirect, decode, and request branches all need a
-/// live connection attempt to reach (reqwest exposes no constructor for its own error; the two
-/// timeout kinds are driven over a real client in `spargen/tests/e2e.rs`), so what is pinned
-/// here is the builder branch, the one reqwest raises without any I/O.
+/// `TransportError::from_reqwest` is the taxonomy of [`crate::ReqwestBackend`]'s failures. Its
+/// timeout, redirect, decode, and request branches all need a live connection attempt to reach
+/// (reqwest exposes no constructor for its own error; the two timeout kinds are driven over a
+/// real client in `spargen/tests/e2e.rs`), so what is pinned here is the builder branch, the one
+/// reqwest raises without any I/O.
 ///
 /// A builder-kind error means reqwest refused the request: nothing was sent, and re-sending
 /// it is refused again. reqwest raises it from `RequestBuilder::build` (an unparseable URL)
-/// and also from `execute` on a request that built fine — a URL whose scheme is not
+/// and also from `execute` on a request handed to it — a URL whose scheme is not
 /// `http`/`https`, or plain `http` on an `https_only` client. The second arrives through the
-/// backend as a `TransportError`, so without this branch the same refusal would be a
-/// non-retryable `RequestConstruction` at build time and a retryable `Transport` at execute.
+/// backend as a `TransportError`, so without this branch the refusal would be a retryable
+/// `Transport` rather than a non-retryable `RequestConstruction`.
 #[test]
 fn from_reqwest_classifies_a_refused_request_as_request_construction() {
     // reqwest answers without touching the network, so the first poll is ready.
     let refused = crate::tests::refused_at_execute().map(|(client, request)| {
+        let request = reqwest::Request::try_from(request.map(|_| reqwest::Body::from("")))
+            .expect("a URL reqwest parses");
         crate::tests::poll_ready(client.execute(request)).expect_err("reqwest refuses the request")
     });
     for source in std::iter::once(reqwest_error()).chain(refused) {
         assert!(source.is_builder(), "{source}");
-        let error = Error::<ApiBody>::from_reqwest(source);
+        let error = Error::<ApiBody>::from_transport(TransportError::from_reqwest(source));
         assert!(
             matches!(error, Error::RequestConstruction(RequestError::Other(_))),
             "{error}"
@@ -495,7 +496,8 @@ fn every_transport_class_is_transient_exactly_when_its_variant_is() {
     let transport = TransportError::from_reqwest(reqwest_error());
     assert_eq!(
         transport.is_transient(),
-        Error::<ApiBody>::from_reqwest(reqwest_error()).is_transient()
+        Error::<ApiBody>::from_transport(TransportError::from_reqwest(reqwest_error()))
+            .is_transient()
     );
 }
 
@@ -641,7 +643,7 @@ fn a_transport_class_failure_is_transient_on_the_borrow_and_to_a_retry_policy() 
     assert!(transport.is_transient());
     let request = crate::tests::seam_request();
     assert!(crate::RetryOutcome::new(&request, Err(&transport)).is_transient());
-    let error = Error::<ApiBody>::from_reqwest(status_error());
+    let error = Error::<ApiBody>::from_transport(TransportError::from_reqwest(status_error()));
     assert!(matches!(error, Error::Transport(_)), "{error}");
     assert!(error.is_transient());
 }
@@ -660,17 +662,20 @@ fn a_refused_connection_is_a_transient_transport_error() {
     let url = format!("http://127.0.0.1:{port}/op");
     let runtime = crate::BlockingRuntime::new().expect("current-thread runtime builds");
     let core = crate::tests::core();
-    let request = || core.http().get(&url).build().unwrap();
-    let seam_request = || crate::transport::request_from_reqwest(request()).unwrap();
+    let request = || {
+        crate::RequestBuilder::new(reqwest::Method::GET, url::Url::parse(&url).unwrap())
+            .build()
+            .unwrap()
+    };
 
     let failure = runtime
         .block_on(crate::HttpBackend::execute(
             core.backend().as_ref(),
-            seam_request(),
+            request(),
         ))
         .expect_err("nothing listens on a released port");
     assert!(failure.is_transient(), "{failure}");
-    assert!(crate::RetryOutcome::new(&seam_request(), Err(&failure)).is_transient());
+    assert!(crate::RetryOutcome::new(&request(), Err(&failure)).is_transient());
 
     let error = runtime
         .block_on(crate::send(&core, request()))

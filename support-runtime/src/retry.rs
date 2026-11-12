@@ -160,7 +160,7 @@ impl<'a> RetryOutcome<'a> {
     /// A transport failure is transient when the class its [`TransportError`] carries is: a
     /// timeout, a failed connection, or an interrupted body is, and a redirect-policy, protocol,
     /// or request-kind failure ([`crate::RequestError::Other`]) is not. [`crate::ReqwestBackend`]
-    /// classifies as [`crate::Error::from_reqwest`] documents, so on `wasm32` a failed connection
+    /// classifies as [`crate::TransportError::from_reqwest`] documents, so on `wasm32` a failed connection
     /// is request-kind there. A `POST` or `PATCH` without an `Idempotency-Key` is never
     /// transient here, since the server may already have applied it. Policies are free to ignore
     /// this and key on [`Self::status`] / [`Self::transport_error`] directly.

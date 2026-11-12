@@ -1321,9 +1321,7 @@ fn send_adds_the_option_headers_the_request_lacks() {
     options.headers.append("x-many", "1".parse().unwrap());
     options.headers.append("x-many", "2".parse().unwrap());
     let core = core_with(backend.clone(), options);
-    let request = core
-        .http()
-        .get("https://example.com/op")
+    let request = crate::tests::builder(reqwest::Method::GET, "https://example.com/op")
         .header("x-own", "request")
         .build()
         .unwrap();

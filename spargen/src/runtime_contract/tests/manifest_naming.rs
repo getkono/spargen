@@ -137,6 +137,7 @@ fn a_corrupt_ancestor_is_only_a_hint_when_no_workspace_root_was_found() {
         "secrecy",
         "serde",
         "serde_json",
+        "url",
     ] {
         let expected = format!(
             "`{dependency}` inherits from `[workspace.dependencies]`, but no workspace \
@@ -278,6 +279,7 @@ fn an_unresolvable_inheritance_says_where_the_lookup_went() {
         "secrecy",
         "serde",
         "serde_json",
+        "url",
     ] {
         assert!(
             orphaned.diagnostics.iter().any(|diagnostic| {

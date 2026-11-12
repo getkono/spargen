@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::Url;
+use url::Url;
 
 use crate::{
     Credential, Error, ExposeSecret, HttpBackend, LinkPaginator, ReqwestBackend, SecretString,
@@ -49,12 +49,12 @@ pub struct ClientConfig {
     /// before the request fails with [`Error::Timeout`] (default 30 s; `None` waits as long as
     /// the operating system does).
     ///
-    /// It is read once, when [`ClientCore::with_config`] or [`ClientCore::new`] builds the
-    /// `reqwest::Client`, so changing it through [`ClientCore::config_mut`] afterwards changes
-    /// nothing. A client injected with [`ClientCore::with_client`] keeps its own connect timeout
-    /// instead, and a backend installed with [`ClientCore::with_backend`] or
-    /// [`ClientCore::with_client_and_backend`] executes requests on its own terms. reqwest's
-    /// `fetch` backend has no connect timeout, so on `wasm32` it is ignored.
+    /// It is read once, when [`ClientCore::with_config`] or [`ClientCore::new`] builds the default
+    /// backend's `reqwest::Client`, so changing it through [`ClientCore::config_mut`] afterwards
+    /// changes nothing. A client injected with [`ClientCore::with_client`] keeps its own connect
+    /// timeout instead, and a backend installed with [`ClientCore::with_backend`] executes
+    /// requests on its own terms. reqwest's `fetch` backend has no connect timeout, so on `wasm32`
+    /// it is ignored.
     pub connect_timeout: Option<Duration>,
     /// How long a read on an established connection may wait for its next bytes — the response
     /// head, or the next chunk of a body, a streamed one included — before the request fails with
@@ -75,10 +75,10 @@ pub struct ClientConfig {
     /// [`ClientCore::config_mut`] applies from the next request on, whichever constructor built
     /// the core, and it is honoured on `wasm32` too. A generated client's `with_timeout` sets it
     /// on the client value it returns, which is how one call gets a deadline of its own. It
-    /// travels on the request itself: a request built with its own
-    /// `reqwest::RequestBuilder::timeout` keeps that one,
-    /// [`ReqwestBackend`] enforces it, and a caller-supplied [`HttpBackend`] that runs the
-    /// request on a `reqwest::Client` enforces it as well. A streaming response is exempt,
+    /// travels on the request itself, as a [`crate::TotalTimeout`] extension: a request that
+    /// already carries one keeps it, [`ReqwestBackend`] enforces it, and so does a caller-supplied
+    /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. A
+    /// streaming response is exempt,
     /// because a stream may rightly stay open indefinitely: an operation returning an
     /// `EventStream` sends its request with [`crate::send_streaming`], which never applies it, and
     /// each reconnect resends that same request.
@@ -152,19 +152,19 @@ pub struct RequestOptions {
     pub headers: http::HeaderMap,
 }
 
-/// The shared core every generated `Client` wraps: the `reqwest::Client` used to BUILD requests
-/// (the BYO-client injection point for TLS choice, proxies, timeouts), the swappable transport
-/// [`HttpBackend`] that EXECUTES them, the base URL, configuration, and per-scheme credentials.
+/// The shared core every generated `Client` wraps: the swappable transport [`HttpBackend`] that
+/// executes requests, the base URL, configuration, and per-scheme credentials.
 ///
-/// Request building stays on a concrete `reqwest::Client`; only the execute step is routed through
-/// the backend (see [`crate::send`]). `new`/`with_client` install the default [`ReqwestBackend`];
-/// `with_backend` plugs a caller-supplied transport, and `with_client_and_backend` takes both.
+/// Requests are built by the runtime itself, as an `http::Request` ([`crate::RequestBuilder`]),
+/// whichever backend executes them (see [`crate::send`]). `new`/`with_config` install the default
+/// [`ReqwestBackend`] on a `reqwest::Client` built from the configuration, `with_client` installs
+/// one on a caller-supplied `reqwest::Client`, and `with_backend` plugs a caller-supplied
+/// transport.
 ///
 /// The generated `Client` wraps one of these and documents its own constructors; each of its
 /// operation methods delegates to the shared dispatch routines.
 #[derive(Debug, Clone)]
 pub struct ClientCore {
-    http: reqwest::Client,
     backend: Arc<dyn HttpBackend>,
     base_url: Url,
     config: ClientConfig,
@@ -182,70 +182,47 @@ impl ClientCore {
         Self::with_config(base_url, ClientConfig::default())
     }
 
-    /// Build a core with the given base URL and configuration on a `reqwest::Client` built from
-    /// `config`'s [connect](ClientConfig::connect_timeout) and
-    /// [read](ClientConfig::read_timeout) timeouts, which both builds requests and, wrapped in
-    /// the default [`ReqwestBackend`], executes them. Returns a request-construction error if the
-    /// base URL is invalid or reqwest cannot build the client (its TLS backend fails to
-    /// initialise).
+    /// Build a core with the given base URL and configuration, executing requests on the default
+    /// [`ReqwestBackend`] over a `reqwest::Client` built from `config`'s
+    /// [connect](ClientConfig::connect_timeout) and [read](ClientConfig::read_timeout) timeouts.
+    /// Returns a request-construction error if the base URL is invalid or reqwest cannot build
+    /// the client (its TLS backend fails to initialise).
     pub fn with_config(base_url: &str, config: ClientConfig) -> Result<Self, Error<Infallible>> {
-        let client = http_client(&config)?;
-        let backend = Arc::new(ReqwestBackend::new(client.clone()));
-        Self::assemble(client, backend, base_url, config)
+        let backend = Arc::new(ReqwestBackend::new(http_client(&config)?));
+        Self::assemble(backend, base_url, config)
     }
 
-    /// Build a core with a caller-supplied `reqwest::Client` — the injection point for TLS backend,
-    /// proxies, and timeouts. The client both builds requests and, wrapped in the default
-    /// [`ReqwestBackend`], executes them, so its own connect and read timeouts apply instead of
-    /// [`ClientConfig::connect_timeout`] and [`ClientConfig::read_timeout`];
-    /// [`ClientConfig::timeout`] still applies to each request [`crate::send`] sends.
+    /// Build a core executing requests on a caller-supplied `reqwest::Client` — the injection
+    /// point for TLS backend, proxies, and timeouts — wrapped in the default [`ReqwestBackend`],
+    /// as [`Self::with_backend`] would with `Arc::new(ReqwestBackend::new(client))`. The client's
+    /// own connect and read timeouts apply instead of [`ClientConfig::connect_timeout`] and
+    /// [`ClientConfig::read_timeout`]; [`ClientConfig::timeout`] still applies to each request
+    /// [`crate::send`] sends.
     pub fn with_client(client: reqwest::Client, base_url: &str) -> Result<Self, Error<Infallible>> {
-        let backend = Arc::new(ReqwestBackend::new(client.clone()));
-        Self::assemble(client, backend, base_url, ClientConfig::default())
+        Self::with_backend(Arc::new(ReqwestBackend::new(client)), base_url)
     }
 
     /// Build a core with a caller-supplied transport [`HttpBackend`] — the injection point for
-    /// retry, middleware, or an entirely non-reqwest transport. Requests are still BUILT on a
-    /// `reqwest::Client` configured as [`Self::new`]'s is; only the execute step goes through
-    /// `backend`, so connecting and reading are bounded however `backend` bounds them.
-    /// [`ClientConfig::timeout`] travels on each request [`crate::send`] sends, for a backend that
-    /// runs it on a `reqwest::Client` to enforce.
-    ///
-    /// Each call builds that request-building `reqwest::Client`, TLS initialisation included;
-    /// [`Self::with_client_and_backend`] takes one the caller already has instead.
+    /// retry, middleware, or an entirely non-reqwest transport — and the default
+    /// [`ClientConfig`]; nothing else is built, so several cores can share one backend. Every
+    /// request is executed by `backend`, so connecting and reading are bounded however `backend`
+    /// bounds them. [`ClientConfig::timeout`] travels on each request [`crate::send`] sends, as a
+    /// [`crate::TotalTimeout`] extension, for `backend` to enforce. Returns a request-construction
+    /// error if the base URL is invalid.
     pub fn with_backend(
         backend: Arc<dyn HttpBackend>,
         base_url: &str,
     ) -> Result<Self, Error<Infallible>> {
-        let client = http_client(&ClientConfig::default())?;
-        Self::with_client_and_backend(client, backend, base_url)
-    }
-
-    /// Build a core with both a caller-supplied `reqwest::Client`, which BUILDS requests, and a
-    /// caller-supplied transport [`HttpBackend`], which EXECUTES them; nothing is built besides,
-    /// so several cores can share one client and one backend. Only the execute step goes through
-    /// `backend`, so connecting and reading are bounded however `backend` bounds them, and
-    /// timeouts configured on `client` itself apply only where `backend` runs requests on it. The
-    /// configuration is the default [`ClientConfig`]; [`ClientConfig::timeout`] travels on each
-    /// request [`crate::send`] sends, as [`Self::with_backend`] describes. Returns a
-    /// request-construction error if the base URL is invalid.
-    pub fn with_client_and_backend(
-        client: reqwest::Client,
-        backend: Arc<dyn HttpBackend>,
-        base_url: &str,
-    ) -> Result<Self, Error<Infallible>> {
-        Self::assemble(client, backend, base_url, ClientConfig::default())
+        Self::assemble(backend, base_url, ClientConfig::default())
     }
 
     fn assemble(
-        http: reqwest::Client,
         backend: Arc<dyn HttpBackend>,
         base_url: &str,
         config: ClientConfig,
     ) -> Result<Self, Error<Infallible>> {
         let base_url = Url::parse(base_url).map_err(Error::request_construction)?;
         Ok(Self {
-            http,
             backend,
             base_url,
             config,
@@ -281,7 +258,7 @@ impl ClientCore {
         &self.base_url
     }
 
-    /// Replace the base URL every later request is resolved against, keeping the client, backend,
+    /// Replace the base URL every later request is resolved against, keeping the backend,
     /// configuration and credentials. Returns a request-construction error, leaving the base URL
     /// as it was, if `base_url` is invalid.
     pub fn set_base_url(&mut self, base_url: &str) -> Result<(), Error<Infallible>> {
@@ -289,12 +266,7 @@ impl ClientCore {
         Ok(())
     }
 
-    /// The injected HTTP client used to BUILD requests.
-    pub fn http(&self) -> &reqwest::Client {
-        &self.http
-    }
-
-    /// The transport backend that EXECUTES requests. [`crate::send`] dispatches through this;
+    /// The transport backend that executes requests. [`crate::send`] dispatches through this;
     /// retry/middleware layers can clone the `Arc` to wrap it.
     pub fn backend(&self) -> &Arc<dyn HttpBackend> {
         &self.backend
@@ -350,7 +322,8 @@ impl ClientCore {
     }
 }
 
-/// The `reqwest::Client` a core builds for itself, with `config`'s connect and read timeouts.
+/// The `reqwest::Client` a core's default backend runs on, with `config`'s connect and read
+/// timeouts.
 /// reqwest's `fetch` backend has neither, so on `wasm32` `config` is not read.
 fn http_client(config: &ClientConfig) -> Result<reqwest::Client, Error<Infallible>> {
     let builder = reqwest::Client::builder();

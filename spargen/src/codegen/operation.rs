@@ -125,7 +125,7 @@ pub(super) fn emit_operation(
                 #url_statements
                 let #url_binding = #build_url
                     .map_err(support::Error::widen)?;
-                let mut #request_binding = self.core.http().request(#reqwest_method, #url_binding);
+                let mut #request_binding = support::RequestBuilder::new(#reqwest_method, #url_binding);
                 #(#headers)*
                 #(#bound_headers)*
                 #cookie_init
@@ -136,7 +136,7 @@ pub(super) fn emit_operation(
                 #attach_auth
                 let #request_binding = #request_binding
                     .build()
-                    .map_err(support::Error::request_construction)?;
+                    .map_err(support::Error::widen)?;
                 #reconnect_request_init
                 let response = #send(&self.core, #request_binding)
                     .await
@@ -276,7 +276,7 @@ pub(super) fn url_accessor_tokens(
         pub fn #url_ident(
             &self,
             #(#decls),*
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             #body
         }
     }

@@ -3,11 +3,10 @@ use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use reqwest::header::HeaderValue;
-use reqwest::RequestBuilder;
+use http::header::{HeaderValue, AUTHORIZATION, COOKIE};
 
 use crate::wasm::{BoxFuture, MaybeSend, MaybeSync};
-use crate::{ClientCore, Error, HttpBody, RequestError};
+use crate::{ClientCore, Error, HttpBody, RequestBuilder, RequestError};
 
 // Secret handling is delegated to `secrecy` rather than hand-rolled: it zeroizes on drop and
 // redacts `Debug`. Re-exported so generated code and consumers use one vocabulary.
@@ -568,12 +567,17 @@ fn attach_token(
     match scheme.kind {
         AuthKind::Basic => match credential {
             Credential::Basic { username, password } => {
-                Ok(request.basic_auth(username, Some(password.expose_secret())))
+                let credentials = format!("{username}:{}", password.expose_secret());
+                let value = format!("Basic {}", base64_encode(credentials.as_bytes()));
+                Ok(request.header(AUTHORIZATION, sensitive_value(&value)?))
             }
             _ => Err(credential_mismatch(scheme.name, "http basic", credential)),
         },
         AuthKind::Bearer => match token {
-            Some(token) => Ok(request.bearer_auth(token.expose_secret())),
+            Some(token) => {
+                let value = format!("Bearer {}", token.expose_secret());
+                Ok(request.header(AUTHORIZATION, sensitive_value(&value)?))
+            }
             None => Err(credential_mismatch(scheme.name, "bearer", credential)),
         },
         AuthKind::ApiKeyHeader(name) => match token {
@@ -593,38 +597,36 @@ fn attach_token(
     }
 }
 
-/// Append `name=value` to the request URL's query, `application/x-www-form-urlencoded` as reqwest's
-/// `RequestBuilder::query` encodes it, after whatever query the URL already carries. Written
-/// against the built request because `query` needs reqwest's `query` feature, which would add
-/// `serde_urlencoded` to every consumer's graph. A builder that already failed reports that
-/// failure here, as the request-construction error `build` would have raised.
+/// Append `name=value` to the request URL's query, `application/x-www-form-urlencoded`, after
+/// whatever query the URL already carries. A builder that already failed is left as it is, for
+/// `build` to report its failure.
 fn append_query_pair(
-    request: RequestBuilder,
+    mut request: RequestBuilder,
     name: &str,
     value: &str,
 ) -> Result<RequestBuilder, Error<Infallible>> {
-    let (client, request) = request.build_split();
-    let mut request = request.map_err(Error::request_construction)?;
-    request.url_mut().query_pairs_mut().append_pair(name, value);
-    Ok(RequestBuilder::from_parts(client, request))
+    if let Some(url) = request.url_mut() {
+        url.query_pairs_mut().append_pair(name, value);
+    }
+    Ok(request)
 }
 
 /// Add `name=value` to the request's one `Cookie` header. RFC 6265 §5.4 allows a user agent a
 /// single `Cookie` header, and `RequestBuilder::header` appends a second, so the cookie joins any
 /// value the request already carries (the operation's cookie parameters, or an earlier cookie
 /// apiKey of the same alternative) after a `; `. The merged value carries the secret, so it is
-/// marked sensitive. A builder that already failed reports that failure here, as the
-/// request-construction error `build` would have raised.
+/// marked sensitive. A builder that already failed is left as it is, for `build` to report its
+/// failure.
 fn append_cookie(
-    request: RequestBuilder,
+    mut request: RequestBuilder,
     name: &str,
     value: &str,
 ) -> Result<RequestBuilder, Error<Infallible>> {
-    let (client, request) = request.build_split();
-    let mut request = request.map_err(Error::request_construction)?;
-    let headers = request.headers_mut();
+    let Some(headers) = request.headers_mut() else {
+        return Ok(request);
+    };
     let mut cookie = Vec::new();
-    for existing in headers.get_all(reqwest::header::COOKIE) {
+    for existing in headers.get_all(COOKIE) {
         cookie.extend_from_slice(existing.as_bytes());
         cookie.extend_from_slice(b"; ");
     }
@@ -633,14 +635,39 @@ fn append_cookie(
     cookie.extend_from_slice(value.as_bytes());
     let mut merged = HeaderValue::from_bytes(&cookie).map_err(Error::request_construction)?;
     merged.set_sensitive(true);
-    headers.insert(reqwest::header::COOKIE, merged);
-    Ok(RequestBuilder::from_parts(client, request))
+    headers.insert(COOKIE, merged);
+    Ok(request)
 }
 
 fn sensitive_value(secret: &str) -> Result<HeaderValue, Error<Infallible>> {
     let mut value = HeaderValue::from_str(secret).map_err(Error::request_construction)?;
     value.set_sensitive(true);
     Ok(value)
+}
+
+/// `bytes` in the padded standard base64 alphabet of RFC 4648 §4, as an `http basic` credential
+/// is sent (RFC 7617 §2). The `contentEncoding: base64` codec is embedded only into a client
+/// whose models use it, so `http basic` carries this encoder of its own.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let group = chunk
+            .iter()
+            .enumerate()
+            .fold(0_u32, |group, (index, byte)| {
+                group | u32::from(*byte) << (16 - 8 * index)
+            });
+        for index in 0..4 {
+            if index <= chunk.len() {
+                let sextet = (group >> (18 - 6 * index)) & 0x3f;
+                encoded.push(char::from(ALPHABET[sextet as usize]));
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    encoded
 }
 
 fn credential_mismatch(
