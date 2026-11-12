@@ -151,9 +151,9 @@ use api::{types, Client, Credential};
 use secrecy::SecretString;
 
 # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-// `new` validates the base URL; `with_client` injects a preconfigured reqwest::Client
-// (TLS choice, proxies, timeouts); `with_backend` installs a retry or middleware adapter, and
-// `with_client_and_backend` takes both. `with_base_url` repoints a clone without rebuilding it.
+// `new` validates the base URL; `with_client` sends on a preconfigured reqwest::Client
+// (TLS choice, proxies, timeouts); `with_backend` installs a retry or middleware adapter, or a
+// transport of your own. `with_base_url` repoints a clone without rebuilding it.
 let client = Client::new("https://api.example.com")?
     .with_credential("bearerAuth", Credential::Bearer(SecretString::from("token")));
 

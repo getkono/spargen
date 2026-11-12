@@ -755,6 +755,7 @@ dependencies = [
  "serde_json",
  "spargen-macro",
  "tokio",
+ "url",
 ]
 
 [[package]]
