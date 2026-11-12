@@ -665,13 +665,26 @@ mod tests {
         ))
         .expect("the emitted blocking client parses");
 
-        // Each operation's method and its URL accessor.
+        // Each operation's method, its URL accessor, request builder and decoder, which both
+        // clients emit, and the preparer, which only `Client` does.
         let operation_methods: std::collections::BTreeSet<String> = api
             .operations
             .iter()
             .map(|operation| names.operation(&operation.id))
-            .flat_map(|names| [&names.method, &names.url_accessor])
+            .flat_map(|names| {
+                [
+                    &names.method,
+                    &names.url_accessor,
+                    &names.request_builder,
+                    &names.decoder,
+                ]
+            })
             .map(|ident| ident.as_str().to_owned())
+            .collect();
+        let preparers: std::collections::BTreeSet<String> = api
+            .operations
+            .iter()
+            .map(|operation| names.operation(&operation.id).preparer.as_str().to_owned())
             .collect();
         let reserved: std::collections::BTreeSet<String> = crate::name::CLIENT_METHODS
             .iter()
@@ -699,9 +712,16 @@ mod tests {
                     "`impl {self_ty}` lacks operation method `{method}`: {methods:?}"
                 );
             }
+            for preparer in &preparers {
+                assert_eq!(
+                    methods.contains(preparer),
+                    self_ty == "Client",
+                    "only `impl Client` defines the preparer `{preparer}`: {methods:?}"
+                );
+            }
             let fixed: std::collections::BTreeSet<String> = methods
                 .into_iter()
-                .filter(|method| !operation_methods.contains(method))
+                .filter(|method| !operation_methods.contains(method) && !preparers.contains(method))
                 .collect();
             assert_eq!(
                 &fixed, expected,
@@ -711,7 +731,7 @@ mod tests {
         }
         for method in crate::name::CLIENT_METHODS {
             assert!(
-                !operation_methods.contains(*method),
+                !operation_methods.contains(*method) && !preparers.contains(*method),
                 "operation `{method}` kept the bare spelling of a fixed client method"
             );
         }

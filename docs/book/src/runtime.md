@@ -65,6 +65,17 @@ and builds nothing else, so clients that share one backend share everything they
 `client.clone().with_base_url(url)?` derives a client value repointed at another base URL, keeping
 its backend, configuration and credentials.
 
+Every operation method is its two halves around that step: `client.{method}_request(..)` builds,
+without sending it, exactly the `http::Request<HttpBody>` the method hands the backend, and
+`client.decode_{method}(response)` decodes an `http::Response<HttpBody>` into the method's own
+`Result`, under the client's body limits. A caller that owns the send — signing the exact request,
+pacing it, re-preparing it on each attempt, or sending it over another transport — calls the two
+itself; only the method's own send replays a call a refreshable credential was rejected on. Each
+request an operation builds carries the operation's `ops::Operation` (its `id`, `method` and
+`path_template`) among its extensions, a replay and a stream reconnect included, so a backend reads
+`request.extensions().get::<ops::Operation>()` to sign, route or meter by operation rather than by
+parsing paths.
+
 ## Timeouts
 
 `Client::new` bounds how long a request may wait, through three `ClientConfig` fields whose

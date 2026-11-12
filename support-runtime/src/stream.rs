@@ -24,7 +24,7 @@ use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 
-use crate::dispatch::{apply_options, cap_body, send_on, unexpected_status_capped};
+use crate::dispatch::{cap_body, send_on, unexpected_status_capped};
 use crate::transport::try_clone_request;
 use crate::wasm::BoxFuture;
 use crate::{ClientConfig, ClientCore, Error, HttpBackend, HttpBody, MaybeSend, MaybeSync};
@@ -181,10 +181,10 @@ impl<T> EventStream<T> {
     /// embedded runtime, so they reach it while the [`Framing`] it takes stays outside the
     /// generated public API. The `allow` is for this crate's own build: its caller is generated code.
     ///
-    /// `request` is the clone the operation kept of what it sent ([`crate::try_clone_request`]),
-    /// `None` where its body could not be cloned. The clone was kept before
-    /// [`crate::send_streaming`] added the core's [`crate::RequestOptions`], so they are added to
-    /// it here the same way, and every reconnect carries them too.
+    /// `request` is the clone the operation kept of the [`crate::prepare`]d request it sent, the
+    /// core's [`crate::RequestOptions`] and its `ops::Operation` already on it, so every reconnect
+    /// carries them too; `None` (a generated `decode_{method}`, which never saw the request) leaves
+    /// the stream nothing to resend, as [`Self::resending`] describes.
     #[allow(dead_code)]
     pub(crate) fn new_reconnectable(
         response: Response,
@@ -192,29 +192,39 @@ impl<T> EventStream<T> {
         core: &ClientCore,
         request: Option<http::Request<HttpBody>>,
     ) -> Self {
-        let request = request.map(|mut request| {
-            apply_options(core.options(), &mut request);
-            request
-        });
-        let last_event_id = request.as_ref().and_then(|request| {
+        Self {
+            max_frame: core.config().max_stream_frame,
+            max_error_body: core.config().max_error_body,
+            ..Self::new(response, framing)
+        }
+        .resending(core, request)
+    }
+
+    /// This stream, able to reconnect by resending `request` through the core's backend once
+    /// [`Self::with_reconnect`] enables it, and seeded with the `Last-Event-ID` `request` carries;
+    /// with `None` (a request whose body could not be cloned) it has nothing to resend. A
+    /// generated operation hands its `decode_{method}`'s stream the request it sent this way.
+    /// Crate-visible, as [`Self::new_reconnectable`] is.
+    #[allow(dead_code)]
+    pub(crate) fn resending(
+        mut self,
+        core: &ClientCore,
+        request: Option<http::Request<HttpBody>>,
+    ) -> Self {
+        self.last_event_id = request.as_ref().and_then(|request| {
             request
                 .headers()
                 .get("last-event-id")
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned)
         });
-        Self {
-            max_frame: core.config().max_stream_frame,
-            max_error_body: core.config().max_error_body,
-            last_event_id,
-            reconnect: request.map(|request| ReconnectContext {
-                backend: Arc::clone(core.backend()),
-                request,
-                policy: None,
-                attempt: 0,
-            }),
-            ..Self::new(response, framing)
-        }
+        self.reconnect = request.map(|request| ReconnectContext {
+            backend: Arc::clone(core.backend()),
+            request,
+            policy: None,
+            attempt: 0,
+        });
+        self
     }
 
     /// Enable automatic reconnects using a caller-owned policy and timer.

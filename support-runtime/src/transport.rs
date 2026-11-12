@@ -445,7 +445,8 @@ impl http_body::Body for FetchBody {
 pub struct TotalTimeout(pub std::time::Duration);
 
 /// A copy of `request` to send again, its method, URI, version, headers, extensions and body
-/// alike; `None` when its body is a stream, which can be read only once.
+/// alike; `None` when its body is a stream, which can be read only once. A streaming operation
+/// keeps one of the request it sends, to reconnect.
 pub fn try_clone_request(request: &http::Request<HttpBody>) -> Option<http::Request<HttpBody>> {
     let mut clone = http::Request::new(request.body().try_clone()?);
     *clone.method_mut() = request.method().clone();

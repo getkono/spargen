@@ -93,8 +93,36 @@ const FIXED_CLIENT_METHODS: &[&str] = &[
 ];
 
 /// Every method the generated `impl Client` defines per operation, sorted: each operation's
-/// method and its `{op}_url` accessor, so a carved operation leaves neither behind.
+/// method and its `{op}_url` accessor, so a carved operation leaves neither behind. Each
+/// operation's `{op}_request`, `decode_{op}` and `prepare_{op}` companions are required beside its
+/// accessor and then left out of the list, so a companion a carved operation left behind stays in
+/// it.
 fn operation_methods(generated: &str) -> Vec<String> {
+    let mut methods = client_methods(generated);
+    let operations: Vec<String> = methods
+        .iter()
+        .filter_map(|name| name.strip_suffix("_url"))
+        .filter(|operation| methods.iter().any(|name| name == operation))
+        .map(str::to_owned)
+        .collect();
+    for operation in operations {
+        for companion in [
+            format!("{operation}_request"),
+            format!("decode_{operation}"),
+            format!("prepare_{operation}"),
+        ] {
+            let index = methods
+                .iter()
+                .position(|name| *name == companion)
+                .unwrap_or_else(|| panic!("`{operation}` has no `{companion}`: {methods:?}"));
+            methods.remove(index);
+        }
+    }
+    methods
+}
+
+/// Every method the generated `impl Client` defines but its fixed ones, sorted.
+fn client_methods(generated: &str) -> Vec<String> {
     let file = syn::parse_file(generated).expect("the generated module parses");
     let mut methods: Vec<String> = (file.items.iter())
         .filter_map(|item| match item {

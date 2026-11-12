@@ -177,21 +177,76 @@ pub fn build_url_with_query_string_on(
 /// [`send_streaming`] instead.
 pub async fn send(
     core: &ClientCore,
-    mut request: Request,
+    request: Request,
 ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
+    execute(core, prepare(core, request, false), None, false).await
+}
+
+/// The request [`send`] (or, with `streaming`, [`send_streaming`]) hands the core's backend,
+/// without sending it: the core's [`crate::RequestOptions`] headers and extensions added where it
+/// lacks them, and then, unless `streaming`, the core's [`crate::ClientConfig::timeout`] as a
+/// [`TotalTimeout`] where it still carries none. Non-generic.
+///
+/// A generated operation prepares its request with it, inserts its own `ops::Operation` into the
+/// request's extensions, and hands the request to [`execute`]; its `{method}_request` builder
+/// returns the same request unsent.
+pub fn prepare(core: &ClientCore, mut request: Request, streaming: bool) -> Request {
     apply_options(core.options(), &mut request);
-    if request.extensions().get::<TotalTimeout>().is_none() {
+    if !streaming && request.extensions().get::<TotalTimeout>().is_none() {
         if let Some(timeout) = core.config().timeout {
             request.extensions_mut().insert(TotalTimeout(timeout));
         }
     }
+    request
+}
+
+/// Execute a [`prepare`]d request through the core's backend, mapping a transport failure into
+/// the taxonomy, and replay it once through [`crate::replay_rejected`] where `replay` is the one
+/// [`crate::attach_auth_replayable`] returned for it; the replay carries the request's extensions,
+/// its `ops::Operation` included. Unless `streaming`, the response carries the body limits
+/// [`crate::RequestOptions::max_body`] and [`crate::ClientConfig::max_success_body`] set, read
+/// now, to the decoder that reads its body. Non-generic.
+pub async fn execute(
+    core: &ClientCore,
+    request: http::Request<HttpBody>,
+    replay: Option<crate::Replay>,
+    streaming: bool,
+) -> Result<http::Response<HttpBody>, Error<Infallible>> {
+    let replay = replay.map(|replay| replay.carrying(request.extensions()));
+    let response = execute_once(core, request, streaming).await?;
+    crate::replay_rejected(core, response, replay, streaming).await
+}
+
+/// [`execute`] with no replay: the one send a replay makes itself.
+pub(crate) async fn execute_once(
+    core: &ClientCore,
+    request: http::Request<HttpBody>,
+    streaming: bool,
+) -> Result<http::Response<HttpBody>, Error<Infallible>> {
     let mut response = send_on(core.backend().as_ref(), request).await?;
+    if !streaming {
+        insert_body_limits(core, &mut response);
+    }
+    Ok(response)
+}
+
+/// Give `response` the body limits a non-streaming call made on `core` reads its body under,
+/// unless it carries them already: [`execute`] inserts them at the send, and a generated
+/// `decode_{method}` inserts them into a response a caller obtained on its own.
+pub fn with_body_limits(core: &ClientCore, mut response: Response) -> Response {
+    if response.extensions().get::<BodyLimits>().is_none() {
+        insert_body_limits(core, &mut response);
+    }
+    response
+}
+
+/// Insert the body limits `core` sets now into `response`, replacing any it carries.
+fn insert_body_limits(core: &ClientCore, response: &mut Response) {
     let max_body = core.options().max_body;
     response.extensions_mut().insert(BodyLimits {
         success: max_body.or(core.config().max_success_body),
         error: max_body,
     });
-    Ok(response)
 }
 
 /// [`send`] for a request whose success response is read as a stream (an `EventStream`): the
@@ -206,10 +261,9 @@ pub async fn send(
 /// executes it.
 pub async fn send_streaming(
     core: &ClientCore,
-    mut request: Request,
+    request: Request,
 ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
-    apply_options(core.options(), &mut request);
-    send_on(core.backend().as_ref(), request).await
+    execute(core, prepare(core, request, true), None, true).await
 }
 
 /// Add `options`' headers and extensions to `request`, leaving whatever it already carries as it

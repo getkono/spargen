@@ -106,6 +106,20 @@ the version it emits, and the idioms spargen handles.
   attaches no credential. This is for a URL handed to a fetcher of its own, such as a media player
   or a browser (`client.stream_file_url(id)`). Where another operation's method already spells
   `{method}_url`, that method keeps it and the accessor takes a disambiguated name.
+- Each operation is also its two halves, on both clients: `{method}_request` takes the method's
+  arguments and returns, as `Result<http::Request<HttpBody>, Error<Infallible>>`, exactly the
+  request the method sends — URL, headers, credentials, body, and the client's `RequestOptions` —
+  without sending it, and `decode_{method}` decodes an `http::Response<HttpBody>` the caller
+  obtained into the method's own `Result`, with the same status dispatch, typed error and body
+  limits. A caller that signs the exact request, paces or retries its own sends, or uses another
+  transport keeps the typed surface. Only the method itself replays a call a refreshable
+  credential was rejected on. Where another method already spells either name, that method keeps
+  it and the companion takes a disambiguated name.
+- An `ops` module holds one `ops::Operation` constant per operation (`ops::GET_PET`, its method
+  name upper-cased) with its `id` (the `operationId`), HTTP `method` token and `path_template`, so
+  a caller names an operation without copying its path. Every request an operation builds carries
+  its `Operation` in its extensions, a replay or stream reconnect included, so a transport backend
+  can sign, route or meter by operation.
 - A `format: binary` request body is taken as `impl Into<HttpBody>`: `Bytes` or `Vec<u8>` move in
   without a copy, and `HttpBody::wrap` streams an upload as it is read. A `format: binary` success
   body read whole is bounded (64 MiB unless `max_body` or `max_success_body` says otherwise), and

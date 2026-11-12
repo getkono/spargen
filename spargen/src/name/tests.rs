@@ -237,6 +237,7 @@ fn generator_bindings_yield_to_every_parameter() {
         "reconnect_request",
         "cookies",
         "replay",
+        "streaming",
     ];
     let mut params: Vec<Parameter> = bindings
         .iter()
@@ -265,6 +266,7 @@ fn generator_bindings_yield_to_every_parameter() {
         &allocated.reconnect_request,
         &allocated.cookies,
         &allocated.replay,
+        &allocated.streaming,
     ];
     for (binding, ident) in bindings.iter().zip(generated) {
         assert_ne!(
@@ -327,6 +329,64 @@ fn an_operation_method_keeps_a_spelling_a_url_accessor_wants() {
         assert_eq!(accessor("getItemUrl"), "get_item_url_url");
         // The stem plus the suffix seeded from `getItem`'s own pointer.
         assert_eq!(accessor("getItem"), "get_item_url_17dbc4cb");
+    }
+}
+
+/// Issue #1264: an operation whose method already spells another operation's request builder,
+/// decoder or preparer keeps it, in either listing order, and the companion it would have taken
+/// is suffixed instead; an uncontended companion keeps its plain spelling.
+#[test]
+fn an_operation_method_keeps_a_spelling_a_companion_wants() {
+    for (spelling, companion) in [
+        ("getItemRequest", "request_builder"),
+        ("decodeGetItem", "decoder"),
+        ("prepareGetItem", "preparer"),
+    ] {
+        for spelled_first in [false, true] {
+            let mut api = api(Vec::new(), false);
+            let mut spelled = api.operations[0].clone();
+            spelled.id = OperationId(spelling.to_owned());
+            spelled.provenance = Provenance::new(
+                JsonPointer::root()
+                    .push("paths")
+                    .push("/items/{id}/spelled")
+                    .push("get"),
+                None,
+            );
+            if spelled_first {
+                api.operations.insert(0, spelled);
+            } else {
+                api.operations.push(spelled);
+            }
+            let names = allocate(&api);
+            let record = |id: &str| &names.operations[&OperationId(id.to_owned())];
+            let companions = |id: &str| {
+                let record = record(id);
+                [
+                    ("request_builder", record.request_builder.as_str()),
+                    ("decoder", record.decoder.as_str()),
+                    ("preparer", record.preparer.as_str()),
+                ]
+            };
+            let method = record(spelling).method.as_str().to_owned();
+            assert_eq!(record("getItem").method.as_str(), "get_item");
+            for (kind, name) in companions("getItem") {
+                if kind == companion {
+                    assert_ne!(name, method, "{spelling}: `{kind}` yields");
+                    assert!(
+                        name.starts_with(&method),
+                        "{spelling}: `{kind}` is `{name}`"
+                    );
+                } else {
+                    let plain = match kind {
+                        "request_builder" => "get_item_request",
+                        "decoder" => "decode_get_item",
+                        _ => "prepare_get_item",
+                    };
+                    assert_eq!(name, plain, "{spelling}");
+                }
+            }
+        }
     }
 }
 
@@ -998,6 +1058,10 @@ proptest::proptest! {
                 .iter()
                 .map(|record| &record.method)
                 .chain(records.iter().map(|record| &record.url_accessor))
+                .chain(records.iter().map(|record| &record.request_builder))
+                .chain(records.iter().map(|record| &record.decoder))
+                .chain(records.iter().map(|record| &record.preparer))
+
                 .chain(records.iter().filter_map(|record| record.byte_stream.as_ref())),
             super::CLIENT_METHODS,
         )?;
@@ -1117,6 +1181,7 @@ proptest::proptest! {
                     &bindings.reconnect_request,
                     &bindings.cookies,
                     &bindings.replay,
+                    &bindings.streaming,
                 ]);
             assert_scope(&format!("arguments of {}", operation.id.0), arguments, &[])?;
             let fields = operation
@@ -1193,6 +1258,9 @@ proptest::proptest! {
                     let methods = (
                         record.method.clone(),
                         record.url_accessor.clone(),
+                        record.request_builder.clone(),
+                        record.decoder.clone(),
+                        record.preparer.clone(),
                         record.byte_stream.clone(),
                     );
                     let types = (
@@ -1252,6 +1320,7 @@ proptest::proptest! {
                 &bindings.reconnect_request,
                 &bindings.cookies,
                 &bindings.replay,
+                &bindings.streaming,
             ]);
         assert_scope("arguments", arguments, &[])?;
         let fields = params

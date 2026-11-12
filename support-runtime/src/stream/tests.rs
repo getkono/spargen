@@ -10,7 +10,7 @@ use super::{
 use crate::tests::{
     core, poll_ready, poll_to_completion, Chunk, Chunks, PendingOnce, Reply, SequenceBackend,
 };
-use crate::{ClientCore, Error};
+use crate::{ClientCore, Error, HttpBody};
 
 /// A [`FrameBuffer`] holding `bytes`, with nothing searched yet.
 fn frame_buffer(bytes: &[u8]) -> FrameBuffer {
@@ -517,6 +517,14 @@ impl ReconnectPolicy for ImmediateReconnect {
     }
 }
 
+/// `request` as a streaming operation sends it and keeps it to reconnect: prepared on `core`.
+fn prepared(
+    core: &ClientCore,
+    request: http::Request<HttpBody>,
+) -> Option<http::Request<HttpBody>> {
+    Some(crate::prepare(core, request, true))
+}
+
 fn reconnectable_stream(
     initial_body: &str,
     backend: Arc<SequenceBackend>,
@@ -537,8 +545,12 @@ fn reconnectable_stream_over(
         .header(reqwest::header::COOKIE, "session=secret")
         .build()
         .unwrap();
-    let stream =
-        EventStream::new_reconnectable(initial, Framing::SseJsonData, &core, Some(request));
+    let stream = EventStream::new_reconnectable(
+        initial,
+        Framing::SseJsonData,
+        &core,
+        prepared(&core, request),
+    );
     match stream.with_reconnect(policy) {
         Ok(stream) => stream,
         Err(error) => panic!("reconnect should be available: {error}"),
@@ -600,9 +612,9 @@ impl crate::HttpBackend for OptionRecorder {
     }
 }
 
-/// Issue #1260: the operation keeps its clone of the request before `send_streaming` adds the
-/// core's `RequestOptions`, so the stream adds them to it, and an automatic reconnect carries the
-/// option headers and extensions the first request did.
+/// Issue #1260: the operation keeps its clone of the request `prepare` added the core's
+/// `RequestOptions` to, so an automatic reconnect carries the option headers and extensions the
+/// first request did.
 #[test]
 fn a_reconnect_carries_the_cores_option_headers_and_extensions() {
     let backend = Arc::new(OptionRecorder::default());
@@ -618,7 +630,7 @@ fn a_reconnect_carries_the_cores_option_headers_and_extensions() {
         response("data: {\"seq\":1}\n\n"),
         Framing::SseJsonData,
         &core,
-        Some(request),
+        prepared(&core, request),
     );
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
@@ -691,7 +703,7 @@ fn an_unsendable_sse_id_reconnects_without_last_event_id() {
         response("id: a\u{1}b\ndata: {\"seq\":1}\n\n"),
         Framing::SseJsonData,
         &core,
-        Some(request),
+        prepared(&core, request),
     );
     let mut stream = match stream.with_reconnect(policy.clone()) {
         Ok(stream) => stream,
@@ -733,7 +745,7 @@ fn an_empty_sse_id_reconnects_without_last_event_id() {
         response("id: evt-1\ndata: {\"seq\":1}\n\nid:\ndata: {\"seq\":2}\n\n"),
         Framing::SseJsonData,
         &core,
-        Some(request),
+        prepared(&core, request),
     );
     let mut stream = match stream.with_reconnect(policy.clone()) {
         Ok(stream) => stream,
@@ -799,8 +811,12 @@ fn a_rejected_reconnect_outlives_its_core_and_keeps_its_error_body_cap() {
     let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .build()
         .unwrap();
-    let stream: EventStream<serde_json::Value> =
-        EventStream::new_reconnectable(response(""), Framing::SseJsonData, &core, Some(request));
+    let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
+        response(""),
+        Framing::SseJsonData,
+        &core,
+        prepared(&core, request),
+    );
     drop(core);
     let mut stream = match stream.with_reconnect(policy) {
         Ok(stream) => stream,
@@ -975,8 +991,12 @@ fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
         .build()
         .unwrap();
     assert!(crate::try_clone_request(&request).is_none());
-    let stream: EventStream<serde_json::Value> =
-        EventStream::new_reconnectable(response(""), Framing::SseJsonData, &core, Some(request));
+    let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
+        response(""),
+        Framing::SseJsonData,
+        &core,
+        prepared(&core, request),
+    );
     let mut stream = match stream.with_reconnect(policy.clone()) {
         Ok(stream) => stream,
         Err(error) => panic!("the stream holds a request, so reconnect is available: {error}"),
@@ -1126,7 +1146,7 @@ fn a_reconnectable_stream_starts_from_the_requests_last_event_id() {
         response("data: 1\n\n"),
         Framing::SseJsonData,
         &core,
-        Some(request),
+        prepared(&core, request),
     );
     assert_eq!(stream.last_event_id(), Some("evt-0"));
 }
@@ -1212,7 +1232,7 @@ fn bounded_stream(
     let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .build()
         .unwrap();
-    match EventStream::new_reconnectable(response(body), framing, &core, Some(request))
+    match EventStream::new_reconnectable(response(body), framing, &core, prepared(&core, request))
         .with_reconnect(policy)
     {
         Ok(stream) => stream,

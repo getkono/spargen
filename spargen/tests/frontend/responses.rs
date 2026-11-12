@@ -370,7 +370,10 @@ fn dispatch_arms(code: &str, name: &str) -> (Vec<String>, Vec<String>) {
         })
     }
     let file = syn::parse_file(code).expect("a generated module parses");
-    let method = find_method(&file.items, name).unwrap_or_else(|| panic!("no method `{name}`"));
+    // The status dispatch is the operation's decoder's (#1264).
+    let decoder = format!("decode_{name}");
+    let method =
+        find_method(&file.items, &decoder).unwrap_or_else(|| panic!("no method `{decoder}`"));
     let dispatch = method
         .block
         .stmts

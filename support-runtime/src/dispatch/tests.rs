@@ -1473,6 +1473,57 @@ fn max_body_replaces_the_configured_success_limit() {
     ));
 }
 
+/// Issue #1264: `with_body_limits` gives a response a caller obtained on its own the limit the
+/// core sets, as a send would, and leaves a response a send already limited as it was.
+#[test]
+fn with_body_limits_limits_a_bare_response_and_keeps_a_sent_ones() {
+    let read = |core: &ClientCore, response| {
+        poll_ready(decode_success_bytes(core, response)).map(|value| value.into_inner().len())
+    };
+    let limited = core_with(Canned::answering([]), max_body(4));
+    let bare = Chunks::repeat(4, 2).into_response(200);
+    assert!(matches!(
+        read(&limited, super::with_body_limits(&limited, bare)),
+        Err(Error::BodyTooLarge { limit: 4, .. })
+    ));
+
+    let backend = Canned::answering([Chunks::repeat(4, 2).into_response(200)]);
+    let sender = core_with(backend, max_body(4));
+    let sent = poll_ready(super::send(&sender, crate::tests::request())).unwrap();
+    let unlimited = core_with(Canned::answering([]), crate::RequestOptions::default());
+    assert!(matches!(
+        read(&unlimited, super::with_body_limits(&unlimited, sent)),
+        Err(Error::BodyTooLarge { limit: 4, .. })
+    ));
+    let bare = Chunks::repeat(4, 2).into_response(200);
+    assert_eq!(
+        read(&unlimited, super::with_body_limits(&unlimited, bare)).unwrap(),
+        8
+    );
+}
+
+/// Issue #1264: `prepare` builds, unsent, the request a send hands the backend, the options'
+/// headers and extensions on it, streaming or not; `send` and `send_streaming` are each `prepare`
+/// then `execute`, so their own tests pin the total timeout it gives a non-streaming request.
+#[test]
+fn prepare_adds_the_options_without_sending() {
+    let backend = Canned::answering([]);
+    let mut options = crate::RequestOptions::default();
+    options.headers.insert("x-option", "set".parse().unwrap());
+    options.extensions.insert(Tag(3));
+    let core = core_with(backend.clone(), options);
+    for streaming in [false, true] {
+        let request = super::prepare(&core, crate::tests::request(), streaming);
+        assert_eq!(
+            request.headers()["x-option"],
+            "set",
+            "streaming: {streaming}"
+        );
+        assert_eq!(request.extensions().get::<Tag>(), Some(&Tag(3)));
+    }
+    assert!(backend.seen.lock().unwrap().is_empty());
+}
+
 /// With no limit set anywhere, a success body within the binary default is read whole, as before.
 #[test]
 fn a_success_body_is_read_whole_within_the_binary_default() {

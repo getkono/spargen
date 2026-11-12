@@ -272,6 +272,18 @@ pub struct Replay {
     alternative: Vec<AuthScheme>,
     /// Each refreshable scheme of `alternative`, with the token it attached.
     sent: Vec<(&'static str, SecretString)>,
+    /// The extensions of the request as it was sent, which the replay carries too: empty until
+    /// [`crate::execute`] records them with [`Self::carrying`].
+    extensions: http::Extensions,
+}
+
+impl Replay {
+    /// This replay, carrying `extensions` (those of the request as it was sent, an operation's
+    /// `ops::Operation` among them) onto the request it sends.
+    pub(crate) fn carrying(mut self, extensions: &http::Extensions) -> Self {
+        self.extensions = extensions.clone();
+        self
+    }
 }
 
 impl std::fmt::Debug for Replay {
@@ -325,6 +337,7 @@ pub async fn attach_auth_replayable(
         unauthenticated,
         alternative: chosen.to_vec(),
         sent,
+        extensions: http::Extensions::new(),
     });
     Ok((request, replay))
 }
@@ -401,11 +414,9 @@ pub async fn replay_rejected(
     let Ok(request) = request.build() else {
         return Ok(unbuffered(original));
     };
-    let sent = if streaming {
-        crate::send_streaming(core, request).await
-    } else {
-        crate::send(core, request).await
-    };
+    let mut request = crate::prepare(core, request, streaming);
+    request.extensions_mut().extend(replay.extensions);
+    let sent = crate::dispatch::execute_once(core, request, streaming).await;
     let Ok(replayed) = sent else {
         return Ok(unbuffered(original));
     };

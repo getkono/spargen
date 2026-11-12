@@ -315,6 +315,12 @@ fn a_rejected_refreshable_credential_is_refreshed_and_the_call_replayed() {
     impl basic_client::HttpBackend for Scripted {
         fn execute(&self, request: http::Request<basic_client::HttpBody>) -> basic_client::ExecuteFuture<'_> {
             let bearer = request.headers()[http::header::AUTHORIZATION].to_str().unwrap().to_owned();
+            // Issue #1264: the replay carries the operation's identity as the first send does.
+            assert_eq!(
+                request.extensions().get::<basic_client::ops::Operation>(),
+                Some(&basic_client::ops::GET_USER),
+                "sent with {bearer}"
+            );
             let response = if bearer == "Bearer fresh" {
                 http::Response::builder()
                     .status(200)
@@ -365,6 +371,121 @@ fn a_rejected_refreshable_credential_is_refreshed_and_the_call_replayed() {
     let error = result.err().expect("the original 401 is the call's answer");
     assert_eq!(error.status().map(|status| status.as_u16()), Some(401));
     assert_eq!(*backend.sent.lock().unwrap(), ["Bearer stale"]);
+}
+
+// Issue #1264: an operation is its request builder's request, sent through the backend and handed
+// to its decoder. The builder returns exactly what the operation sends — URL, credential, the
+// client's option headers and extensions — with the operation's `ops::Operation` among the
+// extensions, which a backend reads on every send, a replay included; the decoder decodes a
+// response the caller sent itself as the operation would, under the client's body limits.
+#[test]
+fn an_operation_is_its_request_builder_and_decoder_and_names_its_operation() {
+    use std::future::Future;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Tag(u8);
+    #[derive(Debug, PartialEq)]
+    struct Seen {
+        method: String,
+        uri: String,
+        authorization: String,
+        option: String,
+        tag: Option<Tag>,
+        operation: Option<basic_client::ops::Operation>,
+    }
+    fn seen(request: &http::Request<basic_client::HttpBody>) -> Seen {
+        let header = |name: &str| request.headers()[name].to_str().unwrap().to_owned();
+        Seen {
+            method: request.method().to_string(),
+            uri: request.uri().to_string(),
+            authorization: header("authorization"),
+            option: header("x-option"),
+            tag: request.extensions().get::<Tag>().cloned(),
+            operation: request.extensions().get::<basic_client::ops::Operation>().copied(),
+        }
+    }
+    #[derive(Debug, Default)]
+    struct Recording {
+        sent: Mutex<Vec<Seen>>,
+    }
+    impl basic_client::HttpBackend for Recording {
+        fn execute(&self, request: http::Request<basic_client::HttpBody>) -> basic_client::ExecuteFuture<'_> {
+            self.sent.lock().unwrap().push(seen(&request));
+            let response = http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(basic_client::HttpBody::from(r#"{"id":"1","name":"Ada"}"#));
+            Box::pin(async move { Ok(response.unwrap()) })
+        }
+    }
+    fn ready<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match future.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(output) => output,
+            std::task::Poll::Pending => panic!("the recording backend answers at once"),
+        }
+    }
+
+    assert_eq!(
+        basic_client::ops::GET_USER,
+        basic_client::ops::Operation { id: "getUser", method: "GET", path_template: "/users/{id}" }
+    );
+    let mut options = basic_client::RequestOptions::default();
+    options.headers.insert("x-option", "set".parse().unwrap());
+    options.extensions.insert(Tag(7));
+    let backend = Arc::new(Recording::default());
+    let client = basic_client::Client::with_backend(backend.clone(), "https://example.com")
+        .unwrap()
+        .with_credential("bearer", basic_client::Credential::Bearer("token".into()))
+        .with_options(options);
+    let params = || basic_client::GetUserParams::default().page(2);
+
+    let sent = ready(client.get_user("1", params())).unwrap();
+    assert_eq!(sent.into_inner().name, "Ada");
+    let request = ready(client.get_user_request("1", params())).unwrap();
+    let built = seen(&request);
+    assert_eq!(built.operation, Some(basic_client::ops::GET_USER));
+    assert_eq!(built.tag, Some(Tag(7)));
+    assert_eq!(built.authorization, "Bearer token");
+    assert_eq!(built.uri, "https://example.com/users/1?page=2");
+    assert_eq!(backend.sent.lock().unwrap()[0], built, "the operation sends what its builder builds");
+
+    let response = ready(basic_client::HttpBackend::execute(&*backend, request)).unwrap();
+    let decoded = ready(client.decode_get_user(response)).unwrap();
+    assert_eq!(decoded.status(), 200);
+    assert_eq!(decoded.into_inner().name, "Ada");
+    assert_eq!(backend.sent.lock().unwrap().len(), 2);
+
+    // The decoder reads under the client's body limit, as the operation does.
+    let bounded = client.clone().with_options(basic_client::RequestOptions {
+        max_body: Some(4),
+        ..basic_client::RequestOptions::default()
+    });
+    let response = http::Response::builder()
+        .status(200)
+        .body(basic_client::HttpBody::from(r#"{"id":"1","name":"Ada"}"#))
+        .unwrap();
+    match ready(bounded.decode_get_user(response)) {
+        Err(basic_client::Error::BodyTooLarge { limit, status }) => {
+            assert_eq!((limit, status.as_u16()), (4, 200));
+        }
+        other => panic!("expected BodyTooLarge, got {other:?}"),
+    }
+    // And dispatches an error status into the operation's typed error.
+    let response = http::Response::builder()
+        .status(404)
+        .header("content-type", "application/json")
+        .body(basic_client::HttpBody::from(r#"{"reason":"gone"}"#))
+        .unwrap();
+    match ready(client.decode_get_multi(response)) {
+        Err(basic_client::Error::Api(value)) => {
+            let body = value.into_inner();
+            assert!(matches!(body, basic_client::GetMultiError::Status404(_)), "{body:?}");
+        }
+        other => panic!("expected the typed 404, got {other:?}"),
+    }
 }
 
 // The third credential state: a credential is registered and selects its alternative, but it is of
