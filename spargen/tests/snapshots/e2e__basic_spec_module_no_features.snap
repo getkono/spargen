@@ -5104,6 +5104,13 @@ mod support {
             /// URI is absolute. A backend that fails builds its [`TransportError`] with the constructor
             /// naming the failure's class, so [`super::send`] maps it to the right [`super::Error`]
             /// variant.
+            ///
+            /// A request carrying a [`TotalTimeout`] extension is bounded by it: from the moment `execute`
+            /// is called until the whole response body has been read. A deadline that elapses fails the
+            /// call, or the body read in progress, with a [`TransportError::timeout`] of
+            /// [`super::TimeoutKind::Total`]. [`super::send`] puts the client's
+            /// [`super::ClientConfig::timeout`] there, so a backend that ignores the extension leaves the
+            /// call unbounded. [`ReqwestBackend`] makes it reqwest's own request timeout.
             fn execute(&self, request: http::Request<HttpBody>) -> ExecuteFuture<'_>;
         }
         /// The cause a body source may fail with, before it is read as a [`TransportError`].
