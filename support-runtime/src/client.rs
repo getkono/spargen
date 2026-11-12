@@ -76,7 +76,8 @@ pub struct ClientConfig {
     /// the core, and it is honoured on `wasm32` too. A generated client's `with_timeout` sets it
     /// on the client value it returns, which is how one call gets a deadline of its own. It
     /// travels on the request itself, as a [`crate::TotalTimeout`] extension: a request that
-    /// already carries one keeps it, [`ReqwestBackend`] enforces it, and so does a caller-supplied
+    /// already carries one keeps it, as does one given one by [`RequestOptions::extensions`],
+    /// which [`crate::send`] applies first, [`ReqwestBackend`] enforces it, and so does a caller-supplied
     /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. A
     /// streaming response is exempt,
     /// because a stream may rightly stay open indefinitely: an operation returning an
@@ -142,7 +143,10 @@ pub struct RequestOptions {
     pub max_body: Option<usize>,
     /// Extensions copied onto each request this client value sends, where an
     /// [`HttpBackend`] reads them from the `http::Request` it executes. An extension of a type the
-    /// request already carries is left as the request has it.
+    /// request already carries is left as the request has it. A [`crate::TotalTimeout`] here is
+    /// the call's deadline: it replaces [`ClientConfig::timeout`] on a non-streaming operation,
+    /// and, being asked for explicitly, also bounds an operation returning an `EventStream`,
+    /// which the configured timeout leaves unbounded.
     pub extensions: http::Extensions,
     /// Headers added to each request this client value sends, every operation's included. A
     /// header the request already carries — an operation's own header parameter, its content

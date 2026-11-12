@@ -830,7 +830,8 @@ mod support {
             /// the core, and it is honoured on `wasm32` too. A generated client's `with_timeout` sets it
             /// on the client value it returns, which is how one call gets a deadline of its own. It
             /// travels on the request itself, as a [`super::TotalTimeout`] extension: a request that
-            /// already carries one keeps it, [`ReqwestBackend`] enforces it, and so does a caller-supplied
+            /// already carries one keeps it, as does one given one by [`RequestOptions::extensions`],
+            /// which [`super::send`] applies first, [`ReqwestBackend`] enforces it, and so does a caller-supplied
             /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. A
             /// streaming response is exempt,
             /// because a stream may rightly stay open indefinitely: an operation returning an
@@ -893,7 +894,10 @@ mod support {
             pub max_body: Option<usize>,
             /// Extensions copied onto each request this client value sends, where an
             /// [`HttpBackend`] reads them from the `http::Request` it executes. An extension of a type the
-            /// request already carries is left as the request has it.
+            /// request already carries is left as the request has it. A [`super::TotalTimeout`] here is
+            /// the call's deadline: it replaces [`ClientConfig::timeout`] on a non-streaming operation,
+            /// and, being asked for explicitly, also bounds an operation returning an `EventStream`,
+            /// which the configured timeout leaves unbounded.
             pub extensions: http::Extensions,
             /// Headers added to each request this client value sends, every operation's included. A
             /// header the request already carries — an operation's own header parameter, its content
@@ -1243,9 +1247,11 @@ mod support {
         /// The backend reports failures as a [`super::TransportError`] carrying its taxonomy class, which
         /// picks the variant here. Non-generic.
         ///
-        /// A request that carries no [`TotalTimeout`] of its own is given the core's
+        /// The core's [`super::RequestOptions`] are applied first, as [`send_streaming`] applies them. A
+        /// request that then carries no [`TotalTimeout`] is given the core's
         /// [`super::ClientConfig::timeout`], read now, which bounds it until its whole response body has
-        /// been read. The body limits [`super::RequestOptions::max_body`] and
+        /// been read: a total timeout the request carries itself wins, then one in the options'
+        /// extensions, then the configured one. The body limits [`super::RequestOptions::max_body`] and
         /// [`super::ClientConfig::max_success_body`] set are read now too, and travel on the response to
         /// the decoder that reads its body. An operation whose success response is a stream sends with
         /// [`send_streaming`] instead.
@@ -1253,12 +1259,13 @@ mod support {
             core: &ClientCore,
             mut request: Request,
         ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
+            apply_options(core.options(), &mut request);
             if request.extensions().get::<TotalTimeout>().is_none() {
                 if let Some(timeout) = core.config().timeout {
                     request.extensions_mut().insert(TotalTimeout(timeout));
                 }
             }
-            let mut response = send_streaming(core, request).await?;
+            let mut response = send_on(core.backend().as_ref(), request).await?;
             let max_body = core.options().max_body;
             response
                 .extensions_mut()
@@ -1270,8 +1277,9 @@ mod support {
         }
         /// [`send`] for a request whose success response is read as a stream (an `EventStream`): the
         /// core's [`super::ClientConfig::timeout`] is not applied, because a stream may rightly stay open
-        /// indefinitely, and neither is a body limit. A total timeout the request carries itself still
-        /// applies, and the client's connect and read timeouts bound it as they bound every request.
+        /// indefinitely, and neither is a body limit. A total timeout the request carries itself, or one
+        /// the core's [`super::RequestOptions::extensions`] carry, is a deadline the caller asked for and
+        /// still applies, and the client's connect and read timeouts bound it as they bound every request.
         /// Non-generic.
         ///
         /// Both sends add the core's [`super::RequestOptions`] headers the request does not already

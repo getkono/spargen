@@ -1256,6 +1256,8 @@ fn append_query_leaves_the_url_alone_without_fragments() {
 struct Canned {
     responses: std::sync::Mutex<std::collections::VecDeque<crate::tests::Response>>,
     seen: std::sync::Mutex<Vec<(http::HeaderMap, Option<Tag>)>>,
+    /// The [`crate::TotalTimeout`] each request carried, in order.
+    timeouts: std::sync::Mutex<Vec<Option<crate::TotalTimeout>>>,
 }
 
 /// An extension type a caller's backend reads.
@@ -1267,6 +1269,7 @@ impl Canned {
         Arc::new(Self {
             responses: std::sync::Mutex::new(responses.into_iter().collect()),
             seen: std::sync::Mutex::default(),
+            timeouts: std::sync::Mutex::default(),
         })
     }
 }
@@ -1277,6 +1280,10 @@ impl crate::HttpBackend for Canned {
             request.headers().clone(),
             request.extensions().get::<Tag>().copied(),
         ));
+        self.timeouts
+            .lock()
+            .unwrap()
+            .push(request.extensions().get::<crate::TotalTimeout>().copied());
         let response = self.responses.lock().unwrap().pop_front();
         Box::pin(async move { Ok(response.expect("a canned response per request")) })
     }
@@ -1356,6 +1363,43 @@ fn send_copies_the_option_extensions_onto_each_request() {
         .map(|seen| seen.1)
         .collect();
     assert_eq!(tags, [Some(Tag(7)), Some(Tag(7)), None]);
+}
+
+/// A total timeout's precedence: the request's own, then the options' extensions, then
+/// `ClientConfig::timeout`, which a streaming send never applies; an options' timeout is an
+/// explicit deadline and bounds a streaming send too.
+#[test]
+fn an_option_total_timeout_wins_over_the_configured_one() {
+    use crate::TotalTimeout;
+    use std::time::Duration;
+    let backend = Canned::answering([
+        response(200, ""),
+        response(200, ""),
+        response(200, ""),
+        response(200, ""),
+        response(200, ""),
+    ]);
+    let mut options = crate::RequestOptions::default();
+    options
+        .extensions
+        .insert(TotalTimeout(Duration::from_secs(2)));
+    let mut core = core_with(backend.clone(), options);
+    core.config_mut().timeout = Some(Duration::from_secs(30));
+    poll_ready(super::send(&core, crate::tests::request())).unwrap();
+    let mut own = crate::tests::request();
+    own.extensions_mut()
+        .insert(TotalTimeout(Duration::from_secs(5)));
+    poll_ready(super::send(&core, own)).unwrap();
+    poll_ready(super::send_streaming(&core, crate::tests::request())).unwrap();
+    let mut plain = core_with(backend.clone(), crate::RequestOptions::default());
+    plain.config_mut().timeout = Some(Duration::from_secs(30));
+    poll_ready(super::send(&plain, crate::tests::request())).unwrap();
+    poll_ready(super::send_streaming(&plain, crate::tests::request())).unwrap();
+    let seconds = |secs| Some(TotalTimeout(Duration::from_secs(secs)));
+    assert_eq!(
+        *backend.timeouts.lock().unwrap(),
+        [seconds(2), seconds(5), seconds(2), seconds(30), None]
+    );
 }
 
 /// An extension of a type the request already carries keeps the request's own value.

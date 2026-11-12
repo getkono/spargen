@@ -167,9 +167,11 @@ pub fn build_url_with_query_string_on(
 /// The backend reports failures as a [`crate::TransportError`] carrying its taxonomy class, which
 /// picks the variant here. Non-generic.
 ///
-/// A request that carries no [`TotalTimeout`] of its own is given the core's
+/// The core's [`crate::RequestOptions`] are applied first, as [`send_streaming`] applies them. A
+/// request that then carries no [`TotalTimeout`] is given the core's
 /// [`crate::ClientConfig::timeout`], read now, which bounds it until its whole response body has
-/// been read. The body limits [`crate::RequestOptions::max_body`] and
+/// been read: a total timeout the request carries itself wins, then one in the options'
+/// extensions, then the configured one. The body limits [`crate::RequestOptions::max_body`] and
 /// [`crate::ClientConfig::max_success_body`] set are read now too, and travel on the response to
 /// the decoder that reads its body. An operation whose success response is a stream sends with
 /// [`send_streaming`] instead.
@@ -177,12 +179,13 @@ pub async fn send(
     core: &ClientCore,
     mut request: Request,
 ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
+    apply_options(core.options(), &mut request);
     if request.extensions().get::<TotalTimeout>().is_none() {
         if let Some(timeout) = core.config().timeout {
             request.extensions_mut().insert(TotalTimeout(timeout));
         }
     }
-    let mut response = send_streaming(core, request).await?;
+    let mut response = send_on(core.backend().as_ref(), request).await?;
     let max_body = core.options().max_body;
     response.extensions_mut().insert(BodyLimits {
         success: max_body.or(core.config().max_success_body),
@@ -193,8 +196,9 @@ pub async fn send(
 
 /// [`send`] for a request whose success response is read as a stream (an `EventStream`): the
 /// core's [`crate::ClientConfig::timeout`] is not applied, because a stream may rightly stay open
-/// indefinitely, and neither is a body limit. A total timeout the request carries itself still
-/// applies, and the client's connect and read timeouts bound it as they bound every request.
+/// indefinitely, and neither is a body limit. A total timeout the request carries itself, or one
+/// the core's [`crate::RequestOptions::extensions`] carry, is a deadline the caller asked for and
+/// still applies, and the client's connect and read timeouts bound it as they bound every request.
 /// Non-generic.
 ///
 /// Both sends add the core's [`crate::RequestOptions`] headers the request does not already
