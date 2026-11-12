@@ -648,7 +648,7 @@ fn sensitive_value(secret: &str) -> Result<HeaderValue, Error<Infallible>> {
 /// `bytes` in the padded standard base64 alphabet of RFC 4648 §4, as an `http basic` credential
 /// is sent (RFC 7617 §2). The `contentEncoding: base64` codec is embedded only into a client
 /// whose models use it, so `http basic` carries this encoder of its own.
-fn base64_encode(bytes: &[u8]) -> String {
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {

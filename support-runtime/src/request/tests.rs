@@ -39,6 +39,54 @@ fn a_built_request_carries_what_the_builder_was_given() {
     assert_eq!(request.body().as_bytes(), Some(&b"payload"[..]));
 }
 
+/// A URL's `user:pass@` userinfo is taken off the URI and sent as `Authorization: Basic`, as
+/// reqwest's own builder did: percent-decoded, a missing password sent as empty, and the value
+/// marked sensitive. A URL without userinfo gains no header.
+#[test]
+fn url_userinfo_becomes_basic_auth_and_leaves_the_uri() {
+    let cases = [
+        // base64("us@er:p:ss")
+        (
+            "https://us%40er:p%3Ass@example.com/op",
+            Some("Basic dXNAZXI6cDpzcw=="),
+        ),
+        // base64("user:")
+        ("https://user@example.com/op", Some("Basic dXNlcjo=")),
+        // base64(":secret")
+        ("https://:secret@example.com/op", Some("Basic OnNlY3JldA==")),
+        ("https://example.com/op", None),
+    ];
+    for (text, expected) in cases {
+        let request = RequestBuilder::new(Method::GET, url(text)).build().unwrap();
+        assert_eq!(request.uri(), "https://example.com/op", "{text}");
+        let authorization = request.headers().get(http::header::AUTHORIZATION);
+        assert_eq!(
+            authorization.map(|value| value.to_str().unwrap()),
+            expected,
+            "{text}"
+        );
+        assert!(
+            authorization.is_none_or(HeaderValue::is_sensitive),
+            "{text}"
+        );
+    }
+}
+
+/// Only a `%` and two hexadecimal digits decode; any other `%` is kept as it is.
+#[test]
+fn percent_decoding_reads_only_well_formed_escapes() {
+    let cases: [(&str, &[u8]); 5] = [
+        ("a%40b", b"a@b"),
+        ("%ff", b"\xff"),
+        ("%zz%4", b"%zz%4"),
+        ("%+1", b"%+1"),
+        ("100%", b"100%"),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(super::percent_decode(text), expected, "{text}");
+    }
+}
+
 /// A request given no body is sent with an empty one, in memory, so it clones.
 #[test]
 fn a_bodyless_request_has_an_empty_body() {

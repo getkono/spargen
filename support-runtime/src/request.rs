@@ -7,7 +7,7 @@ use std::convert::Infallible;
 use std::hash::{BuildHasher, Hasher};
 
 use bytes::{Bytes, BytesMut};
-use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+use http::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use http::Method;
 use url::Url;
 
@@ -34,13 +34,31 @@ struct Parts {
 }
 
 impl RequestBuilder {
-    /// Start a `method` request to `url`, with no headers and an empty body.
-    pub fn new(method: Method, url: Url) -> Self {
+    /// Start a `method` request to `url`, with an empty body and no headers, except where `url`
+    /// carries `user:pass@` userinfo: that is taken off the URL and sent as an
+    /// `Authorization: Basic` header (RFC 7617), percent-decoded and marked sensitive, as
+    /// reqwest's own builder sends it, so the password reaches no backend's URI or error text.
+    pub fn new(method: Method, mut url: Url) -> Self {
+        let mut headers = HeaderMap::new();
+        if let Some(credentials) = take_userinfo(&mut url) {
+            let value = format!("Basic {}", crate::auth::base64_encode(&credentials));
+            match HeaderValue::try_from(value) {
+                Ok(mut value) => {
+                    value.set_sensitive(true);
+                    headers.insert(AUTHORIZATION, value);
+                }
+                Err(error) => {
+                    return Self {
+                        request: Err(Error::request_construction(error)),
+                    }
+                }
+            }
+        }
         Self {
             request: Ok(Parts {
                 method,
                 url,
-                headers: HeaderMap::new(),
+                headers,
                 body: HttpBody::empty(),
             }),
         }
@@ -142,6 +160,49 @@ impl RequestBuilder {
         *request.headers_mut() = headers;
         Ok(request)
     }
+}
+
+/// Take `url`'s userinfo off it, returning its `username:password` credentials, percent-decoded,
+/// a missing password as empty; `None`, leaving `url` as it is, where it carries neither.
+fn take_userinfo(url: &mut Url) -> Option<Vec<u8>> {
+    let password = url.password().map(percent_decode);
+    if url.username().is_empty() && password.is_none() {
+        return None;
+    }
+    let mut credentials = percent_decode(url.username());
+    credentials.push(b':');
+    credentials.extend(password.unwrap_or_default());
+    // Both fail only on a URL that cannot carry userinfo, which this one does.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    Some(credentials)
+}
+
+/// `text` with each `%XX` escape replaced by the byte it encodes; a `%` not followed by two
+/// hexadecimal digits is kept as it is.
+fn percent_decode(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let escaped = (bytes[index] == b'%')
+            .then(|| bytes.get(index + 1..index + 3))
+            .flatten()
+            .filter(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escaped {
+            Some(byte) => {
+                decoded.push(byte);
+                index += 3;
+            }
+            None => {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    decoded
 }
 
 /// A `multipart/form-data` body (RFC 7578): named parts, encoded in the order they were added.
