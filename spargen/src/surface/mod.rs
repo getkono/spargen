@@ -98,6 +98,10 @@ struct OpSurface {
     /// The generated `{method}_url` accessor's identifier. It shares the method scope and yields
     /// to every operation method, so an added operation can rename it while `method_name` holds.
     url_accessor_name: String,
+    /// The generated `{method}_request` builder's identifier, which yields as the accessor does.
+    request_builder_name: String,
+    /// The generated `decode_{method}` decoder's identifier, which yields as the accessor does.
+    decoder_name: String,
     /// The `{method}_url` accessor's arguments, in declaration order. Their types are those of
     /// `params`, compared there.
     url_args: Vec<UrlArgSurface>,

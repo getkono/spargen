@@ -2,20 +2,44 @@
 source: spargen/tests/snapshot.rs
 expression: api_surface(&source)
 ---
-operations (12):
+operations (36):
   chat
+  chat_request
   copy
+  copy_request
   create
+  create_request
+  decode_chat
+  decode_copy
+  decode_create
+  decode_delete
+  decode_embed
+  decode_generate
+  decode_list
+  decode_ps
+  decode_pull
+  decode_push
+  decode_show
+  decode_version
   delete
+  delete_request
   embed
+  embed_request
   generate
+  generate_request
   list
+  list_request
   ps
+  ps_request
   pull
+  pull_request
   push
+  push_request
   show
+  show_request
   version
-types (258):
+  version_request
+types (259):
   BlockingClient
   ChatError
   Client
@@ -30,6 +54,7 @@ types (258):
   PushError
   ShowError
   VersionError
+  ops::Operation
   servers::Server0
   types::ChatMessage
   types::ChatMessageContent

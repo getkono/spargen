@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|method-renamed|GET /pets|decoder renamed `decode_list_pets` -> `decode_list_pets_cd0eec77`
+minor|operation-added|GET /pets/decode|new operation
+bump=major

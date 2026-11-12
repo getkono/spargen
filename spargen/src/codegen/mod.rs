@@ -8,7 +8,8 @@
 //! One module per emitted construct, each producing a deterministically-ordered token fragment
 //! that [`generate`] assembles and formats: [`models`] (the `types` module) and [`union`] (its
 //! union enums), [`client`] (the `Client`, its servers, and the per-operation items beside it),
-//! [`operation`] (one async method, and the signature its blocking twin shares), [`params`],
+//! [`operation`] (one async method with its request builder and decoder, the signature its blocking
+//! twin shares, and the `ops` module of operation identities), [`params`],
 //! [`body`], and [`dispatch`] (the method's parameter, request-body, and status-dispatch code),
 //! [`responses`] (response enums, error types, and header structs), [`blocking`] (the synchronous
 //! facade), [`runtime`] (the embedded `support` module and the root re-exports), the shared
@@ -106,6 +107,7 @@ pub(crate) fn generate(
     let models = models::emit_models(api, names, options, features.datetime.is_some());
     let signatures = operation::signatures(api, names, options);
     let client = client::emit_client(api, &signatures, names, options);
+    let ops = operation::emit_ops(api, names);
     // The synchronous facade is always emitted; `blocking::blocking_cfg` compiles its items out.
     let blocking = blocking::emit_blocking_client(api, &signatures, names, options);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
@@ -134,6 +136,7 @@ pub(crate) fn generate(
 
         #support
         #models
+        #ops
         #client
         #blocking
     };

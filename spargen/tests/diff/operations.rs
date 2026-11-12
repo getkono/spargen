@@ -55,6 +55,51 @@ fn an_added_operation_taking_an_accessor_name_renames_the_accessor_and_is_major(
     assert_eq!(report.bump, Impact::Major);
 }
 
+#[test]
+fn an_added_operation_taking_a_companion_name_renames_the_companion_and_is_major() {
+    // Issue #1264: `listPetsRequest` and `decodeListPets` spell `list_pets`'s request builder and
+    // decoder. Operation methods keep their names, so each companion yields to a suffixed
+    // spelling: an addition that breaks every caller of the companion.
+    for (operation, path, renamed) in [
+        (
+            "listPetsRequest",
+            "/pets/request",
+            "request builder renamed `list_pets_request` -> `list_pets_request_",
+        ),
+        (
+            "decodeListPets",
+            "/pets/decode",
+            "decoder renamed `decode_list_pets` -> `decode_list_pets_",
+        ),
+    ] {
+        let added = format!(
+            "  {path}:
+    get:
+      operationId: {operation}
+      responses:
+        '204':
+          description: none
+"
+        );
+        let old = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
+        let new = full(
+            &format!("{}{added}", pets_get("listPets", "", PET_REF)),
+            PET_SCHEMA,
+        );
+        let report = diff(&old, &new);
+        assert_eq!(
+            kinds(&report),
+            vec![ChangeKind::MethodRenamed, ChangeKind::OperationAdded],
+            "{:?}",
+            report.changes
+        );
+        let change = &report.changes[0];
+        assert_eq!(change.location, "GET /pets");
+        assert!(change.detail.starts_with(renamed), "{}", change.detail);
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
 const REQUEST_BODY_PET: &str = "      requestBody:
         required: true
         content:

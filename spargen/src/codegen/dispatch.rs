@@ -7,26 +7,24 @@ use quote::quote;
 use crate::ir::{
     Api, ApiKeyLoc, ErrorShape, HttpScheme, MediaType, Operation, SecurityScheme, SuccessShape, Ty,
 };
-use crate::name::{Names, OperationBindings};
+use crate::name::Names;
 
 use super::idents::status_variant_ident;
 use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 
-/// The statements that attach the operation's credentials to `request_binding` and replay a call
-/// a refreshable credential was rejected on: the first `security` alternative whose schemes are all
-/// registered is attached through `support::attach_auth_replayable`, which binds `replay_binding`,
-/// and the second statement, emitted after the send, hands the `response` to
-/// `support::replay_rejected` (as a stream's send when `streaming`). Both are empty for an
-/// operation with no `security` requirement.
+/// The statements that attach the operation's credentials to `request_binding` and bind
+/// `replay_binding` to what replays a call a refreshable credential was rejected on: the first
+/// `security` alternative whose schemes are all registered is attached through
+/// `support::attach_auth_replayable`, and `support::execute` spends the replay. An operation with
+/// no `security` requirement attaches nothing and has no replay.
 pub(super) fn attach_auth_tokens(
     operation: &Operation,
     api: &Api,
     request_binding: &crate::name::Ident,
     replay_binding: &crate::name::Ident,
-    streaming: bool,
-) -> (TokenStream, TokenStream) {
+) -> TokenStream {
     if operation.security.is_empty() {
-        (quote! {}, quote! {})
+        quote! { let #replay_binding: Option<support::Replay> = None; }
     } else {
         let alternatives = operation.security.iter().map(|requirement| {
             let schemes = requirement.0.iter().map(|id| {
@@ -53,7 +51,7 @@ pub(super) fn attach_auth_tokens(
             });
             quote! { &[#(#schemes),*][..] }
         });
-        let attach = quote! {
+        quote! {
             let #replay_binding;
             (#request_binding, #replay_binding) = support::attach_auth_replayable(
                 &self.core,
@@ -62,18 +60,7 @@ pub(super) fn attach_auth_tokens(
             )
                 .await
                 .map_err(support::Error::widen)?;
-        };
-        let replay = quote! {
-            let response = support::replay_rejected(
-                &self.core,
-                response,
-                #replay_binding,
-                #streaming,
-            )
-                .await
-                .map_err(support::Error::widen)?;
-        };
-        (attach, replay)
+        }
     }
 }
 
@@ -169,19 +156,16 @@ pub(super) fn error_branch_tokens(
     }
 }
 
-/// The method's success branch and, for a streaming success, the statement that keeps a clone of
-/// the request for reconnection (`None` otherwise). `success_ty` is [`success_type`]'s rendering
-/// and `error_ident` the operation's error type.
+/// The decoder's success branch. `success_ty` is [`success_type`]'s rendering and `error_ident`
+/// the operation's error type. A streaming success yields a stream with no request to resend,
+/// which the operation method hands the request it sent.
 pub(super) fn success_decode_tokens(
     operation: &Operation,
     api: &Api,
     names: &Names,
-    bindings: &OperationBindings,
     success_ty: &TokenStream,
     error_ident: &crate::name::Ident,
-) -> (TokenStream, Option<TokenStream>) {
-    let request_binding = &bindings.request;
-    let reconnect_request_binding = &bindings.reconnect_request;
+) -> TokenStream {
     let success_decode = match operation.responses.success() {
         SuccessShape::Unit => quote! {
             let status = response.status();
@@ -284,7 +268,7 @@ pub(super) fn success_decode_tokens(
         .responses
         .stream_success()
         .map(|(framing, _)| framing);
-    let success_decode = match stream_framing {
+    match stream_framing {
         Some(framing) => {
             let framing_tokens = match framing {
                 crate::ir::Framing::Sse => quote! { support::Framing::Sse },
@@ -298,18 +282,12 @@ pub(super) fn success_decode_tokens(
                     response,
                     #framing_tokens,
                     &self.core,
-                    #reconnect_request_binding,
+                    None,
                 ))
             }
         }
         None => success_decode,
-    };
-    let reconnect_request_init = stream_framing.map(|_| {
-        quote! {
-            let #reconnect_request_binding = #request_binding.try_clone();
-        }
-    });
-    (success_decode, reconnect_request_init)
+    }
 }
 
 /// The expression decoding a by-status variant's already-read `body` into that variant, as a
@@ -455,12 +433,13 @@ paths:
         contents.split_whitespace().collect()
     }
 
-    /// The async method `name` in `generated`'s whitespace-free text, from its signature to the
-    /// doc comment of the `_url` method emitted after it.
+    /// The async method `name` and its companions in `generated`'s whitespace-free text, from the
+    /// signature of its preparer, emitted first, to the doc comment of the `_url` method emitted
+    /// last: the preparer, the method, its request builder and its decoder.
     fn method<'g>(generated: &'g str, name: &str) -> &'g str {
         let start = generated
-            .find(&format!("pubasyncfn{name}("))
-            .unwrap_or_else(|| panic!("no async method `{name}`"));
+            .find(&format!("asyncfnprepare_{name}("))
+            .unwrap_or_else(|| panic!("no preparer of `{name}`"));
         let end = generated[start..]
             .find(&format!("///TheURL`{name}`"))
             .unwrap_or_else(|| panic!("no URL method after `{name}`"));
@@ -479,8 +458,12 @@ paths:
             "letreplay;(request,replay)=support::attach_auth_replayable(&self.core,request,\
              &[&[support::AuthScheme{name:\"token\",kind:support::AuthKind::Bearer,},][..],],)\
              .await.map_err(support::Error::widen)?;",
-            "letresponse=support::replay_rejected(&self.core,response,replay,false).await\
-             .map_err(support::Error::widen)?;ifresponse.status().is_success()",
+            "letmutrequest=support::prepare(&self.core,request,false)?;\
+             request.extensions_mut().insert(ops::GET_XML);Ok((request,replay))",
+            "letresponse=support::execute(&self.core,request,replay,false).await\
+             .map_err(support::Error::widen)?;self.decode_get_xml(response).await}",
+            "letresponse=support::with_body_limits(&self.core,response);\
+             ifresponse.status().is_success()",
             "support::decode_success_xml::<types::Item>(&self.core,response).await\
              .map_err(support::Error::widen)",
             "Err(support::classify_error_xml::<GetXmlError,>(&self.core,response,\
@@ -494,11 +477,11 @@ paths:
             "support::decode_success_text::<types::",
             "Err(support::classify_error_text::<GetTextError,>(&self.core,response,\
              &[support::StatusSpec::Exact(500u16)]).await,)",
+            "letreplay:Option<support::Replay>=None;",
         ] {
             assert!(text.contains(fragment), "`{fragment}` in {text}");
         }
         assert!(!text.contains("attach_auth"), "{text}");
-        assert!(!text.contains("replay_rejected"), "{text}");
 
         let many = method(&generated, "get_many");
         for fragment in [

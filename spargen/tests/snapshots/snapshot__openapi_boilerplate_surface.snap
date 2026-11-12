@@ -2,11 +2,17 @@
 source: spargen/tests/snapshot.rs
 expression: api_surface(&source)
 ---
-operations (3):
+operations (9):
   create_pets
+  create_pets_request
+  decode_create_pets
+  decode_list_pets
+  decode_show_pet_by_id
   list_pets
+  list_pets_request
   show_pet_by_id
-types (18):
+  show_pet_by_id_request
+types (19):
   BlockingClient
   Client
   CreatePetsError
@@ -14,6 +20,7 @@ types (18):
   ListPetsParams
   ListPetsStatus200Headers
   ShowPetByIdError
+  ops::Operation
   servers::Server0
   types::Error
   types::ErrorCode

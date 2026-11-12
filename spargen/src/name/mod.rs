@@ -91,6 +91,16 @@ pub(crate) struct OperationNames {
     /// holds. Allocated in the method scope after every URL accessor, so an operation or accessor
     /// that already spells it keeps that name and the twin takes a pointer-seeded suffix instead.
     pub(crate) byte_stream: Option<Ident>,
+    /// The request builder, `{method}_request`, which returns the request the method sends without
+    /// sending it. Allocated after every URL accessor and `_stream` twin, on the URL accessor's
+    /// terms.
+    pub(crate) request_builder: Ident,
+    /// The response decoder, `decode_{method}`, which decodes a response the caller obtained as
+    /// the method decodes its own. Allocated after every request builder, on the same terms.
+    pub(crate) decoder: Ident,
+    /// The private method both the operation method and its request builder prepare the request
+    /// with, `prepare_{method}`. Allocated after every decoder, on the same terms.
+    pub(crate) preparer: Ident,
     /// The optional-parameters `…Params` struct.
     pub(crate) params_struct: Ident,
     /// The error type: `{Method}Error`, or `{Method}OperationError` where the first form would
@@ -329,6 +339,9 @@ pub(crate) struct OperationBindings {
     /// What a secured operation needs to replay itself once after a refreshable credential is
     /// rejected.
     pub(crate) replay: Ident,
+    /// The preparer's flag for whether the request it builds is sent streaming, which it takes
+    /// only where the operation has a `_stream` twin.
+    pub(crate) streaming: Ident,
 }
 
 /// Allocate every identifier the API needs, in one deterministic pass. Allocation is total: each
@@ -494,6 +507,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
             reconnect_request: binding_scope.alloc("reconnect_request", IdentRole::Param, pointer),
             cookies: binding_scope.alloc("cookies", IdentRole::Param, pointer),
             replay: binding_scope.alloc("replay", IdentRole::Param, pointer),
+            streaming: binding_scope.alloc("streaming", IdentRole::Param, pointer),
         };
         signatures.push((method, params_struct, parameters, bindings));
     }
@@ -526,27 +540,51 @@ pub(crate) fn allocate(api: &Api) -> Names {
                 .then(|| byte_streams.next().expect("one twin per binary success"))
         })
         .collect();
+    // Each companion family after the URL accessors and twins, in a fixed order, so adding one
+    // renames no name allocated before it.
+    let mut companions = |spell: fn(&str) -> String| {
+        let hints: Vec<String> = signatures
+            .iter()
+            .map(|(method, ..)| spell(method.unraw()))
+            .collect();
+        operation_scope.alloc_ranked(&operation_requests(api, &hints), IdentRole::Method)
+    };
+    let request_builders = companions(|method| format!("{method}_request"));
+    let decoders = companions(|method| format!("decode_{method}"));
+    let preparers = companions(|method| format!("prepare_{method}"));
+    let companions = request_builders
+        .into_iter()
+        .zip(decoders)
+        .zip(preparers)
+        .map(|((request_builder, decoder), preparer)| (request_builder, decoder, preparer));
     let methods: Vec<&Ident> = signatures.iter().map(|(method, ..)| method).collect();
     let (errors, success_enums) = allocate_operation_types(api, &methods, &mut root_scope);
     let records = api
         .operations
         .iter()
         .zip(signatures)
-        .zip(url_accessors.into_iter().zip(byte_streams))
+        .zip(url_accessors.into_iter().zip(byte_streams).zip(companions))
         .zip(errors)
         .zip(success_enums)
         .zip(response_headers);
     for (
-        ((((operation, signature), (url_accessor, byte_stream)), error), success_enum),
+        (
+            (((operation, signature), ((url_accessor, byte_stream), companions)), error),
+            success_enum,
+        ),
         response_headers,
     ) in records
     {
         let (method, params_struct, parameters, bindings) = signature;
+        let (request_builder, decoder, preparer) = companions;
         names.operations.insert(
             operation.id.clone(),
             OperationNames {
                 method,
                 url_accessor,
+                request_builder,
+                decoder,
+                preparer,
                 byte_stream,
                 params_struct,
                 error,

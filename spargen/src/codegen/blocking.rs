@@ -7,6 +7,7 @@ use crate::ir::{Api, Operation};
 use crate::name::Names;
 
 use super::client::{default_server_docs, with_bound_header_tokens, with_credential_docs};
+use super::docs::normalize_rustdoc;
 use super::operation::{url_accessor_tokens, Arg, OperationSig};
 
 /// The `cfg` every blocking item is emitted under, the facade here and the embedded
@@ -239,6 +240,20 @@ fn emit_blocking_operation(
         sig,
         quote! { self.inner.#url_ident(#(#url_forwards),*) },
     );
+    let request_builder = &operation_names.request_builder;
+    let decoder = &operation_names.decoder;
+    let builder_decls = sig.decls();
+    let builder_forwards = sig.forwards();
+    let deprecated = sig.deprecated();
+    let method = method_ident.unraw();
+    let builder_doc = normalize_rustdoc(&format!(
+        "The request `{method}` sends, built without sending it (mirrors the async client's \
+         `{request_builder}`)."
+    ));
+    let decoder_doc = normalize_rustdoc(&format!(
+        "Decode a response to the request `{method}` sends, exactly as `{method}` decodes its \
+         own (mirrors the async client's `{decoder}`)."
+    ));
     quote! {
         #attrs
         #[inline]
@@ -247,6 +262,26 @@ fn emit_blocking_operation(
             #(#decls),*
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
             self.runtime.block_on(self.inner.#method_ident(#(#forwards),*))
+        }
+
+        #[doc = #builder_doc]
+        #deprecated
+        #[inline]
+        pub fn #request_builder(
+            &self,
+            #(#builder_decls),*
+        ) -> Result<http::Request<support::HttpBody>, support::Error<std::convert::Infallible>> {
+            self.runtime.block_on(self.inner.#request_builder(#(#builder_forwards),*))
+        }
+
+        #[doc = #decoder_doc]
+        #deprecated
+        #[inline]
+        pub fn #decoder(
+            &self,
+            response: http::Response<support::HttpBody>,
+        ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
+            self.runtime.block_on(self.inner.#decoder(response))
         }
 
         #url_accessor
