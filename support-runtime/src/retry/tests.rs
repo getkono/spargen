@@ -8,7 +8,9 @@ use crate::tests::{
     poll_ready, poll_to_completion, refused_at_execute, seam_request as request, Chunk, Chunks,
     PendingOnce, Reply, RetryTransient, SequenceBackend,
 };
-use crate::transport::{try_clone_request, ExecuteFuture, HttpBackend, ReqwestBackend};
+use crate::transport::{
+    try_clone_request, ExecuteFuture, HttpBackend, ReqwestBackend, TotalTimeout,
+};
 use crate::{HttpBody, RequestBuilder};
 
 /// A request as the transport seam carries it.
@@ -259,6 +261,38 @@ fn a_request_reqwest_refuses_to_send_is_executed_exactly_once() {
             "{url}"
         );
     }
+}
+
+/// Records the [`TotalTimeout`] of every request it is handed, then delegates to `inner`.
+#[derive(Debug)]
+struct RecordTotalTimeout {
+    inner: Arc<SequenceBackend>,
+    seen: Mutex<Vec<Option<TotalTimeout>>>,
+}
+
+impl HttpBackend for RecordTotalTimeout {
+    fn execute(&self, request: Request) -> ExecuteFuture<'_> {
+        let timeout = request.extensions().get::<TotalTimeout>().copied();
+        self.seen.lock().unwrap().push(timeout);
+        self.inner.execute(request)
+    }
+}
+
+/// A `TotalTimeout` bounds each attempt, as `RetryBackend`'s docs say: every replay reaches the
+/// inner backend carrying the same extension, rather than a share of one whole-call deadline.
+#[test]
+fn every_attempt_carries_the_requests_total_timeout() {
+    let inner = Arc::new(RecordTotalTimeout {
+        inner: SequenceBackend::statuses([503, 503, 200]),
+        seen: Mutex::new(Vec::new()),
+    });
+    let backend = retrying(inner.clone(), 5);
+    let mut sent = request();
+    let timeout = TotalTimeout(Duration::from_secs(3));
+    sent.extensions_mut().insert(timeout);
+    let response = poll_ready(backend.execute(sent)).expect("the third attempt succeeds");
+    assert_eq!(response.status(), 200);
+    assert_eq!(*inner.seen.lock().unwrap(), [Some(timeout); 3]);
 }
 
 /// The manual `Debug` renders the type and its inner backend, and marks the policy it leaves out.

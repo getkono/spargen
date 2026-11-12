@@ -78,7 +78,8 @@ pub struct ClientConfig {
     /// travels on the request itself, as a [`crate::TotalTimeout`] extension: a request that
     /// already carries one keeps it, as does one given one by [`RequestOptions::extensions`],
     /// which [`crate::send`] applies first, [`ReqwestBackend`] enforces it, and so does a caller-supplied
-    /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. A
+    /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. Behind
+    /// a [`crate::RetryBackend`] it bounds each attempt, not the retried call as a whole. A
     /// streaming response is exempt,
     /// because a stream may rightly stay open indefinitely: an operation returning an
     /// `EventStream` sends its request with [`crate::send_streaming`], which never applies it, and
