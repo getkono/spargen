@@ -373,6 +373,70 @@ fn a_rejected_refreshable_credential_is_refreshed_and_the_call_replayed() {
     assert_eq!(*backend.sent.lock().unwrap(), ["Bearer stale"]);
 }
 
+// Issue #1289: a generated multipart operation's body is encoded in memory, so its request clones,
+// and a `RetryBackend` resends it, every attempt carrying the same `Content-Type` and the same
+// bytes. A form sent as a stream was sent exactly once, whatever the policy said. The policy here
+// retries a `503` whatever the method, since `upload_file` is a `POST`.
+#[test]
+fn a_multipart_operation_is_retried_with_its_body_intact() {
+    use std::future::Future;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Default)]
+    struct Scripted {
+        sent: Mutex<Vec<(String, Vec<u8>)>>,
+    }
+    impl basic_client::HttpBackend for Scripted {
+        fn execute(&self, request: http::Request<basic_client::HttpBody>) -> basic_client::ExecuteFuture<'_> {
+            let content_type = request.headers()[http::header::CONTENT_TYPE].to_str().unwrap().to_owned();
+            let body = request.body().as_bytes().expect("a multipart body is in memory").to_vec();
+            let mut sent = self.sent.lock().unwrap();
+            let status = if sent.is_empty() { 503 } else { 204 };
+            sent.push((content_type, body));
+            let response = http::Response::builder()
+                .status(status)
+                .body(basic_client::HttpBody::empty());
+            Box::pin(async move { Ok(response.unwrap()) })
+        }
+    }
+
+    struct RetryUnavailable;
+    impl basic_client::RetryPolicy for RetryUnavailable {
+        fn retry<'a>(
+            &'a self,
+            attempt: u32,
+            outcome: &basic_client::RetryOutcome<'_>,
+        ) -> Option<basic_client::RetryWait<'a>> {
+            (attempt < 3 && outcome.status().map(|status| status.as_u16()) == Some(503))
+                .then(|| Box::pin(std::future::ready(())) as basic_client::RetryWait<'a>)
+        }
+    }
+
+    let backend = Arc::new(Scripted::default());
+    let retry = basic_client::RetryBackend::new(backend.clone(), Arc::new(RetryUnavailable));
+    let client = basic_client::Client::with_backend(Arc::new(retry), "https://example.com").unwrap();
+    let body = basic_client::types::UploadFileBody {
+        file: bytes::Bytes::from_static(b"hello"),
+        caption: "a caption".to_owned(),
+        count: Some(3),
+        tags: None,
+    };
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut call = std::pin::pin!(client.upload_file(&body));
+    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+        panic!("the scripted backend and the policy's wait answer at once");
+    };
+    result.expect("the retry succeeds");
+
+    let sent = backend.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2, "the 503 is retried once");
+    assert!(sent[0].0.starts_with("multipart/form-data; boundary="), "{}", sent[0].0);
+    let text = String::from_utf8_lossy(&sent[0].1);
+    assert!(text.contains("\r\n\r\nhello\r\n"), "{text}");
+    assert!(text.contains("\r\n\r\na caption\r\n"), "{text}");
+    assert_eq!(sent[0], sent[1], "the retry resends the same request body");
+}
+
 // Issue #1264: an operation is its request builder's request, sent through the backend and handed
 // to its decoder. The builder returns exactly what the operation sends — URL, credential, the
 // client's option headers and extensions — with the operation's `ops::Operation` among the

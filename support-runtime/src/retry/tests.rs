@@ -11,7 +11,7 @@ use crate::tests::{
 use crate::transport::{
     try_clone_request, ExecuteFuture, HttpBackend, ReqwestBackend, TotalTimeout,
 };
-use crate::{HttpBody, RequestBuilder};
+use crate::{HttpBody, MultipartForm, MultipartPart, RequestBuilder};
 
 /// A request as the transport seam carries it.
 type Request = http::Request<HttpBody>;
@@ -135,6 +135,38 @@ fn non_cloneable_request_is_executed_exactly_once() {
     let response = poll_ready(backend.execute(request)).expect("executes once");
     assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(inner.calls(), 1);
+}
+
+/// A `multipart/form-data` body is encoded in memory, so a request carrying one clones and is
+/// retried like any other, every attempt sending the same `Content-Type` and the same bytes (#1289:
+/// a form sent as a stream was sent exactly once).
+#[test]
+fn a_multipart_request_is_retried_with_its_body_intact() {
+    let request = RequestBuilder::new(
+        Method::PUT,
+        url::Url::parse("https://example.com/pets/1").unwrap(),
+    )
+    .multipart(
+        MultipartForm::new()
+            .part("name", MultipartPart::text("Rex"))
+            .part("tag", MultipartPart::text("dog")),
+    )
+    .build()
+    .unwrap();
+    let body = request.body().as_bytes().expect("in memory").to_vec();
+    let content_type = request.headers()[http::header::CONTENT_TYPE]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(content_type.starts_with("multipart/form-data; boundary="));
+
+    let inner = SequenceBackend::statuses([503, 503, 200]);
+    let backend = retrying(inner.clone(), 5);
+    let response = poll_ready(backend.execute(request)).expect("execute succeeds");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(inner.calls(), 3);
+    assert_eq!(inner.bodies(), vec![Some(body); 3]);
+    assert_eq!(inner.header("content-type"), vec![Some(content_type); 3]);
 }
 
 #[test]
