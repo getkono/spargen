@@ -21,6 +21,10 @@ use super::ty::ty_tokens;
 /// Emit the `testing` module: the operation-independent `Call`, `Reply`, `Unrouted` and
 /// `MockBackend`, one `on_{method}` registration per operation, and one `{method}` module per
 /// operation holding its typed `Reply`.
+///
+/// Every crate path in the module is written from the extern prelude (`::http`, `::bytes`,
+/// `::std`, `::serde`, `::serde_json`, `::http_body`): a `{method}` module of the same name sits
+/// beside it and would shadow the bare spelling.
 pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
     let registrations = api
         .operations
@@ -41,10 +45,10 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
             #[derive(Debug, Clone)]
             pub struct Call {
                 operation: Option<super::ops::Operation>,
-                method: http::Method,
-                uri: http::Uri,
-                headers: http::HeaderMap,
-                body: bytes::Bytes,
+                method: ::http::Method,
+                uri: ::http::Uri,
+                headers: ::http::HeaderMap,
+                body: ::bytes::Bytes,
             }
 
             impl Call {
@@ -55,12 +59,12 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 }
 
                 /// The request's method.
-                pub fn method(&self) -> &http::Method {
+                pub fn method(&self) -> &::http::Method {
                     &self.method
                 }
 
                 /// The request's absolute URI.
-                pub fn uri(&self) -> &http::Uri {
+                pub fn uri(&self) -> &::http::Uri {
                     &self.uri
                 }
 
@@ -75,7 +79,7 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 }
 
                 /// The request's headers.
-                pub fn headers(&self) -> &http::HeaderMap {
+                pub fn headers(&self) -> &::http::HeaderMap {
                     &self.headers
                 }
 
@@ -90,8 +94,8 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 }
 
                 /// The request body decoded from JSON into `T`, as the server would read it.
-                pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
-                    serde_json::from_slice(&self.body)
+                pub fn json<T: ::serde::de::DeserializeOwned>(&self) -> Result<T, ::serde_json::Error> {
+                    ::serde_json::from_slice(&self.body)
                 }
             }
 
@@ -101,9 +105,9 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
             /// does not document.
             #[derive(Debug, Clone)]
             pub struct Reply {
-                status: http::StatusCode,
-                headers: http::HeaderMap,
-                body: bytes::Bytes,
+                status: ::http::StatusCode,
+                headers: ::http::HeaderMap,
+                body: ::bytes::Bytes,
             }
 
             impl Reply {
@@ -113,13 +117,13 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 ///
                 /// When `status` is not a status code (`100..=999`).
                 pub fn new(status: u16) -> Self {
-                    let Ok(status) = http::StatusCode::from_u16(status) else {
+                    let Ok(status) = ::http::StatusCode::from_u16(status) else {
                         panic!("testing::Reply: {status} is not an HTTP status code");
                     };
                     Self {
                         status,
-                        headers: http::HeaderMap::new(),
-                        body: bytes::Bytes::new(),
+                        headers: ::http::HeaderMap::new(),
+                        body: ::bytes::Bytes::new(),
                     }
                 }
 
@@ -130,10 +134,10 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 /// When `name` is not a header name or `value` not a header value.
                 #[must_use]
                 pub fn header(mut self, name: &str, value: &str) -> Self {
-                    let Ok(name) = http::header::HeaderName::from_bytes(name.as_bytes()) else {
+                    let Ok(name) = ::http::header::HeaderName::from_bytes(name.as_bytes()) else {
                         panic!("testing::Reply: `{name}` is not a header name");
                     };
-                    let Ok(value) = http::HeaderValue::from_str(value) else {
+                    let Ok(value) = ::http::HeaderValue::from_str(value) else {
                         panic!("testing::Reply: `{value}` is not a header value");
                     };
                     self.headers.append(name, value);
@@ -143,36 +147,36 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 /// Replace the body with `body`, as given; the content type is the caller's to set
                 /// with [`Self::header`].
                 #[must_use]
-                pub fn body(mut self, body: impl Into<bytes::Bytes>) -> Self {
+                pub fn body(mut self, body: impl Into<::bytes::Bytes>) -> Self {
                     self.body = body.into();
                     self
                 }
 
                 /// The response's status.
-                pub fn status(&self) -> http::StatusCode {
+                pub fn status(&self) -> ::http::StatusCode {
                     self.status
                 }
 
                 /// A response with the status `status` whose body is `body`, already encoded and
                 /// announced with `content_type`.
-                fn encoded(status: u16, content_type: &'static str, body: bytes::Bytes) -> Self {
+                fn encoded(status: u16, content_type: &'static str, body: ::bytes::Bytes) -> Self {
                     Self::new(status)
                         .header("content-type", content_type)
                         .body(body)
                 }
 
                 /// `body` as JSON.
-                fn json<T: serde::Serialize + ?Sized>(status: u16, body: &T) -> Self {
-                    match serde_json::to_vec(body) {
+                fn json<T: ::serde::Serialize + ?Sized>(status: u16, body: &T) -> Self {
+                    match ::serde_json::to_vec(body) {
                         Ok(bytes) => Self::encoded(status, "application/json", bytes.into()),
                         Err(error) => panic!("testing::Reply: the body has no JSON form: {error}"),
                     }
                 }
 
                 /// `body` as `text/plain`, read back by the client as the JSON string it is.
-                fn text<T: serde::Serialize + ?Sized>(status: u16, body: &T) -> Self {
-                    match serde_json::to_value(body) {
-                        Ok(serde_json::Value::String(text)) => {
+                fn text<T: ::serde::Serialize + ?Sized>(status: u16, body: &T) -> Self {
+                    match ::serde_json::to_value(body) {
+                        Ok(::serde_json::Value::String(text)) => {
                             Self::encoded(status, "text/plain; charset=utf-8", text.into())
                         }
                         Ok(other) => panic!(
@@ -183,7 +187,7 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 }
 
                 /// `body` as raw octets.
-                fn octets(status: u16, body: impl Into<bytes::Bytes>) -> Self {
+                fn octets(status: u16, body: impl Into<::bytes::Bytes>) -> Self {
                     Self::encoded(status, "application/octet-stream", body.into())
                 }
 
@@ -198,8 +202,8 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 }
 
                 /// The `http::Response` the backend hands the client.
-                fn into_response(self) -> http::Response<super::support::HttpBody> {
-                    let mut response = http::Response::new(super::support::HttpBody::from(self.body));
+                fn into_response(self) -> ::http::Response<super::support::HttpBody> {
+                    let mut response = ::http::Response::new(super::support::HttpBody::from(self.body));
                     *response.status_mut() = self.status;
                     *response.headers_mut() = self.headers;
                     response
@@ -222,8 +226,8 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 }
             }
 
-            impl std::fmt::Display for Unrouted {
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            impl ::std::fmt::Display for Unrouted {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                     match self.call.operation {
                         Some(operation) => write!(
                             f,
@@ -244,16 +248,16 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 }
             }
 
-            impl std::error::Error for Unrouted {}
+            impl ::std::error::Error for Unrouted {}
 
             /// A registered handler.
-            type Handler = std::sync::Arc<dyn Fn(&Call) -> Reply + Send + Sync>;
+            type Handler = ::std::sync::Arc<dyn Fn(&Call) -> Reply + Send + Sync>;
 
             /// What the clones of one `MockBackend` share.
             #[derive(Default)]
             struct State {
                 /// The handler per operation id, the latest registration winning.
-                handlers: std::collections::HashMap<&'static str, Handler>,
+                handlers: ::std::collections::HashMap<&'static str, Handler>,
                 /// Every request received, in arrival order.
                 calls: Vec<Call>,
             }
@@ -272,11 +276,11 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
             /// after handing another to the client.
             #[derive(Clone, Default)]
             pub struct MockBackend {
-                state: std::sync::Arc<std::sync::Mutex<State>>,
+                state: ::std::sync::Arc<::std::sync::Mutex<State>>,
             }
 
-            impl std::fmt::Debug for MockBackend {
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            impl ::std::fmt::Debug for MockBackend {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                     let state = self.lock();
                     let mut routed: Vec<&str> = state.handlers.keys().copied().collect();
                     routed.sort_unstable();
@@ -310,10 +314,10 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
 
                 /// The shared state; a handler that panicked while the lock was held poisons
                 /// nothing a test still reads.
-                fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+                fn lock(&self) -> ::std::sync::MutexGuard<'_, State> {
                     self.state
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .unwrap_or_else(::std::sync::PoisonError::into_inner)
                 }
 
                 /// Register `handler` for the operation `id`, replacing any registered before.
@@ -328,13 +332,13 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
             impl super::support::HttpBackend for MockBackend {
                 fn execute(
                     &self,
-                    request: http::Request<super::support::HttpBody>,
+                    request: ::http::Request<super::support::HttpBody>,
                 ) -> super::support::ExecuteFuture<'_> {
                     Box::pin(async move {
                         let (parts, mut body) = request.into_parts();
                         let mut bytes = Vec::new();
-                        while let Some(frame) = std::future::poll_fn(|cx| {
-                            http_body::Body::poll_frame(std::pin::Pin::new(&mut body), cx)
+                        while let Some(frame) = ::std::future::poll_fn(|cx| {
+                            ::http_body::Body::poll_frame(::std::pin::Pin::new(&mut body), cx)
                         })
                         .await
                         {
@@ -388,7 +392,7 @@ fn registration(operation: &Operation, names: &Names) -> TokenStream {
         ) -> Self {
             self.route(
                 super::ops::#constant.id,
-                std::sync::Arc::new(move |call: &Call| handler(call).0),
+                ::std::sync::Arc::new(move |call: &Call| handler(call).0),
             )
         }
     }
@@ -494,7 +498,7 @@ fn constructor(spec: StatusSpec, response: &Response, api: &Api, names: &Names) 
     };
     let (param, encode, codec) = match BodyCodec::of(api, ty, response.media) {
         BodyCodec::Bytes => (
-            quote! { body: impl Into<bytes::Bytes> },
+            quote! { body: impl Into<::bytes::Bytes> },
             quote! { super::Reply::octets(#status, body) },
             "raw octets",
         ),
@@ -599,7 +603,7 @@ paths:
             "pubfnstatus_4xx(status:u16,body:&types::ResponseBody)->Self{Self(super::Reply::text(super::Reply::in_range(status,4u16),body))}",
             "pubfndefault(status:u16)->Self{Self(super::Reply::new(status))}",
             "matchsupport::to_xml(body){Ok(xml)=>{super::Reply::encoded(200u16,\"application/xml\",xml.into())}",
-            "pubfnstatus_200(body:implInto<bytes::Bytes>)->Self{Self(super::Reply::octets(200u16,body))}",
+            "pubfnstatus_200(body:implInto<::bytes::Bytes>)->Self{Self(super::Reply::octets(200u16,body))}",
             "pubfnon_get_item(self,handler:implFn(&Call)->get_item::Reply+Send+Sync+'static,)->Self{self.route(super::ops::GET_ITEM.id,",
             "pubfnon_watch(self,handler:implFn(&Call)->watch::Reply+Send+Sync+'static,)->Self",
         ] {
