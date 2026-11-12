@@ -22,10 +22,11 @@ spargen = { path = "../../spargen", default-features = false }
 bytes = { version = "1.12.1", features = ["serde"] }
 http = "1.4.2"
 http-body = "1.0.1"
-reqwest = { version = "0.13.5", default-features = false, features = ["multipart"] }
+reqwest = { version = "0.13.5", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+url = "2.5.8"
 # The example's own dependency, not the generated client's: `main.rs` runs on tokio, and `time`
 # powers the bring-your-own retry wait (tokio::time::sleep) it feeds RetryBackend. The generated
 # client leaves timing to the caller.

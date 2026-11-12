@@ -132,8 +132,8 @@ there is no consuming package, and `spargen deps` covers that ground instead.
 
 Print the exact `[dependencies]` block generated output from this spec needs. Generated output is
 freestanding, so the consuming package declares its own runtime dependencies — and which ones
-depends on the API: multipart bodies pull in a `reqwest` feature, `format: uuid` pulls in `uuid`,
-sequential responses pull in `futures-core`. This answers that up front rather than one `E023` at a
+depends on the API: `format: uuid` pulls in `uuid`, sequential responses pull in `futures-core`
+and a `reqwest` feature. This answers that up front rather than one `E023` at a
 time.
 
 ```bash

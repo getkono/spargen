@@ -171,7 +171,6 @@ fn reserved_spellings_compile_together() {
         "with_default_server",
         "with_client",
         "with_backend",
-        "with_client_and_backend",
         "core",
         "with_credential",
         "without_credential",

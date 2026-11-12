@@ -447,8 +447,8 @@ paths:
   # multipart/form-data request body: the body is an object whose properties are the form
   # parts. `file` is `format: binary` → a `bytes::Bytes` file part; `caption` a required text part;
   # `count` an optional scalar text part; `tags` an optional array → a JSON-encoded text part. The
-  # generated method builds a `reqwest::multipart::Form` (compile-verifies the multipart emit AND that
-  # the synthesized Cargo.toml enabled reqwest's `multipart` feature and bytes' `serde` feature).
+  # generated method builds the runtime's `MultipartForm` (compile-verifies the multipart emit AND
+  # that the synthesized Cargo.toml enabled bytes' `serde` feature).
   /upload:
     post:
       operationId: uploadFile

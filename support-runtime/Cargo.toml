@@ -27,6 +27,9 @@ chrono = ["dep:chrono"]
 http.workspace = true
 http-body.workspace = true
 reqwest.workspace = true
+# The URL type a request is built on, and the one generated code names (`{op}_url`,
+# `ClientCore::base_url`, pagination links); reqwest re-exports this same crate.
+url.workspace = true
 futures-core = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true

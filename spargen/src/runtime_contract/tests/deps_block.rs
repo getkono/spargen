@@ -27,6 +27,7 @@ reqwest = {{ version = "0.13.5", default-features = false }}
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}
 serde_json = "1.0.151"
+url = "2.5.8"
 {BLOCKING_OPT_IN}"#
         )
     );
@@ -35,7 +36,6 @@ serde_json = "1.0.151"
 #[test]
 fn the_all_capability_dependency_block_is_printed_byte_for_byte() {
     let requirements = RuntimeRequirements {
-        reqwest_multipart: true,
         bytes_serde: true,
         streams: true,
         xml: true,
@@ -50,11 +50,12 @@ fn the_all_capability_dependency_block_is_printed_byte_for_byte() {
 bytes = {{ version = "1.12.1", features = ["serde"] }}
 http = "1.4.2"
 http-body = "1.0.1"
-reqwest = {{ version = "0.13.5", default-features = false, features = ["multipart", "stream"] }}
+reqwest = {{ version = "0.13.5", default-features = false, features = ["stream"] }}
 futures-core = "0.3.32"
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}
 serde_json = "1.0.151"
+url = "2.5.8"
 quick-xml = {{ version = "0.42.0", features = ["serialize"] }}
 uuid = {{ version = "1.24.0", features = ["serde"] }}
 time = {{ version = "0.3.55", features = ["formatting", "parsing"] }}
@@ -82,7 +83,7 @@ fn each_datetime_backend_prints_its_crate_and_passes_its_own_audit() {
         };
         let block = Requirements::new(&requirements).manifest_block();
         assert!(
-            block.contains(&format!("serde_json = \"1.0.151\"\n{line}")),
+            block.contains(&format!("url = \"2.5.8\"\n{line}")),
             "{block}"
         );
         assert!(!block.contains("time ="), "{block}");
@@ -127,7 +128,6 @@ fn the_printed_tokio_table_is_the_generated_blocking_gate() {
 fn the_printed_dependency_block_passes_the_audit_it_describes() {
     // Every capability on at once, so the table is exercised in full.
     let requirements = RuntimeRequirements {
-        reqwest_multipart: true,
         bytes_serde: true,
         streams: true,
         xml: true,

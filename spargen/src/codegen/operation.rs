@@ -201,7 +201,7 @@ pub(super) fn emit_operation(
             #url_statements
             let #url_binding = #build_url
                 .map_err(support::Error::widen)?;
-            let mut #request_binding = self.core.http().request(#reqwest_method, #url_binding);
+            let mut #request_binding = support::RequestBuilder::new(#reqwest_method, #url_binding);
             #(#headers)*
             #(#bound_headers)*
             #cookie_init
@@ -210,10 +210,8 @@ pub(super) fn emit_operation(
             #accept
             #body_send
             #attach_auth
-            let #request_binding = #request_binding
-                .build()
-                .map_err(support::Error::request_construction)?;
-            let mut #request_binding = support::prepare(&self.core, #request_binding, #streaming_arg)?;
+            let #request_binding = #request_binding.build()?;
+            let mut #request_binding = support::prepare(&self.core, #request_binding, #streaming_arg);
             #request_binding.extensions_mut().insert(ops::#operation_const);
             Ok((#request_binding, #replay_binding))
         }
@@ -444,7 +442,7 @@ pub(super) fn url_accessor_tokens(
         pub fn #url_ident(
             &self,
             #(#decls),*
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             #body
         }
     }

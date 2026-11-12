@@ -535,8 +535,7 @@ fn multipart_body_struct_has_typed_form_part_fields() {
     // parts. The binary `file` part is `bytes::Bytes` (its `serde` impls compile only because the
     // synthesized Cargo.toml enabled bytes' `serde` feature), `caption` a required `String`, and the
     // optional `count`/`tags` are `Option`. Constructing the value proves the field types; the
-    // generated `upload_file` method (compiled here) builds the `reqwest::multipart::Form` from it,
-    // which compiles only with reqwest's `multipart` feature enabled.
+    // generated `upload_file` method (compiled here) builds the runtime's `MultipartForm` from it.
     let body = basic_client::types::UploadFileBody {
         file: bytes::Bytes::from_static(b"hello"),
         caption: "a caption".to_owned(),
@@ -681,18 +680,11 @@ fn custom_http_backend_plugs_into_non_generic_client() {
     }
 
     let backend: std::sync::Arc<dyn basic_client::HttpBackend> = std::sync::Arc::new(TestBackend);
-    let _client =
-        basic_client::Client::with_backend(backend.clone(), "https://api.example.com").unwrap();
 
-    // Issue #1259: one shared `reqwest::Client` and one backend, both injected, so nothing is
-    // built per client; `with_base_url` repoints a derived value and keeps the backend.
-    let shared = reqwest::Client::new();
-    let both = basic_client::Client::with_client_and_backend(
-        shared.clone(),
-        backend.clone(),
-        "https://api.example.com",
-    )
-    .unwrap();
+    // Issues #1259 and #1287: one backend shared by many clients, and nothing else built per
+    // client; `with_base_url` repoints a derived value and keeps the backend.
+    let both =
+        basic_client::Client::with_backend(backend.clone(), "https://api.example.com").unwrap();
     assert!(std::sync::Arc::ptr_eq(both.core().backend(), &backend));
     let moved = both.clone().with_base_url("https://peer.example/v2/").unwrap();
     assert_eq!(moved.core().base_url().as_str(), "https://peer.example/v2/");

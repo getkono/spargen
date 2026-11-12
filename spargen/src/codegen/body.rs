@@ -42,7 +42,7 @@ pub(super) fn body_send_tokens(
             quote! {
                 #request_binding = #request_binding
                     .header(reqwest::header::CONTENT_TYPE, #content_type)
-                    .body(support::request_body(#body_binding).map_err(support::Error::widen)?);
+                    .body(#body_binding);
             }
         } else {
             quote! {
@@ -217,7 +217,7 @@ fn form_style_tokens(style: &crate::ir::ParamStyle) -> TokenStream {
     }
 }
 
-/// Emit the body send for a `multipart/form-data` request body: build a `reqwest::multipart::Form`
+/// Emit the body send for a `multipart/form-data` request body: build a `support::MultipartForm`
 /// from the typed body struct, one part per field in declaration order (part order is
 /// deterministic), and attach it to the request.
 ///
@@ -297,12 +297,12 @@ fn emit_multipart_body(
                     let style = form_style_tokens(style);
                     let add = match &extra_headers {
                         Some(extra_headers) => quote! {
-                            let mut part = reqwest::multipart::Part::text(value);
+                            let mut part = support::MultipartPart::text(value);
                             #extra_headers
                             form = form.part(#wire, part);
                         },
                         None => quote! {
-                            form = form.part(#wire, reqwest::multipart::Part::text(value));
+                            form = form.part(#wire, support::MultipartPart::text(value));
                         },
                     };
                     return quote! {
@@ -340,7 +340,7 @@ fn emit_multipart_body(
     });
     let additional = additional_parts_tokens(ty, object, api, names, body_binding, encoding);
     quote! {
-        let mut form = reqwest::multipart::Form::new();
+        let mut form = support::MultipartForm::new();
         #(#parts)*
         #additional
         #request_binding = #request_binding.multipart(form);
@@ -417,11 +417,11 @@ fn media_part_tokens(
         // A binary/bytes property → a file/bytes part carrying the raw bytes; a base64 newtype
         // reaches them through its `Deref`, so its part is the decoded bytes, not their text.
         Some(TypeKind::Bytes(_)) => quote! {
-            let mut part = reqwest::multipart::Part::bytes(#receiver.to_vec());
+            let mut part = support::MultipartPart::bytes(#receiver.to_vec());
         },
         // A scalar property → a text part rendered through `Display`.
         Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => quote! {
-            let mut part = reqwest::multipart::Part::text(#receiver.to_string());
+            let mut part = support::MultipartPart::text(#receiver.to_string());
         },
         // Codegen sees only a checked `Api`; JSON-encoding a reservation would pick a
         // part shape for a body nobody lowered.
@@ -430,7 +430,7 @@ fn media_part_tokens(
         ),
         // Any composite property → a JSON-encoded text part.
         _ => quote! {
-            let mut part = reqwest::multipart::Part::text(
+            let mut part = support::MultipartPart::text(
                 serde_json::to_string(#reference)
                     .map_err(support::Error::request_construction)?,
             );
@@ -444,11 +444,11 @@ fn set_part_type_tokens(mode: Option<&crate::ir::EncodingMode>) -> Option<TokenS
     let Some(crate::ir::EncodingMode::Media { content_type, .. }) = mode else {
         return None;
     };
-    // `mime_str` consumes the part, so a malformed content type from the spec surfaces as
-    // a request-construction error rather than being silently dropped.
+    // `mime_str` consumes the part, so a content type from the spec that is no header value
+    // surfaces as a request-construction error rather than being silently dropped.
     Some(quote! {
         part = part
             .mime_str(#content_type)
-            .map_err(support::Error::request_construction)?;
+            .map_err(support::Error::widen)?;
     })
 }

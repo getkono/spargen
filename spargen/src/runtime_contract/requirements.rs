@@ -5,7 +5,7 @@
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-use crate::ir::{Api, DateTimeBackend, MediaType, Prim, TypeKind};
+use crate::ir::{Api, DateTimeBackend, Prim, TypeKind};
 use crate::Spec;
 
 pub(super) const BYTES: Dependency = Dependency::new("bytes", "1.12.1", 2, 0);
@@ -22,6 +22,7 @@ pub(super) const TIME: Dependency = Dependency::new("time", "0.3.55", 0, 4);
 pub(super) const JIFF: Dependency = Dependency::new("jiff", "0.2.42", 0, 3);
 pub(super) const CHRONO: Dependency = Dependency::new("chrono", "0.4.45", 0, 5);
 pub(super) const TOKIO: Dependency = Dependency::new("tokio", "1.53.3", 2, 0);
+pub(super) const URL: Dependency = Dependency::new("url", "2.5.8", 3, 0);
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Dependency {
@@ -61,7 +62,6 @@ impl Dependency {
 /// The dependency capabilities referenced by one generated module.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RuntimeRequirements {
-    pub(crate) reqwest_multipart: bool,
     pub(crate) bytes_serde: bool,
     pub(crate) streams: bool,
     pub(crate) xml: bool,
@@ -74,12 +74,6 @@ impl RuntimeRequirements {
     pub(crate) fn for_api(api: &Api, spec: &Spec) -> Self {
         let features = api.runtime_features(spec.datetime);
         Self {
-            reqwest_multipart: api.operations.iter().any(|operation| {
-                operation
-                    .request_body
-                    .as_ref()
-                    .is_some_and(|body| body.media == MediaType::Multipart)
-            }),
             bytes_serde: api.uses_bytes_serde(),
             streams: features.streams,
             xml: features.xml,
@@ -160,13 +154,14 @@ pub(super) fn requirement_table(requirements: &RuntimeRequirements) -> Vec<Requi
     // `HttpBackend`, so both are unconditional.
     push(HTTP, NONE, false);
     push(HTTP_BODY, NONE, false);
+    // The default backend. A `multipart/form-data` body is encoded by the runtime itself, so only
+    // a sequential response needs a feature of it (`stream`, which `EventStream` reads through).
     push(
         REQWEST,
-        match (requirements.reqwest_multipart, requirements.streams) {
-            (true, true) => &["multipart", "stream"],
-            (true, false) => &["multipart"],
-            (false, true) => &["stream"],
-            (false, false) => NONE,
+        if requirements.streams {
+            &["stream"]
+        } else {
+            NONE
         },
         true,
     );
@@ -176,6 +171,9 @@ pub(super) fn requirement_table(requirements: &RuntimeRequirements) -> Vec<Requi
     push(SECRECY, NONE, false);
     push(SERDE, &["derive"], false);
     push(SERDE_JSON, NONE, false);
+    // The URL every request is built on, and the type `{op}_url`, `ClientCore::base_url` and
+    // pagination name: unconditional, like the seam's `http`.
+    push(URL, NONE, false);
     if requirements.xml {
         push(QUICK_XML, &["serialize"], false);
     }

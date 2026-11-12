@@ -29,6 +29,7 @@ reqwest.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+url.workspace = true
 "#,
     )
     .unwrap();

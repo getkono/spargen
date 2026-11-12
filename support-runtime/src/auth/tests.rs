@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::{ClientCore, Error, RequestError};
+use crate::{ClientCore, Error, RequestBuilder, RequestError};
 
 use super::{
     attach_auth, attach_auth_replayable, replay_rejected, token_provider, AuthError, AuthKind,
@@ -11,9 +11,13 @@ use super::{
 };
 use crate::tests::{core, poll_ready, Reply, SequenceBackend};
 
-fn get(core: &ClientCore) -> reqwest::RequestBuilder {
-    core.http()
-        .request(reqwest::Method::GET, "https://example.com/op")
+fn get(core: &ClientCore) -> RequestBuilder {
+    request_to(core, reqwest::Method::GET, "https://example.com/op")
+}
+
+/// A builder for a `method` request to `url`, resolved against the core's base URL.
+fn request_to(core: &ClientCore, method: reqwest::Method, url: &str) -> RequestBuilder {
+    RequestBuilder::new(method, core.base_url().join(url).expect("a valid URL"))
 }
 
 const BEARER: &[AuthScheme] = &[AuthScheme {
@@ -95,7 +99,7 @@ fn attaches_provider_token_under_every_api_key_kind() {
     .unwrap()
     .build()
     .unwrap();
-    assert_eq!(query.url().query(), Some("api_key=fresh"));
+    assert_eq!(query.uri().query(), Some("api_key=fresh"));
 
     let cookie = poll_ready(attach_auth(
         &core,
@@ -174,14 +178,13 @@ fn a_cookie_api_key_joins_the_cookie_header_the_request_already_carries() {
     assert!(cookies[0].is_sensitive());
 }
 
-/// A request builder that already failed carries its error to the caller as the
-/// request-construction error `build` would have raised, rather than losing it while the cookie
-/// is merged.
+/// A request builder that already failed keeps its error for `build` to report as a
+/// request-construction error, rather than losing it while the cookie is merged.
 #[test]
 fn a_cookie_api_key_on_a_failed_builder_reports_request_construction() {
     let mut core = core();
     core.set_credential("key", Credential::ApiKey(SecretString::from("k3y")));
-    let request = core.http().request(reqwest::Method::GET, "not a url");
+    let request = get(&core).header("not a header name", "x");
     let error = poll_ready(attach_auth(
         &core,
         request,
@@ -190,6 +193,8 @@ fn a_cookie_api_key_on_a_failed_builder_reports_request_construction() {
             kind: AuthKind::ApiKeyCookie("SESSION"),
         }]],
     ))
+    .unwrap()
+    .build()
     .unwrap_err();
     assert!(
         matches!(error, Error::RequestConstruction(RequestError::Other(_))),
@@ -215,18 +220,16 @@ fn attaches_api_key_query_from_first_satisfiable_alternative() {
     .unwrap()
     .build()
     .unwrap();
-    assert_eq!(request.url().query(), Some("api_key=k3y"));
+    assert_eq!(request.uri().query(), Some("api_key=k3y"));
 }
 
-/// The key joins the query the operation already built, form-encoded as reqwest's
-/// `RequestBuilder::query` encoded it.
+/// The key joins the query the operation already built, form-encoded as
+/// `application/x-www-form-urlencoded` encodes it.
 #[test]
 fn a_query_api_key_joins_the_existing_query_form_encoded() {
     let mut core = core();
     core.set_credential("key", Credential::ApiKey(SecretString::from("a b&c=d+é")));
-    let request = core
-        .http()
-        .request(reqwest::Method::GET, "https://example.com/op?page=2");
+    let request = request_to(&core, reqwest::Method::GET, "https://example.com/op?page=2");
     let request = poll_ready(attach_auth(
         &core,
         request,
@@ -239,7 +242,7 @@ fn a_query_api_key_joins_the_existing_query_form_encoded() {
     .build()
     .unwrap();
     assert_eq!(
-        request.url().query(),
+        request.uri().query(),
         Some("page=2&api+key=a+b%26c%3Dd%2B%C3%A9")
     );
 }
@@ -250,7 +253,7 @@ fn a_query_api_key_joins_the_existing_query_form_encoded() {
 fn a_query_api_key_on_a_failed_builder_reports_request_construction() {
     let mut core = core();
     core.set_credential("key", Credential::ApiKey(SecretString::from("k3y")));
-    let request = core.http().request(reqwest::Method::GET, "not a url");
+    let request = get(&core).header("not a header name", "x");
     let error = poll_ready(attach_auth(
         &core,
         request,
@@ -259,6 +262,8 @@ fn a_query_api_key_on_a_failed_builder_reports_request_construction() {
             kind: AuthKind::ApiKeyQuery("api_key"),
         }]],
     ))
+    .unwrap()
+    .build()
     .unwrap_err();
     assert!(
         matches!(error, Error::RequestConstruction(RequestError::Other(_))),
@@ -292,7 +297,7 @@ fn no_requirement_attaches_nothing() {
         .build()
         .unwrap();
     assert!(request.headers().is_empty(), "{:?}", request.headers());
-    assert_eq!(request.url().query(), None);
+    assert_eq!(request.uri().query(), None);
 }
 
 #[test]
@@ -670,7 +675,7 @@ fn removing_the_selected_credential_falls_through_to_a_later_alternative() {
         .unwrap()
         .build()
         .unwrap();
-    assert_eq!(request.url().query(), Some("api_key=k3y"));
+    assert_eq!(request.uri().query(), Some("api_key=k3y"));
     assert!(request.headers().get("authorization").is_none());
 
     // Removing every alternative's scheme leaves nothing satisfiable: the call fails as
@@ -720,7 +725,7 @@ fn both_static_token_variants_attach_under_every_token_kind_and_neither_under_ba
             .unwrap()
             .build()
             .unwrap();
-        assert_eq!(query.url().query(), Some("api_key=t0k"), "{registered}");
+        assert_eq!(query.uri().query(), Some("api_key=t0k"), "{registered}");
         let cookie = attach(AuthKind::ApiKeyCookie("SESSION"))
             .unwrap()
             .build()
@@ -871,19 +876,68 @@ fn an_api_key_that_is_not_a_header_value_fails_as_request_construction() {
     }
 }
 
-/// A bearer token a header value refuses is handed to reqwest's `bearer_auth`, which records the
-/// failure in the builder: `attach_auth` succeeds, and building the request fails, so it is
-/// still never sent.
+/// A bearer token a header value refuses fails the call as a request-construction error while the
+/// credential is attached, so the request is never sent; an `http basic` password likewise.
 #[test]
-fn a_bearer_token_that_is_not_a_header_value_fails_at_build() {
+fn a_credential_that_is_not_a_header_value_fails_before_send() {
     let mut core = core();
     core.set_credential(
         "token",
         Credential::Bearer(SecretString::from("t0k\nX-Evil: 1")),
     );
-    let builder = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap();
-    let error = builder.build().unwrap_err();
-    assert!(error.is_builder(), "{error:?}");
+    let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
+    assert!(
+        matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+        "{error:?}"
+    );
+}
+
+/// An `http basic` credential is sent as `Basic` and the RFC 4648 base64 of `username:password`
+/// (RFC 7617 §2), marked sensitive; each padding length is right.
+#[test]
+fn a_basic_credential_is_base64_of_user_colon_password() {
+    for (username, password, expected) in [
+        (
+            "Aladdin",
+            "open sesame",
+            "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+        ),
+        ("a", "b", "Basic YTpi"),
+        ("ab", "c", "Basic YWI6Yw=="),
+        ("ab", "cd", "Basic YWI6Y2Q="),
+        ("", "", "Basic Og=="),
+    ] {
+        let mut core = core();
+        core.set_credential(
+            "basic",
+            Credential::Basic {
+                username: username.to_owned(),
+                password: SecretString::from(password),
+            },
+        );
+        let request = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "basic",
+                kind: AuthKind::Basic,
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        let header = &request.headers()[http::header::AUTHORIZATION];
+        assert_eq!(header, expected);
+        assert!(header.is_sensitive());
+    }
+    assert_eq!(super::base64_encode(b""), "");
+    assert_eq!(super::base64_encode(b"f"), "Zg==");
+    assert_eq!(super::base64_encode(b"fo"), "Zm8=");
+    assert_eq!(super::base64_encode(b"foo"), "Zm9v");
+    assert_eq!(super::base64_encode(b"foob"), "Zm9vYg==");
+    assert_eq!(super::base64_encode(b"fooba"), "Zm9vYmE=");
+    assert_eq!(super::base64_encode(b"foobar"), "Zm9vYmFy");
+    assert_eq!(super::base64_encode(&[0xfb, 0xff]), "+/8=");
 }
 
 #[test]
@@ -970,7 +1024,7 @@ fn a_credential_registered_under_a_mutual_tls_scheme_never_reaches_a_token_provi
         "a mutualTLS scheme must never invoke a token provider"
     );
     assert!(request.headers().is_empty(), "{:?}", request.headers());
-    assert_eq!(request.url().query(), None, "{}", request.url());
+    assert_eq!(request.uri().query(), None, "{}", request.uri());
 }
 
 /// `Debug` is hand-written so a credential cannot reach a log. Every arm is pinned, `Basic`
@@ -1069,7 +1123,7 @@ fn refreshable(calls: &Arc<Calls>, refreshed: Option<&'static str>) -> Credentia
 /// the response to [`replay_rejected`]. Returns the response and the body read from it.
 fn call(
     core: &ClientCore,
-    request: reqwest::RequestBuilder,
+    request: RequestBuilder,
     requirements: &[&[AuthScheme]],
 ) -> (u16, http::HeaderMap, String) {
     let (request, replay) =
@@ -1361,7 +1415,6 @@ fn an_alternative_without_a_refreshable_credential_has_no_replay() {
 
 /// A streaming upload is read once, so there is nothing to replay: the rejected response is the
 /// call's answer, and the check is never asked.
-#[cfg(feature = "stream")]
 #[test]
 fn a_request_whose_body_cannot_be_cloned_is_not_replayed() {
     use crate::tests::{Chunk, Chunks};
@@ -1370,10 +1423,8 @@ fn a_request_whose_body_cannot_be_cloned_is_not_replayed() {
     let mut core = core_over(&backend);
     let calls = Arc::new(Calls::default());
     core.set_credential("token", refreshable(&calls, Some("fresh")));
-    let upload = core
-        .http()
-        .request(reqwest::Method::POST, "https://example.com/op")
-        .body(reqwest::Body::wrap_stream(Chunks::new([Chunk::data("ab")])));
+    let upload = request_to(&core, reqwest::Method::POST, "https://example.com/op")
+        .body(crate::HttpBody::wrap(Chunks::new([Chunk::data("ab")])));
 
     let (status, _, body) = call(&core, upload, &[BEARER]);
     assert_eq!((status, body.as_str()), (401, "expired"));

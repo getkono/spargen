@@ -458,7 +458,7 @@ paths:
             "letreplay;(request,replay)=support::attach_auth_replayable(&self.core,request,\
              &[&[support::AuthScheme{name:\"token\",kind:support::AuthKind::Bearer,},][..],],)\
              .await.map_err(support::Error::widen)?;",
-            "letmutrequest=support::prepare(&self.core,request,false)?;\
+            "letrequest=request.build()?;letmutrequest=support::prepare(&self.core,request,false);\
              request.extensions_mut().insert(ops::GET_XML);Ok((request,replay))",
             "letresponse=support::execute(&self.core,request,replay,false).await\
              .map_err(support::Error::widen)?;self.decode_get_xml(response).await}",

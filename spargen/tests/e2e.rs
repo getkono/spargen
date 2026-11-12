@@ -426,10 +426,11 @@ futures-core = "{futures_core}"
 http = "{http}"
 http-body = "{http_body}"
 quick-xml = {{ version = "{quick_xml}", features = ["serialize"] }}
-reqwest = {{ version = "{reqwest}", default-features = false, features = ["multipart", "stream"] }}
+reqwest = {{ version = "{reqwest}", default-features = false, features = ["stream"] }}
 secrecy = "{secrecy}"
 serde = {{ version = "{serde}", features = ["derive"] }}
 serde_json = "{serde_json}"
+url = "{url}"
 uuid = {{ version = "{uuid}", features = ["serde"] }}
 time = {{ version = "{time}", features = ["formatting", "parsing"] }}
 
@@ -445,6 +446,7 @@ tokio = {{ version = "{tokio}", features = ["rt"], optional = true }}
             secrecy = runtime_floor("secrecy"),
             serde = runtime_floor("serde"),
             serde_json = runtime_floor("serde_json"),
+            url = runtime_floor("url"),
             uuid = runtime_floor("uuid"),
             time = runtime_floor("time"),
             tokio = runtime_floor("tokio"),
@@ -488,10 +490,10 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
     let lock: toml::Value =
         toml::from_str(&std::fs::read_to_string(out.join("Cargo.lock")).unwrap()).unwrap();
     let packages = lock["package"].as_array().unwrap();
-    // Every floor the requirement table states: the twelve crates the fixture manifest declares, so
+    // Every floor the requirement table states: the thirteen crates the fixture manifest declares, so
     // the proof cannot pass by the table having shrunk, and a crate added to it fails here until
     // the fixture declares it too.
-    assert_eq!(runtime_floors().len(), 12, "{:#?}", runtime_floors());
+    assert_eq!(runtime_floors().len(), 13, "{:#?}", runtime_floors());
     for (&name, &expected) in runtime_floors() {
         assert!(
             packages.iter().any(|package| {
@@ -680,8 +682,9 @@ mod shapes;
 #[path = "e2e/wire.rs"]
 mod wire;
 
-/// A spec that turns on every capability the requirement table knows: a multipart body
-/// (`reqwest/multipart`), a binary array inside a JSON body (`bytes/serde`), an XML body
+/// A spec that turns on every capability the requirement table knows, beside a multipart body,
+/// which the runtime encodes itself and so requires nothing: a binary array inside a JSON body
+/// (`bytes/serde`), an XML body
 /// (`quick-xml`), an event stream (`futures-core` + `reqwest/stream`), `format: uuid` (`uuid`) and
 /// `format: date-time` (`time`). The advice round trip below is only as strong as the set it
 /// round-trips, so it asserts this spec really derives all of them.

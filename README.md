@@ -99,7 +99,7 @@ the version it emits, and the idioms spargen handles.
   description declares a server, and only `BlockingClient` emits `inner`; both names are reserved
   on both clients regardless, so declaring a server never renames an operation.
 - Beside each operation method, a `{method}_url` accessor on both clients returns, as
-  `Result<reqwest::Url, Error<Infallible>>`, the URL that method sends its request to, less any
+  `Result<url::Url, Error<Infallible>>`, the URL that method sends its request to, less any
   `apiKey` query credential, without sending it: the same path-parameter and query encoding,
   resolved against the base URL or the operation's server override. It takes the required path,
   query and `querystring` parameters and, where it holds one of those, the `…Params` bundle; it

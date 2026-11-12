@@ -23,6 +23,7 @@ reqwest = { version = "0.13.5", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+url = "2.5.8"
 
 [workspace]
 "#,
@@ -148,6 +149,7 @@ reqwest = { version = "0.13.5", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+url = "2.5.8"
 "#;
     let temp = tempfile::tempdir().unwrap();
     let manifest = temp.path().join("Cargo.toml");
@@ -231,6 +233,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["stream"] 
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+url = "2.5.8"
 futures-core = "0.3.32"
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
 "#,
@@ -250,6 +253,7 @@ reqwest = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+url = { workspace = true }
 futures-core = { workspace = true }
 uuid = { workspace = true }
 "#,
@@ -511,21 +515,18 @@ fn workspace_inheritance_audit_agrees_with_cargo() {
     let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
     std::fs::write(
         &spec,
-        r##"openapi: 3.1.0
+        r##"openapi: 3.2.0
 info: { title: Inherited, version: 1.0.0 }
 paths:
-  /upload:
-    post:
-      operationId: upload
-      requestBody:
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              properties:
-                name: { type: string }
+  /events:
+    get:
+      operationId: streamEvents
       responses:
-        "204": { description: ok }
+        "200":
+          description: events
+          content:
+            text/event-stream:
+              itemSchema: { type: object, properties: { name: { type: string } } }
 "##,
     )
     .unwrap();
@@ -540,7 +541,7 @@ paths:
         .find(|dependency| dependency.name == "reqwest")
         .unwrap();
     assert!(
-        reqwest.no_default_features && reqwest.features.contains(&"multipart"),
+        reqwest.no_default_features && reqwest.features.contains(&"stream"),
         "the cases below need a required feature and a required `default-features = false`: \
          {requirements:#?}"
     );
@@ -639,7 +640,7 @@ paths:
             member: &[
                 (
                     "reqwest",
-                    r#"reqwest = { workspace = true, features = ["multipart"] }"#,
+                    r#"reqwest = { workspace = true, features = ["stream"] }"#,
                 ),
                 (
                     "serde",
@@ -661,7 +662,7 @@ paths:
                 "the member's default-features = false cannot turn off defaults the root leaves on",
             root: &[(
                 "reqwest",
-                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["multipart"] }"#,
+                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["stream"] }"#,
             )],
             member: &[(
                 "reqwest",
@@ -673,7 +674,7 @@ paths:
             name: "the same override, refused outright on edition 2024",
             root: &[(
                 "reqwest",
-                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["multipart"] }"#,
+                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["stream"] }"#,
             )],
             member: &[(
                 "reqwest",
@@ -925,14 +926,9 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
             .features
             .clone()
     };
-    for feature in ["multipart", "stream"] {
-        assert!(
-            features_of("reqwest").contains(&feature),
-            "{requirements:#?}"
-        );
-    }
+    assert_eq!(features_of("reqwest"), ["stream"], "{requirements:#?}");
     assert!(features_of("bytes").contains(&"serde"), "{requirements:#?}");
-    for crate_name in ["futures-core", "quick-xml", "uuid", "time", "tokio"] {
+    for crate_name in ["futures-core", "quick-xml", "uuid", "time", "tokio", "url"] {
         features_of(crate_name);
     }
 
@@ -1104,6 +1100,7 @@ reqwest = { version = "0.13.5", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+url = "2.5.8"
 uuid = { version = "1.24.0", features = ["serde"], optional = true }
 
 [workspace]
@@ -1216,6 +1213,7 @@ reqwest = {{ version = "0.13.5", default-features = false }}
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}
 serde_json = "1.0.151"
+url = "2.5.8"
 
 [build-dependencies]
 spargen = {{ path = {spargen_path:?}, default-features = false }}

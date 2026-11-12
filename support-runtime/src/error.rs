@@ -80,7 +80,7 @@ pub enum Error<E> {
     /// would never end. Every page before it was yielded; nothing was sent for `url`.
     PaginationCycle {
         /// The revisited URL the `next` link resolved to.
-        url: reqwest::Url,
+        url: url::Url,
     },
     /// #12 — a non-streaming operation's response body exceeded the limit the call was made
     /// under: [`crate::RequestOptions::max_body`], or for a success body
@@ -108,34 +108,6 @@ impl<E> Error<E> {
         Self::RequestConstruction(RequestError::Other(RequestCause(Box::new(MessageError(
             message.into(),
         )))))
-    }
-
-    /// Classify a reqwest error into the closest runtime taxonomy class.
-    ///
-    /// reqwest reports every failure of the send itself as a request-kind error, a refused
-    /// connection, an unresolvable host, and a failed TLS handshake included. Those are asked for
-    /// first (`is_connect`) and become [`Error::Transport`]; only the request-kind errors that are
-    /// not connection failures stay [`Error::RequestConstruction`]. reqwest offers no connect
-    /// classification on `wasm32`, where the browser's fetch reports failures opaquely, so there
-    /// every request-kind error stays [`Error::RequestConstruction`].
-    ///
-    /// A timeout is asked for before any of those, and the same connect discriminator splits it:
-    /// one raised while establishing the connection (the client's `connect_timeout`, which bounds
-    /// name resolution, the TCP handshake, and TLS, or the operating system's own handshake
-    /// timeout) is [`TimeoutKind::Connect`]; every other one,
-    /// the total-request budget elapsing during the connect included, is [`TimeoutKind::Total`].
-    /// On `wasm32` every timeout is `Total`, for the reason above.
-    ///
-    /// A builder-kind error is reqwest refusing the request before sending anything, and it
-    /// becomes [`Error::RequestConstruction`] wherever reqwest raises it: from
-    /// `RequestBuilder::build`, or from `execute` on a request that built fine — a URL whose
-    /// scheme is not `http`/`https`, plain `http` on an `https_only` client, or a URL that is not
-    /// a valid URI. Re-sending it is refused again, so it is not transient.
-    ///
-    /// This is [`TransportError::from_reqwest`]'s classification, read as the variant
-    /// [`crate::send`] maps that transport error to.
-    pub fn from_reqwest(error: reqwest::Error) -> Self {
-        Self::from_transport(TransportError::from_reqwest(error))
     }
 
     /// The taxonomy variant a backend's [`TransportError`] stands for: the class its constructor
@@ -636,7 +608,7 @@ pub enum RequestError {
     /// already have acted on it. This variant is therefore the one place in taxonomy #1 where "the
     /// request was never sent" does not hold, and a caller that retries on it must treat the call
     /// as possibly-already-applied. A connection that was never established is classified apart,
-    /// as [`Error::from_reqwest`] describes.
+    /// as [`TransportError::from_reqwest`] describes.
     ///
     /// After a response was accepted: when the API has streaming (sequential) responses, the
     /// embedded `EventStream` raises this when the stored request cannot be cloned for an
@@ -728,8 +700,29 @@ impl TransportError {
         Self::new(TransportClass::Interrupted, source)
     }
 
-    /// Classify a `reqwest::Error` from executing a request, keeping it as the source. This is
-    /// the classification [`Error::from_reqwest`] documents.
+    /// Classify a `reqwest::Error` from executing a request into the closest runtime taxonomy
+    /// class, keeping it as the source. Each class is named below by the [`Error`] variant
+    /// [`crate::send`] maps it to.
+    ///
+    /// reqwest reports every failure of the send itself as a request-kind error, a refused
+    /// connection, an unresolvable host, and a failed TLS handshake included. Those are asked for
+    /// first (`is_connect`) and become [`Error::Transport`]; only the request-kind errors that are
+    /// not connection failures stay [`Error::RequestConstruction`]. reqwest offers no connect
+    /// classification on `wasm32`, where the browser's fetch reports failures opaquely, so there
+    /// every request-kind error stays [`Error::RequestConstruction`].
+    ///
+    /// A timeout is asked for before any of those, and the same connect discriminator splits it:
+    /// one raised while establishing the connection (the client's `connect_timeout`, which bounds
+    /// name resolution, the TCP handshake, and TLS, or the operating system's own handshake
+    /// timeout) is [`TimeoutKind::Connect`]; every other one,
+    /// the total-request budget elapsing during the connect included, is [`TimeoutKind::Total`].
+    /// On `wasm32` every timeout is `Total`, for the reason above.
+    ///
+    /// A builder-kind error is reqwest refusing the request before sending anything, and it
+    /// becomes [`Error::RequestConstruction`] wherever reqwest raises it: from `execute` on a
+    /// request it was handed — a URL whose scheme is not `http`/`https`, plain `http` on an
+    /// `https_only` client, or a URI that is not a URL. Re-sending it is refused again, so it is
+    /// not transient.
     pub fn from_reqwest(error: reqwest::Error) -> Self {
         Self::new(TransportClass::of(&error), error)
     }
@@ -865,7 +858,7 @@ pub enum TimeoutKind {
     /// The connect timeout: no connection was established in time — the client's
     /// `connect_timeout` (which covers name resolution, the TCP handshake, and TLS) elapsed, or
     /// the operating system gave up on the handshake. Never reported on `wasm32`; see
-    /// [`Error::from_reqwest`].
+    /// [`TransportError::from_reqwest`].
     Connect,
     /// Every other timeout: the client's total-request `timeout` elapsed, whichever phase the
     /// request was in (connecting included), or a `read_timeout` elapsed on an established

@@ -64,6 +64,10 @@ pub(crate) fn runtime_files() -> &'static [SupportFile] {
             contents: include_str!("runtime/paginate.rs"),
         },
         SupportFile {
+            name: "request.rs",
+            contents: include_str!("runtime/request.rs"),
+        },
+        SupportFile {
             name: "response.rs",
             contents: include_str!("runtime/response.rs"),
         },

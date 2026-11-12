@@ -89,9 +89,10 @@ reqwest = { version = "0.13.5", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+url = "2.5.8"
 "#;
 
-/// The seven core dependencies as a `[workspace.dependencies]` body, reusing `CORE_MANIFEST` so
+/// The eight core dependencies as a `[workspace.dependencies]` body, reusing `CORE_MANIFEST` so
 /// the floors in these fixtures cannot drift from the ones every other test audits against.
 fn core_workspace_dependencies() -> &'static str {
     CORE_MANIFEST.split_once("[dependencies]\n").unwrap().1
@@ -160,6 +161,7 @@ reqwest.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+url.workspace = true
 ";
 
 /// A build-script environment as Cargo sets it: `TARGET` plus `CARGO_CFG_*`, each `(cfg,

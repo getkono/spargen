@@ -2,15 +2,15 @@
 
 The runtime support code is embedded into generated output as a private `support` module — no
 spargen crate ever enters a consumer's dependency graph. Its core dependency set is `reqwest`
-(default features off) / `http` / `http-body` / `serde` / `serde_json` / `bytes` / `secrecy`;
-`http` and `http-body` carry the [transport seam](#the-transport-seam)'s request, response and body
-types. A capability that needs more
+(default features off) / `http` / `http-body` / `url` / `serde` / `serde_json` / `bytes` /
+`secrecy`; `http` and `http-body` carry the [transport seam](#the-transport-seam)'s request,
+response and body types, and `url` the URL a request is built on. A capability that needs more
 adds it only when the compiled API uses it, as this table lists; each crate's exact Cargo features
-are in the contract linked below:
+are in the contract linked below. A `multipart/form-data` request body is encoded by the runtime
+itself, so it adds nothing:
 
 | Capability | Adds |
 | --- | --- |
-| `multipart/form-data` request bodies | reqwest's `multipart` feature |
 | A raw `bytes` value serde encodes (a `format: binary` value in a model, a JSON `content` parameter, or a serde-encoded body; a [`contentEncoding: base64`](#binary-content) one carries its own codec) | `bytes`' `serde` feature |
 | [Streaming](#streaming) (sequential responses) | `futures-core` and reqwest's `stream` feature |
 | [XML bodies](#xml-bodies) | `quick-xml` |
@@ -43,7 +43,9 @@ building, auth attachment, decode, streaming, pagination — operates on the req
 untouched. The generated `Client` holds an `Arc<dyn HttpBackend>` (not a type parameter), and async
 methods return a manually boxed future rather than using `async-trait`.
 
-The currency is the `http` crate's types, so a backend need not be built on reqwest. `HttpBody` is
+The currency is the `http` crate's types, so a backend need not be built on reqwest. The runtime
+builds every request itself, as an `http::Request<HttpBody>`, a `multipart/form-data` body
+included, so no HTTP client is built to build requests, whichever backend executes them. `HttpBody` is
 the runtime's own body: bytes in memory, which clone (so a request can be retried or a stream
 reconnected), or any `http_body::Body` adopted with `HttpBody::wrap`, which streams and is read
 once. A backend reports a failure as a `TransportError` built with the constructor naming its
@@ -56,12 +58,12 @@ response back, an in-memory body moving across without a copy off wasm, and clas
 failures exactly as executing on the client directly always has. On `wasm32` it runs reqwest's
 `fetch` backend, which sends no streaming request body. The retry and middleware adapters below
 are themselves `HttpBackend`s that wrap an inner backend, so they compose by nesting.
-`Client::with_backend(backend, base_url)` takes the outermost one as an `Arc<dyn HttpBackend>`;
-requests are still built on a default `reqwest::Client`, which each call builds, and only the
-execute step goes through the backend. `Client::with_client_and_backend(client, backend, base_url)`
-takes both pieces instead, so clients that share one `reqwest::Client` and one backend build
-neither. `client.clone().with_base_url(url)?` derives a client value repointed at another base
-URL, keeping its `reqwest::Client`, backend, configuration and credentials.
+`Client::with_backend(backend, base_url)` takes the outermost one as an `Arc<dyn HttpBackend>`
+and builds nothing else, so clients that share one backend share everything they send through.
+`Client::with_client(client, base_url)` is the same as
+`Client::with_backend(Arc::new(ReqwestBackend::new(client)), base_url)`.
+`client.clone().with_base_url(url)?` derives a client value repointed at another base URL, keeping
+its backend, configuration and credentials.
 
 Every operation method is its two halves around that step: `client.{method}_request(..)` builds,
 without sending it, exactly the `http::Request<HttpBody>` the method hands the backend, and
@@ -87,9 +89,11 @@ defaults are deliberately generous, for an application to tighten or loosen:
 
 Each one that elapses fails the request with `Error::Timeout`, which is transient. Set them with
 `Client::with_config(base_url, |config| { … })`, which hands the configuration over before the
-client's `reqwest::Client` is built from the connect and read timeouts. The total `timeout` is
-applied to each request as it is sent, and an operation returning an `EventStream` never applies
-it, since a stream may rightly stay open indefinitely. An event stream whose server sends nothing for longer than
+`reqwest::Client` the default backend runs on is built from the connect and read timeouts. The
+total `timeout` is applied to each request as it is sent, as a `TotalTimeout` extension the
+backend enforces (`ReqwestBackend` does, and a backend of your own reads it from the request), and
+an operation returning an `EventStream` never applies it, since a stream may rightly stay open
+indefinitely. An event stream whose server sends nothing for longer than
 `read_timeout` still fails with `Error::Timeout`, which a reconnect policy may answer.
 
 `Client::with_timeout(Option<Duration>)` (and `BlockingClient::with_timeout`) sets the total
@@ -100,8 +104,7 @@ the connect and read timeouts still apply, and so does a total timeout configure
 `reqwest::Client` injected with `with_client`, which reqwest lets a request shorten or lengthen
 but not lift. An operation returning an `EventStream` is exempt, as it is from `timeout`.
 
-`Client::with_client`, `Client::with_backend` and `Client::with_client_and_backend` run on the
-default configuration, whose total
+`Client::with_client` and `Client::with_backend` run on the default configuration, whose total
 `timeout` is none, and leave connecting and reading to what they were given: the caller's
 `reqwest::Client` keeps its own timeouts, and a backend bounds requests however it bounds them.
 On `wasm32`, reqwest's `fetch` backend has no connect or read timeout, so only the total `timeout`

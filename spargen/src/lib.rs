@@ -197,8 +197,8 @@ pub mod __private {
 /// The dependency tables generated output from `spec` requires — what backs `spargen deps`.
 ///
 /// Generated output is freestanding, so the consuming package declares its own runtime
-/// dependencies. Which ones depends on the API: multipart bodies pull in a `reqwest` feature,
-/// `format: uuid` pulls in `uuid`, sequential responses pull in `futures-core`. This returns the
+/// dependencies. Which ones depends on the API: `format: uuid` pulls in `uuid`, sequential
+/// responses pull in `futures-core` and a `reqwest` feature. This returns the
 /// whole set before a build, rather than leaving `E023` to report what the consuming package
 /// lacks.
 ///

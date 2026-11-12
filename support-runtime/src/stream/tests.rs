@@ -518,8 +518,11 @@ impl ReconnectPolicy for ImmediateReconnect {
 }
 
 /// `request` as a streaming operation sends it and keeps it to reconnect: prepared on `core`.
-fn prepared(core: &ClientCore, request: reqwest::Request) -> Option<http::Request<HttpBody>> {
-    Some(crate::prepare(core, request, true).unwrap())
+fn prepared(
+    core: &ClientCore,
+    request: http::Request<HttpBody>,
+) -> Option<http::Request<HttpBody>> {
+    Some(crate::prepare(core, request, true))
 }
 
 fn reconnectable_stream(
@@ -538,9 +541,7 @@ fn reconnectable_stream_over(
     policy: Arc<ImmediateReconnect>,
 ) -> EventStream<serde_json::Value> {
     let core = ClientCore::with_backend(backend, "https://example.com").unwrap();
-    let request = core
-        .http()
-        .request(Method::GET, "https://example.com/events")
+    let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .header(reqwest::header::COOKIE, "session=secret")
         .build()
         .unwrap();
@@ -622,9 +623,7 @@ fn a_reconnect_carries_the_cores_option_headers_and_extensions() {
     options.headers.insert("x-option", "set".parse().unwrap());
     options.extensions.insert(Tag(7));
     core.set_options(options);
-    let request = core
-        .http()
-        .request(Method::GET, "https://example.com/events")
+    let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .build()
         .unwrap();
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
@@ -695,9 +694,7 @@ fn an_unsendable_sse_id_reconnects_without_last_event_id() {
         ..ImmediateReconnect::default()
     });
     let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
-    let request = core
-        .http()
-        .request(Method::GET, "https://example.com/events")
+    let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .header("last-event-id", "evt-0")
         .header(reqwest::header::COOKIE, "session=secret")
         .build()
@@ -739,9 +736,7 @@ fn an_empty_sse_id_reconnects_without_last_event_id() {
         ..ImmediateReconnect::default()
     });
     let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
-    let request = core
-        .http()
-        .request(Method::GET, "https://example.com/events")
+    let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .header("last-event-id", "evt-0")
         .header(reqwest::header::COOKIE, "session=secret")
         .build()
@@ -813,9 +808,7 @@ fn a_rejected_reconnect_outlives_its_core_and_keeps_its_error_body_cap() {
     });
     let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
     core.config_mut().max_error_body = 4;
-    let request = core
-        .http()
-        .request(Method::GET, "https://example.com/events")
+    let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .build()
         .unwrap();
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
@@ -991,13 +984,13 @@ fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
         ..ImmediateReconnect::default()
     });
     let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
-    let request = core
-        .http()
-        .request(Method::POST, "https://example.com/events")
-        .body(reqwest::Body::wrap(reqwest::Body::from("one-shot")))
+    let request = crate::tests::builder(Method::POST, "https://example.com/events")
+        .body(crate::HttpBody::wrap(Chunks::new([Chunk::data(
+            "one-shot",
+        )])))
         .build()
         .unwrap();
-    assert!(request.try_clone().is_none());
+    assert!(crate::try_clone_request(&request).is_none());
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response(""),
         Framing::SseJsonData,
@@ -1145,9 +1138,7 @@ fn sse_frames_the_event_behind_one_that_dispatches_nothing() {
 #[test]
 fn a_reconnectable_stream_starts_from_the_requests_last_event_id() {
     let core = core();
-    let request = core
-        .http()
-        .request(Method::GET, "https://example.com/events")
+    let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .header("last-event-id", "evt-0")
         .build()
         .unwrap();
@@ -1238,9 +1229,7 @@ fn bounded_stream(
     let mut core = ClientCore::with_backend(backend, "https://example.com").unwrap();
     core.config_mut().max_stream_frame = max_stream_frame;
     core.config_mut().max_error_body = 4;
-    let request = core
-        .http()
-        .request(Method::GET, "https://example.com/events")
+    let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .build()
         .unwrap();
     match EventStream::new_reconnectable(response(body), framing, &core, prepared(&core, request))

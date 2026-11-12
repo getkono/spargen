@@ -54,6 +54,7 @@ mod header;
 mod middleware;
 mod paginate;
 mod parameter;
+mod request;
 mod response;
 mod retry;
 // The RFC 3339 codec the `chrono` and `jiff` backends share; a generated client embeds it beside
@@ -104,6 +105,7 @@ pub use parameter::{
     serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter,
     FormMode, FormProperty, FormStyle, PercentEncoding,
 };
+pub use request::{MultipartForm, MultipartPart, RequestBuilder};
 pub use response::{stream_success_bytes, ByteStream, ResponseValue};
 pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
 #[cfg(feature = "stream")]
@@ -111,7 +113,7 @@ pub use stream::{
     EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
 };
 pub use transport::{
-    request_body, try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend,
+    try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend, TotalTimeout,
 };
 pub use wasm::{MaybeSend, MaybeSync};
 #[cfg(feature = "xml")]
@@ -131,12 +133,12 @@ mod tests {
 
     use bytes::Bytes;
     use reqwest::header::HeaderMap;
-    use reqwest::{Method, Request};
+    use reqwest::Method;
 
     use crate::transport::response_from_reqwest;
     use crate::{
-        ClientCore, ExecuteFuture, HttpBackend, HttpBody, RetryOutcome, RetryPolicy, RetryWait,
-        TransportError,
+        ClientCore, ExecuteFuture, HttpBackend, HttpBody, RequestBuilder, RetryOutcome,
+        RetryPolicy, RetryWait, TransportError,
     };
 
     /// A response as the transport seam carries it.
@@ -208,17 +210,21 @@ mod tests {
         ClientCore::new("https://example.com").expect("a valid base URL")
     }
 
-    /// A `GET https://example.com/op` built on a default client.
-    pub(crate) fn request() -> Request {
-        reqwest::Client::new()
-            .request(Method::GET, "https://example.com/op")
+    /// A builder for a `method` request to the absolute `url`.
+    pub(crate) fn builder(method: Method, url: &str) -> RequestBuilder {
+        RequestBuilder::new(method, url::Url::parse(url).expect("a valid URL"))
+    }
+
+    /// A `GET https://example.com/op` as the transport seam carries it.
+    pub(crate) fn request() -> http::Request<HttpBody> {
+        builder(Method::GET, "https://example.com/op")
             .build()
             .expect("build request")
     }
 
-    /// A `GET https://example.com/op` as the transport seam carries it.
+    /// [`request`], under the name the transport-level tests read it by.
     pub(crate) fn seam_request() -> http::Request<HttpBody> {
-        crate::transport::request_from_reqwest(request()).expect("a valid URI")
+        request()
     }
 
     /// An in-memory reqwest response (no server, no runtime) with `status` and `body`.
@@ -246,10 +252,10 @@ mod tests {
         response_from_reqwest(reqwest_response(status, body))
     }
 
-    /// The two requests reqwest builds but refuses at `execute`, without any I/O, as a
-    /// builder-kind error: a URL whose scheme is not `http`/`https`, and plain `http` on a client
-    /// configured `https_only`. Each comes with the client that refuses it.
-    pub(crate) fn refused_at_execute() -> [(reqwest::Client, Request); 2] {
+    /// The two `GET` requests reqwest refuses at `execute`, without any I/O, as a builder-kind
+    /// error: a URL whose scheme is not `http`/`https`, and plain `http` on a client configured
+    /// `https_only`. Each comes with the client that refuses it.
+    pub(crate) fn refused_at_execute() -> [(reqwest::Client, http::Request<HttpBody>); 2] {
         let https_only = reqwest::Client::builder()
             .https_only(true)
             .build()
@@ -259,10 +265,9 @@ mod tests {
             (https_only, "http://example.com/op"),
         ]
         .map(|(client, url)| {
-            let request = client
-                .request(Method::GET, url)
+            let request = RequestBuilder::new(Method::GET, url::Url::parse(url).expect("a URL"))
                 .build()
-                .expect("reqwest builds the request; it refuses it only at execute");
+                .expect("the request builds; reqwest refuses it only at execute");
             (client, request)
         })
     }

@@ -10,11 +10,13 @@
 use std::convert::Infallible;
 
 use bytes::Bytes;
-use reqwest::{Request, Url};
 use serde::de::DeserializeOwned;
+use url::Url;
 
-use crate::transport::request_from_reqwest;
-use crate::{ClientCore, Error, HttpBackend, HttpBody, ResponseValue};
+use crate::{ClientCore, Error, HttpBackend, HttpBody, ResponseValue, TotalTimeout};
+
+/// A request as the transport seam carries it.
+type Request = http::Request<HttpBody>;
 
 /// A response as the transport seam carries it.
 type Response = http::Response<HttpBody>;
@@ -160,16 +162,16 @@ pub fn build_url_with_query_string_on(
     Ok(url)
 }
 
-/// Send a request built on the core's `reqwest::Client` through the core's transport
+/// Send a request ([`crate::RequestBuilder`] builds one) through the core's transport
 /// [`crate::HttpBackend`], mapping transport/timeout/protocol/redirect failures into the taxonomy.
-/// The request crosses the seam as an [`http::Request`] whose in-memory body moves without a copy
-/// off `wasm32`; a URL that is not a valid URI is refused first, as
-/// [`Error::RequestConstruction`]. The backend reports failures as a [`crate::TransportError`]
-/// carrying its taxonomy class, which picks the variant here. Non-generic.
+/// The backend reports failures as a [`crate::TransportError`] carrying its taxonomy class, which
+/// picks the variant here. Non-generic.
 ///
-/// A request that carries no total timeout of its own is given the core's
+/// The core's [`crate::RequestOptions`] are applied first, as [`send_streaming`] applies them. A
+/// request that then carries no [`TotalTimeout`] is given the core's
 /// [`crate::ClientConfig::timeout`], read now, which bounds it until its whole response body has
-/// been read. The body limits [`crate::RequestOptions::max_body`] and
+/// been read: a total timeout the request carries itself wins, then one in the options'
+/// extensions, then the configured one. The body limits [`crate::RequestOptions::max_body`] and
 /// [`crate::ClientConfig::max_success_body`] set are read now too, and travel on the response to
 /// the decoder that reads its body. An operation whose success response is a stream sends with
 /// [`send_streaming`] instead.
@@ -177,29 +179,25 @@ pub async fn send(
     core: &ClientCore,
     request: Request,
 ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
-    execute(core, prepare(core, request, false)?, None, false).await
+    execute(core, prepare(core, request, false), None, false).await
 }
 
-/// The request [`send`] (or, with `streaming`, [`send_streaming`]) hands the core's backend, built
-/// without sending it: the core's [`crate::ClientConfig::timeout`] given to a non-streaming
-/// request that carries no total timeout of its own, the request moved onto the transport seam
-/// (a URL that is not a valid URI refused as [`Error::RequestConstruction`]), and the core's
-/// [`crate::RequestOptions`] headers and extensions added where it lacks them. Non-generic.
+/// The request [`send`] (or, with `streaming`, [`send_streaming`]) hands the core's backend,
+/// without sending it: the core's [`crate::RequestOptions`] headers and extensions added where it
+/// lacks them, and then, unless `streaming`, the core's [`crate::ClientConfig::timeout`] as a
+/// [`TotalTimeout`] where it still carries none. Non-generic.
 ///
 /// A generated operation prepares its request with it, inserts its own `ops::Operation` into the
 /// request's extensions, and hands the request to [`execute`]; its `{method}_request` builder
 /// returns the same request unsent.
-pub fn prepare(
-    core: &ClientCore,
-    mut request: Request,
-    streaming: bool,
-) -> Result<http::Request<HttpBody>, Error<Infallible>> {
-    if !streaming && request.timeout().is_none() {
-        *request.timeout_mut() = core.config().timeout;
-    }
-    let mut request = request_from_reqwest(request).map_err(Error::from_reqwest)?;
+pub fn prepare(core: &ClientCore, mut request: Request, streaming: bool) -> Request {
     apply_options(core.options(), &mut request);
-    Ok(request)
+    if !streaming && request.extensions().get::<TotalTimeout>().is_none() {
+        if let Some(timeout) = core.config().timeout {
+            request.extensions_mut().insert(TotalTimeout(timeout));
+        }
+    }
+    request
 }
 
 /// Execute a [`prepare`]d request through the core's backend, mapping a transport failure into
@@ -253,8 +251,9 @@ fn insert_body_limits(core: &ClientCore, response: &mut Response) {
 
 /// [`send`] for a request whose success response is read as a stream (an `EventStream`): the
 /// core's [`crate::ClientConfig::timeout`] is not applied, because a stream may rightly stay open
-/// indefinitely, and neither is a body limit. A total timeout the request carries itself still
-/// applies, and the client's connect and read timeouts bound it as they bound every request.
+/// indefinitely, and neither is a body limit. A total timeout the request carries itself, or one
+/// the core's [`crate::RequestOptions::extensions`] carry, is a deadline the caller asked for and
+/// still applies, and the client's connect and read timeouts bound it as they bound every request.
 /// Non-generic.
 ///
 /// Both sends add the core's [`crate::RequestOptions`] headers the request does not already
@@ -264,7 +263,7 @@ pub async fn send_streaming(
     core: &ClientCore,
     request: Request,
 ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
-    execute(core, prepare(core, request, true)?, None, true).await
+    execute(core, prepare(core, request, true), None, true).await
 }
 
 /// Add `options`' headers and extensions to `request`, leaving whatever it already carries as it
