@@ -154,6 +154,91 @@ fn the_basic_spec_testing_module_compiles_and_lints_clean() {
     );
 }
 
+/// One operation named for each crate the `testing` module spells a path through, each with a JSON,
+/// raw-octet and text reply, so a `pub mod {method}` there shadows the crate unless the module
+/// writes its paths from the crate root.
+const SHADOWING_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: Shadows, version: 1.0.0 }
+components:
+  schemas:
+    Item:
+      type: object
+      properties:
+        name: { type: string }
+paths:
+  /http:
+    get:
+      operationId: http
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Item" }
+  /bytes:
+    get:
+      operationId: bytes
+      responses:
+        "200":
+          description: ok
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+  /std:
+    get:
+      operationId: std
+      responses:
+        "200":
+          description: ok
+          content:
+            text/plain:
+              schema: { type: string }
+  /serde:
+    get:
+      operationId: serde
+      responses:
+        "200": { description: ok }
+  /serde-json:
+    get:
+      operationId: serde_json
+      responses:
+        "200": { description: ok }
+  /http-body:
+    get:
+      operationId: http_body
+      responses:
+        "200": { description: ok }
+"##;
+
+/// An operation whose method is `http`, `bytes`, `std`, `serde`, `serde_json` or `http_body` gets a
+/// `testing::{method}` module of that name, and the `testing` module still compiles and lints clean.
+#[test]
+fn a_reply_module_named_for_a_crate_does_not_shadow_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "shadows.yaml", SHADOWING_SPEC);
+    let out = temp.path().join("client");
+    let report = generate_configured_fixture_crate(&spec, &out, "shadow_client", "2021", |spec| {
+        spec.testing(true)
+    });
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    for module in ["http", "bytes", "std", "serde", "serde_json", "http_body"] {
+        assert!(
+            generated.contains(&format!("pub mod {module} {{")),
+            "the `{module}` reply module is emitted"
+        );
+    }
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "a reply module named for a crate must not shadow it"
+    );
+}
+
 /// The switch is off by default, and nothing of the module is emitted then.
 #[test]
 fn no_testing_module_is_emitted_by_default() {
