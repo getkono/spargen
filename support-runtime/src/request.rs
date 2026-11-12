@@ -87,8 +87,15 @@ impl RequestBuilder {
     pub fn multipart(mut self, form: MultipartForm) -> Self {
         if let Ok(parts) = &mut self.request {
             let (content_type, body) = form.encode();
-            parts.headers.insert(CONTENT_TYPE, content_type);
-            parts.body = HttpBody::from(body);
+            // The boundary is hexadecimal, so the value always converts; were it refused, the
+            // builder fails rather than sending a body its `Content-Type` does not describe.
+            match HeaderValue::from_bytes(&content_type) {
+                Ok(content_type) => {
+                    parts.headers.insert(CONTENT_TYPE, content_type);
+                    parts.body = HttpBody::from(body);
+                }
+                Err(error) => self.request = Err(Error::request_construction(error)),
+            }
         }
         self
     }
@@ -159,13 +166,13 @@ impl MultipartForm {
     }
 
     /// The `Content-Type` naming the boundary, and the encoded body.
-    fn encode(self) -> (HeaderValue, Bytes) {
+    fn encode(self) -> (Vec<u8>, Bytes) {
         self.encode_with(boundary)
     }
 
     /// [`Self::encode`], drawing candidate boundaries from `candidate`, seed by seed from zero,
     /// until one occurs in no part.
-    fn encode_with(self, mut candidate: impl FnMut(u64) -> Vec<u8>) -> (HeaderValue, Bytes) {
+    fn encode_with(self, mut candidate: impl FnMut(u64) -> Vec<u8>) -> (Vec<u8>, Bytes) {
         let heads: Vec<Vec<u8>> = self
             .parts
             .iter()
@@ -205,8 +212,6 @@ impl MultipartForm {
         body.extend_from_slice(b"--\r\n");
         let mut content_type = b"multipart/form-data; boundary=".to_vec();
         content_type.extend_from_slice(&boundary);
-        let content_type = HeaderValue::from_bytes(&content_type)
-            .expect("a boundary is visible ASCII, so the content type is a valid header value");
         (content_type, body.freeze())
     }
 }
@@ -216,7 +221,8 @@ impl MultipartForm {
 #[derive(Debug, Clone)]
 pub struct MultipartPart {
     body: Bytes,
-    content_type: Option<HeaderValue>,
+    /// The part's own `Content-Type`.
+    mime: Option<HeaderValue>,
     headers: HeaderMap,
 }
 
@@ -231,16 +237,15 @@ impl MultipartPart {
     pub fn bytes(bytes: impl Into<Bytes>) -> Self {
         Self {
             body: bytes.into(),
-            content_type: None,
+            mime: None,
             headers: HeaderMap::new(),
         }
     }
 
     /// Set the part's `Content-Type`. One that is not a valid header value is refused as
     /// [`Error::RequestConstruction`].
-    pub fn mime_str(mut self, content_type: &str) -> Result<Self, Error<Infallible>> {
-        self.content_type =
-            Some(HeaderValue::from_str(content_type).map_err(Error::request_construction)?);
+    pub fn mime_str(mut self, mime: &str) -> Result<Self, Error<Infallible>> {
+        self.mime = Some(HeaderValue::from_str(mime).map_err(Error::request_construction)?);
         Ok(self)
     }
 
@@ -268,9 +273,15 @@ impl MultipartPart {
             }
         }
         head.extend_from_slice(b"\"\r\n");
-        let content_type = self.content_type.iter().map(|value| (&CONTENT_TYPE, value));
-        for (name, value) in content_type.chain(&self.headers) {
-            head.extend_from_slice(name.as_str().as_bytes());
+        // `Content-Type` is written in the case RFC 7578's examples use; any other header in the
+        // lowercase `HeaderName` holds, which every reader matches without regard to case.
+        let mime = self.mime.iter().map(|value| ("Content-Type", value));
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value));
+        for (name, value) in mime.chain(headers) {
+            head.extend_from_slice(name.as_bytes());
             head.extend_from_slice(b": ");
             head.extend_from_slice(value.as_bytes());
             head.extend_from_slice(b"\r\n");

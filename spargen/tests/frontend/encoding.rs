@@ -1075,7 +1075,8 @@ paths:
             !has_code(&report, Code::UnsupportedMediaType),
             "{content_type:?}: {report:#?}"
         );
-        assert!(!code.contains("mime_str"), "{content_type:?}: {code}");
+        // The embedded runtime defines `mime_str`; only a part's call to it marks a header sent.
+        assert!(!code.contains(".mime_str("), "{content_type:?}: {code}");
     }
     // Well-formed parameter lists generate, and the part carries the canonical spelling: names
     // and values as written, whitespace around `;` and empty parameters dropped (RFC 9110 admits

@@ -15,7 +15,7 @@ fn url(text: &str) -> Url {
 fn encoded(form: MultipartForm) -> (String, String) {
     let (content_type, body) = form.encode_with(|_| b"B".to_vec());
     (
-        content_type.to_str().unwrap().to_owned(),
+        String::from_utf8(content_type).unwrap(),
         String::from_utf8(body.to_vec()).unwrap(),
     )
 }
@@ -135,7 +135,7 @@ fn a_form_encodes_its_parts_in_order() {
     assert_eq!(
         body,
         "--B\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nRex\r\n\
-         --B\r\nContent-Disposition: form-data; name=\"image\"\r\ncontent-type: image/png\r\n\
+         --B\r\nContent-Disposition: form-data; name=\"image\"\r\nContent-Type: image/png\r\n\
          x-part: p\r\n\r\n\u{0}\u{1}\r\n\
          --B\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nFido\r\n\
          --B--\r\n"
@@ -191,7 +191,7 @@ fn a_boundary_a_part_contains_is_passed_over() {
     };
     let form = MultipartForm::new().part("in-name", MultipartPart::text("text holding in-body"));
     let (content_type, body) = form.encode_with(candidates);
-    assert_eq!(content_type, "multipart/form-data; boundary=clear");
+    assert_eq!(content_type, b"multipart/form-data; boundary=clear");
     assert!(body.starts_with(b"--clear\r\n"));
 }
 
