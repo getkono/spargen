@@ -326,7 +326,7 @@ fn variant_body_decode(
 /// The codec a response body is decoded with, chosen once for the single-body success and error
 /// paths and the by-status variants alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BodyCodec {
+pub(super) enum BodyCodec {
     /// A `bytes`-typed body, read raw whatever its media.
     Bytes,
     /// An XML media.
@@ -339,7 +339,7 @@ enum BodyCodec {
 
 impl BodyCodec {
     /// The codec of a body of type `ty` under the response's chosen `media`.
-    fn of(api: &Api, ty: Ty, media: Option<MediaType>) -> Self {
+    pub(super) fn of(api: &Api, ty: Ty, media: Option<MediaType>) -> Self {
         if is_bytes_ty(api, ty) {
             return Self::Bytes;
         }

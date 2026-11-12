@@ -24,7 +24,7 @@ never ask for an output path they would not use. Both types have private fields 
 setters, so a new knob is additive rather than breaking.
 
 `Spec`'s knobs are `uuid`, `datetime`, `omit`/`omit_rule`, `error_body_cap`, `batch_cap`, `carve`,
-`open_narrowing`, `open_unions`, `verbatim_docs`, and `bind_header`. They can equally be read from a
+`open_narrowing`, `open_unions`, `verbatim_docs`, `testing`, and `bind_header`. They can equally be read from a
 [`spargen.toml`](./cli.md#spargentoml-reference) (`Spec::config_file`,
 `Spec::discover_config_file`) — the same file the CLI and the macro read, parsed by the library
 so the three cannot drift. Setters called afterwards still win, so build code stays

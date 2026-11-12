@@ -76,6 +76,42 @@ request an operation builds carries the operation's `ops::Operation` (its `id`, 
 `request.extensions().get::<ops::Operation>()` to sign, route or meter by operation rather than by
 parsing paths.
 
+### Testing with a mock backend
+
+`Spec::testing(true)` (`testing = true` in `spargen.toml`, or the macro's `testing` switch) emits a
+`testing` module beside the client. Its `MockBackend` is a backend to build the client on, with one
+typed registration per operation, so a test fakes the API by operation rather than by path:
+
+```rust,ignore
+use std::sync::Arc;
+use api::{ops, testing};
+
+let mock = testing::MockBackend::new()
+    .on_get_pet(|call| testing::get_pet::Reply::status_200(&pet(call.path())))
+    .on_delete_pet(|_| testing::delete_pet::Reply::status_4xx(409, &problem("pet.busy")));
+let client = api::Client::with_backend(Arc::new(mock.clone()), "http://mock")?;
+// ... exercise the code under test ...
+assert_eq!(mock.calls(ops::GET_PET).len(), 1);
+```
+
+- **Routing.** Each request is routed by the `ops::Operation` among its extensions to the handler
+  `on_{method}` registered; the latest registration for an operation wins. A path changed in the
+  description needs no change to the fake, and a renamed operation renames its registration, so a
+  stale fake fails to compile rather than answering a route the client no longer sends.
+- **Replies.** A handler returns its operation's own `testing::{method}::Reply`, with one
+  constructor per documented response: `status_200(&body)` for an exact status,
+  `status_4xx(status, &body)` for a range, `default(status, &body)` for `default`, and no body
+  argument for a bodyless response. Each encodes its body with the codec the client decodes that
+  status with (JSON, `text/plain`, XML, or raw octets), so the client reads it as the typed success
+  or the typed `Error::Api`, never as `Error::Decode`. A streamed body, or a response the
+  description does not document, is built with `Reply::from_reply(testing::Reply::new(status)…)`.
+- **Recording.** Every request is recorded as a `testing::Call` (its operation, method, URI,
+  headers and body, with `json::<T>()` to decode the body) before it is routed; `calls(op)` and
+  `all_calls()` read them back. Clones of a `MockBackend` share their handlers and calls.
+- **Unrouted requests.** A request no handler is registered for fails with
+  `Error::RequestConstruction`, whose source chain holds a `testing::Unrouted` naming the
+  operation, its method and path template, and the URI it was sent to.
+
 ## Timeouts
 
 `Client::new` bounds how long a request may wait, through three `ClientConfig` fields whose

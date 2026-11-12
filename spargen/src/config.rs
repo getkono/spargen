@@ -52,6 +52,7 @@ pub struct Spec {
     pub(crate) open_narrowing: bool,
     pub(crate) open_unions: bool,
     pub(crate) verbatim_docs: bool,
+    pub(crate) testing: bool,
     /// The header names [`Spec::bind_header`] bound, in the order bound, no two equal in any
     /// letter case.
     pub(crate) bind_headers: Vec<String>,
@@ -65,7 +66,7 @@ impl Spec {
     /// A spec with defaults: `uuid` on, dates mapped through the `time` crate
     /// ([`DateTimeBackend::Time`]), a 64 KiB error-body cap, a 100-diagnostic
     /// batch, no omissions, no carving, no open narrowing, no open unions, carried docs
-    /// rewritten for rustdoc rather than verbatim, and no bound headers.
+    /// rewritten for rustdoc rather than verbatim, no `testing` module, and no bound headers.
     pub fn new(path: impl Into<Utf8PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -78,6 +79,7 @@ impl Spec {
             open_narrowing: false,
             open_unions: false,
             verbatim_docs: false,
+            testing: false,
             bind_headers: Vec::new(),
             config_files: Vec::new(),
         }
@@ -137,6 +139,12 @@ impl Spec {
     /// [`verbatim_docs`](Self::verbatim_docs) set it.
     pub fn verbatim_docs_enabled(&self) -> bool {
         self.verbatim_docs
+    }
+
+    /// Whether the generated module carries its `testing` module, as [`testing`](Self::testing)
+    /// set it.
+    pub fn testing_enabled(&self) -> bool {
+        self.testing
     }
 
     /// The header names [`bind_header`](Self::bind_header) bound, in the order bound.
@@ -308,6 +316,24 @@ impl Spec {
         self
     }
 
+    /// Emit a `testing` module beside the client (default `false`): a typed test double,
+    /// `testing::MockBackend`, to build a client on with `Client::with_backend`.
+    ///
+    /// The mock routes each request by the `ops::Operation` its operation method attaches, never
+    /// by path, to the handler registered with that operation's `on_{method}`; the handler reads
+    /// the recorded `testing::Call` and answers with the operation's own `testing::{method}::Reply`,
+    /// whose constructors encode a typed body with the codec the client decodes that status with.
+    /// Every request is recorded, read back with `calls(ops::…)`. A request no handler is
+    /// registered for fails with a `testing::Unrouted` error naming its operation, method and
+    /// path, rather than with any response.
+    ///
+    /// The module is compiled wherever the generated module is, so a build that never names it
+    /// still compiles it.
+    pub fn testing(mut self, enabled: bool) -> Self {
+        self.testing = enabled;
+        self
+    }
+
     /// Bind the header parameter `name` once on the client, rather than at every call.
     ///
     /// Every operation that declares a header parameter of that name, matched in any letter case,
@@ -424,6 +450,9 @@ impl Spec {
         }
         if let Some(value) = file.verbatim_docs {
             self.verbatim_docs = value;
+        }
+        if let Some(value) = file.testing {
+            self.testing = value;
         }
         for (index, entry) in file.omit.iter().enumerate() {
             let rule = entry.to_rule().map_err(|message| {
@@ -561,6 +590,7 @@ struct FileConfig {
     open_narrowing: Option<bool>,
     open_unions: Option<bool>,
     verbatim_docs: Option<bool>,
+    testing: Option<bool>,
     /// Retained solely to give the removed 0.2 `[features]` table a targeted error.
     features: Option<toml::Value>,
     #[serde(default)]
@@ -703,6 +733,7 @@ mod tests {
         assert!(!spec.open_narrowing);
         assert!(!spec.open_unions);
         assert!(!spec.verbatim_docs);
+        assert!(!spec.testing);
         assert!(spec.bind_headers.is_empty());
         assert!(spec.omit.is_empty());
         assert_eq!(Build::new(spec, "out.rs").cargo, CargoIntegration::Auto);
@@ -738,6 +769,7 @@ mod tests {
             open_narrowing = true
             open_unions = true
             verbatim_docs = true
+            testing = true
             "#,
         )
         .unwrap();
@@ -749,6 +781,7 @@ mod tests {
         assert!(spec.open_narrowing);
         assert!(spec.open_unions);
         assert!(spec.verbatim_docs);
+        assert!(spec.testing);
     }
 
     /// The removed `time` switch is refused, whatever its value, with an error naming the
