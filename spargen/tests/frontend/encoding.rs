@@ -286,7 +286,7 @@ paths:
         "{code}"
     );
     assert!(
-        code.contains("reqwest::multipart::Part::bytes(body.image.to_vec())"),
+        code.contains("support::MultipartPart::bytes(body.image.to_vec())"),
         "{code}"
     );
     assert!(
@@ -640,7 +640,7 @@ paths:
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
-    assert!(code.contains("reqwest::multipart::Part::text("), "{code}");
+    assert!(code.contains("support::MultipartPart::text("), "{code}");
     assert!(code.contains(".mime_str(\"image/png\")"), "{code}");
 }
 
@@ -979,7 +979,7 @@ paths:
     );
     assert!(code.contains("mime_str(\"application/sdp\")"), "{code}");
     assert!(
-        code.contains("reqwest::multipart::Part::text(value.to_string())"),
+        code.contains("support::MultipartPart::text(value.to_string())"),
         "the part is built from the string property, not from the declared type: {code}"
     );
     // A well-formed, classified type with parameters, and a malformed element after the one that

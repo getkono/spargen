@@ -19,8 +19,8 @@ pub use support::{
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
     RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
     RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
-    TokenProvider, TokenRefresher, TransportError, UnknownVariant, exponential_backoff,
-    next_link, token_provider,
+    TokenProvider, TokenRefresher, TotalTimeout, TransportError, UnknownVariant,
+    exponential_backoff, next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -49,8 +49,8 @@ pub use support::{
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
     RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
     RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
-    TokenProvider, TokenRefresher, TransportError, UnknownVariant, exponential_backoff,
-    next_link, token_provider,
+    TokenProvider, TokenRefresher, TotalTimeout, TransportError, UnknownVariant,
+    exponential_backoff, next_link, token_provider,
 };
 #[allow(
     unused_imports,

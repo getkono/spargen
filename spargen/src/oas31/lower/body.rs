@@ -130,7 +130,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(schema) = object.schema.as_ref() {
             self.warn_structural_default_ref(schema, "a request body schema");
         }
-        // A `multipart/form-data` body is emitted as a `reqwest::multipart::Form` whose parts are the
+        // A `multipart/form-data` body is emitted as a runtime `MultipartForm` whose parts are the
         // fields of an object schema. A concrete non-object type (or a multipart body with no schema
         // at all) has no fields to enumerate as parts, so it stays unsupported (`E009`, narrowed)
         // rather than silently degrade. A schema that *failed* to lower for its own reason (`ty` is

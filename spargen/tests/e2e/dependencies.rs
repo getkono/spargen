@@ -80,6 +80,7 @@ reqwest = {{ version = "0.13.5", default-features = false }}
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}
 serde_json = "1.0.151"
+url = "2.5.8"
 
 [build-dependencies]
 spargen = {{ path = {:?}, default-features = false }}
@@ -158,6 +159,7 @@ reqwest = {{ version = "0.13.5", default-features = false }}
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}
 serde_json = "1.0.151"
+url = "2.5.8"
 
 {tokio_tables}
 [build-dependencies]

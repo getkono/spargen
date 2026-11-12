@@ -23,8 +23,8 @@ pub use support::{
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
     RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
     RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
-    TokenProvider, TokenRefresher, TransportError, UnknownVariant, exponential_backoff,
-    next_link, token_provider,
+    TokenProvider, TokenRefresher, TotalTimeout, TransportError, UnknownVariant,
+    exponential_backoff, next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -65,10 +65,9 @@ mod support {
         use std::future::Future;
         use std::sync::Arc;
         use bytes::Bytes;
-        use reqwest::header::HeaderValue;
-        use reqwest::RequestBuilder;
+        use http::header::{HeaderValue, AUTHORIZATION, COOKIE};
         use super::wasm::{BoxFuture, MaybeSend, MaybeSync};
-        use super::{ClientCore, Error, HttpBody, RequestError};
+        use super::{ClientCore, Error, HttpBody, RequestBuilder, RequestError};
         pub use secrecy::{ExposeSecret, SecretString};
         /// A failure from an async token provider.
         #[derive(Debug)]
@@ -615,9 +614,13 @@ mod support {
                 AuthKind::Basic => {
                     match credential {
                         Credential::Basic { username, password } => {
-                            Ok(
-                                request.basic_auth(username, Some(password.expose_secret())),
-                            )
+                            let credentials = format!(
+                                "{username}:{}", password.expose_secret()
+                            );
+                            let value = format!(
+                                "Basic {}", base64_encode(credentials.as_bytes())
+                            );
+                            Ok(request.header(AUTHORIZATION, sensitive_value(&value)?))
                         }
                         _ => {
                             Err(
@@ -628,7 +631,10 @@ mod support {
                 }
                 AuthKind::Bearer => {
                     match token {
-                        Some(token) => Ok(request.bearer_auth(token.expose_secret())),
+                        Some(token) => {
+                            let value = format!("Bearer {}", token.expose_secret());
+                            Ok(request.header(AUTHORIZATION, sensitive_value(&value)?))
+                        }
                         None => {
                             Err(credential_mismatch(scheme.name, "bearer", credential))
                         }
@@ -670,37 +676,35 @@ mod support {
                 }
             }
         }
-        /// Append `name=value` to the request URL's query, `application/x-www-form-urlencoded` as reqwest's
-        /// `RequestBuilder::query` encodes it, after whatever query the URL already carries. Written
-        /// against the built request because `query` needs reqwest's `query` feature, which would add
-        /// `serde_urlencoded` to every consumer's graph. A builder that already failed reports that
-        /// failure here, as the request-construction error `build` would have raised.
+        /// Append `name=value` to the request URL's query, `application/x-www-form-urlencoded`, after
+        /// whatever query the URL already carries. A builder that already failed is left as it is, for
+        /// `build` to report its failure.
         fn append_query_pair(
-            request: RequestBuilder,
+            mut request: RequestBuilder,
             name: &str,
             value: &str,
         ) -> Result<RequestBuilder, Error<Infallible>> {
-            let (client, request) = request.build_split();
-            let mut request = request.map_err(Error::request_construction)?;
-            request.url_mut().query_pairs_mut().append_pair(name, value);
-            Ok(RequestBuilder::from_parts(client, request))
+            if let Some(url) = request.url_mut() {
+                url.query_pairs_mut().append_pair(name, value);
+            }
+            Ok(request)
         }
         /// Add `name=value` to the request's one `Cookie` header. RFC 6265 §5.4 allows a user agent a
         /// single `Cookie` header, and `RequestBuilder::header` appends a second, so the cookie joins any
         /// value the request already carries (the operation's cookie parameters, or an earlier cookie
         /// apiKey of the same alternative) after a `; `. The merged value carries the secret, so it is
-        /// marked sensitive. A builder that already failed reports that failure here, as the
-        /// request-construction error `build` would have raised.
+        /// marked sensitive. A builder that already failed is left as it is, for `build` to report its
+        /// failure.
         fn append_cookie(
-            request: RequestBuilder,
+            mut request: RequestBuilder,
             name: &str,
             value: &str,
         ) -> Result<RequestBuilder, Error<Infallible>> {
-            let (client, request) = request.build_split();
-            let mut request = request.map_err(Error::request_construction)?;
-            let headers = request.headers_mut();
+            let Some(headers) = request.headers_mut() else {
+                return Ok(request);
+            };
             let mut cookie = Vec::new();
-            for existing in headers.get_all(reqwest::header::COOKIE) {
+            for existing in headers.get_all(COOKIE) {
                 cookie.extend_from_slice(existing.as_bytes());
                 cookie.extend_from_slice(b"; ");
             }
@@ -710,14 +714,41 @@ mod support {
             let mut merged = HeaderValue::from_bytes(&cookie)
                 .map_err(Error::request_construction)?;
             merged.set_sensitive(true);
-            headers.insert(reqwest::header::COOKIE, merged);
-            Ok(RequestBuilder::from_parts(client, request))
+            headers.insert(COOKIE, merged);
+            Ok(request)
         }
         fn sensitive_value(secret: &str) -> Result<HeaderValue, Error<Infallible>> {
             let mut value = HeaderValue::from_str(secret)
                 .map_err(Error::request_construction)?;
             value.set_sensitive(true);
             Ok(value)
+        }
+        /// `bytes` in the padded standard base64 alphabet of RFC 4648 §4, as an `http basic` credential
+        /// is sent (RFC 7617 §2). The `contentEncoding: base64` codec is embedded only into a client
+        /// whose models use it, so `http basic` carries this encoder of its own.
+        fn base64_encode(bytes: &[u8]) -> String {
+            const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+            for chunk in bytes.chunks(3) {
+                let group = chunk
+                    .iter()
+                    .enumerate()
+                    .fold(
+                        0_u32,
+                        |group, (index, byte)| {
+                            group | u32::from(*byte) << (16 - 8 * index)
+                        },
+                    );
+                for index in 0..4 {
+                    if index <= chunk.len() {
+                        let sextet = (group >> (18 - 6 * index)) & 0x3f;
+                        encoded.push(char::from(ALPHABET[sextet as usize]));
+                    } else {
+                        encoded.push('=');
+                    }
+                }
+            }
+            encoded
         }
         fn credential_mismatch(
             scheme: &'static str,
@@ -736,7 +767,7 @@ mod support {
         use std::convert::Infallible;
         use std::sync::Arc;
         use std::time::Duration;
-        use reqwest::Url;
+        use url::Url;
         use super::{
             Credential, Error, ExposeSecret, HttpBackend, LinkPaginator, ReqwestBackend,
             SecretString,
@@ -781,12 +812,12 @@ mod support {
             /// before the request fails with [`Error::Timeout`] (default 30 s; `None` waits as long as
             /// the operating system does).
             ///
-            /// It is read once, when [`ClientCore::with_config`] or [`ClientCore::new`] builds the
-            /// `reqwest::Client`, so changing it through [`ClientCore::config_mut`] afterwards changes
-            /// nothing. A client injected with [`ClientCore::with_client`] keeps its own connect timeout
-            /// instead, and a backend installed with [`ClientCore::with_backend`] or
-            /// [`ClientCore::with_client_and_backend`] executes requests on its own terms. reqwest's
-            /// `fetch` backend has no connect timeout, so on `wasm32` it is ignored.
+            /// It is read once, when [`ClientCore::with_config`] or [`ClientCore::new`] builds the default
+            /// backend's `reqwest::Client`, so changing it through [`ClientCore::config_mut`] afterwards
+            /// changes nothing. A client injected with [`ClientCore::with_client`] keeps its own connect
+            /// timeout instead, and a backend installed with [`ClientCore::with_backend`] executes
+            /// requests on its own terms. reqwest's `fetch` backend has no connect timeout, so on `wasm32`
+            /// it is ignored.
             pub connect_timeout: Option<Duration>,
             /// How long a read on an established connection may wait for its next bytes — the response
             /// head, or the next chunk of a body, a streamed one included — before the request fails with
@@ -807,10 +838,10 @@ mod support {
             /// [`ClientCore::config_mut`] applies from the next request on, whichever constructor built
             /// the core, and it is honoured on `wasm32` too. A generated client's `with_timeout` sets it
             /// on the client value it returns, which is how one call gets a deadline of its own. It
-            /// travels on the request itself: a request built with its own
-            /// `reqwest::RequestBuilder::timeout` keeps that one,
-            /// [`ReqwestBackend`] enforces it, and a caller-supplied [`HttpBackend`] that runs the
-            /// request on a `reqwest::Client` enforces it as well. A streaming response is exempt,
+            /// travels on the request itself, as a [`super::TotalTimeout`] extension: a request that
+            /// already carries one keeps it, [`ReqwestBackend`] enforces it, and so does a caller-supplied
+            /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. A
+            /// streaming response is exempt,
             /// because a stream may rightly stay open indefinitely: an operation returning an
             /// `EventStream` sends its request with [`super::send_streaming`], which never applies it, and
             /// each reconnect resends that same request.
@@ -880,19 +911,19 @@ mod support {
             /// `HeaderValue::set_sensitive` to redact it there.
             pub headers: http::HeaderMap,
         }
-        /// The shared core every generated `Client` wraps: the `reqwest::Client` used to BUILD requests
-        /// (the BYO-client injection point for TLS choice, proxies, timeouts), the swappable transport
-        /// [`HttpBackend`] that EXECUTES them, the base URL, configuration, and per-scheme credentials.
+        /// The shared core every generated `Client` wraps: the swappable transport [`HttpBackend`] that
+        /// executes requests, the base URL, configuration, and per-scheme credentials.
         ///
-        /// Request building stays on a concrete `reqwest::Client`; only the execute step is routed through
-        /// the backend (see [`super::send`]). `new`/`with_client` install the default [`ReqwestBackend`];
-        /// `with_backend` plugs a caller-supplied transport, and `with_client_and_backend` takes both.
+        /// Requests are built by the runtime itself, as an `http::Request` ([`super::RequestBuilder`]),
+        /// whichever backend executes them (see [`super::send`]). `new`/`with_config` install the default
+        /// [`ReqwestBackend`] on a `reqwest::Client` built from the configuration, `with_client` installs
+        /// one on a caller-supplied `reqwest::Client`, and `with_backend` plugs a caller-supplied
+        /// transport.
         ///
         /// The generated `Client` wraps one of these and documents its own constructors; each of its
         /// operation methods delegates to the shared dispatch routines.
         #[derive(Debug, Clone)]
         pub struct ClientCore {
-            http: reqwest::Client,
             backend: Arc<dyn HttpBackend>,
             base_url: Url,
             config: ClientConfig,
@@ -908,65 +939,44 @@ mod support {
             pub fn new(base_url: &str) -> Result<Self, Error<Infallible>> {
                 Self::with_config(base_url, ClientConfig::default())
             }
-            /// Build a core with the given base URL and configuration on a `reqwest::Client` built from
-            /// `config`'s [connect](ClientConfig::connect_timeout) and
-            /// [read](ClientConfig::read_timeout) timeouts, which both builds requests and, wrapped in
-            /// the default [`ReqwestBackend`], executes them. Returns a request-construction error if the
-            /// base URL is invalid or reqwest cannot build the client (its TLS backend fails to
-            /// initialise).
+            /// Build a core with the given base URL and configuration, executing requests on the default
+            /// [`ReqwestBackend`] over a `reqwest::Client` built from `config`'s
+            /// [connect](ClientConfig::connect_timeout) and [read](ClientConfig::read_timeout) timeouts.
+            /// Returns a request-construction error if the base URL is invalid or reqwest cannot build
+            /// the client (its TLS backend fails to initialise).
             pub fn with_config(
                 base_url: &str,
                 config: ClientConfig,
             ) -> Result<Self, Error<Infallible>> {
-                let client = http_client(&config)?;
-                let backend = Arc::new(ReqwestBackend::new(client.clone()));
-                Self::assemble(client, backend, base_url, config)
+                let backend = Arc::new(ReqwestBackend::new(http_client(&config)?));
+                Self::assemble(backend, base_url, config)
             }
-            /// Build a core with a caller-supplied `reqwest::Client` — the injection point for TLS backend,
-            /// proxies, and timeouts. The client both builds requests and, wrapped in the default
-            /// [`ReqwestBackend`], executes them, so its own connect and read timeouts apply instead of
-            /// [`ClientConfig::connect_timeout`] and [`ClientConfig::read_timeout`];
-            /// [`ClientConfig::timeout`] still applies to each request [`super::send`] sends.
+            /// Build a core executing requests on a caller-supplied `reqwest::Client` — the injection
+            /// point for TLS backend, proxies, and timeouts — wrapped in the default [`ReqwestBackend`],
+            /// as [`Self::with_backend`] would with `Arc::new(ReqwestBackend::new(client))`. The client's
+            /// own connect and read timeouts apply instead of [`ClientConfig::connect_timeout`] and
+            /// [`ClientConfig::read_timeout`]; [`ClientConfig::timeout`] still applies to each request
+            /// [`super::send`] sends.
             pub fn with_client(
                 client: reqwest::Client,
                 base_url: &str,
             ) -> Result<Self, Error<Infallible>> {
-                let backend = Arc::new(ReqwestBackend::new(client.clone()));
-                Self::assemble(client, backend, base_url, ClientConfig::default())
+                Self::with_backend(Arc::new(ReqwestBackend::new(client)), base_url)
             }
             /// Build a core with a caller-supplied transport [`HttpBackend`] — the injection point for
-            /// retry, middleware, or an entirely non-reqwest transport. Requests are still BUILT on a
-            /// `reqwest::Client` configured as [`Self::new`]'s is; only the execute step goes through
-            /// `backend`, so connecting and reading are bounded however `backend` bounds them.
-            /// [`ClientConfig::timeout`] travels on each request [`super::send`] sends, for a backend that
-            /// runs it on a `reqwest::Client` to enforce.
-            ///
-            /// Each call builds that request-building `reqwest::Client`, TLS initialisation included;
-            /// [`Self::with_client_and_backend`] takes one the caller already has instead.
+            /// retry, middleware, or an entirely non-reqwest transport — and the default
+            /// [`ClientConfig`]; nothing else is built, so several cores can share one backend. Every
+            /// request is executed by `backend`, so connecting and reading are bounded however `backend`
+            /// bounds them. [`ClientConfig::timeout`] travels on each request [`super::send`] sends, as a
+            /// [`super::TotalTimeout`] extension, for `backend` to enforce. Returns a request-construction
+            /// error if the base URL is invalid.
             pub fn with_backend(
                 backend: Arc<dyn HttpBackend>,
                 base_url: &str,
             ) -> Result<Self, Error<Infallible>> {
-                let client = http_client(&ClientConfig::default())?;
-                Self::with_client_and_backend(client, backend, base_url)
-            }
-            /// Build a core with both a caller-supplied `reqwest::Client`, which BUILDS requests, and a
-            /// caller-supplied transport [`HttpBackend`], which EXECUTES them; nothing is built besides,
-            /// so several cores can share one client and one backend. Only the execute step goes through
-            /// `backend`, so connecting and reading are bounded however `backend` bounds them, and
-            /// timeouts configured on `client` itself apply only where `backend` runs requests on it. The
-            /// configuration is the default [`ClientConfig`]; [`ClientConfig::timeout`] travels on each
-            /// request [`super::send`] sends, as [`Self::with_backend`] describes. Returns a
-            /// request-construction error if the base URL is invalid.
-            pub fn with_client_and_backend(
-                client: reqwest::Client,
-                backend: Arc<dyn HttpBackend>,
-                base_url: &str,
-            ) -> Result<Self, Error<Infallible>> {
-                Self::assemble(client, backend, base_url, ClientConfig::default())
+                Self::assemble(backend, base_url, ClientConfig::default())
             }
             fn assemble(
-                http: reqwest::Client,
                 backend: Arc<dyn HttpBackend>,
                 base_url: &str,
                 config: ClientConfig,
@@ -974,7 +984,6 @@ mod support {
                 let base_url = Url::parse(base_url)
                     .map_err(Error::request_construction)?;
                 Ok(Self {
-                    http,
                     backend,
                     base_url,
                     config,
@@ -1004,7 +1013,7 @@ mod support {
             pub fn base_url(&self) -> &Url {
                 &self.base_url
             }
-            /// Replace the base URL every later request is resolved against, keeping the client, backend,
+            /// Replace the base URL every later request is resolved against, keeping the backend,
             /// configuration and credentials. Returns a request-construction error, leaving the base URL
             /// as it was, if `base_url` is invalid.
             pub fn set_base_url(
@@ -1015,11 +1024,7 @@ mod support {
                     .map_err(Error::request_construction)?;
                 Ok(())
             }
-            /// The injected HTTP client used to BUILD requests.
-            pub fn http(&self) -> &reqwest::Client {
-                &self.http
-            }
-            /// The transport backend that EXECUTES requests. [`super::send`] dispatches through this;
+            /// The transport backend that executes requests. [`super::send`] dispatches through this;
             /// retry/middleware layers can clone the `Arc` to wrap it.
             pub fn backend(&self) -> &Arc<dyn HttpBackend> {
                 &self.backend
@@ -1067,7 +1072,8 @@ mod support {
                 LinkPaginator::new(self.clone(), first)
             }
         }
-        /// The `reqwest::Client` a core builds for itself, with `config`'s connect and read timeouts.
+        /// The `reqwest::Client` a core's default backend runs on, with `config`'s connect and read
+        /// timeouts.
         /// reqwest's `fetch` backend has neither, so on `wasm32` `config` is not read.
         fn http_client(
             config: &ClientConfig,
@@ -1100,10 +1106,13 @@ mod support {
         //! is monomorphized per distinct body or error type.
         use std::convert::Infallible;
         use bytes::Bytes;
-        use reqwest::{Request, Url};
         use serde::de::DeserializeOwned;
-        use super::transport::request_from_reqwest;
-        use super::{ClientCore, Error, HttpBackend, HttpBody, ResponseValue};
+        use url::Url;
+        use super::{
+            ClientCore, Error, HttpBackend, HttpBody, ResponseValue, TotalTimeout,
+        };
+        /// A request as the transport seam carries it.
+        type Request = http::Request<HttpBody>;
         /// A response as the transport seam carries it.
         type Response = http::Response<HttpBody>;
         /// Build a request URL from the base URL, or an optional per-operation server override, and a
@@ -1238,14 +1247,12 @@ mod support {
             }
             Ok(url)
         }
-        /// Send a request built on the core's `reqwest::Client` through the core's transport
+        /// Send a request ([`super::RequestBuilder`] builds one) through the core's transport
         /// [`super::HttpBackend`], mapping transport/timeout/protocol/redirect failures into the taxonomy.
-        /// The request crosses the seam as an [`http::Request`] whose in-memory body moves without a copy
-        /// off `wasm32`; a URL that is not a valid URI is refused first, as
-        /// [`Error::RequestConstruction`]. The backend reports failures as a [`super::TransportError`]
-        /// carrying its taxonomy class, which picks the variant here. Non-generic.
+        /// The backend reports failures as a [`super::TransportError`] carrying its taxonomy class, which
+        /// picks the variant here. Non-generic.
         ///
-        /// A request that carries no total timeout of its own is given the core's
+        /// A request that carries no [`TotalTimeout`] of its own is given the core's
         /// [`super::ClientConfig::timeout`], read now, which bounds it until its whole response body has
         /// been read. The body limits [`super::RequestOptions::max_body`] and
         /// [`super::ClientConfig::max_success_body`] set are read now too, and travel on the response to
@@ -1255,8 +1262,10 @@ mod support {
             core: &ClientCore,
             mut request: Request,
         ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
-            if request.timeout().is_none() {
-                *request.timeout_mut() = core.config().timeout;
+            if request.extensions().get::<TotalTimeout>().is_none() {
+                if let Some(timeout) = core.config().timeout {
+                    request.extensions_mut().insert(TotalTimeout(timeout));
+                }
             }
             let mut response = send_streaming(core, request).await?;
             let max_body = core.options().max_body;
@@ -1279,10 +1288,8 @@ mod support {
         /// executes it.
         pub async fn send_streaming(
             core: &ClientCore,
-            request: Request,
+            mut request: Request,
         ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
-            let mut request = request_from_reqwest(request)
-                .map_err(Error::from_reqwest)?;
             apply_options(core.options(), &mut request);
             send_on(core.backend().as_ref(), request).await
         }
@@ -1807,7 +1814,7 @@ mod support {
             /// would never end. Every page before it was yielded; nothing was sent for `url`.
             PaginationCycle {
                 /// The revisited URL the `next` link resolved to.
-                url: reqwest::Url,
+                url: url::Url,
             },
             /// #12 — a non-streaming operation's response body exceeded the limit the call was made
             /// under: [`super::RequestOptions::max_body`], or for a success body
@@ -1839,33 +1846,6 @@ mod support {
                         RequestCause(Box::new(MessageError(message.into()))),
                     ),
                 )
-            }
-            /// Classify a reqwest error into the closest runtime taxonomy class.
-            ///
-            /// reqwest reports every failure of the send itself as a request-kind error, a refused
-            /// connection, an unresolvable host, and a failed TLS handshake included. Those are asked for
-            /// first (`is_connect`) and become [`Error::Transport`]; only the request-kind errors that are
-            /// not connection failures stay [`Error::RequestConstruction`]. reqwest offers no connect
-            /// classification on `wasm32`, where the browser's fetch reports failures opaquely, so there
-            /// every request-kind error stays [`Error::RequestConstruction`].
-            ///
-            /// A timeout is asked for before any of those, and the same connect discriminator splits it:
-            /// one raised while establishing the connection (the client's `connect_timeout`, which bounds
-            /// name resolution, the TCP handshake, and TLS, or the operating system's own handshake
-            /// timeout) is [`TimeoutKind::Connect`]; every other one,
-            /// the total-request budget elapsing during the connect included, is [`TimeoutKind::Total`].
-            /// On `wasm32` every timeout is `Total`, for the reason above.
-            ///
-            /// A builder-kind error is reqwest refusing the request before sending anything, and it
-            /// becomes [`Error::RequestConstruction`] wherever reqwest raises it: from
-            /// `RequestBuilder::build`, or from `execute` on a request that built fine — a URL whose
-            /// scheme is not `http`/`https`, plain `http` on an `https_only` client, or a URL that is not
-            /// a valid URI. Re-sending it is refused again, so it is not transient.
-            ///
-            /// This is [`TransportError::from_reqwest`]'s classification, read as the variant
-            /// [`super::send`] maps that transport error to.
-            pub fn from_reqwest(error: reqwest::Error) -> Self {
-                Self::from_transport(TransportError::from_reqwest(error))
             }
             /// The taxonomy variant a backend's [`TransportError`] stands for: the class its constructor
             /// named decides. A timeout keeps only its [`TimeoutKind`]; a request-kind failure is
@@ -2345,7 +2325,7 @@ mod support {
             /// already have acted on it. This variant is therefore the one place in taxonomy #1 where "the
             /// request was never sent" does not hold, and a caller that retries on it must treat the call
             /// as possibly-already-applied. A connection that was never established is classified apart,
-            /// as [`Error::from_reqwest`] describes.
+            /// as [`TransportError::from_reqwest`] describes.
             ///
             /// After a response was accepted: when the API has streaming (sequential) responses, the
             /// embedded `EventStream` raises this when the stored request cannot be cloned for an
@@ -2425,8 +2405,29 @@ mod support {
             pub fn interrupted(source: impl Into<BoxError>) -> Self {
                 Self::new(TransportClass::Interrupted, source)
             }
-            /// Classify a `reqwest::Error` from executing a request, keeping it as the source. This is
-            /// the classification [`Error::from_reqwest`] documents.
+            /// Classify a `reqwest::Error` from executing a request into the closest runtime taxonomy
+            /// class, keeping it as the source. Each class is named below by the [`Error`] variant
+            /// [`super::send`] maps it to.
+            ///
+            /// reqwest reports every failure of the send itself as a request-kind error, a refused
+            /// connection, an unresolvable host, and a failed TLS handshake included. Those are asked for
+            /// first (`is_connect`) and become [`Error::Transport`]; only the request-kind errors that are
+            /// not connection failures stay [`Error::RequestConstruction`]. reqwest offers no connect
+            /// classification on `wasm32`, where the browser's fetch reports failures opaquely, so there
+            /// every request-kind error stays [`Error::RequestConstruction`].
+            ///
+            /// A timeout is asked for before any of those, and the same connect discriminator splits it:
+            /// one raised while establishing the connection (the client's `connect_timeout`, which bounds
+            /// name resolution, the TCP handshake, and TLS, or the operating system's own handshake
+            /// timeout) is [`TimeoutKind::Connect`]; every other one,
+            /// the total-request budget elapsing during the connect included, is [`TimeoutKind::Total`].
+            /// On `wasm32` every timeout is `Total`, for the reason above.
+            ///
+            /// A builder-kind error is reqwest refusing the request before sending anything, and it
+            /// becomes [`Error::RequestConstruction`] wherever reqwest raises it: from `execute` on a
+            /// request it was handed — a URL whose scheme is not `http`/`https`, plain `http` on an
+            /// `https_only` client, or a URI that is not a URL. Re-sending it is refused again, so it is
+            /// not transient.
             pub fn from_reqwest(error: reqwest::Error) -> Self {
                 Self::new(TransportClass::of(&error), error)
             }
@@ -2553,7 +2554,7 @@ mod support {
             /// The connect timeout: no connection was established in time — the client's
             /// `connect_timeout` (which covers name resolution, the TCP handshake, and TLS) elapsed, or
             /// the operating system gave up on the handshake. Never reported on `wasm32`; see
-            /// [`Error::from_reqwest`].
+            /// [`TransportError::from_reqwest`].
             Connect,
             /// Every other timeout: the client's total-request `timeout` elapsed, whichever phase the
             /// request was in (connecting included), or a `read_timeout` elapsed on an established
@@ -3861,11 +3862,11 @@ mod support {
         use std::convert::Infallible;
         use std::marker::PhantomData;
         use reqwest::header::HeaderMap;
-        use reqwest::Url;
         use serde::de::DeserializeOwned;
+        use url::Url;
         use super::{
             decode_success, send, unexpected_status, ClientCore, Error, HttpBody,
-            ResponseValue,
+            RequestBuilder, ResponseValue,
         };
         /// A manual async iterator over the pages of a `Link`-header-paginated collection.
         ///
@@ -3950,9 +3951,11 @@ mod support {
                 if !self.fetched.insert(key) {
                     return Some(Err(Error::PaginationCycle { url }));
                 }
-                let request = match self.core.http().get(url.clone()).build() {
+                let request = match RequestBuilder::new(http::Method::GET, url.clone())
+                    .build()
+                {
                     Ok(request) => request,
-                    Err(error) => return Some(Err(Error::request_construction(error))),
+                    Err(error) => return Some(Err(error)),
                 };
                 let response = match send(&self.core, request).await {
                     Ok(response) => response,
@@ -4068,6 +4071,299 @@ mod support {
                 }
             }
             Some((uri, is_next))
+        }
+    }
+    mod request {
+        //! Building a request as the transport seam carries it: [`RequestBuilder`] assembles an
+        //! [`http::Request`] whose body is the runtime's own [`HttpBody`], and [`MultipartForm`] encodes a
+        //! `multipart/form-data` body for it. Nothing here depends on the backend that will execute the
+        //! request, so no HTTP client is built to build a request.
+        use std::convert::Infallible;
+        use std::hash::{BuildHasher, Hasher};
+        use bytes::{Bytes, BytesMut};
+        use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+        use http::Method;
+        use url::Url;
+        use super::{Error, HttpBody};
+        /// A request under construction: a method, an absolute URL, headers and a body, built into an
+        /// `http::Request<HttpBody>` by [`Self::build`].
+        ///
+        /// Like the builders of the HTTP stacks it replaces, it defers failure: a header that does not
+        /// convert leaves the builder failed, every later step leaves it as it is, and [`Self::build`]
+        /// reports the first failure as [`Error::RequestConstruction`].
+        #[derive(Debug)]
+        pub struct RequestBuilder {
+            request: Result<Parts, Error<Infallible>>,
+        }
+        /// What a [`RequestBuilder`] holds until it is built.
+        #[derive(Debug)]
+        struct Parts {
+            method: Method,
+            url: Url,
+            headers: HeaderMap,
+            body: HttpBody,
+        }
+        impl RequestBuilder {
+            /// Start a `method` request to `url`, with no headers and an empty body.
+            pub fn new(method: Method, url: Url) -> Self {
+                Self {
+                    request: Ok(Parts {
+                        method,
+                        url,
+                        headers: HeaderMap::new(),
+                        body: HttpBody::empty(),
+                    }),
+                }
+            }
+            /// Add a header, after any value the request already carries under `name`. A name or value
+            /// that does not convert fails the builder.
+            pub fn header<K, V>(mut self, name: K, value: V) -> Self
+            where
+                HeaderName: TryFrom<K>,
+                <HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+                HeaderValue: TryFrom<V>,
+                <HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
+            {
+                if let Ok(parts) = &mut self.request {
+                    let header = HeaderName::try_from(name)
+                        .map_err(Into::into)
+                        .and_then(|name| {
+                            HeaderValue::try_from(value)
+                                .map_err(Into::into)
+                                .map(|value| (name, value))
+                        });
+                    match header {
+                        Ok((name, value)) => {
+                            parts.headers.append(name, value);
+                        }
+                        Err(error) => {
+                            self.request = Err(Error::request_construction(error));
+                        }
+                    }
+                }
+                self
+            }
+            /// Set the body, replacing any set before.
+            pub fn body(mut self, body: impl Into<HttpBody>) -> Self {
+                if let Ok(parts) = &mut self.request {
+                    parts.body = body.into();
+                }
+                self
+            }
+            /// Set a `multipart/form-data` body encoded from `form`, and the `Content-Type` naming its
+            /// boundary, replacing any `Content-Type` set before. The body is held in memory, so the
+            /// request clones for a retry, a credential refresh or a reconnect.
+            pub fn multipart(mut self, form: MultipartForm) -> Self {
+                if let Ok(parts) = &mut self.request {
+                    let (content_type, body) = form.encode();
+                    parts.headers.insert(CONTENT_TYPE, content_type);
+                    parts.body = HttpBody::from(body);
+                }
+                self
+            }
+            /// A copy of the builder, or `None` when its body is a stream, which can be read only once,
+            /// or the builder has failed.
+            pub fn try_clone(&self) -> Option<Self> {
+                let parts = self.request.as_ref().ok()?;
+                Some(Self {
+                    request: Ok(Parts {
+                        method: parts.method.clone(),
+                        url: parts.url.clone(),
+                        headers: parts.headers.clone(),
+                        body: parts.body.try_clone()?,
+                    }),
+                })
+            }
+            /// The request's URL, for a step that rewrites it (an `apiKey` query credential); `None` once
+            /// the builder has failed.
+            pub(crate) fn url_mut(&mut self) -> Option<&mut Url> {
+                self.request.as_mut().ok().map(|parts| &mut parts.url)
+            }
+            /// The request's headers, for a step that merges into one (a cookie `apiKey`); `None` once
+            /// the builder has failed.
+            pub(crate) fn headers_mut(&mut self) -> Option<&mut HeaderMap> {
+                self.request.as_mut().ok().map(|parts| &mut parts.headers)
+            }
+            /// The request, or the first failure the builder met. A URL that is not a valid URI is
+            /// refused here, as [`Error::RequestConstruction`].
+            pub fn build(self) -> Result<http::Request<HttpBody>, Error<Infallible>> {
+                let Parts { method, url, headers, body } = self.request?;
+                let uri = http::Uri::try_from(url.as_str())
+                    .map_err(Error::request_construction)?;
+                let mut request = http::Request::new(body);
+                *request.method_mut() = method;
+                *request.uri_mut() = uri;
+                *request.headers_mut() = headers;
+                Ok(request)
+            }
+        }
+        /// A `multipart/form-data` body (RFC 7578): named parts, encoded in the order they were added.
+        ///
+        /// Every part is held in memory, so the encoded body is too. The boundary is chosen when the form
+        /// is encoded, and is one that no part contains.
+        #[derive(Debug, Default)]
+        pub struct MultipartForm {
+            parts: Vec<(String, MultipartPart)>,
+        }
+        impl MultipartForm {
+            /// A form with no parts.
+            pub fn new() -> Self {
+                Self::default()
+            }
+            /// Add a part named `name`, after every part added before; a name may repeat.
+            pub fn part(mut self, name: impl Into<String>, part: MultipartPart) -> Self {
+                self.parts.push((name.into(), part));
+                self
+            }
+            /// The `Content-Type` naming the boundary, and the encoded body.
+            fn encode(self) -> (HeaderValue, Bytes) {
+                self.encode_with(boundary)
+            }
+            /// [`Self::encode`], drawing candidate boundaries from `candidate`, seed by seed from zero,
+            /// until one occurs in no part.
+            fn encode_with(
+                self,
+                mut candidate: impl FnMut(u64) -> Vec<u8>,
+            ) -> (HeaderValue, Bytes) {
+                let heads: Vec<Vec<u8>> = self
+                    .parts
+                    .iter()
+                    .map(|(name, part)| part.head(name))
+                    .collect();
+                let mut seed = 0_u64;
+                let boundary = loop {
+                    let boundary = candidate(seed);
+                    let clashes = self
+                        .parts
+                        .iter()
+                        .zip(&heads)
+                        .any(|((_, part), head)| {
+                            contains(head, &boundary) || contains(&part.body, &boundary)
+                        });
+                    if !clashes {
+                        break boundary;
+                    }
+                    seed += 1;
+                };
+                let length = self
+                    .parts
+                    .iter()
+                    .zip(&heads)
+                    .map(|((_, part), head)| {
+                        boundary.len() + head.len() + part.body.len() + 8
+                    })
+                    .sum::<usize>() + boundary.len() + 6;
+                let mut body = BytesMut::with_capacity(length);
+                for ((_, part), head) in self.parts.iter().zip(&heads) {
+                    body.extend_from_slice(b"--");
+                    body.extend_from_slice(&boundary);
+                    body.extend_from_slice(b"\r\n");
+                    body.extend_from_slice(head);
+                    body.extend_from_slice(b"\r\n");
+                    body.extend_from_slice(&part.body);
+                    body.extend_from_slice(b"\r\n");
+                }
+                body.extend_from_slice(b"--");
+                body.extend_from_slice(&boundary);
+                body.extend_from_slice(b"--\r\n");
+                let mut content_type = b"multipart/form-data; boundary=".to_vec();
+                content_type.extend_from_slice(&boundary);
+                let content_type = HeaderValue::from_bytes(&content_type)
+                    .expect(
+                        "a boundary is visible ASCII, so the content type is a valid header value",
+                    );
+                (content_type, body.freeze())
+            }
+        }
+        /// One part of a [`MultipartForm`]: its bytes, and the `Content-Type` and other headers it
+        /// carries beside its `Content-Disposition`.
+        #[derive(Debug, Clone)]
+        pub struct MultipartPart {
+            body: Bytes,
+            content_type: Option<HeaderValue>,
+            headers: HeaderMap,
+        }
+        impl MultipartPart {
+            /// A part holding `text` as UTF-8, with no `Content-Type` of its own (RFC 7578 §4.4 reads
+            /// one without it as `text/plain`).
+            pub fn text(text: impl Into<String>) -> Self {
+                Self::bytes(text.into())
+            }
+            /// A part holding `bytes`, with no `Content-Type` of its own.
+            pub fn bytes(bytes: impl Into<Bytes>) -> Self {
+                Self {
+                    body: bytes.into(),
+                    content_type: None,
+                    headers: HeaderMap::new(),
+                }
+            }
+            /// Set the part's `Content-Type`. One that is not a valid header value is refused as
+            /// [`Error::RequestConstruction`].
+            pub fn mime_str(
+                mut self,
+                content_type: &str,
+            ) -> Result<Self, Error<Infallible>> {
+                self.content_type = Some(
+                    HeaderValue::from_str(content_type)
+                        .map_err(Error::request_construction)?,
+                );
+                Ok(self)
+            }
+            /// Set the headers the part carries after its `Content-Disposition` and `Content-Type`,
+            /// replacing any set before.
+            pub fn headers(mut self, headers: HeaderMap) -> Self {
+                self.headers = headers;
+                self
+            }
+            /// The part's header lines, each ending in CRLF: `Content-Disposition` naming it, then its
+            /// `Content-Type`, then its other headers.
+            ///
+            /// The name is written as the WHATWG HTML standard's `multipart/form-data` encoding writes a
+            /// form field's: as UTF-8, quoted, with `"`, CR and LF percent-encoded, and nothing else
+            /// escaped. RFC 7578 §4.2 rules out the RFC 2231 `name*=` form.
+            fn head(&self, name: &str) -> Vec<u8> {
+                let mut head = b"Content-Disposition: form-data; name=\"".to_vec();
+                for byte in name.bytes() {
+                    match byte {
+                        b'"' => head.extend_from_slice(b"%22"),
+                        b'\r' => head.extend_from_slice(b"%0D"),
+                        b'\n' => head.extend_from_slice(b"%0A"),
+                        byte => head.push(byte),
+                    }
+                }
+                head.extend_from_slice(b"\"\r\n");
+                let content_type = self
+                    .content_type
+                    .iter()
+                    .map(|value| (&CONTENT_TYPE, value));
+                for (name, value) in content_type.chain(&self.headers) {
+                    head.extend_from_slice(name.as_str().as_bytes());
+                    head.extend_from_slice(b": ");
+                    head.extend_from_slice(value.as_bytes());
+                    head.extend_from_slice(b"\r\n");
+                }
+                head
+            }
+        }
+        /// A boundary of 32 lowercase hexadecimal digits, from `std`'s randomly keyed hasher (keyed per
+        /// process where the platform supplies randomness) over `seed`. [`MultipartForm`] moves to the
+        /// next seed while a part contains the boundary, so a part cannot end the body early whatever the
+        /// hasher's keys are.
+        fn boundary(seed: u64) -> Vec<u8> {
+            let state = std::collections::hash_map::RandomState::new();
+            let mut boundary = Vec::with_capacity(32);
+            for half in 0..2_u64 {
+                let mut hasher = state.build_hasher();
+                hasher.write_u64(seed);
+                hasher.write_u64(half);
+                boundary
+                    .extend_from_slice(format!("{:016x}", hasher.finish()).as_bytes());
+            }
+            boundary
+        }
+        /// Whether `haystack` contains `needle` anywhere.
+        fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+            haystack.windows(needle.len()).any(|window| window == needle)
         }
     }
     mod response {
@@ -4342,7 +4638,7 @@ mod support {
             /// A transport failure is transient when the class its [`TransportError`] carries is: a
             /// timeout, a failed connection, or an interrupted body is, and a redirect-policy, protocol,
             /// or request-kind failure ([`super::RequestError::Other`]) is not. [`super::ReqwestBackend`]
-            /// classifies as [`super::Error::from_reqwest`] documents, so on `wasm32` a failed connection
+            /// classifies as [`super::TransportError::from_reqwest`] documents, so on `wasm32` a failed connection
             /// is request-kind there. A `POST` or `PATCH` without an `Idempotency-Key` is never
             /// transient here, since the server may already have applied it. Policies are free to ignore
             /// this and key on [`Self::status`] / [`Self::transport_error`] directly.
@@ -4714,10 +5010,6 @@ mod support {
             Full(Bytes),
             /// A body read frame by frame.
             Streaming(BoxBody),
-            /// A request body reqwest's `fetch` backend holds as something other than bytes (a multipart
-            /// form), which only [`ReqwestBackend`] can send.
-            #[cfg(target_arch = "wasm32")]
-            Reqwest(reqwest::Body),
             /// A response body reqwest's `fetch` backend received.
             #[cfg(target_arch = "wasm32")]
             Fetch(FetchBody),
@@ -4751,8 +5043,6 @@ mod support {
                     Inner::Streaming(_) => None,
                     #[cfg(target_arch = "wasm32")]
                     Inner::Fetch(_) => None,
-                    #[cfg(target_arch = "wasm32")]
-                    Inner::Reqwest(body) => body.as_bytes(),
                 }
             }
             /// A copy of an in-memory body, sharing its bytes; `None` for a streaming one, which can be
@@ -4763,8 +5053,6 @@ mod support {
                     Inner::Streaming(_) => None,
                     #[cfg(target_arch = "wasm32")]
                     Inner::Fetch(_) => None,
-                    #[cfg(target_arch = "wasm32")]
-                    Inner::Reqwest(_) => None,
                 }
             }
             /// The next chunk of data, or `None` once the body has ended. Frames that carry no data
@@ -4833,42 +5121,6 @@ mod support {
                 }
                 Ok(Some(buffered.freeze()))
             }
-            /// A request body reqwest built, as the seam carries it. Off `wasm32` an in-memory body
-            /// moves over without a copy, and anything else is read as a stream. On `wasm32` an in-memory
-            /// body is copied, and a multipart form stays reqwest's, for [`ReqwestBackend`] to send.
-            ///
-            /// One function for both targets, with the target-specific steps `cfg`-gated inside it, so a
-            /// native test reaches it and no mutation of it survives by being compiled out.
-            fn from_reqwest_request(
-                #[allow(unused_mut)]
-                mut body: reqwest::Body,
-            ) -> Self {
-                #[cfg(target_arch = "wasm32")]
-                return match body.as_bytes() {
-                    Some(bytes) => Self::from(Bytes::copy_from_slice(bytes)),
-                    None => {
-                        Self {
-                            inner: Inner::Reqwest(body),
-                        }
-                    }
-                };
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    if body.as_bytes().is_none() {
-                        return Self::from_reqwest_stream(body);
-                    }
-                    let mut cx = Context::from_waker(std::task::Waker::noop());
-                    match Pin::new(&mut body).poll_frame(&mut cx) {
-                        Poll::Ready(Some(Ok(frame))) => {
-                            Self::from(frame.into_data().unwrap_or_default())
-                        }
-                        Poll::Ready(None) => Self::empty(),
-                        Poll::Ready(Some(Err(_))) | Poll::Pending => {
-                            Self::from_reqwest_stream(body)
-                        }
-                    }
-                }
-            }
             /// A body reqwest reads, read through [`TransportError::from_reqwest_body`].
             #[cfg(not(target_arch = "wasm32"))]
             fn from_reqwest_stream(body: reqwest::Body) -> Self {
@@ -4902,8 +5154,6 @@ mod support {
                             ),
                         )
                     }
-                    #[cfg(target_arch = "wasm32")]
-                    Inner::Reqwest(body) => Ok(body),
                 }
             }
         }
@@ -4922,27 +5172,12 @@ mod support {
                     Inner::Streaming(body) => body.as_mut().poll_frame(cx),
                     #[cfg(target_arch = "wasm32")]
                     Inner::Fetch(body) => Pin::new(body).poll_frame(cx),
-                    #[cfg(target_arch = "wasm32")]
-                    Inner::Reqwest(_) => {
-                        self.inner = Inner::Full(Bytes::new());
-                        Poll::Ready(
-                            Some(
-                                Err(
-                                    TransportError::request(
-                                        "a multipart request body built by reqwest is sent only by ReqwestBackend",
-                                    ),
-                                ),
-                            ),
-                        )
-                    }
                 }
             }
             fn is_end_stream(&self) -> bool {
                 match &self.inner {
                     Inner::Full(bytes) => bytes.is_empty(),
                     Inner::Streaming(body) => body.is_end_stream(),
-                    #[cfg(target_arch = "wasm32")]
-                    Inner::Reqwest(_) => false,
                     #[cfg(target_arch = "wasm32")]
                     Inner::Fetch(_) => false,
                 }
@@ -4952,7 +5187,7 @@ mod support {
                     Inner::Full(bytes) => SizeHint::with_exact(bytes.len() as u64),
                     Inner::Streaming(body) => body.size_hint(),
                     #[cfg(target_arch = "wasm32")]
-                    Inner::Reqwest(_) | Inner::Fetch(_) => SizeHint::default(),
+                    Inner::Fetch(_) => SizeHint::default(),
                 }
             }
         }
@@ -4968,8 +5203,6 @@ mod support {
                         f.debug_tuple("HttpBody").field(&bytes.len()).finish()
                     }
                     Inner::Streaming(_) => f.write_str("HttpBody(streaming)"),
-                    #[cfg(target_arch = "wasm32")]
-                    Inner::Reqwest(_) => f.write_str("HttpBody(reqwest)"),
                     #[cfg(target_arch = "wasm32")]
                     Inner::Fetch(_) => f.write_str("HttpBody(fetch)"),
                 }
@@ -4999,16 +5232,6 @@ mod support {
             fn from(bytes: &'static [u8]) -> Self {
                 Self::from(Bytes::from_static(bytes))
             }
-        }
-        /// A binary operation's request body, as the `reqwest::RequestBuilder` it is built on takes it:
-        /// in-memory bytes move over without a copy, and a streaming body ([`HttpBody::wrap`]) is sent as
-        /// it is read. A streaming body is never replayed: the request it rides on does not clone, so a
-        /// retry or a credential refresh does not resend it. reqwest's `fetch` backend on `wasm32` takes
-        /// no stream, so there a streaming body is refused as [`super::Error::RequestConstruction`].
-        pub fn request_body(
-            body: impl Into<HttpBody>,
-        ) -> Result<reqwest::Body, super::Error<std::convert::Infallible>> {
-            body.into().into_reqwest().map_err(super::Error::from_transport)
         }
         /// An adopted body: its data read as `Bytes`, and its failures as [`TransportError`]s.
         struct SourceBody<B> {
@@ -5125,34 +5348,16 @@ mod support {
                 }
             }
         }
-        /// A request reqwest built, as the seam carries it. A URL that is not a valid URI is refused here
-        /// as reqwest refuses it at `execute`, as a builder-kind error.
-        ///
-        /// The request's total timeout crosses with it: off `wasm32` reqwest keeps it among the request's
-        /// extensions, which the conversion carries; on `wasm32` it is a field the conversion drops, so it
-        /// is carried as a `FetchTimeout` extension, which [`request_into_reqwest`] reads back.
-        pub(crate) fn request_from_reqwest(
-            request: reqwest::Request,
-        ) -> Result<http::Request<HttpBody>, reqwest::Error> {
-            #[cfg(target_arch = "wasm32")]
-            let timeout = request.timeout().copied();
-            let request = http::Request::<reqwest::Body>::try_from(request)?;
-            #[allow(unused_mut)]
-            let mut request = request.map(HttpBody::from_reqwest_request);
-            #[cfg(target_arch = "wasm32")]
-            if let Some(timeout) = timeout {
-                request.extensions_mut().insert(FetchTimeout(timeout));
-            }
-            Ok(request)
-        }
-        /// A request's total timeout as it crosses the seam on `wasm32`, where reqwest's own request
-        /// keeps it outside the extensions its conversion carries.
-        #[cfg(target_arch = "wasm32")]
-        #[derive(Clone, Copy, Debug)]
-        struct FetchTimeout(std::time::Duration);
+        /// The total timeout of one request, from connecting until its whole response body has been
+        /// read, carried among the request's extensions. [`super::send`] gives a request without one the
+        /// client's [`super::ClientConfig::timeout`] this way, and [`ReqwestBackend`] enforces it; a
+        /// backend on another HTTP stack reads it from the request it executes and bounds the exchange by
+        /// it.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct TotalTimeout(pub std::time::Duration);
         /// A copy of `request` to send again, its method, URI, version, headers, extensions and body
         /// alike; `None` when its body is a stream, which can be read only once.
-        pub(crate) fn try_clone_request(
+        pub fn try_clone_request(
             request: &http::Request<HttpBody>,
         ) -> Option<http::Request<HttpBody>> {
             let mut clone = http::Request::new(request.body().try_clone()?);
@@ -5163,24 +5368,22 @@ mod support {
             *clone.extensions_mut() = request.extensions().clone();
             Some(clone)
         }
-        /// A request from the seam, as reqwest sends it. The URI is parsed back into a URL; one that does
-        /// not parse is refused as a request-kind failure, before anything is sent.
+        /// A request from the seam, as reqwest sends it, its [`TotalTimeout`] become reqwest's own request
+        /// timeout. The URI is parsed back into a URL; one that does not parse is refused as a
+        /// request-kind failure, before anything is sent.
         fn request_into_reqwest(
             request: http::Request<HttpBody>,
         ) -> Result<reqwest::Request, TransportError> {
             let (parts, body) = request.into_parts();
-            #[cfg(target_arch = "wasm32")]
             let timeout = parts
                 .extensions
-                .get::<FetchTimeout>()
+                .get::<TotalTimeout>()
                 .map(|timeout| timeout.0);
             let body = body.into_reqwest()?;
-            #[allow(unused_mut)]
             let mut request = reqwest::Request::try_from(
                     http::Request::from_parts(parts, body),
                 )
                 .map_err(TransportError::from_reqwest)?;
-            #[cfg(target_arch = "wasm32")]
             if timeout.is_some() {
                 *request.timeout_mut() = timeout;
             }
@@ -5188,8 +5391,9 @@ mod support {
         }
         /// A response reqwest received, as the seam carries it. Off `wasm32` the body is reqwest's own,
         /// read as it arrives; on `wasm32` it is the `fetch` response's, read whole unless `EventStream`
-        /// takes it back to stream it. One
-        /// function for both targets, as [`HttpBody::from_reqwest_request`] is, and for the same reason.
+        /// takes it back to stream it. One function for both targets, with the target-specific steps
+        /// `cfg`-gated inside it, so a native test reaches it and no mutation of it survives by being
+        /// compiled out.
         pub(crate) fn response_from_reqwest(
             #[allow(unused_mut)]
             mut response: reqwest::Response,
@@ -5327,7 +5531,7 @@ mod support {
         use super::dispatch::{
             apply_options, cap_body, send_on, unexpected_status_capped,
         };
-        use super::transport::{request_from_reqwest, try_clone_request};
+        use super::transport::try_clone_request;
         use super::wasm::BoxFuture;
         use super::{
             ClientConfig, ClientCore, Error, HttpBackend, HttpBody, MaybeSend, MaybeSync,
@@ -5472,22 +5676,21 @@ mod support {
             /// embedded runtime, so they reach it while the [`Framing`] it takes stays outside the
             /// generated public API. The `allow` is for this crate's own build: its caller is generated code.
             ///
-            /// `request` is the clone the operation kept of what it sent, built on reqwest; a URL that is
-            /// not a valid URI cannot cross the seam again, so it leaves the stream nothing to resend. The
-            /// clone was kept before [`super::send_streaming`] added the core's [`super::RequestOptions`],
-            /// so they are added to it here the same way, and every reconnect carries them too.
+            /// `request` is the clone the operation kept of what it sent ([`super::try_clone_request`]),
+            /// `None` where its body could not be cloned. The clone was kept before
+            /// [`super::send_streaming`] added the core's [`super::RequestOptions`], so they are added to
+            /// it here the same way, and every reconnect carries them too.
             #[allow(dead_code)]
             pub(crate) fn new_reconnectable(
                 response: Response,
                 framing: Framing,
                 core: &ClientCore,
-                request: Option<reqwest::Request>,
+                request: Option<http::Request<HttpBody>>,
             ) -> Self {
                 let request = request
-                    .and_then(|request| {
-                        let mut request = request_from_reqwest(request).ok()?;
+                    .map(|mut request| {
                         apply_options(core.options(), &mut request);
-                        Some(request)
+                        request
                     });
                 let last_event_id = request
                     .as_ref()
@@ -6650,12 +6853,14 @@ mod support {
         FormStyle, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
+    pub use request::{MultipartForm, MultipartPart, RequestBuilder};
     pub use response::{stream_success_bytes, ByteStream, ResponseValue};
     pub use retry::{
         exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
     };
     pub use transport::{
-        request_body, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend,
+        try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend,
+        TotalTimeout,
     };
     pub use wasm::{MaybeSend, MaybeSync};
     pub use stream::{
@@ -12848,9 +13053,9 @@ impl Client {
         Self::with_config(base_url, |_| {})
     }
     /// Build a client whose `ClientConfig` is the default one as `configure` leaves it —
-    /// where the connect, read and total timeouts are tightened or loosened. Its
-    /// `reqwest::Client` is built from the connect and read timeouts as they are when
-    /// `configure` returns.
+    /// where the connect, read and total timeouts are tightened or loosened. The
+    /// `reqwest::Client` its default backend runs on is built from the connect and read
+    /// timeouts as they are when `configure` returns.
     pub fn with_config(
         base_url: &str,
         configure: impl FnOnce(&mut support::ClientConfig),
@@ -12871,9 +13076,9 @@ impl Client {
     > {
         Self::new(&servers::default_url())
     }
-    /// Build a client over a caller-supplied `reqwest::Client`, which both builds and
-    /// sends requests: your client's timeouts apply instead of `ClientConfig`'s connect
-    /// and read timeouts.
+    /// Build a client that sends its requests on a caller-supplied `reqwest::Client`, as
+    /// `with_backend` does with `ReqwestBackend::new(client)`: your client's timeouts
+    /// apply instead of `ClientConfig`'s connect and read timeouts.
     pub fn with_client(
         client: reqwest::Client,
         base_url: &str,
@@ -12883,32 +13088,15 @@ impl Client {
         Ok(Self { core })
     }
     /// Build a client over a caller-supplied transport backend — the injection point for
-    /// retry, middleware, or a non-reqwest transport. Requests are still built on a default
-    /// `reqwest::Client`; only the execute step goes through the backend, so connecting
-    /// and reading are bounded however the backend bounds them. Each call builds that
-    /// `reqwest::Client`; [`Self::with_client_and_backend`] takes one you already have.
+    /// retry, middleware, or a non-reqwest transport — which executes every request; the
+    /// client builds no HTTP client of its own, so many clients can share one backend.
+    /// Connecting and reading are bounded however the backend bounds them, and the total
+    /// timeout travels on each request as a `TotalTimeout` extension for it to enforce.
     pub fn with_backend(
         backend: std::sync::Arc<dyn support::HttpBackend>,
         base_url: &str,
     ) -> Result<Self, support::Error<std::convert::Infallible>> {
         let mut core = support::ClientCore::with_backend(backend, base_url)?;
-        core.config_mut().max_error_body = 65536usize;
-        Ok(Self { core })
-    }
-    /// Build a client over both a caller-supplied `reqwest::Client`, which builds
-    /// requests, and a caller-supplied transport backend, which executes them; nothing
-    /// else is built, so many clients can share one of each. Connecting and reading are
-    /// bounded however the backend bounds them.
-    pub fn with_client_and_backend(
-        client: reqwest::Client,
-        backend: std::sync::Arc<dyn support::HttpBackend>,
-        base_url: &str,
-    ) -> Result<Self, support::Error<std::convert::Infallible>> {
-        let mut core = support::ClientCore::with_client_and_backend(
-            client,
-            backend,
-            base_url,
-        )?;
         core.config_mut().max_error_body = 65536usize;
         Ok(Self { core })
     }
@@ -12981,8 +13169,8 @@ impl Client {
         self.core.set_options(options);
         self
     }
-    /// Repoint this client value at another base URL, keeping its `reqwest::Client`,
-    /// transport backend, configuration and credentials, so nothing is rebuilt: derive one
+    /// Repoint this client value at another base URL, keeping its transport backend,
+    /// configuration and credentials, so nothing is rebuilt: derive one
     /// with `client.clone().with_base_url(url)?`. Fails with `Error::RequestConstruction`
     /// if `base_url` is not a valid URL.
     pub fn with_base_url(
@@ -13013,8 +13201,8 @@ impl Client {
             );
         let url = support::build_url_on(&self.core, None, &path_3c31c5d6, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -13031,7 +13219,7 @@ impl Client {
     pub fn read_file_url(
         &self,
         path: impl Into<types::Path>,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let path: types::Path = path.into();
         let mut path_3c31c5d6 = "/files".to_owned();
         let mut query: Vec<String> = Vec::new();
@@ -13104,10 +13292,10 @@ impl Client {
                 &query_fe9665f8,
             )
             .map_err(support::Error::widen)?;
-        let mut request_fe9665f8 = self
-            .core
-            .http()
-            .request(reqwest::Method::GET, url_fe9665f8);
+        let mut request_fe9665f8 = support::RequestBuilder::new(
+            reqwest::Method::GET,
+            url_fe9665f8,
+        );
         request_fe9665f8 = request_fe9665f8
             .header(
                 "request",
@@ -13133,9 +13321,7 @@ impl Client {
             request_fe9665f8 = request_fe9665f8
                 .header(reqwest::header::COOKIE, cookies_fe9665f8.join("; "));
         }
-        let request_fe9665f8 = request_fe9665f8
-            .build()
-            .map_err(support::Error::request_construction)?;
+        let request_fe9665f8 = request_fe9665f8.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request_fe9665f8)
             .await
             .map_err(support::Error::widen)?;
@@ -13159,7 +13345,7 @@ impl Client {
         query: impl Into<types::Query>,
         url: impl Into<types::Url>,
         params: impl Into<Option<BindingCollisionsParams>>,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let query: types::Query = query.into();
         let url: types::Url = url.into();
         let params: Option<BindingCollisionsParams> = params.into();
@@ -13255,13 +13441,13 @@ impl Client {
         }
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         let body_07e95c71 = serde_json::to_vec(body_07e95c71)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body_07e95c71);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -13285,7 +13471,7 @@ impl Client {
         body: impl Into<types::Body>,
         params: impl Into<types::Params>,
         params_07e95c71: impl Into<Option<SignatureBindingCollisionsParams>>,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let body: types::Body = body.into();
         let params: types::Params = params.into();
         let params_07e95c71: Option<SignatureBindingCollisionsParams> = params_07e95c71
@@ -13387,7 +13573,7 @@ impl Client {
         }
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
         request = request
             .header(
                 "X-Flags",
@@ -13414,7 +13600,7 @@ impl Client {
         if !cookies.is_empty() {
             request = request.header(reqwest::header::COOKIE, cookies.join("; "));
         }
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -13436,7 +13622,7 @@ impl Client {
         ids: types::Ids,
         workflow_id: types::WorkflowId,
         params: impl Into<Option<SerializeParamsParams>>,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let params: Option<SerializeParamsParams> = params.into();
         let mut path = "/params/{ids}".to_owned();
         path = path
@@ -13495,7 +13681,7 @@ impl Client {
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
         let replay;
         (request, replay) = support::attach_auth_replayable(
                 &self.core,
@@ -13531,7 +13717,7 @@ impl Client {
             )
             .await
             .map_err(support::Error::widen)?;
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -13553,7 +13739,7 @@ impl Client {
     #[inline]
     pub fn get_conjunction_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/conjunction".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -13617,7 +13803,7 @@ impl Client {
         }
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
         let replay;
         (request, replay) = support::attach_auth_replayable(
                 &self.core,
@@ -13639,7 +13825,7 @@ impl Client {
             )
             .await
             .map_err(support::Error::widen)?;
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -13660,7 +13846,7 @@ impl Client {
         &self,
         id: impl Into<types::IdF3e1128f>,
         params: impl Into<Option<GetUserParams>>,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let id: types::IdF3e1128f = id.into();
         let params: Option<GetUserParams> = params.into();
         let mut path = "/users/{id}".to_owned();
@@ -13733,8 +13919,8 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -13815,7 +14001,7 @@ Response `409`: Conflict*/
     #[inline]
     pub fn get_multi_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/multi".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -13835,8 +14021,8 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -13894,7 +14080,7 @@ Response `409`: Conflict*/
     #[inline]
     pub fn get_shared_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/shared".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -13914,8 +14100,8 @@ Response `default`: Anything else*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -13983,7 +14169,7 @@ Response `default`: Anything else*/
     #[inline]
     pub fn get_maybe_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/maybe".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14004,8 +14190,8 @@ Response `default`: Anything else*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14054,7 +14240,7 @@ Response `default`: Anything else*/
     #[inline]
     pub fn get_multi_default_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/multi-default".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14073,8 +14259,8 @@ Response `default`: Anything else*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14095,7 +14281,7 @@ Response `default`: Anything else*/
     #[inline]
     pub fn get_plain_default_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/plain-default".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14111,8 +14297,8 @@ Response `default`: Anything else*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14133,7 +14319,7 @@ Response `default`: Anything else*/
     #[inline]
     pub fn get_unit_default_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/unit-default".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14151,8 +14337,8 @@ Response `default`: Anything else*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14200,7 +14386,7 @@ Response `default`: Anything else*/
     #[inline]
     pub fn get_bodyless_default_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/bodyless-default".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14223,8 +14409,8 @@ Response `default`: Anything else*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14287,7 +14473,7 @@ Response `default`: Anything else*/
     #[inline]
     pub fn get_bodyless_default_multi_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/bodyless-default-multi".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14305,8 +14491,8 @@ Response `404`: Not Found*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14354,7 +14540,7 @@ Response `404`: Not Found*/
     #[inline]
     pub fn get_bodyless_sibling_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/bodyless-sibling".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14372,8 +14558,8 @@ Response `404`: Not Found*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14420,7 +14606,7 @@ Response `404`: Not Found*/
     #[inline]
     pub fn get_xml_bodyless_sibling_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/xml-bodyless-sibling".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14439,8 +14625,8 @@ Response `default`: Anything else*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14486,7 +14672,7 @@ Response `default`: Anything else*/
     #[inline]
     pub fn get_conditional_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/conditional".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14502,8 +14688,8 @@ Response `400`: Bad Request*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14524,7 +14710,7 @@ Response `400`: Bad Request*/
     #[inline]
     pub fn get_maybe_single_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/maybe-single".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14542,8 +14728,8 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14593,7 +14779,7 @@ Response `409`: Conflict*/
     #[inline]
     pub fn get_alias_shared_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/alias-shared".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14608,17 +14794,13 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
-        let mut form = reqwest::multipart::Form::new();
-        let mut part = reqwest::multipart::Part::bytes(body.file.to_vec());
-        part = part
-            .mime_str("application/octet-stream")
-            .map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
+        let mut form = support::MultipartForm::new();
+        let mut part = support::MultipartPart::bytes(body.file.to_vec());
+        part = part.mime_str("application/octet-stream").map_err(support::Error::widen)?;
         form = form.part("file", part);
-        let mut part = reqwest::multipart::Part::text(body.caption.to_string());
-        part = part
-            .mime_str("text/plain")
-            .map_err(support::Error::request_construction)?;
+        let mut part = support::MultipartPart::text(body.caption.to_string());
+        part = part.mime_str("text/plain").map_err(support::Error::widen)?;
         let mut part_headers = reqwest::header::HeaderMap::new();
         part_headers
             .insert(
@@ -14630,24 +14812,20 @@ Response `409`: Conflict*/
         part = part.headers(part_headers);
         form = form.part("caption", part);
         if let Some(value) = &body.count {
-            let mut part = reqwest::multipart::Part::text(value.to_string());
-            part = part
-                .mime_str("text/plain")
-                .map_err(support::Error::request_construction)?;
+            let mut part = support::MultipartPart::text(value.to_string());
+            part = part.mime_str("text/plain").map_err(support::Error::widen)?;
             form = form.part("count", part);
         }
         if let Some(value) = &body.tags {
-            let mut part = reqwest::multipart::Part::text(
+            let mut part = support::MultipartPart::text(
                 serde_json::to_string(value)
                     .map_err(support::Error::request_construction)?,
             );
-            part = part
-                .mime_str("application/json")
-                .map_err(support::Error::request_construction)?;
+            part = part.mime_str("application/json").map_err(support::Error::widen)?;
             form = form.part("tags", part);
         }
         request = request.multipart(form);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14665,7 +14843,7 @@ Response `409`: Conflict*/
     #[inline]
     pub fn upload_file_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/upload".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14705,8 +14883,8 @@ Response `409`: Conflict*/
         }
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14724,7 +14902,7 @@ Response `409`: Conflict*/
         &self,
         token: impl Into<types::Token84222325>,
         params: impl Into<Option<GetBlobParams>>,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let token: types::Token84222325 = token.into();
         let params: Option<GetBlobParams> = params.into();
         let mut path = "/blob/{token}".to_owned();
@@ -14764,11 +14942,9 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
-        request = request
-            .header(reqwest::header::CONTENT_TYPE, "text/plain")
-            .body(support::request_body(body).map_err(support::Error::widen)?);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
+        request = request.header(reqwest::header::CONTENT_TYPE, "text/plain").body(body);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14784,7 +14960,7 @@ Response `409`: Conflict*/
     #[inline]
     pub fn post_raw_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/raw".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14816,13 +14992,13 @@ Response `409`: Conflict*/
         }
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         let body = serde_json::to_vec(body)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14844,7 +15020,7 @@ Response `409`: Conflict*/
     pub fn post_nullable_bytes_url(
         &self,
         params: impl Into<Option<PostNullableBytesParams>>,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let params: Option<PostNullableBytesParams> = params.into();
         let mut path = "/nullable-bytes".to_owned();
         let mut query: Vec<String> = Vec::new();
@@ -14872,24 +15048,24 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
-        let mut form = reqwest::multipart::Form::new();
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
+        let mut form = support::MultipartForm::new();
         if let Some(value) = &body.file {
-            let mut part = reqwest::multipart::Part::bytes(value.to_vec());
+            let mut part = support::MultipartPart::bytes(value.to_vec());
             part = part
                 .mime_str("application/octet-stream")
-                .map_err(support::Error::request_construction)?;
+                .map_err(support::Error::widen)?;
             form = form.part("file", part);
         }
         if let Some(value) = &body.thumb {
-            let mut part = reqwest::multipart::Part::bytes(value.to_vec());
+            let mut part = support::MultipartPart::bytes(value.to_vec());
             part = part
                 .mime_str("application/octet-stream")
-                .map_err(support::Error::request_construction)?;
+                .map_err(support::Error::widen)?;
             form = form.part("thumb", part);
         }
         request = request.multipart(form);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14910,7 +15086,7 @@ Response `409`: Conflict*/
     #[inline]
     pub fn post_nullable_parts_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/nullable-parts".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14927,8 +15103,8 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14948,7 +15124,7 @@ Response `409`: Conflict*/
     #[inline]
     pub fn render_html_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/render".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -14965,8 +15141,8 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -14986,7 +15162,7 @@ Response `409`: Conflict*/
     #[inline]
     pub fn get_octocat_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/octocat".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15003,8 +15179,8 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15023,7 +15199,7 @@ Response `409`: Conflict*/
     #[inline]
     pub fn download_raw_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/download".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15040,8 +15216,8 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send_streaming(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15068,11 +15244,11 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::PUT, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::PUT, url);
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(support::request_body(body).map_err(support::Error::widen)?);
-        let request = request.build().map_err(support::Error::request_construction)?;
+            .body(body);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15088,7 +15264,7 @@ Response `409`: Conflict*/
     #[inline]
     pub fn put_ranged_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/ranged".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15106,11 +15282,11 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::PUT, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::PUT, url);
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(support::request_body(body).map_err(support::Error::widen)?);
-        let request = request.build().map_err(support::Error::request_construction)?;
+            .body(body);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send_streaming(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15144,8 +15320,8 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15164,7 +15340,7 @@ Response `409`: Conflict*/
     pub fn get_artwork_url(
         &self,
         id: impl Into<types::Id>,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let id: types::Id = id.into();
         let mut path = "/artwork/{id}".to_owned();
         path = path
@@ -15204,8 +15380,8 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send_streaming(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15240,11 +15416,9 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::PUT, url);
-        request = request
-            .header(reqwest::header::CONTENT_TYPE, "image/png")
-            .body(support::request_body(body).map_err(support::Error::widen)?);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::PUT, url);
+        request = request.header(reqwest::header::CONTENT_TYPE, "image/png").body(body);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15263,7 +15437,7 @@ Response `409`: Conflict*/
     pub fn put_artwork_url(
         &self,
         id: impl Into<types::Id4f0a4fba>,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let id: types::Id4f0a4fba = id.into();
         let mut path = "/artwork/{id}".to_owned();
         path = path
@@ -15291,8 +15465,8 @@ Response `400`: textual failure*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15314,7 +15488,7 @@ Response `400`: textual failure*/
     #[inline]
     pub fn get_text_error_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/text-error".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15337,8 +15511,8 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15412,7 +15586,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn get_raw_multi_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/raw-multi".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15430,12 +15604,12 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         let body = support::to_xml(body).map_err(support::Error::widen)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/xml")
             .body(body);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15454,7 +15628,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn submit_order_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/xml/order".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15481,13 +15655,13 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::PATCH, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::PATCH, url);
         let body = serde_json::to_vec(body)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/merge-patch+json")
             .body(body);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15509,7 +15683,7 @@ Response `409`: binary error*/
     pub fn patch_merge_document_url(
         &self,
         id: impl Into<types::Id3e6bacfe>,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let id: types::Id3e6bacfe = id.into();
         let mut path = "/merge-patch/{id}".to_owned();
         path = path
@@ -15535,10 +15709,10 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         let body = support::to_xml(body).map_err(support::Error::widen)?;
         request = request.header(reqwest::header::CONTENT_TYPE, "text/xml").body(body);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15559,7 +15733,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn submit_legacy_order_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/xml/legacy-order".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15577,13 +15751,13 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         let body = serde_json::to_vec(body)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15602,7 +15776,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn post_json_meta_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/json/meta".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15619,9 +15793,9 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
-        let reconnect_request = request.try_clone();
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
+        let reconnect_request = support::try_clone_request(&request);
         let response = support::send_streaming(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15644,7 +15818,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn stream_chat_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/chat/stream".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15661,9 +15835,9 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
-        let reconnect_request = request.try_clone();
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
+        let reconnect_request = support::try_clone_request(&request);
         let response = support::send_streaming(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15687,7 +15861,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn stream_chat_lines_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/chat/lines".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15704,9 +15878,9 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
-        let reconnect_request = request.try_clone();
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
+        let reconnect_request = support::try_clone_request(&request);
         let response = support::send_streaming(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15732,7 +15906,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn stream_chat_sequence_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/chat/sequence".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15746,7 +15920,7 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
         let replay;
         (request, replay) = support::attach_auth_replayable(
                 &self.core,
@@ -15774,7 +15948,7 @@ Response `409`: binary error*/
             )
             .await
             .map_err(support::Error::widen)?;
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15796,7 +15970,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn get_alternate_auth_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/alternate-auth".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -15895,8 +16069,8 @@ Response `409`: binary error*/
         }
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -15919,7 +16093,7 @@ Response `409`: binary error*/
         label: types::Label,
         raw: impl Into<types::Raw>,
         params: impl Into<Option<SerializeStylesParams>>,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let raw: types::Raw = raw.into();
         let params: Option<SerializeStylesParams> = params.into();
         let mut path = "/styles/{matrix}/{label}/{raw}".to_owned();
@@ -16045,7 +16219,7 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
         request = request
             .header(
                 "X-Text",
@@ -16062,7 +16236,7 @@ Response `409`: binary error*/
                 serde_json::to_string(&x_json)
                     .map_err(support::Error::request_construction)?,
             );
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16085,7 +16259,7 @@ Response `409`: binary error*/
         &self,
         text: impl Into<types::Text>,
         json: types::DeepFilter,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let text: types::Text = text.into();
         let mut path = "/content-params/{text}/{json}".to_owned();
         path = path
@@ -16123,7 +16297,7 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         const FORM_PROPERTIES: &[support::FormProperty] = &[
             support::FormProperty {
                 name: "name",
@@ -16147,7 +16321,7 @@ Response `409`: binary error*/
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(body);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16165,7 +16339,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn submit_form_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/forms".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16180,7 +16354,7 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         const FORM_PROPERTIES: &[support::FormProperty] = &[
             support::FormProperty {
                 name: "a",
@@ -16196,7 +16370,7 @@ Response `409`: binary error*/
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(body);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16217,7 +16391,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn submit_form_additional_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/forms/additional".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16235,7 +16409,7 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         const FORM_PROPERTIES: &[support::FormProperty] = &[
             support::FormProperty {
                 name: "a",
@@ -16254,7 +16428,7 @@ Response `409`: binary error*/
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(body);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16275,7 +16449,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn submit_nullable_form_additional_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/form/additional/nullable".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16290,28 +16464,24 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::POST, url);
-        let mut form = reqwest::multipart::Form::new();
-        let mut part = reqwest::multipart::Part::text(body.caption.to_string());
-        part = part
-            .mime_str("text/plain")
-            .map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
+        let mut form = support::MultipartForm::new();
+        let mut part = support::MultipartPart::text(body.caption.to_string());
+        part = part.mime_str("text/plain").map_err(support::Error::widen)?;
         form = form.part("caption", part);
         for (name, value) in &body.additional {
             if matches!(name.as_str(), "caption") {
                 continue;
             }
-            let mut part = reqwest::multipart::Part::text(
+            let mut part = support::MultipartPart::text(
                 serde_json::to_string(value)
                     .map_err(support::Error::request_construction)?,
             );
-            part = part
-                .mime_str("application/json")
-                .map_err(support::Error::request_construction)?;
+            part = part.mime_str("application/json").map_err(support::Error::widen)?;
             form = form.part(name.clone(), part);
         }
         request = request.multipart(form);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16330,7 +16500,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn upload_additional_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/upload/additional".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16344,8 +16514,8 @@ Response `409`: binary error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16366,7 +16536,7 @@ Response `409`: binary error*/
     #[inline]
     pub fn documented_headers_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/documented-headers".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16385,8 +16555,8 @@ Response `default`: Anything else*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16437,7 +16607,7 @@ Response `default`: Anything else*/
     #[inline]
     pub fn get_no_success_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/no-success".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16456,8 +16626,8 @@ Response `204`: No Content*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16500,7 +16670,7 @@ Response `204`: No Content*/
     #[inline]
     pub fn get_maybe_empty_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/maybe-empty".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16519,8 +16689,8 @@ Response `204`: No Content*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16562,7 +16732,7 @@ Response `204`: No Content*/
     #[inline]
     pub fn get_xml_maybe_empty_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/xml/maybe-empty".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16581,8 +16751,8 @@ Response `206`: A range of it*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16627,7 +16797,7 @@ Response `206`: A range of it*/
     #[inline]
     pub fn get_partial_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/partial".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16646,8 +16816,8 @@ Response `200`: OK*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16688,7 +16858,7 @@ Response `200`: OK*/
     #[inline]
     pub fn get_ranged_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/exact-or-range".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16709,8 +16879,8 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16760,7 +16930,7 @@ Response `409`: Conflict*/
     #[inline]
     pub fn get_error_ranged_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/error-exact-or-range".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16779,8 +16949,8 @@ Response `5XX`: Any server error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16801,7 +16971,7 @@ Response `5XX`: Any server error*/
     #[inline]
     pub fn get_range_only_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/range-only".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16817,7 +16987,7 @@ Response `5XX`: Any server error*/
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
         if let Some(value) = params
             .as_ref()
             .and_then(|params| params.x_trace_id.as_ref())
@@ -16849,7 +17019,7 @@ Response `5XX`: Any server error*/
         if !cookies.is_empty() {
             request = request.header(reqwest::header::COOKIE, cookies.join("; "));
         }
-        let request = request.build().map_err(support::Error::request_construction)?;
+        let request = request.build().map_err(support::Error::widen)?;
         let response = support::send(&self.core, request)
             .await
             .map_err(support::Error::widen)?;
@@ -16865,7 +17035,7 @@ Response `5XX`: Any server error*/
     #[inline]
     pub fn get_traced_url(
         &self,
-    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+    ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
         let mut path = "/traced".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
@@ -16959,17 +17129,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
-        /// Build a blocking client over a caller-supplied `reqwest::Client` and transport
-        /// backend, as `Client::with_client_and_backend` does.
-        pub fn with_client_and_backend(
-            client: reqwest::Client,
-            backend: std::sync::Arc<dyn support::HttpBackend>,
-            base_url: &str,
-        ) -> Result<Self, support::Error<std::convert::Infallible>> {
-            let inner = Client::with_client_and_backend(client, backend, base_url)?;
-            let runtime = new_runtime()?;
-            Ok(Self { inner, runtime })
-        }
         /// Borrow the wrapped async client.
         pub fn inner(&self) -> &Client {
             &self.inner
@@ -17053,7 +17212,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         pub fn read_file_url(
             &self,
             path: impl Into<types::Path>,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.read_file_url(path)
         }
         ///Response `204`: No Content
@@ -17078,7 +17237,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             query: impl Into<types::Query>,
             url: impl Into<types::Url>,
             params: impl Into<Option<BindingCollisionsParams>>,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.binding_collisions_url(query, url, params)
         }
         ///Response `204`: No Content
@@ -17112,7 +17271,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             body: impl Into<types::Body>,
             params: impl Into<types::Params>,
             params_07e95c71: impl Into<Option<SignatureBindingCollisionsParams>>,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.signature_binding_collisions_url(body, params, params_07e95c71)
         }
         ///Response `204`: No Content
@@ -17134,7 +17293,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             ids: types::Ids,
             workflow_id: types::WorkflowId,
             params: impl Into<Option<SerializeParamsParams>>,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.serialize_params_url(ids, workflow_id, params)
         }
         ///Response `204`: No Content
@@ -17148,7 +17307,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         #[inline]
         pub fn get_conjunction_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_conjunction_url()
         }
         ///Response `200`: OK
@@ -17166,7 +17325,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             &self,
             id: impl Into<types::IdF3e1128f>,
             params: impl Into<Option<GetUserParams>>,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_user_url(id, params)
         }
         /**Response `200`: OK
@@ -17191,7 +17350,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn get_multi_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_multi_url()
         }
         /**Response `200`: OK
@@ -17211,7 +17370,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn get_shared_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_shared_url()
         }
         /**Response `200`: OK
@@ -17231,7 +17390,7 @@ Response `default`: Anything else*/
         #[inline]
         pub fn get_maybe_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_maybe_url()
         }
         /**Response `200`: OK
@@ -17252,7 +17411,7 @@ Response `default`: Anything else*/
         #[inline]
         pub fn get_multi_default_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_multi_default_url()
         }
         /**Response `200`: OK
@@ -17271,7 +17430,7 @@ Response `default`: Anything else*/
         #[inline]
         pub fn get_plain_default_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_plain_default_url()
         }
         /**Response `204`: No Content
@@ -17287,7 +17446,7 @@ Response `default`: Anything else*/
         #[inline]
         pub fn get_unit_default_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_unit_default_url()
         }
         /**Response `200`: OK
@@ -17308,7 +17467,7 @@ Response `default`: Anything else*/
         #[inline]
         pub fn get_bodyless_default_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_bodyless_default_url()
         }
         /**Response `200`: OK
@@ -17331,7 +17490,7 @@ Response `default`: Anything else*/
         #[inline]
         pub fn get_bodyless_default_multi_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_bodyless_default_multi_url()
         }
         /**Response `200`: OK
@@ -17352,7 +17511,7 @@ Response `404`: Not Found*/
         #[inline]
         pub fn get_bodyless_sibling_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_bodyless_sibling_url()
         }
         /**Response `200`: OK
@@ -17373,7 +17532,7 @@ Response `404`: Not Found*/
         #[inline]
         pub fn get_xml_bodyless_sibling_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_xml_bodyless_sibling_url()
         }
         /**Response `304`: Not Modified
@@ -17392,7 +17551,7 @@ Response `default`: Anything else*/
         #[inline]
         pub fn get_conditional_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_conditional_url()
         }
         /**Response `204`: No Content
@@ -17408,7 +17567,7 @@ Response `400`: Bad Request*/
         #[inline]
         pub fn get_maybe_single_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_maybe_single_url()
         }
         /**Response `200`: OK
@@ -17426,7 +17585,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn get_alias_shared_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_alias_shared_url()
         }
         ///Response `204`: No Content
@@ -17441,7 +17600,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn upload_file_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.upload_file_url()
         }
         ///Response `204`: No Content
@@ -17459,7 +17618,7 @@ Response `409`: Conflict*/
             &self,
             token: impl Into<types::Token84222325>,
             params: impl Into<Option<GetBlobParams>>,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_blob_url(token, params)
         }
         ///Response `204`: No Content
@@ -17475,7 +17634,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn post_raw_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.post_raw_url()
         }
         ///Response `200`: OK
@@ -17495,7 +17654,7 @@ Response `409`: Conflict*/
         pub fn post_nullable_bytes_url(
             &self,
             params: impl Into<Option<PostNullableBytesParams>>,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.post_nullable_bytes_url(params)
         }
         ///Response `204`: No Content
@@ -17510,7 +17669,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn post_nullable_parts_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.post_nullable_parts_url()
         }
         ///Response `200`: rendered HTML
@@ -17527,7 +17686,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn render_html_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.render_html_url()
         }
         ///Response `200`: octocat art
@@ -17544,7 +17703,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn get_octocat_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_octocat_url()
         }
         ///Response `200`: raw bytes
@@ -17561,7 +17720,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn download_raw_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.download_raw_url()
         }
         ///Response `206`: partial content
@@ -17580,7 +17739,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn put_ranged_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.put_ranged_url()
         }
         ///Response `200`: the image
@@ -17599,7 +17758,7 @@ Response `409`: Conflict*/
         pub fn get_artwork_url(
             &self,
             id: impl Into<types::Id>,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_artwork_url(id)
         }
         ///Response `204`: stored
@@ -17617,7 +17776,7 @@ Response `409`: Conflict*/
         pub fn put_artwork_url(
             &self,
             id: impl Into<types::Id4f0a4fba>,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.put_artwork_url(id)
         }
         /**Response `204`: success
@@ -17635,7 +17794,7 @@ Response `400`: textual failure*/
         #[inline]
         pub fn get_text_error_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_text_error_url()
         }
         /**Response `200`: text success
@@ -17658,7 +17817,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn get_raw_multi_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_raw_multi_url()
         }
         ///Response `200`: OK
@@ -17676,7 +17835,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_order_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.submit_order_url()
         }
         ///Response `204`: patched
@@ -17696,7 +17855,7 @@ Response `409`: binary error*/
         pub fn patch_merge_document_url(
             &self,
             id: impl Into<types::Id3e6bacfe>,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.patch_merge_document_url(id)
         }
         ///Response `204`: accepted
@@ -17711,7 +17870,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_legacy_order_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.submit_legacy_order_url()
         }
         ///Response `200`: OK
@@ -17729,7 +17888,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn post_json_meta_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.post_json_meta_url()
         }
         ///Response `200`: OK
@@ -17746,7 +17905,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn stream_chat_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.stream_chat_url()
         }
         ///Response `200`: OK
@@ -17763,7 +17922,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn stream_chat_lines_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.stream_chat_lines_url()
         }
         ///Response `200`: OK
@@ -17780,7 +17939,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn stream_chat_sequence_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.stream_chat_sequence_url()
         }
         ///Response `204`: No Content
@@ -17794,7 +17953,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn get_alternate_auth_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_alternate_auth_url()
         }
         ///Response `204`: No Content
@@ -17817,7 +17976,7 @@ Response `409`: binary error*/
             label: types::Label,
             raw: impl Into<types::Raw>,
             params: impl Into<Option<SerializeStylesParams>>,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.serialize_styles_url(matrix, label, raw, params)
         }
         ///Response `204`: No Content
@@ -17843,7 +18002,7 @@ Response `409`: binary error*/
             &self,
             text: impl Into<types::Text>,
             json: types::DeepFilter,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.serialize_content_params_url(text, json)
         }
         ///Response `204`: No Content
@@ -17858,7 +18017,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_form_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.submit_form_url()
         }
         ///Response `204`: No Content
@@ -17876,7 +18035,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_form_additional_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.submit_form_additional_url()
         }
         ///Response `204`: No Content
@@ -17894,7 +18053,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_nullable_form_additional_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.submit_nullable_form_additional_url()
         }
         ///Response `204`: No Content
@@ -17909,7 +18068,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn upload_additional_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.upload_additional_url()
         }
         ///Response `204`: No Content
@@ -17923,7 +18082,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn documented_headers_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.documented_headers_url()
         }
         /**Response `404`: Not Found
@@ -17942,7 +18101,7 @@ Response `default`: Anything else*/
         #[inline]
         pub fn get_no_success_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_no_success_url()
         }
         /**Response `200`: OK
@@ -17961,7 +18120,7 @@ Response `204`: No Content*/
         #[inline]
         pub fn get_maybe_empty_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_maybe_empty_url()
         }
         /**Response `200`: OK
@@ -17980,7 +18139,7 @@ Response `204`: No Content*/
         #[inline]
         pub fn get_xml_maybe_empty_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_xml_maybe_empty_url()
         }
         /**Response `200`: The whole resource
@@ -17999,7 +18158,7 @@ Response `206`: A range of it*/
         #[inline]
         pub fn get_partial_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_partial_url()
         }
         /**Response `2XX`: Any other success
@@ -18018,7 +18177,7 @@ Response `200`: OK*/
         #[inline]
         pub fn get_ranged_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_ranged_url()
         }
         /**Response `200`: OK
@@ -18039,7 +18198,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn get_error_ranged_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_error_ranged_url()
         }
         /**Response `2XX`: Any success
@@ -18058,7 +18217,7 @@ Response `5XX`: Any server error*/
         #[inline]
         pub fn get_range_only_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_range_only_url()
         }
         ///Response `204`: No Content
@@ -18073,7 +18232,7 @@ Response `5XX`: Any server error*/
         #[inline]
         pub fn get_traced_url(
             &self,
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_traced_url()
         }
     }

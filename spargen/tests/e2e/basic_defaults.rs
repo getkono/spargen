@@ -535,8 +535,7 @@ fn multipart_body_struct_has_typed_form_part_fields() {
     // parts. The binary `file` part is `bytes::Bytes` (its `serde` impls compile only because the
     // synthesized Cargo.toml enabled bytes' `serde` feature), `caption` a required `String`, and the
     // optional `count`/`tags` are `Option`. Constructing the value proves the field types; the
-    // generated `upload_file` method (compiled here) builds the `reqwest::multipart::Form` from it,
-    // which compiles only with reqwest's `multipart` feature enabled.
+    // generated `upload_file` method (compiled here) builds the runtime's `MultipartForm` from it.
     let body = basic_client::types::UploadFileBody {
         file: bytes::Bytes::from_static(b"hello"),
         caption: "a caption".to_owned(),
