@@ -52,6 +52,16 @@ pub trait HttpBackend: MaybeSend + MaybeSync + std::fmt::Debug {
     /// URI is absolute. A backend that fails builds its [`TransportError`] with the constructor
     /// naming the failure's class, so [`crate::send`] maps it to the right [`crate::Error`]
     /// variant.
+    ///
+    /// A request carrying a [`TotalTimeout`] extension is bounded by it: from the moment `execute`
+    /// is called until the whole response body has been read. A deadline that elapses fails the
+    /// call, or the body read in progress, with a [`TransportError::timeout`] of
+    /// [`crate::TimeoutKind::Total`]. [`crate::send`] puts the client's
+    /// [`crate::ClientConfig::timeout`] there, so a backend that ignores the extension leaves the
+    /// call unbounded. [`ReqwestBackend`] makes it reqwest's own request timeout. A backend that
+    /// executes the request more than once through an inner one bounds each execution, not their
+    /// sum: [`crate::RetryBackend`] hands every attempt the same extension and awaits its policy's
+    /// backoff between them, so a retried call may take each attempt's timeout plus the backoffs.
     fn execute(&self, request: http::Request<HttpBody>) -> ExecuteFuture<'_>;
 }
 

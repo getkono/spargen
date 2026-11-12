@@ -842,7 +842,8 @@ mod support {
             /// travels on the request itself, as a [`super::TotalTimeout`] extension: a request that
             /// already carries one keeps it, as does one given one by [`RequestOptions::extensions`],
             /// which [`super::send`] applies first, [`ReqwestBackend`] enforces it, and so does a caller-supplied
-            /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. A
+            /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. Behind
+            /// a [`super::RetryBackend`] it bounds each attempt, not the retried call as a whole. A
             /// streaming response is exempt,
             /// because a stream may rightly stay open indefinitely: an operation returning an
             /// `EventStream` sends its request with [`super::send_streaming`], which never applies it, and
@@ -4840,6 +4841,12 @@ mod support {
         ///
         /// It takes effect only when a caller wraps their backend in it and installs it via
         /// `Client::with_backend`. See this module's docs for the timing and cloneability contracts.
+        ///
+        /// A request's [`super::TotalTimeout`] bounds each attempt, not the whole retried call: every
+        /// replay carries the same extension to the inner backend, and the policy's backoff runs between
+        /// attempts outside any of them. A call retried `n` times may therefore take `n + 1` timeouts plus
+        /// the backoffs; a policy that must meet an overall deadline stops retrying once its waits would
+        /// pass it.
         #[derive(Clone)]
         pub struct RetryBackend {
             inner: Arc<dyn HttpBackend>,
@@ -5104,6 +5111,16 @@ mod support {
             /// URI is absolute. A backend that fails builds its [`TransportError`] with the constructor
             /// naming the failure's class, so [`super::send`] maps it to the right [`super::Error`]
             /// variant.
+            ///
+            /// A request carrying a [`TotalTimeout`] extension is bounded by it: from the moment `execute`
+            /// is called until the whole response body has been read. A deadline that elapses fails the
+            /// call, or the body read in progress, with a [`TransportError::timeout`] of
+            /// [`super::TimeoutKind::Total`]. [`super::send`] puts the client's
+            /// [`super::ClientConfig::timeout`] there, so a backend that ignores the extension leaves the
+            /// call unbounded. [`ReqwestBackend`] makes it reqwest's own request timeout. A backend that
+            /// executes the request more than once through an inner one bounds each execution, not their
+            /// sum: [`super::RetryBackend`] hands every attempt the same extension and awaits its policy's
+            /// backoff between them, so a retried call may take each attempt's timeout plus the backoffs.
             fn execute(&self, request: http::Request<HttpBody>) -> ExecuteFuture<'_>;
         }
         /// The cause a body source may fail with, before it is read as a [`TransportError`].

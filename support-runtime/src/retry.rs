@@ -239,6 +239,12 @@ pub trait RetryPolicy: MaybeSend + MaybeSync {
 ///
 /// It takes effect only when a caller wraps their backend in it and installs it via
 /// `Client::with_backend`. See this module's docs for the timing and cloneability contracts.
+///
+/// A request's [`crate::TotalTimeout`] bounds each attempt, not the whole retried call: every
+/// replay carries the same extension to the inner backend, and the policy's backoff runs between
+/// attempts outside any of them. A call retried `n` times may therefore take `n + 1` timeouts plus
+/// the backoffs; a policy that must meet an overall deadline stops retrying once its waits would
+/// pass it.
 #[derive(Clone)]
 pub struct RetryBackend {
     inner: Arc<dyn HttpBackend>,
