@@ -1,8 +1,0 @@
----
-source: spargen/tests/snapshot.rs
-assertion_line: 228
-expression: summary(&report)
----
-outcome: Rejected
-diagnostics (code: count):
-  E011: 1
