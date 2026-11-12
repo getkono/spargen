@@ -527,3 +527,86 @@ fn constructor(spec: StatusSpec, response: &Response, api: &Api, names: &Names) 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// One operation per reply shape: an exact JSON body beside a `4XX` text range and a bodyless
+    /// `default` (`getItem`), an XML body (`getXml`), raw octets (`getRaw`), and a streamed body
+    /// (`watch`).
+    const REPLIES: &str = r##"openapi: 3.1.0
+info: {title: T, version: '1'}
+components:
+  schemas:
+    Item: {type: object, properties: {name: {type: string}}}
+paths:
+  /items:
+    get:
+      operationId: getItem
+      responses:
+        '200': {description: ok, content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        '4XX': {description: refused, content: {text/plain: {schema: {type: string}}}}
+        default: {description: failed}
+  /xml:
+    get:
+      operationId: getXml
+      responses:
+        '200': {description: ok, content: {application/xml: {schema: {$ref: '#/components/schemas/Item'}}}}
+  /raw:
+    get:
+      operationId: getRaw
+      responses:
+        '200': {description: ok, content: {application/octet-stream: {schema: {type: string, format: binary}}}}
+  /watch:
+    get:
+      operationId: watch
+      responses:
+        '200': {description: ok, content: {application/x-ndjson: {schema: {$ref: '#/components/schemas/Item'}}}}
+"##;
+
+    /// The module `REPLIES` generates, with or without `testing`, with every run of whitespace
+    /// removed so an assertion reads the tokens rather than `prettyplease`'s line breaking.
+    fn generated(testing: bool) -> String {
+        let directory = tempfile::tempdir().unwrap();
+        let path =
+            camino::Utf8PathBuf::from_path_buf(directory.path().join("openapi.yaml")).unwrap();
+        std::fs::write(&path, REPLIES).unwrap();
+        let preview = crate::__private::preview(&crate::Spec::new(path).testing(testing));
+        let contents = preview
+            .contents
+            .unwrap_or_else(|| panic!("the spec generates: {:?}", preview.report.diagnostics));
+        contents.split_whitespace().collect()
+    }
+
+    /// Each status selector names its constructor and takes the status where it is not exact, and
+    /// each codec encodes the body the client decodes that status with; a streamed body has no
+    /// constructor, and every operation has its registration and its `from_reply`.
+    #[test]
+    fn each_selector_and_codec_has_its_reply_constructor() {
+        let generated = generated(true);
+        for expected in [
+            "pubfnstatus_200(body:&types::Item)->Self{Self(super::Reply::json(200u16,body))}",
+            "pubfnstatus_4xx(status:u16,body:&types::ResponseBody)->Self{Self(super::Reply::text(super::Reply::in_range(status,4u16),body))}",
+            "pubfndefault(status:u16)->Self{Self(super::Reply::new(status))}",
+            "matchsupport::to_xml(body){Ok(xml)=>{super::Reply::encoded(200u16,\"application/xml\",xml.into())}",
+            "pubfnstatus_200(body:implInto<bytes::Bytes>)->Self{Self(super::Reply::octets(200u16,body))}",
+            "pubfnon_get_item(self,handler:implFn(&Call)->get_item::Reply+Send+Sync+'static,)->Self{self.route(super::ops::GET_ITEM.id,",
+            "pubfnon_watch(self,handler:implFn(&Call)->watch::Reply+Send+Sync+'static,)->Self",
+        ] {
+            assert!(generated.contains(expected), "missing `{expected}`");
+        }
+        let watch = &generated[generated.find("pubmodwatch{").expect("the watch replies")..];
+        let watch = &watch[..watch.find("implFrom<Reply>").expect("its conversion")];
+        assert!(watch.contains("pubfnfrom_reply("), "{watch}");
+        assert!(!watch.contains("pubfnstatus_200"), "{watch}");
+        assert_eq!(generated.matches("pubfnfrom_reply(").count(), 4);
+    }
+
+    /// Without the switch, nothing of the module is emitted.
+    #[test]
+    fn the_module_is_emitted_only_under_the_switch() {
+        assert!(generated(true).contains("pubmodtesting{"));
+        let off = generated(false);
+        assert!(!off.contains("pubmodtesting{"));
+        assert!(!off.contains("MockBackend"));
+    }
+}
