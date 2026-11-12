@@ -12,7 +12,8 @@
 //! twin shares, and the `ops` module of operation identities), [`params`],
 //! [`body`], and [`dispatch`] (the method's parameter, request-body, and status-dispatch code),
 //! [`responses`] (response enums, error types, and header structs), [`blocking`] (the synchronous
-//! facade), [`runtime`] (the embedded `support` module and the root re-exports), the shared
+//! facade), [`testing`] (the opt-in `testing` module and its typed `MockBackend`), [`runtime`]
+//! (the embedded `support` module and the root re-exports), the shared
 //! [`docs`] and [`ty`] renderers, and [`idents`] (the status variant names the response and
 //! dispatch emitters read).
 
@@ -27,6 +28,7 @@ mod operation;
 mod params;
 mod responses;
 mod runtime;
+mod testing;
 mod ty;
 mod union;
 
@@ -49,6 +51,8 @@ pub(crate) struct CodegenOptions {
     /// Render spec-carried prose as written, skipping [`docs::sanitize_carried`]: the
     /// `Spec::verbatim_docs` knob.
     pub(crate) verbatim_docs: bool,
+    /// Emit the `testing` module and its typed `MockBackend`: the `Spec::testing` knob.
+    pub(crate) testing: bool,
 }
 
 /// The default cap on bytes of a response body retained on generated error variants, which
@@ -64,6 +68,7 @@ impl Default for CodegenOptions {
             datetime: crate::ir::DateTimeBackend::Time,
             error_body_cap: DEFAULT_ERROR_BODY_CAP,
             verbatim_docs: false,
+            testing: false,
         }
     }
 }
@@ -110,6 +115,7 @@ pub(crate) fn generate(
     let ops = operation::emit_ops(api, names);
     // The synchronous facade is always emitted; `blocking::blocking_cfg` compiles its items out.
     let blocking = blocking::emit_blocking_client(api, &signatures, names, options);
+    let testing = options.testing.then(|| testing::emit_testing(api, names));
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
     // output unusable via `include!` from OUT_DIR, the build.rs consumption path.
     // The root surface is emitted from the lists `name` owns, whose root scope reserves them before
@@ -139,6 +145,7 @@ pub(crate) fn generate(
         #ops
         #client
         #blocking
+        #testing
     };
     render(tokens)
 }

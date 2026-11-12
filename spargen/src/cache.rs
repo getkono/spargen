@@ -55,6 +55,7 @@ fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[
     append(&mut hasher, &[u8::from(spec.open_narrowing)]);
     append(&mut hasher, &[u8::from(spec.open_unions)]);
     append(&mut hasher, &[u8::from(spec.verbatim_docs)]);
+    append(&mut hasher, &[u8::from(spec.testing)]);
     // The omit profile's one canonical encoding, the same bytes its provenance-header
     // fingerprint hashes, so the two cannot drift apart.
     append(&mut hasher, &spec.omit.canonical_encoding());
@@ -806,6 +807,7 @@ components:
             open_narrowing: false,
             open_unions: true,
             verbatim_docs: false,
+            testing: true,
             bind_headers: vec!["X-Api-Version".to_owned()],
             config_files: Vec::new(),
         };
@@ -835,6 +837,7 @@ components:
         frame(&[0]);
         frame(&[1]);
         frame(&[0]);
+        frame(&[1]);
         frame(&spec.omit.canonical_encoding());
         frame(&1u64.to_be_bytes());
         frame(b"X-Api-Version");
@@ -847,7 +850,7 @@ components:
         assert_eq!(digest, sha256_hex(&buffer));
         assert_eq!(
             digest,
-            "f09a08df3695356f4f5d12723bf761ce18b9eb1c3bf898493b4364cb062dacf6"
+            "532c1a5616e7c98f998330fd0cf6930acd4c15df10bd6ebd29b50c47a0a3f8d3"
         );
     }
 
@@ -984,6 +987,7 @@ components:
             open_narrowing,
             open_unions,
             verbatim_docs,
+            testing,
             bind_headers,
             config_files,
         } = &base;
@@ -1061,6 +1065,13 @@ components:
                 "verbatim_docs",
                 Spec {
                     verbatim_docs: !verbatim_docs,
+                    ..base.clone()
+                },
+            ),
+            (
+                "testing",
+                Spec {
+                    testing: !testing,
                     ..base.clone()
                 },
             ),

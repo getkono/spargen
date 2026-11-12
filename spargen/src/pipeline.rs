@@ -308,6 +308,7 @@ fn build_emit_plan(
             datetime: spec.datetime,
             error_body_cap: spec.error_body_cap,
             verbatim_docs: spec.verbatim_docs,
+            testing: spec.testing,
         },
     )
     .map_err(|error| emit_pipeline_error(diags, error.to_string()))?;
