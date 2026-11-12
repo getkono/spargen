@@ -185,8 +185,10 @@ let page = client
 `RetryBackend` wraps any inner `HttpBackend` and re-executes a request per a caller-supplied
 `RetryPolicy`, which is handed each attempt's `RetryOutcome` and returns the wait before the next
 one as a `RetryWait`, built on the caller's own timer: the runtime has none. A request whose body
-cannot be cloned is sent exactly once. `Error::is_transient()` and `RetryOutcome::is_transient()`
-classify retry-worthy failures, and `Error::status()` reports the status of every failure that
+cannot be cloned is sent exactly once. A `multipart/form-data` body is encoded in memory, every
+part included, so it clones: a multipart call is retried, and replayed after a credential refresh,
+like any other; a body adopted with `HttpBody::wrap` streams, and is sent once.
+`Error::is_transient()` and `RetryOutcome::is_transient()` classify retry-worthy failures, and `Error::status()` reports the status of every failure that
 produced a response. `RetryOutcome::is_transient()` also requires the request to be safe to
 repeat: its method idempotent by [RFC 9110 §9.2.2](https://www.rfc-editor.org/rfc/rfc9110#section-9.2.2)
 (`GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE`), or an `Idempotency-Key` header on it. A
