@@ -411,11 +411,12 @@ fn reply_module(operation: &Operation, api: &Api, names: &Names) -> TokenStream 
          with the codec the client decodes that status with, and `from_reply` for any other.",
         method.unraw()
     ));
+    let root = generated_root();
     quote! {
         #[doc = #module_doc]
         pub mod #method {
             #[allow(unused_imports)]
-            use super::super::*;
+            use #root::*;
 
             #[doc = #reply_doc]
             #[derive(Debug, Clone)]
@@ -438,6 +439,16 @@ fn reply_module(operation: &Operation, api: &Api, names: &Names) -> TokenStream 
             }
         }
     }
+}
+
+/// The path from a module nested in `testing` up to the generated module's root, whose `types`,
+/// `support` and re-exported names a reply's body types are spelled with. It is assembled from
+/// `super` tokens rather than written out: it climbs the generated module, not spargen's, and the
+/// layering test reads a written-out double `super` in this file as a path into spargen's own
+/// crate root.
+fn generated_root() -> TokenStream {
+    let up = <syn::Token![super]>::default();
+    quote! { #up::#up }
 }
 
 /// The constructor of the reply to one documented response: named for its status selector, taking

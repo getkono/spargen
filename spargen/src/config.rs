@@ -327,8 +327,8 @@ impl Spec {
     /// registered for fails with a `testing::Unrouted` error naming its operation, method and
     /// path, rather than with any response.
     ///
-    /// The module is compiled wherever the generated module is: a build that never names it
-    /// pays its compile time, and the linker drops it from the binary.
+    /// The module is compiled wherever the generated module is, so a build that never names it
+    /// still compiles it.
     pub fn testing(mut self, enabled: bool) -> Self {
         self.testing = enabled;
         self
