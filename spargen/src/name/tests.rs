@@ -237,6 +237,7 @@ fn generator_bindings_yield_to_every_parameter() {
         "reconnect_request",
         "cookies",
         "replay",
+        "streaming",
     ];
     let mut params: Vec<Parameter> = bindings
         .iter()
@@ -265,6 +266,7 @@ fn generator_bindings_yield_to_every_parameter() {
         &allocated.reconnect_request,
         &allocated.cookies,
         &allocated.replay,
+        &allocated.streaming,
     ];
     for (binding, ident) in bindings.iter().zip(generated) {
         assert_ne!(
@@ -385,6 +387,62 @@ fn an_operation_method_keeps_a_spelling_a_companion_wants() {
                 }
             }
         }
+    }
+}
+
+/// Issue #1263: an operation whose success is one raw binary body gets a `{method}_stream` twin,
+/// which yields, in either listing order, to an operation already spelling it; an operation with
+/// any other success gets none.
+#[test]
+fn a_binary_success_twin_yields_to_a_method_spelling_it() {
+    use crate::ir::{BytesEncoding, Response, StatusSpec};
+    for twin_first in [false, true] {
+        let mut api = api(Vec::new(), false);
+        let bytes = api.types.insert(TypeDef {
+            name_hint: "Blob".to_owned(),
+            kind: TypeKind::Bytes(BytesEncoding::Raw),
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
+        });
+        api.operations[0].responses.by_status = vec![(
+            StatusSpec::Exact(200),
+            Response {
+                body: Some(Ty {
+                    id: bytes,
+                    nullable: false,
+                    boxed: false,
+                }),
+                media: Some(MediaType::OctetStream),
+                stream: None,
+                accept: None,
+                headers: Vec::new(),
+            },
+        )];
+        let mut spelled = api.operations[0].clone();
+        spelled.id = OperationId("getItemStream".to_owned());
+        spelled.responses.by_status.clear();
+        spelled.provenance = Provenance::new(
+            JsonPointer::root()
+                .push("paths")
+                .push("/items/{id}/stream")
+                .push("get"),
+            None,
+        );
+        if twin_first {
+            api.operations.insert(0, spelled);
+        } else {
+            api.operations.push(spelled);
+        }
+        let names = allocate(&api);
+        let record = |id: &str| &names.operations[&OperationId(id.to_owned())];
+        assert_eq!(record("getItemStream").method.as_str(), "get_item_stream");
+        assert!(record("getItemStream").byte_stream.is_none());
+        let twin = record("getItem").byte_stream.as_ref().unwrap().as_str();
+        assert!(
+            twin.len() > "get_item_stream".len() && twin.starts_with("get_item_stream_"),
+            "{twin}"
+        );
     }
 }
 
@@ -592,6 +650,36 @@ fn a_component_keeps_its_type_name_from_an_inline_type_spelling_it() {
     }
 }
 
+#[test]
+fn a_closed_string_enum_variant_never_takes_the_all_constants_spelling() {
+    // `a_l_l` cases to `ALL`, the closed enum's inherent constant, which the variant would shadow.
+    // An open enum emits no such constant, so its variant keeps the spelling.
+    use crate::ir::{Openness, ScalarEnum, ScalarRepr, ScalarValue};
+    let mut api = api(Vec::new(), false);
+    let mut enumeration = |hint: &str, openness: Openness| {
+        api.types.insert(TypeDef {
+            name_hint: hint.to_owned(),
+            kind: TypeKind::Enum(ScalarEnum {
+                repr: ScalarRepr::String,
+                variants: vec![ScalarValue::String("a_l_l".to_owned())],
+                openness,
+            }),
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root().push(hint), None),
+            document: String::new(),
+        })
+    };
+    let closed = enumeration("Closed", Openness::Closed);
+    let open = enumeration("Open", Openness::Open);
+
+    let names = allocate(&api);
+
+    let variant = |id| names.variants[&(id, "a_l_l".to_owned())].as_str();
+    assert_eq!(super::CLOSED_ENUM_ALL, "ALL");
+    assert_ne!(variant(closed), "ALL");
+    assert_eq!(variant(open), "ALL");
+}
+
 /// Does `text` lex as exactly one Rust identifier token, spelled as itself? `Ident`'s
 /// `ToTokens` hands the text to `proc_macro2::Ident::new`, which panics on anything else.
 fn is_legal(text: &str) -> bool {
@@ -635,6 +723,7 @@ fn hint() -> impl proptest::strategy::Strategy<Value = String> {
             "Default", "default", "Into", "new", "core", "inner", "with_credential", "params",
             "body", "path", "query", "url", "request", "cookies", "replay", "additional", "other",
             "Other", "unknown", "Unknown", "1a", "-", "requestOperation", "getV2", "get_v_2",
+            "a_l_l",
         ])
         .prop_map(str::to_owned),
     ]
@@ -971,7 +1060,9 @@ proptest::proptest! {
                 .chain(records.iter().map(|record| &record.url_accessor))
                 .chain(records.iter().map(|record| &record.request_builder))
                 .chain(records.iter().map(|record| &record.decoder))
-                .chain(records.iter().map(|record| &record.preparer)),
+                .chain(records.iter().map(|record| &record.preparer))
+
+                .chain(records.iter().filter_map(|record| record.byte_stream.as_ref())),
             super::CLIENT_METHODS,
         )?;
         let enum_successes = api
@@ -1037,7 +1128,13 @@ proptest::proptest! {
                         variants.len(),
                         enumeration.variants.len() + usize::from(enumeration.is_open())
                     );
-                    assert_scope(&format!("variants of {}", def.name_hint), variants, &[])?;
+                    // A closed string enum's `ALL` constant shares its variants' namespace.
+                    let reserved: &[&str] = if enumeration.is_open() {
+                        &[]
+                    } else {
+                        &[super::CLOSED_ENUM_ALL]
+                    };
+                    assert_scope(&format!("variants of {}", def.name_hint), variants, reserved)?;
                 }
                 TypeKind::Union(union) => {
                     let variants: Vec<&Ident> = union
@@ -1084,6 +1181,7 @@ proptest::proptest! {
                     &bindings.reconnect_request,
                     &bindings.cookies,
                     &bindings.replay,
+                    &bindings.streaming,
                 ]);
             assert_scope(&format!("arguments of {}", operation.id.0), arguments, &[])?;
             let fields = operation
@@ -1163,6 +1261,7 @@ proptest::proptest! {
                         record.request_builder.clone(),
                         record.decoder.clone(),
                         record.preparer.clone(),
+                        record.byte_stream.clone(),
                     );
                     let types = (
                         record.params_struct.clone(),
@@ -1221,6 +1320,7 @@ proptest::proptest! {
                 &bindings.reconnect_request,
                 &bindings.cookies,
                 &bindings.replay,
+                &bindings.streaming,
             ]);
         assert_scope("arguments", arguments, &[])?;
         let fields = params

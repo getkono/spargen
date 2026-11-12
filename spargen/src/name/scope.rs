@@ -39,6 +39,13 @@ impl Scope {
         self.used.insert(ident.as_str().to_owned());
     }
 
+    /// Mark `ident`, spelled exactly as given, as occupied: a generator-owned item that shares the
+    /// scope's namespace under a spelling no casing of a hint is asked for (an associated `const`
+    /// beside enum variants), so allocations that case to it are disambiguated instead.
+    pub(crate) fn reserve_exact(&mut self, ident: &str) {
+        self.used.insert(ident.to_owned());
+    }
+
     /// Allocate a unique identifier for `hint` in `role`. If the cased/escaped name is already
     /// taken in this scope, `provenance` seeds a stable disambiguator.
     ///

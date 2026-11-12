@@ -26,7 +26,7 @@ mod petstore {
     spargen_macro::generate_api!(
         spec = "petstore.yaml",
         no_uuid,
-        no_time,
+        datetime = "string",
         carve,
         error_body_cap = 32_768,
         batch_cap = 200,

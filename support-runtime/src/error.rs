@@ -84,7 +84,9 @@ pub enum Error<E> {
     },
     /// #12 — a non-streaming operation's response body exceeded the limit the call was made
     /// under: [`crate::RequestOptions::max_body`], or for a success body
-    /// `ClientConfig::max_success_body`. A `Content-Length` past it is refused before the body is
+    /// `ClientConfig::max_success_body`, and for a raw binary success body where neither is set
+    /// `ClientConfig::DEFAULT_MAX_BINARY_BODY`; or the limit a [`crate::ByteStream`]'s
+    /// `collect_bounded` was given. A `Content-Length` past it is refused before the body is
     /// read; a body that grows past it is abandoned at the chunk that crosses it. Nothing of the
     /// body is retained. Not transient: the same limit refuses the same response again.
     BodyTooLarge {
@@ -882,6 +884,42 @@ pub struct ProtocolError {
 pub struct RedirectError {
     source: BoxError,
 }
+
+/// The `FromStr` error of a generated closed string enum: the text is none of the values the
+/// enum lists. It carries the rejected text and the enum's Rust name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownVariant {
+    type_name: &'static str,
+    value: String,
+}
+
+impl UnknownVariant {
+    /// `value` was parsed as the enum named `type_name`, which lists no such value.
+    pub fn new(type_name: &'static str, value: impl Into<String>) -> Self {
+        Self {
+            type_name,
+            value: value.into(),
+        }
+    }
+
+    /// The Rust name of the enum the text was parsed as.
+    pub fn type_name(&self) -> &'static str {
+        self.type_name
+    }
+
+    /// The rejected text, exactly as it was given.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl std::fmt::Display for UnknownVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?} is not a value of {}", self.value, self.type_name)
+    }
+}
+
+impl std::error::Error for UnknownVariant {}
 
 impl std::fmt::Display for RequestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

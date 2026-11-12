@@ -651,6 +651,35 @@ fn a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry() {
     );
 }
 
+/// `code` with the type-name literal of every `UnknownVariant::new("…", value)` call removed: the
+/// string a closed enum's `FromStr` names itself by, which is its Rust name and never a tag.
+fn without_unknown_variant_type_names(code: &str) -> String {
+    const CALL: &str = "UnknownVariant::new(";
+    let mut kept = String::with_capacity(code.len());
+    let mut rest = code;
+    while let Some(at) = rest.find(CALL) {
+        let (before, after) = rest.split_at(at + CALL.len());
+        kept.push_str(before);
+        let literal = after.trim_start();
+        let literal = literal
+            .strip_prefix('"')
+            .expect("`UnknownVariant::new` takes a string literal first");
+        let close = literal.find('"').expect("the type-name literal closes");
+        rest = &literal[close + 1..];
+    }
+    kept.push_str(rest);
+    kept
+}
+
+#[test]
+fn the_unknown_variant_filter_drops_only_the_type_name_literal() {
+    let code = "_ => Err(UnknownVariant::new(\n    \"PetVariant1Kind\",\n    value,\n)),\n\"PetVariant1\" =>";
+    assert_eq!(
+        without_unknown_variant_type_names(code),
+        "_ => Err(UnknownVariant::new(,\n    value,\n)),\n\"PetVariant1\" =>"
+    );
+}
+
 /// Issue #403: a member that is no schema component — inline, or a pointer into another schema —
 /// has no implicit discriminator value ("inline `oneOf` or `anyOf` subschemas are not considered").
 /// With no `mapping` entry naming it, the generated client dispatched on a tag spargen made up —
@@ -771,9 +800,12 @@ fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag
             let de_impl = de_impl.split("\nimpl").next().unwrap_or(de_impl);
             assert!(!de_impl.contains("match tag"), "{what}\n{de_impl}");
         }
-        // Either way no tag is invented: neither the pointer text nor a variant hint.
+        // Either way no tag is invented: neither the pointer text nor a variant hint. The one
+        // literal that legitimately spells a variant hint is a closed enum's Rust name, which its
+        // `FromStr` hands to `UnknownVariant::new`; that is not a tag, so it is left out.
+        let tag_text = without_unknown_variant_type_names(&code);
         for invented in ["\"Envelope/properties/cat\"", "\"PetVariant"] {
-            assert!(!code.contains(invented), "{what}: {invented}\n{code}");
+            assert!(!tag_text.contains(invented), "{what}: {invented}\n{code}");
         }
     }
 

@@ -123,7 +123,7 @@ fn field_type(items: &[syn::Item], struct_name: &str, field: &str) -> Option<syn
 /// the ones `canon_ty`'s documentation states: a path is named by its last segment
 /// (`types::Leaf`, `bytes::Bytes`, `serde_json::Value`), `Box` is not rendered, and a `format`
 /// scalar is labelled by its format (`Uuid`, `DateTime`, `Date`) whatever Rust type the `uuid` and
-/// `time` mappings choose for it, so both sides spell those `String` here.
+/// date-time mappings choose for it, so both sides spell those `String` here.
 fn normalise(ty: &syn::Type, aliases: &std::collections::BTreeMap<String, syn::Type>) -> String {
     match ty {
         syn::Type::Tuple(tuple) => {

@@ -18,6 +18,8 @@ stream = ["reqwest/stream", "dep:futures-core"]
 xml = ["dep:quick-xml"]
 blocking = ["dep:tokio"]
 time = ["dep:time"]
+jiff = ["dep:jiff"]
+chrono = ["dep:chrono"]
 
 [dependencies]
 # The transport seam's currency: `HttpBackend` takes an `http::Request` and answers an
@@ -39,6 +41,10 @@ tokio = { workspace = true, features = ["rt"], optional = true }
 # rather than delegated to `time/serde`, whose representation is not RFC 3339 with or without its
 # `serde-human-readable` feature. Keeping `serde` off is what makes that impossible to regress into.
 time = { workspace = true, features = ["formatting", "parsing"], optional = true }
+# The other two date-time backends need no feature of their crate: the RFC 3339 text is read and
+# written by `rfc3339.rs`, and only each crate's calendar types and conversions are used.
+jiff = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Test-only: the shared scripted response body (`Chunks` in src/lib.rs) is a `futures_core::Stream`

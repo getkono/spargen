@@ -15,7 +15,7 @@ mod synth;
 
 use std::collections::HashMap;
 
-use crate::ir::{AdditionalProps, Api, OperationId, TypeId, TypeKind};
+use crate::ir::{AdditionalProps, Api, OperationId, ScalarRepr, TypeId, TypeKind};
 
 pub(crate) use casing::hint_segment;
 use casing::{to_pascal_case, to_snake_case};
@@ -59,6 +59,11 @@ pub(crate) struct Names {
     pub(crate) server_variable_fields: HashMap<(usize, String), Ident>,
 }
 
+/// The inherent associated `const` listing a closed string enum's variants. It shares the
+/// variants' namespace, so [`allocate`] reserves it in each closed string enum's variant scope and
+/// codegen emits it under this spelling.
+pub(crate) const CLOSED_ENUM_ALL: &str = "ALL";
+
 impl Names {
     /// The names allocated for the operation `id`, which every operation of the allocated [`Api`]
     /// has.
@@ -81,8 +86,14 @@ pub(crate) struct OperationNames {
     /// operation's own method, so an operation whose method already spells `{method}_url` keeps
     /// that name and the accessor takes a pointer-seeded suffix instead.
     pub(crate) url_accessor: Ident,
+    /// The `{method}_stream` twin on `Client` reading a raw binary success body as a `ByteStream`,
+    /// present exactly when [`Api::streams_binary_success`](crate::ir::Api::streams_binary_success)
+    /// holds. Allocated in the method scope after every URL accessor, so an operation or accessor
+    /// that already spells it keeps that name and the twin takes a pointer-seeded suffix instead.
+    pub(crate) byte_stream: Option<Ident>,
     /// The request builder, `{method}_request`, which returns the request the method sends without
-    /// sending it. Allocated after every URL accessor, on the URL accessor's terms.
+    /// sending it. Allocated after every URL accessor and `_stream` twin, on the URL accessor's
+    /// terms.
     pub(crate) request_builder: Ident,
     /// The response decoder, `decode_{method}`, which decodes a response the caller obtained as
     /// the method decodes its own. Allocated after every request builder, on the same terms.
@@ -194,8 +205,8 @@ pub(crate) const CLIENT_METHODS: &[&str] = &[
 /// hinted `Date`, a component named `String`) is disambiguated instead of redefining an imported
 /// name (`E0255`) or shadowing the prelude type every other model refers to.
 ///
-/// `Date` and `DateTime` are imported only when the API uses a date type with the `time` mapping
-/// on; they are reserved unconditionally, so a model's name does not change when an unrelated
+/// `Date` and `DateTime` are imported only when the API uses a date type with a typed date-time
+/// backend; they are reserved unconditionally, so a model's name does not change when an unrelated
 /// part of the spec starts using dates. `codegen`'s tests hold this list to every such name the
 /// emitted module uses.
 pub(crate) const TYPES_MODULE_NAMES: &[&str] = &[
@@ -249,6 +260,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "ApiErrorBody",
     "ApiErrorProblem",
     "AuthError",
+    "ByteStream",
     "ClientConfig",
     "ClientCore",
     "Credential",
@@ -283,6 +295,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "TokenProvider",
     "TokenRefresher",
     "TransportError",
+    "UnknownVariant",
     "exponential_backoff",
     "next_link",
     "token_provider",
@@ -326,6 +339,9 @@ pub(crate) struct OperationBindings {
     /// What a secured operation needs to replay itself once after a refreshable credential is
     /// rejected.
     pub(crate) replay: Ident,
+    /// The preparer's flag for whether the request it builds is sent streaming, which it takes
+    /// only where the operation has a `_stream` twin.
+    pub(crate) streaming: Ident,
 }
 
 /// Allocate every identifier the API needs, in one deterministic pass. Allocation is total: each
@@ -491,6 +507,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
             reconnect_request: binding_scope.alloc("reconnect_request", IdentRole::Param, pointer),
             cookies: binding_scope.alloc("cookies", IdentRole::Param, pointer),
             replay: binding_scope.alloc("replay", IdentRole::Param, pointer),
+            streaming: binding_scope.alloc("streaming", IdentRole::Param, pointer),
         };
         signatures.push((method, params_struct, parameters, bindings));
     }
@@ -501,8 +518,30 @@ pub(crate) fn allocate(api: &Api) -> Names {
         .collect();
     let url_accessors =
         operation_scope.alloc_ranked(&operation_requests(api, &accessor_hints), IdentRole::Method);
-    // Each companion family after the URL accessors, in a fixed order, so adding one renames no
-    // name allocated before it.
+    // After every accessor, so the twin yields to both (see `OperationNames::byte_stream`).
+    let stream_hints: Vec<String> = signatures
+        .iter()
+        .map(|(method, ..)| format!("{}_stream", method.unraw()))
+        .collect();
+    let stream_requests: Vec<_> = operation_requests(api, &stream_hints)
+        .into_iter()
+        .zip(&api.operations)
+        .filter(|(_, operation)| api.streams_binary_success(operation))
+        .map(|(request, _)| request)
+        .collect();
+    let mut byte_streams = operation_scope
+        .alloc_ranked(&stream_requests, IdentRole::Method)
+        .into_iter();
+    let byte_streams: Vec<Option<Ident>> = api
+        .operations
+        .iter()
+        .map(|operation| {
+            api.streams_binary_success(operation)
+                .then(|| byte_streams.next().expect("one twin per binary success"))
+        })
+        .collect();
+    // Each companion family after the URL accessors and twins, in a fixed order, so adding one
+    // renames no name allocated before it.
     let mut companions = |spell: fn(&str) -> String| {
         let hints: Vec<String> = signatures
             .iter()
@@ -524,12 +563,15 @@ pub(crate) fn allocate(api: &Api) -> Names {
         .operations
         .iter()
         .zip(signatures)
-        .zip(url_accessors.into_iter().zip(companions))
+        .zip(url_accessors.into_iter().zip(byte_streams).zip(companions))
         .zip(errors)
         .zip(success_enums)
         .zip(response_headers);
     for (
-        ((((operation, signature), (url_accessor, companions)), error), success_enum),
+        (
+            (((operation, signature), ((url_accessor, byte_stream), companions)), error),
+            success_enum,
+        ),
         response_headers,
     ) in records
     {
@@ -543,6 +585,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
                 request_builder,
                 decoder,
                 preparer,
+                byte_stream,
                 params_struct,
                 error,
                 success_enum,
@@ -575,6 +618,11 @@ pub(crate) fn allocate(api: &Api) -> Names {
             }
             TypeKind::Enum(enumeration) => {
                 let mut scope = Scope::default();
+                // A closed string enum's inherent `ALL` constant shares the variants' namespace,
+                // and a variant spelled `ALL` (the value `a_l_l`) would shadow it.
+                if enumeration.repr == ScalarRepr::String && !enumeration.is_open() {
+                    scope.reserve_exact(CLOSED_ENUM_ALL);
+                }
                 for variant in &enumeration.variants {
                     let value = variant.wire();
                     names.variants.insert(

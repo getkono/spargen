@@ -23,8 +23,9 @@ changes.
   `http` / `http-body` / `serde` / `serde_json` / `bytes` / `secrecy` (`http` and `http-body`
   carry the transport seam's request, response and body), plus optional ones for the
   conditionally embedded modules: `futures-core` and reqwest's `stream` feature (`stream`, emitted only for APIs with
-  sequential responses), `quick-xml` (`xml`), `tokio` (`blocking`), and `time` (`time`, the RFC
-  3339 date newtypes). Each source file keeps its `#[cfg(test)]` module last — inline, or `mod
+  sequential responses), `quick-xml` (`xml`), `tokio` (`blocking`), and the date-time backends'
+  `time`, `jiff` and `chrono` (each behind the feature of its name: the RFC 3339 date newtypes the
+  `datetime` backend selects). Each source file keeps its `#[cfg(test)]` module last — inline, or `mod
   tests;` reading `<stem>/tests.rs` — and everything above that marker is embedded into generated
   code and must compile there.
 - `examples/` — each its own workspace, so a consumer's crate layout is what is tested:

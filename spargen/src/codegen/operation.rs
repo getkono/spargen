@@ -32,7 +32,9 @@ use super::ty::{reqwest_method, ty_tokens};
 /// body or error type.
 ///
 /// The operation's URL accessor (`emit_operation_url`) is emitted after them, from the same
-/// URL-building statements.
+/// URL-building statements, and last, where the operation has one, its `_stream` twin: the
+/// preparer's request, exempt from the total timeout, sent through `support::execute`, with the
+/// success body handed over unread and the method's own error branch.
 pub(super) fn emit_operation(
     operation: &Operation,
     sig: &OperationSig,
@@ -108,11 +110,31 @@ pub(super) fn emit_operation(
     let request_builder = &operation_names.request_builder;
     let decoder = &operation_names.decoder;
     let operation_const = ops_const_ident(operation_names);
-    let forwards = sig.forwards();
-    let builder_forwards = sig.forwards();
     let builder_doc = request_builder_doc(&operation_names.method);
     let decoder_doc = decoder_doc(&operation_names.method, &operation_const);
     let deprecated = &sig.deprecated;
+    // An operation with a `_stream` twin prepares the twin's request through the same preparer,
+    // exempt from the client's total timeout, so its preparer takes whether the send streams; any
+    // other operation's preparer streams exactly when its success is a stream.
+    let twinned = operation_names.byte_stream.is_some();
+    let streaming_binding = &bindings.streaming;
+    let preparer_decls: Vec<TokenStream> = decls
+        .iter()
+        .map(|decl| (*decl).clone())
+        .chain(twinned.then(|| quote! { #streaming_binding: bool }))
+        .collect();
+    let streaming_arg = if twinned {
+        quote! { #streaming_binding }
+    } else {
+        quote! { #streaming }
+    };
+    let forwards_streaming = |streaming: bool| -> Vec<TokenStream> {
+        sig.forwards()
+            .cloned()
+            .chain(twinned.then(|| quote! { #streaming }))
+            .collect()
+    };
+    let forwards = forwards_streaming(streaming);
     // A streaming success keeps a clone of the request it sent, which its stream resends to
     // reconnect; the decoder alone, which never saw the request, has none to give it.
     let reconnect_request_binding = &bindings.reconnect_request;
@@ -133,6 +155,35 @@ pub(super) fn emit_operation(
     let body_limits = (!streaming).then(|| {
         quote! { let response = support::with_body_limits(&self.core, response); }
     });
+    // A raw binary success body read whole is bounded; the twin hands it over unread instead. It
+    // sends the request the operation's preparer builds, exempt from the total timeout, and shares
+    // the method's error branch.
+    let byte_stream = operation_names.byte_stream.as_ref().map(|twin| {
+        let doc = byte_stream_doc(method_ident);
+        let twin_forwards = forwards_streaming(true);
+        quote! {
+            #[doc = #doc]
+            #deprecated
+            #[inline]
+            pub async fn #twin(
+                &self,
+                #(#decls),*
+            ) -> Result<support::ResponseValue<support::ByteStream>, support::Error<#error_ty>> {
+                let (#request_binding, #replay_binding) = self
+                    .#preparer(#(#twin_forwards),*)
+                    .await
+                    .map_err(support::Error::widen)?;
+                let response = support::execute(&self.core, #request_binding, #replay_binding, true)
+                    .await
+                    .map_err(support::Error::widen)?;
+                if response.status().is_success() {
+                    Ok(support::stream_success_bytes(response))
+                } else {
+                    #error_branch
+                }
+            }
+        }
+    });
 
     quote! {
         /// The request the operation method sends, credentials attached and the client's
@@ -141,7 +192,7 @@ pub(super) fn emit_operation(
         #[inline]
         async fn #preparer(
             &self,
-            #(#decls),*
+            #(#preparer_decls),*
         ) -> Result<
             (http::Request<support::HttpBody>, Option<support::Replay>),
             support::Error<std::convert::Infallible>,
@@ -162,7 +213,7 @@ pub(super) fn emit_operation(
             let #request_binding = #request_binding
                 .build()
                 .map_err(support::Error::request_construction)?;
-            let mut #request_binding = support::prepare(&self.core, #request_binding, #streaming)?;
+            let mut #request_binding = support::prepare(&self.core, #request_binding, #streaming_arg)?;
             #request_binding.extensions_mut().insert(ops::#operation_const);
             Ok((#request_binding, #replay_binding))
         }
@@ -196,7 +247,7 @@ pub(super) fn emit_operation(
             &self,
             #(#decls),*
         ) -> Result<http::Request<support::HttpBody>, support::Error<std::convert::Infallible>> {
-            self.#preparer(#(#builder_forwards),*)
+            self.#preparer(#(#forwards),*)
                 .await
                 .map(|(#request_binding, _)| #request_binding)
         }
@@ -217,6 +268,8 @@ pub(super) fn emit_operation(
         }
 
         #url_accessor
+
+        #byte_stream
     }
 }
 
@@ -299,6 +352,18 @@ pub(super) fn emit_ops(api: &Api, names: &Names) -> TokenStream {
             #(#constants)*
         }
     }
+}
+
+/// The rustdoc of a binary operation's `_stream` twin.
+fn byte_stream_doc(method_ident: &crate::name::Ident) -> String {
+    let method = method_ident.unraw();
+    normalize_rustdoc(&format!(
+        "`{method}`, with its success body handed over unread as a `ByteStream`, to read as it \
+         arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The \
+         request and the error branch are `{method}`'s. Like an `EventStream`, the call is exempt \
+         from the client's total timeout and its body limits; its connect and read timeouts \
+         still apply."
+    ))
 }
 
 /// The statements sending each of `operation`'s bound headers ([`Operation::bound_headers`]) from
@@ -536,8 +601,8 @@ pub(super) fn signatures(
 pub(super) struct Arg {
     /// The `name: Type` declaration.
     decl: TokenStream,
-    /// The bare name, which the blocking shim forwards. A body argument is already `&T`, so its
-    /// name passes the reference straight through.
+    /// The bare name, which the blocking shim forwards. A body argument is already `&T`, or a
+    /// binary body the value the async method takes, so its name passes straight through.
     forward: TokenStream,
     /// The statement converting an `impl Into<..>` argument to its concrete type once, at the top
     /// of the body, so the rest of the body is written against concrete types: a required
@@ -617,10 +682,25 @@ impl OperationSig {
                 let note = normalize_rustdoc(&note);
                 quote! { #[doc = #note] }
             });
+        // A binary body is taken as `impl Into<HttpBody>`, so the signature no longer names the
+        // body's own type; the rustdoc does, as the in-memory value the call accepts.
+        let binary_body_doc = operation
+            .typed_body()
+            .filter(|_| api.sends_binary_body(operation))
+            .map(|(_, ty)| {
+                let ty = ty_tokens(ty, names, true).to_string().replace(' ', "");
+                let note = normalize_rustdoc(&format!(
+                    "The request body is a `{ty}` (`bytes::Bytes`) or a `Vec<u8>`, moved in \
+                     without a copy, or an `HttpBody::wrap` stream, sent as it is read and never \
+                     replayed."
+                ));
+                quote! { #[doc = #note] }
+            });
         let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
         let attrs = quote! {
             #docs
             #(#param_docs)*
+            #binary_body_doc
             #deprecated
         };
 
@@ -672,11 +752,15 @@ impl OperationSig {
                 .as_ref()
                 .expect("request body argument allocated");
             // A body the specification marks `required: false` may legitimately be omitted, so
-            // the caller says so in the type rather than inventing an empty value.
-            let decl = if body.required {
-                quote! { #body_binding: &#ty }
-            } else {
-                quote! { #body_binding: Option<&#ty> }
+            // the caller says so in the type rather than inventing an empty value. A raw binary
+            // body is taken by value as anything that converts into the transport's body, so owned
+            // bytes move in without a copy and a stream is sent as it is read; an optional one is
+            // the concrete `HttpBody`, where `impl Into` would leave a bare `None` uninferable.
+            let decl = match (api.sends_binary_body(operation), body.required) {
+                (true, true) => quote! { #body_binding: impl Into<support::HttpBody> },
+                (true, false) => quote! { #body_binding: Option<support::HttpBody> },
+                (false, true) => quote! { #body_binding: &#ty },
+                (false, false) => quote! { #body_binding: Option<&#ty> },
             };
             args.push(Arg {
                 decl,

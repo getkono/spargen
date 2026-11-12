@@ -305,7 +305,7 @@ fn build_emit_plan(
         names,
         &codegen::CodegenOptions {
             feature_uuid: spec.uuid,
-            feature_time: spec.time,
+            datetime: spec.datetime,
             error_body_cap: spec.error_body_cap,
             verbatim_docs: spec.verbatim_docs,
         },

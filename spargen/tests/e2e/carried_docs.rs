@@ -144,7 +144,7 @@ fn a_description_without_operations_passes_the_strict_consumer() {
 
     let generated = std::fs::read_to_string(out.join("src/rest_client.rs")).unwrap();
     assert!(
-        generated.contains("pub struct Operation") && !generated.contains("pub const "),
+        generated.contains("pub struct Operation") && !generated.contains(": Operation = "),
         "the module declares `Operation` and no constant of it"
     );
 

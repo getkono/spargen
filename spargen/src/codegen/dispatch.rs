@@ -204,6 +204,19 @@ pub(super) fn success_decode_tokens(
                 let spec_tokens = runtime_status_spec(*spec);
                 let variant_ident = status_variant_ident(*spec);
                 match ty {
+                    // A raw-bytes status: read through the binary decoder, so the body is bounded
+                    // by the binary default where the call set no limit, as a single binary
+                    // success body is.
+                    Some(ty) if is_bytes_ty(api, *ty) => quote! {
+                        if #spec_tokens.matches(status) {
+                            return support::decode_success_bytes(&self.core, response)
+                                .await
+                                .map(|value| {
+                                    value.map(|body| #enum_ident::#variant_ident(Box::new(body)))
+                                })
+                                .map_err(support::Error::widen);
+                        }
+                    },
                     // Bodied status: read the whole body and parse it into the variant's type; a
                     // parse failure is `Decode` with the body capped.
                     Some(ty) => {

@@ -40,6 +40,14 @@ mod client;
 // has a `format: date-time` or `format: date`.
 #[cfg(feature = "time")]
 mod datetime;
+// The same two newtypes over `chrono` and `jiff`, the other typed date-time backends, each compiled
+// under the feature of its crate. A generated client embeds the one its backend selects, in place of
+// `datetime`, under that module's name; here they sit beside it under their own names, reached by
+// path, so every backend is built and tested together.
+#[cfg(feature = "chrono")]
+pub mod datetime_chrono;
+#[cfg(feature = "jiff")]
+pub mod datetime_jiff;
 mod dispatch;
 mod error;
 mod header;
@@ -48,6 +56,10 @@ mod paginate;
 mod parameter;
 mod response;
 mod retry;
+// The RFC 3339 codec the `chrono` and `jiff` backends share; a generated client embeds it beside
+// either of them.
+#[cfg(any(feature = "chrono", feature = "jiff"))]
+mod rfc3339;
 // Typed streaming of sequential response bodies pulls in the optional `futures-core` dependency
 // and reqwest's `stream` feature, so it is compiled only under the `stream` feature; a generated
 // client embeds this module only when its spec has a sequential (SSE, ndjson or JSON-seq) response.
@@ -82,7 +94,7 @@ pub use dispatch::{
 };
 pub use error::{
     ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError,
-    RequestCause, RequestError, TimeoutKind, TransportError,
+    RequestCause, RequestError, TimeoutKind, TransportError, UnknownVariant,
 };
 pub use header::{parse_header, require_header, HeaderError, HeaderShape};
 pub use middleware::{Middleware, MiddlewareBackend, Next};
@@ -92,13 +104,15 @@ pub use parameter::{
     serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter,
     FormMode, FormProperty, FormStyle, PercentEncoding,
 };
-pub use response::ResponseValue;
+pub use response::{stream_success_bytes, ByteStream, ResponseValue};
 pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
 #[cfg(feature = "stream")]
 pub use stream::{
     EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
 };
-pub use transport::{try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend};
+pub use transport::{
+    request_body, try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend,
+};
 pub use wasm::{MaybeSend, MaybeSync};
 #[cfg(feature = "xml")]
 pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml};

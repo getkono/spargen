@@ -25,7 +25,7 @@ use super::integration::*;
 use super::requirements::*;
 use super::target::*;
 use super::*;
-use crate::CargoIntegration;
+use crate::{CargoIntegration, DateTimeBackend};
 
 /// Every file of this test module with its source, for the tests that read the fixtures' text:
 /// the `E023` explain test, which checks each fixture it cites is a `#[test]` here, and

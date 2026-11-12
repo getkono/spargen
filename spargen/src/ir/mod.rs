@@ -35,6 +35,7 @@ pub(crate) use responses::{
     ApiErrorBodyImpl, ErrorShape, HeaderShape, Response, ResponseHeader, Responses, StatusSpec,
     SuccessShape,
 };
+pub use types::DateTimeBackend;
 pub(crate) use types::{
     AdditionalProps, BytesEncoding, DefaultValue, DisjointFeature, Field, FieldDefault,
     JsonCategory, Openness, Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty,
@@ -66,21 +67,22 @@ pub(crate) struct RuntimeFeatures {
     pub(crate) xml: bool,
     /// The sequential-response `stream` module: [`Api::uses_streams`].
     pub(crate) streams: bool,
-    /// The RFC 3339 `Date`/`DateTime` newtypes: [`Api::uses_time`], with the `time` mapping on.
-    pub(crate) time: bool,
+    /// The RFC 3339 `Date`/`DateTime` newtypes and the crate they wrap: [`Api::uses_time`], with
+    /// a typed [`DateTimeBackend`] selected. Never `Some(DateTimeBackend::String)`.
+    pub(crate) datetime: Option<DateTimeBackend>,
     /// The `contentEncoding: base64` codec: [`Api::uses_base64`].
     pub(crate) base64: bool,
 }
 
 impl Api {
-    /// The conditional runtime modules the module generated from this API embeds, with the `time`
-    /// mapping on or off as `time_mapping` says. With it off, the date primitives stay `String` and
-    /// the newtypes would be dead weight.
-    pub(crate) fn runtime_features(&self, time_mapping: bool) -> RuntimeFeatures {
+    /// The conditional runtime modules the module generated from this API embeds, with the date
+    /// formats mapped by `datetime`. Under [`DateTimeBackend::String`] the date primitives stay
+    /// `String` and the newtypes would be dead weight.
+    pub(crate) fn runtime_features(&self, datetime: DateTimeBackend) -> RuntimeFeatures {
         RuntimeFeatures {
             xml: self.uses_xml(),
             streams: self.uses_streams(),
-            time: time_mapping && self.uses_time(),
+            datetime: (datetime.is_typed() && self.uses_time()).then_some(datetime),
             base64: self.uses_base64(),
         }
     }
@@ -113,11 +115,11 @@ impl Api {
 
     /// Whether the types the output carries contain a `format: date-time` or `format: date`
     /// primitive. Drives the conditional embedding of the RFC 3339 `DateTime`/`Date` runtime
-    /// newtypes and the `time` requirement. An [elided](TypeGraph::elide) definition is no type of
+    /// newtypes and the requirement of the crate they wrap. An [elided](TypeGraph::elide) definition is no type of
     /// the output, so it counts for nothing here, as in `check_invariants` (#723).
     ///
     /// This is a property of the API alone; whether those primitives actually *become* the newtypes
-    /// additionally depends on the `time` config knob, which callers apply themselves.
+    /// additionally depends on the `datetime` config knob, which callers apply themselves.
     pub(crate) fn uses_time(&self) -> bool {
         self.types.emitted().any(|(_, definition)| {
             matches!(
@@ -125,6 +127,33 @@ impl Api {
                 TypeKind::Primitive(Prim::Date | Prim::DateTime)
             )
         })
+    }
+
+    /// Whether `operation`'s success is one raw `bytes` body read whole: the body its method reads
+    /// within a default limit, and its `_stream` twin returns as a `ByteStream`.
+    pub(crate) fn streams_binary_success(&self, operation: &Operation) -> bool {
+        operation.responses.stream_success().is_none()
+            && matches!(
+                operation.responses.success(),
+                SuccessShape::Plain(ty) if self.is_raw_bytes(ty)
+            )
+    }
+
+    /// Whether `operation`'s typed request body is raw `bytes`, which its method takes as anything
+    /// that converts into the runtime's `HttpBody`, in memory or streamed.
+    pub(crate) fn sends_binary_body(&self, operation: &Operation) -> bool {
+        operation
+            .typed_body()
+            .is_some_and(|(_, ty)| self.is_raw_bytes(ty))
+    }
+
+    /// Whether `ty` is a non-nullable raw `bytes` value (`bytes::Bytes` itself).
+    fn is_raw_bytes(&self, ty: Ty) -> bool {
+        !ty.nullable
+            && matches!(
+                self.types.get(ty.id).map(|definition| &definition.kind),
+                Some(TypeKind::Bytes(BytesEncoding::Raw))
+            )
     }
 
     /// Whether any operation returns a sequential response as a typed stream. Drives conditional
@@ -303,10 +332,10 @@ pub(crate) struct Docs {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdditionalProps, Api, BodyEncoding, BoundHeader, Field, Info, MediaType, Method, Operation,
-        OperationId, ParamLoc, ParamStyle, Parameter, PathTemplate, Prim, PropertyName,
-        RequestBody, Response, Responses, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeKind,
-        Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch,
+        AdditionalProps, Api, BodyEncoding, BoundHeader, DateTimeBackend, Field, Info, MediaType,
+        Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathTemplate, Prim,
+        PropertyName, RequestBody, Response, Responses, StatusSpec, Struct, Ty, TypeDef, TypeGraph,
+        TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch,
     };
     use crate::diag::{JsonPointer, Provenance};
 
@@ -521,22 +550,20 @@ mod tests {
     }
 
     /// `runtime_features` embeds the date newtypes only when the API uses a date primitive *and*
-    /// the `time` mapping is on, and takes the other two modules from their predicates whatever
-    /// the mapping says.
+    /// a typed backend is selected, carrying that backend, and takes the other two modules from
+    /// their predicates whatever the backend.
     #[test]
     fn runtime_features_gate_time_on_the_mapping_and_the_api_alike() {
         let plain = api();
         let mut dated = api();
         insert(&mut dated, TypeKind::Primitive(Prim::DateTime));
-        for (case, api, mapping, time) in [
-            ("no date, mapping off", &plain, false, false),
-            ("no date, mapping on", &plain, true, false),
-            ("a date, mapping off", &dated, false, false),
-            ("a date, mapping on", &dated, true, true),
-        ] {
-            let features = api.runtime_features(mapping);
-            assert_eq!(features.time, time, "{case}");
-            assert!(!features.xml && !features.streams, "{case}");
+        for &backend in DateTimeBackend::ALL {
+            let typed = (backend != DateTimeBackend::String).then_some(backend);
+            for (case, api, expected) in [("no date", &plain, None), ("a date", &dated, typed)] {
+                let features = api.runtime_features(backend);
+                assert_eq!(features.datetime, expected, "{case}, {backend}");
+                assert!(!features.xml && !features.streams, "{case}, {backend}");
+            }
         }
     }
 
@@ -592,6 +619,127 @@ mod tests {
                 ),
             ],
             Api::uses_streams,
+        );
+    }
+
+    /// Issue #1263: only a single raw `bytes` success body read whole is streamed by a twin.
+    #[test]
+    fn streams_binary_success_follows_the_table() {
+        check(
+            &[
+                ("no body", |_| {}, false),
+                (
+                    "an octet-stream success",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(api, OK, MediaType::OctetStream, ty);
+                    },
+                    true,
+                ),
+                (
+                    "a raw bytes success under a range",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(api, Some(StatusSpec::Range(2)), MediaType::OctetStream, ty);
+                    },
+                    true,
+                ),
+                (
+                    "a base64 bytes success",
+                    |api| {
+                        let ty = insert(api, TypeKind::Bytes(super::BytesEncoding::Base64));
+                        respond(api, OK, MediaType::OctetStream, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a JSON string success",
+                    |api| {
+                        let ty = string(api);
+                        respond(api, OK, MediaType::Json, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a bytes success beside a second bodied success",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(api, OK, MediaType::OctetStream, ty);
+                        respond(
+                            api,
+                            Some(StatusSpec::Exact(206)),
+                            MediaType::OctetStream,
+                            ty,
+                        );
+                    },
+                    false,
+                ),
+                (
+                    "a bytes body on the error side only",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(
+                            api,
+                            Some(StatusSpec::Exact(500)),
+                            MediaType::OctetStream,
+                            ty,
+                        );
+                    },
+                    false,
+                ),
+            ],
+            |api| api.streams_binary_success(&api.operations[0]),
+        );
+    }
+
+    /// Issue #1263: only a raw `bytes` request body is taken as an `HttpBody`.
+    #[test]
+    fn sends_binary_body_follows_the_table() {
+        check(
+            &[
+                ("no body", |_| {}, false),
+                (
+                    "an octet-stream request body",
+                    |api| {
+                        let ty = bytes(api);
+                        request(api, MediaType::OctetStream, ty);
+                    },
+                    true,
+                ),
+                (
+                    "a nullable bytes request body",
+                    |api| {
+                        let ty = bytes(api);
+                        request(
+                            api,
+                            MediaType::Json,
+                            Ty {
+                                nullable: true,
+                                ..ty
+                            },
+                        );
+                    },
+                    false,
+                ),
+                (
+                    "a base64 request body",
+                    |api| {
+                        let ty = insert(api, TypeKind::Bytes(super::BytesEncoding::Base64));
+                        request(api, MediaType::OctetStream, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a JSON object request body",
+                    |api| {
+                        let field = string(api);
+                        let ty = object(api, field, AdditionalProps::Deny);
+                        request(api, MediaType::Json, ty);
+                    },
+                    false,
+                ),
+            ],
+            |api| api.sends_binary_body(&api.operations[0]),
         );
     }
 
@@ -839,7 +987,7 @@ mod tests {
         );
         let mut api = api();
         base64(&mut api);
-        assert!(api.runtime_features(false).base64);
+        assert!(api.runtime_features(DateTimeBackend::String).base64);
     }
 
     fn base64(api: &mut Api) -> Ty {

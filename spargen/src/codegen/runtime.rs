@@ -5,6 +5,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use super::blocking::blocking_cfg;
+use crate::ir::DateTimeBackend;
 
 /// Emit the private `support` module, one submodule per freestanding runtime source: each file's
 /// text up to its `#[cfg(test)]` module, with `crate::` rewritten to `super::`, re-parsed as
@@ -13,13 +14,14 @@ use super::blocking::blocking_cfg;
 /// `application/xml` / `text/xml` body), the XML codec module is embedded and its helpers
 /// re-exported; otherwise it is omitted entirely, so a non-XML output carries no `quick-xml`
 /// reference. `features.streams` embeds the sequential-response `stream` module,
-/// `features.time` the RFC 3339 `DateTime`/`Date` newtypes, and `features.base64` the
+/// `features.datetime` the RFC 3339 `DateTime`/`Date` newtypes over the selected backend's crate
+/// (with the shared `rfc3339` codec for `jiff` and `chrono`), and `features.base64` the
 /// `contentEncoding: base64` codec, on the same terms.
 pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream {
     let crate::ir::RuntimeFeatures {
         xml: uses_xml,
         streams: uses_streams,
-        time: uses_time,
+        datetime,
         base64: uses_base64,
     } = features;
     let embed = |file: &crate::support::SupportFile| {
@@ -58,10 +60,30 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
     let xml_reexport = uses_xml.then(|| {
         quote! { pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml}; }
     });
-    // The RFC 3339 newtypes are embedded only when a date-typed primitive survives lowering with the
-    // `time` mapping enabled; only then does the audit require `time` of the consumer.
-    let datetime_module = uses_time.then(|| embed(&crate::support::datetime_runtime_file()));
-    let datetime_reexport = uses_time.then(|| {
+    // The RFC 3339 newtypes are embedded only when a date-typed primitive survives lowering with a
+    // typed backend selected; only then does the audit require that backend's crate of the
+    // consumer. Every backend's file is embedded as `datetime`, so the re-export is one spelling.
+    let datetime_module = datetime.map(|backend| {
+        let codec = || embed(&crate::support::rfc3339_runtime_file());
+        match backend {
+            DateTimeBackend::Jiff => {
+                let codec = codec();
+                let newtypes = embed(&crate::support::datetime_jiff_runtime_file());
+                quote! { #newtypes #codec }
+            }
+            DateTimeBackend::Chrono => {
+                let codec = codec();
+                let newtypes = embed(&crate::support::datetime_chrono_runtime_file());
+                quote! { #newtypes #codec }
+            }
+            // `runtime_features` never selects `String` (it embeds no newtypes), so the arm it
+            // shares is `Time`'s.
+            DateTimeBackend::Time | DateTimeBackend::String => {
+                embed(&crate::support::datetime_runtime_file())
+            }
+        }
+    });
+    let datetime_reexport = datetime.is_some().then(|| {
         quote! { pub use datetime::{Date, DateParseError, DateTime}; }
     });
     // The base64 codec is embedded only when a `contentEncoding: base64` newtype survives lowering;
@@ -100,14 +122,14 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
             pub use auth::{attach_auth, attach_auth_replayable, replay_rejected, token_provider, AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, RejectionCheck, Replay, SecretString, TokenFuture, TokenProvider, TokenRefresher};
             pub use client::{ClientConfig, ClientCore, RequestOptions};
             pub use dispatch::{build_url_on, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, classify_with, decode_success, decode_success_bytes, decode_success_text, decode_success_with, decode_text_body, execute, prepare, send, send_streaming, unexpected_status, with_body_limits, StatusSpec};
-            pub use error::{ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind, TransportError};
+            pub use error::{ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind, TransportError, UnknownVariant};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
             pub use header::{parse_header, require_header, HeaderError, HeaderShape};
             pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty, FormStyle, PercentEncoding};
             pub use paginate::{next_link, LinkPaginator};
-            pub use response::ResponseValue;
+            pub use response::{stream_success_bytes, ByteStream, ResponseValue};
             pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
-            pub use transport::{try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend};
+            pub use transport::{request_body, try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend};
             pub use wasm::{MaybeSend, MaybeSync};
             #stream_reexport
             #xml_reexport

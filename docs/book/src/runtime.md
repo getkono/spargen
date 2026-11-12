@@ -14,8 +14,8 @@ are in the contract linked below:
 | A raw `bytes` value serde encodes (a `format: binary` value in a model, a JSON `content` parameter, or a serde-encoded body; a [`contentEncoding: base64`](#binary-content) one carries its own codec) | `bytes`' `serde` feature |
 | [Streaming](#streaming) (sequential responses) | `futures-core` and reqwest's `stream` feature |
 | [XML bodies](#xml-bodies) | `quick-xml` |
-| [`format: date-time` / `date`](#uuid-and-time) | `time` |
-| [`format: uuid`](#uuid-and-time) | `uuid` |
+| [`format: date-time` / `date`](#uuid-and-dates) | `time`, or the `jiff` or `chrono` crate the `datetime` backend selects |
+| [`format: uuid`](#uuid-and-dates) | `uuid` |
 | [Blocking client](#blocking-feature-blocking) | an optional, native-only `tokio`, behind the consumer's own `blocking` feature |
 
 Beyond that core set, the transport seam, retry, middleware, pagination, problem details and
@@ -127,11 +127,13 @@ let page = client
 - `max_body` bounds the response body of a non-streaming operation. A `Content-Length` past it is
   refused before the body is read, and a body that grows past it is abandoned at the chunk that
   crosses it; either is `Error::BodyTooLarge { limit, status }`, which is not transient. It
-  replaces `ClientConfig::max_success_body` (default none: a success body is read whole), which
+  replaces `ClientConfig::max_success_body` (default none: a structured success body is read whole,
+  and a raw binary one within `ClientConfig::DEFAULT_MAX_BINARY_BODY`, 64 MiB), which
   `with_config` sets for every call. An error body is read no further than `max_error_body` in any
   case; where `max_body` is the smaller of the two, an error body past it is `BodyTooLarge` instead
   of truncated. An operation returning an `EventStream` is exempt, its error body included:
-  `max_stream_frame` bounds its items.
+  `max_stream_frame` bounds its items. So is a binary operation's `_stream` twin, which returns a
+  [`ByteStream`](#binary-content).
 - `extensions` are copied onto each request, where a caller-supplied `HttpBackend` reads them from
   the `http::Request` it executes. An extension type the request already carries keeps its value.
 - `headers` are added to each request, streaming operations' included. A header the request already
@@ -330,20 +332,36 @@ dependency, and Cargo's feature unification applies it to the generated client:
 serde_json = { version = "1", features = ["float_roundtrip"] }
 ```
 
-### `uuid` and `time`
+### `uuid` and dates
 
-`format: uuid` maps to the `uuid` crate and `format: date-time` / `date` to `time`, as opt-out
-mappings in generated code. Call `Spec::uuid(false)` / `Spec::time(false)` (or use
-the macro's `no_uuid` / `no_time`, or `uuid = false` / `time = false` in `spargen.toml`) to fall
-back to `String`. The corresponding dependency is
-required only when that mapping is enabled and actually occurs in the compiled API.
+`format: uuid` maps to the `uuid` crate, as an opt-out mapping: call `Spec::uuid(false)` (or use the
+macro's `no_uuid`, or `uuid = false` in `spargen.toml`) to fall back to `String`.
 
-Dates are emitted as the embedded `DateTime(pub time::OffsetDateTime)` and `Date(pub time::Date)`
-newtypes rather than `time`'s own types, because `time`'s serde output is not the RFC 3339 text
-these formats are defined as. They carry a hand-written RFC 3339 codec, so only `time`'s
-`formatting` and `parsing` features are needed; they `Deref` to and convert with `From` from the
-inner type, and parse with `FromStr`, failing with `DateParseError`, which the generated root
-re-exports beside them. The [`datetime` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/datetime.rs)
+`format: date-time` / `date` map to the crate the date-time backend names: `Spec::datetime`
+(`spargen::DateTimeBackend`), `datetime = "…"` in `spargen.toml`, `--datetime …` on the CLI, or
+the macro's `datetime = "…"`.
+
+| Backend | `DateTime` wraps | `Date` wraps | Requires |
+| --- | --- | --- | --- |
+| `time` (default) | `time::OffsetDateTime` | `time::Date` | `time` with `formatting` and `parsing` |
+| `jiff` | `jiff::Timestamp` | `jiff::civil::Date` | `jiff` |
+| `chrono` | `chrono::DateTime<chrono::FixedOffset>` | `chrono::NaiveDate` | `chrono` |
+| `string` | — (`String`) | — (`String`) | nothing |
+
+Each dependency is required only when its mapping is selected and actually occurs in the compiled
+API.
+
+Dates are emitted as the embedded `DateTime` and `Date` newtypes rather than the crate's own types,
+because `time`'s serde output is not the RFC 3339 text these formats are defined as, and so that
+every backend reads and writes one wire form. They carry a hand-written RFC 3339 codec, so no
+backend's `serde` feature is needed (only `time`'s `formatting` and `parsing`); they `Deref` to and
+convert with `From` from the inner type, and parse with `FromStr`, failing with `DateParseError`,
+which the generated root re-exports beside them. The `jiff` and `chrono` newtypes share the
+[`rfc3339` codec](https://github.com/getkono/spargen/blob/master/support-runtime/src/rfc3339.rs),
+which states the grammar they accept and write. `jiff::Timestamp` has no offset, so the `jiff`
+backend normalizes a decoded `date-time` to UTC and always writes `Z`; `time` and `chrono` keep
+the offset the value was written with. The
+[`datetime` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/datetime.rs)
 sets out why `time`'s own representation is not RFC 3339.
 
 ### Binary content
@@ -358,3 +376,30 @@ is a sequence of numbers, so the newtype carries the embedded
 codec instead, which adds no dependency and is embedded only when such a schema is emitted. A
 whole request or response body and a multipart part carry the octets themselves under either
 keyword: a whole body is typed `bytes::Bytes`, and a part is read through the newtype's `Deref`.
+
+A whole `format: binary` request body is taken by value as `impl Into<HttpBody>` (an optional one
+as `Option<HttpBody>`): `Bytes` and `Vec<u8>` move in without a copy, and `HttpBody::wrap` sends any
+`http_body::Body` as it is read, for an upload produced incrementally or larger than it should be
+held in memory. A streaming body does not clone, so neither a retry nor a credential refresh
+resends it; reqwest's `fetch` backend on `wasm32` refuses one as `Error::RequestConstruction`.
+
+```rust,ignore
+client.put_blob(Bytes::from(sealed)).await?;              // in memory, no copy
+client.put_blob(HttpBody::wrap(paced_upload)).await?;     // streamed as it is read
+```
+
+An operation whose success is one whole `format: binary` body reads it within
+`ClientConfig::DEFAULT_MAX_BINARY_BODY` (64 MiB) unless `max_body` or `max_success_body` sets
+another limit, so a large or hostile download fails as `Error::BodyTooLarge` instead of growing
+without bound. Each such operation also has a `{method}_stream` twin returning
+`ResponseValue<ByteStream>`, the body handed over unread: `next()` yields it chunk by chunk,
+`collect_bounded(limit)` reads the rest whole within a limit of the caller's choosing (a
+`Content-Length` past it refused unread), and `into_body()` hands over the `HttpBody` for a reader
+of the caller's own. `collect_bounded` is its only collector. Like an `EventStream`, the
+twin is exempt from the total timeout and the body limits; the connect and read timeouts still
+apply. Its errors are `Error<Infallible>`, which `Error::widen` turns into the operation's.
+
+```rust,ignore
+let blob = client.get_blob_stream(id).await?.into_inner();
+let bytes = blob.collect_bounded(MAX_BLOB).await.map_err(Error::widen)?;
+```

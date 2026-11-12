@@ -40,7 +40,7 @@ fn the_all_capability_dependency_block_is_printed_byte_for_byte() {
         streams: true,
         xml: true,
         uuid: true,
-        time: true,
+        datetime: Some(DateTimeBackend::Time),
     };
     let block = Requirements::new(&requirements).manifest_block();
     assert_eq!(
@@ -66,6 +66,40 @@ time = {{ version = "0.3.55", features = ["formatting", "parsing"] }}
         Requirements::new(&requirements).to_string(),
         block.trim_end()
     );
+}
+
+/// The `jiff` and `chrono` backends print their crate as a bare floor where `time` sits, and each
+/// printed block passes the audit it describes.
+#[test]
+fn each_datetime_backend_prints_its_crate_and_passes_its_own_audit() {
+    for (backend, line) in [
+        (DateTimeBackend::Jiff, "jiff = \"0.2.42\"\n"),
+        (DateTimeBackend::Chrono, "chrono = \"0.4.45\"\n"),
+    ] {
+        let requirements = RuntimeRequirements {
+            datetime: Some(backend),
+            ..RuntimeRequirements::default()
+        };
+        let block = Requirements::new(&requirements).manifest_block();
+        assert!(
+            block.contains(&format!("serde_json = \"1.0.151\"\n{line}")),
+            "{block}"
+        );
+        assert!(!block.contains("time ="), "{block}");
+        let manifest = format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{block}");
+        let diagnostics = audit_manifest(&manifest, &requirements, &TargetContext::Unknown);
+        assert!(diagnostics.is_empty(), "{backend}: {diagnostics:#?}");
+
+        let without = block.replace(line, "");
+        let manifest = format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{without}");
+        let diagnostics = audit_manifest(&manifest, &requirements, &TargetContext::Unknown);
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains(&format!("requires `{backend}`"))),
+            "{backend}: {diagnostics:#?}"
+        );
+    }
 }
 
 #[test]
@@ -98,7 +132,7 @@ fn the_printed_dependency_block_passes_the_audit_it_describes() {
         streams: true,
         xml: true,
         uuid: true,
-        time: true,
+        datetime: Some(DateTimeBackend::Time),
     };
     let block = Requirements::new(&requirements).manifest_block();
     // `deps` renders the blocking opt-in — its `[features]` entry and its dependency —

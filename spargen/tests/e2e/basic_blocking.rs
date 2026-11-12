@@ -538,7 +538,7 @@ fn a_byte_request_body_declares_its_content_type() {
 
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .put_ranged(&bytes::Bytes::from_static(b"abc"))
+        .put_ranged(bytes::Bytes::from_static(b"abc"))
         .unwrap();
 
     let request = server.join().unwrap().text();
@@ -552,7 +552,7 @@ fn a_byte_request_body_declares_its_content_type() {
 
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .put_artwork("poster", &bytes::Bytes::from_static(b"\x89PNG"))
+        .put_artwork("poster", b"\x89PNG".to_vec())
         .unwrap();
 
     let request = server.join().unwrap().text();
@@ -675,6 +675,101 @@ fn textual_vendor_and_binary_responses_use_raw_wire_codecs() {
     let (base, server) = serve_once("application/octet-stream", "200 OK", b"\0raw\xff");
     let client = basic_client::BlockingClient::new(&base).unwrap();
     assert_eq!(client.download_raw().unwrap().into_inner().as_ref(), b"\0raw\xff");
+    server.join().unwrap();
+}
+
+/// Issue #1263: a binary request body built from a stream goes out as it is read, chunked, and the
+/// operation's `_stream` twin hands the binary success body over unread, as a `ByteStream`.
+#[test]
+fn a_binary_body_streams_both_ways() {
+    /// A request body played from a fixed list of pieces.
+    struct Pieces(std::collections::VecDeque<&'static [u8]>);
+    impl http_body::Body for Pieces {
+        type Data = bytes::Bytes;
+        type Error = std::convert::Infallible;
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<bytes::Bytes>, Self::Error>>> {
+            let piece = self.0.pop_front();
+            std::task::Poll::Ready(
+                piece.map(|piece| Ok(http_body::Frame::data(bytes::Bytes::from_static(piece)))),
+            )
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let ranged = || {
+        common::serve_one(common::response(
+            "206 Partial Content",
+            &[("Content-Type", "application/octet-stream")],
+            b"abcdef",
+        ))
+    };
+
+    let (base, server) = ranged();
+    let client = basic_client::Client::new(&base).unwrap();
+    let body = basic_client::HttpBody::wrap(Pieces([&b"ab"[..], b"cd"].into()));
+    let value = runtime.block_on(client.put_ranged_stream(body)).unwrap();
+    assert_eq!(value.status(), 206);
+    assert_eq!(value.headers()["content-length"], "6");
+    let stream: basic_client::ByteStream = value.into_inner();
+    assert_eq!(runtime.block_on(stream.collect_bounded(6)).unwrap(), "abcdef");
+    let request = server.join().unwrap();
+    assert_eq!(request.header("transfer-encoding"), ["chunked"], "{}", request.head);
+    assert!(request.header("content-length").is_empty(), "{}", request.head);
+    let sent = String::from_utf8_lossy(&request.body);
+    assert!(sent.contains("ab") && sent.contains("cd"), "{sent}");
+
+    // The declared length past the limit is refused before the body is read.
+    let (base, server) = ranged();
+    let client = basic_client::Client::new(&base).unwrap();
+    let value = runtime
+        .block_on(client.put_ranged_stream(bytes::Bytes::from_static(b"x")))
+        .unwrap();
+    match runtime.block_on(value.into_inner().collect_bounded(5)) {
+        Err(basic_client::Error::BodyTooLarge { limit: 5, status }) => assert_eq!(status, 206),
+        other => panic!("expected BodyTooLarge, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // `next` yields the body chunk by chunk, then `None`.
+    let (base, server) = ranged();
+    let client = basic_client::Client::new(&base).unwrap();
+    let mut stream = runtime
+        .block_on(client.put_ranged_stream(vec![b'x']))
+        .unwrap()
+        .into_inner();
+    let mut read = Vec::new();
+    while let Some(chunk) = runtime.block_on(stream.next()) {
+        read.extend_from_slice(&chunk.unwrap());
+    }
+    assert_eq!(read, b"abcdef");
+    server.join().unwrap();
+}
+
+/// Issue #1263: a binary success body read whole is bounded by `DEFAULT_MAX_BINARY_BODY` where
+/// the call sets no limit: a `Content-Length` past it is refused before the body is read.
+#[test]
+fn a_buffered_binary_body_is_bounded_by_default() {
+    let declared = basic_client::ClientConfig::DEFAULT_MAX_BINARY_BODY + 1;
+    let (base, server) = common::serve_one(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+             Content-Length: {declared}\r\nConnection: close\r\n\r\nabc"
+        )
+        .into_bytes(),
+    );
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.download_raw() {
+        Err(basic_client::Error::BodyTooLarge { limit, status }) => {
+            assert_eq!(limit, basic_client::ClientConfig::DEFAULT_MAX_BINARY_BODY);
+            assert_eq!(status, 200);
+        }
+        other => panic!("expected BodyTooLarge, got {other:?}"),
+    }
     server.join().unwrap();
 }
 
