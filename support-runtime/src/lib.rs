@@ -429,14 +429,17 @@ mod tests {
     }
 
     /// A transport that answers each request with the next [`Reply`] of its script, the last one
-    /// repeating once the script is spent, and records every request it is handed (its URL, its
-    /// headers, and its body where that is in memory). Each response also carries
-    /// `x-response: backend`, so a test can tell it from one built by hand.
+    /// repeating once the script is spent, and records every request it is handed. Each response
+    /// also carries `x-response: backend`, so a test can tell it from one built by hand.
     #[derive(Debug)]
     pub(crate) struct SequenceBackend {
         script: Mutex<VecDeque<Reply>>,
-        requests: Mutex<Vec<(String, HeaderMap, Option<Vec<u8>>)>>,
+        requests: Mutex<Vec<Sent>>,
     }
+
+    /// One request a [`SequenceBackend`] was handed: its URL, its headers, and its body where
+    /// that is in memory.
+    type Sent = (String, HeaderMap, Option<Vec<u8>>);
 
     impl SequenceBackend {
         pub(crate) fn new(script: impl IntoIterator<Item = Reply>) -> Arc<Self> {
