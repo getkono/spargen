@@ -26,7 +26,7 @@ fn set_cookie_is_never_comma_joined() {
 
 /// The same headers under the ordinary list rule, which `SetCookie` exists to avoid: joined,
 /// then split back apart on every comma, so two cookies come back as three fragments, the first
-/// cut inside its `Expires` date.
+/// cut inside its `Expires` date and the second losing the space after that comma.
 #[test]
 fn the_array_shape_splits_set_cookie_values_on_every_comma() {
     let mut map = HeaderMap::new();
@@ -42,7 +42,7 @@ fn the_array_shape_splits_set_cookie_values_on_every_comma() {
         split,
         [
             "lang=en; Expires=Wed",
-            " 09 Jun 2021 10:18:14 GMT",
+            "09 Jun 2021 10:18:14 GMT",
             "sessionId=38afes7a8"
         ]
     );
@@ -443,6 +443,13 @@ fn token(excluded: &'static [u8]) -> impl proptest::strategy::Strategy<Value = S
     })
 }
 
+/// As [`token`], but never empty: the list rule skips an empty element, so only a non-empty
+/// one survives as a list element or an unexploded object's key or value.
+fn element(excluded: &'static [u8]) -> impl proptest::strategy::Strategy<Value = String> {
+    use proptest::strategy::Strategy;
+    token(excluded).prop_filter("a list element is non-empty", |text| !text.is_empty())
+}
+
 /// Write `value` with `serialize_simple` under `explode`, then read it back with
 /// `require_header` under `shape` and the same `explode`.
 fn round_trip<T: serde::Serialize + DeserializeOwned>(
@@ -467,9 +474,10 @@ fn finite() -> proptest::num::f64::Any {
 
 proptest::proptest! {
     /// The module's stated law: parsing is the inverse of `serialize_simple`, for every value
-    /// `simple` can carry losslessly — a scalar of each JSON type, a non-empty array whose
-    /// strings hold no `,`, and an object of up to four members whose keys and values hold
-    /// neither `,` nor `=` — under both `explode` settings. A string spelling a number or a
+    /// `simple` can carry losslessly — a scalar of each JSON type, an array of up to four
+    /// elements whose strings are non-empty and hold no `,`, and an object of up to four members
+    /// whose keys and values are non-empty and hold neither `,` nor `=` — under both `explode`
+    /// settings. A string spelling a number or a
     /// boolean stays a string. A finite float, alone or in an array, reads back as itself.
     #[test]
     fn require_header_inverts_serialize_simple(
@@ -478,10 +486,10 @@ proptest::proptest! {
         signed in proptest::num::i64::ANY,
         real in finite(),
         flag in proptest::bool::ANY,
-        texts in proptest::collection::vec(token(b""), 1..5),
-        numbers in proptest::collection::vec(proptest::num::i64::ANY, 1..5),
-        reals in proptest::collection::vec(finite(), 1..5),
-        members in proptest::collection::btree_map(token(b"="), token(b"="), 0..5),
+        texts in proptest::collection::vec(element(b""), 0..5),
+        numbers in proptest::collection::vec(proptest::num::i64::ANY, 0..5),
+        reals in proptest::collection::vec(finite(), 0..5),
+        members in proptest::collection::btree_map(element(b"="), element(b"="), 0..5),
         explode in proptest::bool::ANY,
     ) {
         proptest::prop_assert_eq!(round_trip(&text, HeaderShape::Scalar, explode).unwrap(), text);
@@ -511,15 +519,20 @@ proptest::proptest! {
     }
 }
 
-/// Why the law above holds only for a non-empty array: `simple` writes an empty array and an
-/// array of one empty string alike, as the empty value, and that reads back as the latter.
+/// Why the law above holds only for non-empty strings in a list: `simple` writes an empty array
+/// and an array of one empty string alike, as the empty value, and the list rule skips an empty
+/// element, so both read back as the former.
 #[test]
-fn an_empty_array_reads_back_as_one_empty_string() {
+fn an_array_of_one_empty_string_reads_back_empty() {
     for explode in [false, true] {
         let empty: Vec<String> = Vec::new();
         assert_eq!(
             round_trip(&empty, HeaderShape::Array, explode).unwrap(),
-            [""]
+            empty
+        );
+        assert_eq!(
+            round_trip(&vec![String::new()], HeaderShape::Array, explode).unwrap(),
+            empty
         );
     }
 }
