@@ -1087,7 +1087,7 @@ fn the_getters_read_back_what_the_setters_wrote() {
     let spec = spargen::Spec::new("openapi.yaml")
         .uuid(false)
         .datetime(spargen::DateTimeBackend::String)
-        // `omit` replaces the rule set `omit_rule` started, and a later `omit_rule` appends to it.
+        // `omit` and `omit_rule` each append to the rules set before them.
         .omit_rule(appended.clone())
         .omit(omit)
         .omit_rule(appended.clone())
@@ -1102,7 +1102,7 @@ fn the_getters_read_back_what_the_setters_wrote() {
         .bind_header("X-Tenant");
     assert!(!spec.uuid_enabled());
     assert_eq!(spec.datetime_backend(), spargen::DateTimeBackend::String);
-    assert_eq!(spec.omissions().rules, [rule, appended]);
+    assert_eq!(spec.omissions().rules, [appended.clone(), rule, appended]);
     assert_eq!(spec.error_body_cap_bytes(), 11);
     assert_eq!(spec.batch_cap_count(), 7);
     assert!(spec.carve_enabled());
@@ -1189,16 +1189,62 @@ fn keep_rules_apply_from_the_flag_and_the_config_file() {
     );
 }
 
-/// `keep_operation` appends to the profile `omissions` reads back, and `omit` replaces the keep
-/// rules with the rest of the profile.
+/// `keep_operation` appends to the profile `omissions` reads back, `omit` appends a profile's keep
+/// rules after it, and `clear_omissions` removes the keep rules with the rest of the profile.
 #[test]
-fn keep_operation_reads_back_and_omit_replaces_it() {
+fn keep_operation_reads_back_and_clear_omissions_removes_it() {
+    let post = spargen::KeepRule::operation(spargen::OmitMethod::Post, "/kept");
+    let put = spargen::KeepRule::operation(spargen::OmitMethod::Put, "/appended");
     let get = spargen::KeepRule::operation(spargen::OmitMethod::Get, "/pets");
+    let mut profile = spargen::Omit::default();
+    profile.keep.push(put.clone());
     let spec = spargen::Spec::new("openapi.yaml")
-        .keep_operation(spargen::OmitMethod::Post, "/dropped")
-        .omit(spargen::Omit::default())
+        .keep_operation(spargen::OmitMethod::Post, "/kept")
+        .omit(profile);
+    assert_eq!(spec.omissions().keep, [post, put]);
+
+    let spec = spec
+        .omit_rule(spargen::OmitRule::path("/dropped"))
+        .clear_omissions()
         .keep_operation(spargen::OmitMethod::Get, "/pets");
     assert_eq!(spec.omissions().keep, [get]);
     assert!(spec.omissions().rules.is_empty());
     assert!(!spec.omissions().is_empty());
+}
+
+/// `omit` after a config file keeps the file's `[[omit]]` and `[[keep]]` rules and appends its
+/// own (#1328), and applying the same file again appends neither its rules nor a second
+/// `config_files` entry, while its keys are set again over a setter in between.
+#[test]
+fn omit_after_a_config_file_keeps_the_file_rules_and_a_reapplied_file_adds_none() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let file = dir.join("spargen.toml");
+    std::fs::write(
+        &file,
+        "batch_cap = 7\n[[omit]]\npath = \"/from-file\"\n[[keep]]\nmethod = \"get\"\npath = \"/kept\"\n",
+    )
+    .unwrap();
+    let from_file = spargen::OmitRule::path("/from-file");
+    let from_setter = spargen::OmitRule::path("/from-setter");
+    let kept = spargen::KeepRule::operation(spargen::OmitMethod::Get, "/kept");
+    let mut omit = spargen::Omit::default();
+    omit.rules.push(from_setter.clone());
+
+    let spec = spargen::Spec::new(dir.join("openapi.yaml"))
+        .config_file(&file)
+        .unwrap()
+        .omit(omit);
+    assert_eq!(
+        spec.omissions().rules,
+        [from_file.clone(), from_setter.clone()]
+    );
+    assert_eq!(spec.omissions().keep, [kept.clone()]);
+    assert_eq!(spec.config_files(), [file.clone()]);
+
+    let spec = spec.batch_cap(1).config_file(&file).unwrap();
+    assert_eq!(spec.omissions().rules, [from_file, from_setter]);
+    assert_eq!(spec.omissions().keep, [kept]);
+    assert_eq!(spec.config_files(), [file]);
+    assert_eq!(spec.batch_cap_count(), 7);
 }

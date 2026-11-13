@@ -80,9 +80,9 @@ A `paths` entry written as a `$ref` is kept **whole** once one of its target's o
 because the target can be shared by other entries; a keep rule names such an operation by the
 `paths` key that refers to it.
 
-Keep rules are part of the `Omit` profile and its fingerprint: `Spec::omit` replaces them along with
-the omit rules, so call `keep_operation` after it. In `spargen.toml` each is a `[[keep]]` entry with
-both keys required:
+Keep rules are part of the `Omit` profile and its fingerprint: `Spec::omit` appends a profile's keep
+rules as it appends its omit rules, and `Spec::clear_omissions` removes both. In `spargen.toml` each
+is a `[[keep]]` entry with both keys required:
 
 ```toml
 [[keep]]

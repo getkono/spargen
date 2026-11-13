@@ -100,9 +100,9 @@ impl Spec {
         self.datetime
     }
 
-    /// The compatibility omissions and keep rules, in chained order: [`omit`](Self::omit) replaces
-    /// the set, and [`omit_rule`](Self::omit_rule), [`keep_operation`](Self::keep_operation) and
-    /// each applied config file append to it.
+    /// The compatibility omissions and keep rules, in chained order: [`omit`](Self::omit),
+    /// [`omit_rule`](Self::omit_rule), [`keep_operation`](Self::keep_operation) and each applied
+    /// config file append to them, and [`clear_omissions`](Self::clear_omissions) empties them.
     pub fn omissions(&self) -> &Omit {
         &self.omit
     }
@@ -183,9 +183,26 @@ impl Spec {
         self
     }
 
-    /// Replace the compatibility omissions applied before OpenAPI validation and lowering.
+    /// Add every omit and keep rule of `omit` to the compatibility omissions applied before
+    /// OpenAPI validation and lowering, after the rules already set, as
+    /// [`omit_rule`](Self::omit_rule), [`keep_operation`](Self::keep_operation) and each applied
+    /// config file add theirs. [`clear_omissions`](Self::clear_omissions) empties the set.
+    ///
+    /// ```no_run
+    /// let spec = spargen::Spec::new("api/openapi.yaml")
+    ///     .discover_config_file()?
+    ///     .omit(spargen::omit! { paths { "/internal/**"; } });
+    /// # Ok::<(), spargen::ConfigError>(())
+    /// ```
     pub fn omit(mut self, omit: Omit) -> Self {
-        self.omit = omit;
+        self.omit.rules.extend(omit.rules);
+        self.omit.keep.extend(omit.keep);
+        self
+    }
+
+    /// Remove every omit and keep rule set so far, by a setter or an applied config file.
+    pub fn clear_omissions(mut self) -> Self {
+        self.omit = Omit::default();
         self
     }
 
@@ -199,7 +216,7 @@ impl Spec {
     /// omitted, and so is every component of the root document the kept operations do not reach.
     /// Omit rules still apply on top. A keep rule naming an operation the document does not declare
     /// fails generation with `E019`. Keep rules are part of the [`Omit`] profile, so
-    /// [`omit`](Self::omit) replaces them too; call this after it.
+    /// [`clear_omissions`](Self::clear_omissions) removes them too.
     ///
     /// ```no_run
     /// use spargen::OmitMethod;
@@ -380,14 +397,18 @@ impl Spec {
     ///
     /// The spec records `path`, so an edit to the file reruns the build:
     /// [`generate`](crate::generate) names it as a `cargo:rerun-if-changed` path and fingerprints
-    /// its bytes, and `generate_api!` tracks it.
+    /// its bytes, and `generate_api!` tracks it. Applying a path already applied, spelled the same,
+    /// sets the file's keys again but appends neither its rules nor a second record of the path.
     pub fn config_file(self, path: impl AsRef<Utf8Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path.as_std_path()).map_err(|error| {
             ConfigError::new(format!("cannot read config file `{path}`: {error}"))
         })?;
-        let mut spec = self.apply_config(&text, path)?;
-        spec.config_files.push(path.to_path_buf());
+        let applied = self.config_files.iter().any(|applied| applied == path);
+        let mut spec = self.apply_config(&text, path, !applied)?;
+        if !applied {
+            spec.config_files.push(path.to_path_buf());
+        }
         Ok(spec)
     }
 
@@ -412,8 +433,15 @@ impl Spec {
         self.config_file(&discovered)
     }
 
-    /// Apply already-read config-file text. Split out so the parser is testable without I/O.
-    fn apply_config(mut self, text: &str, path: &Utf8Path) -> Result<Self, ConfigError> {
+    /// Apply already-read config-file text, appending its `[[omit]]` and `[[keep]]` rules only
+    /// when `append_rules` says the file was not applied before. Split out so the parser is
+    /// testable without I/O.
+    fn apply_config(
+        mut self,
+        text: &str,
+        path: &Utf8Path,
+        append_rules: bool,
+    ) -> Result<Self, ConfigError> {
         let file = toml::from_str::<FileConfig>(text)
             .map_err(|error| ConfigError::new(format!("invalid config file `{path}`: {error}")))?;
         if file.features.is_some() {
@@ -467,7 +495,9 @@ impl Spec {
                     index + 1
                 ))
             })?;
-            self.omit.rules.push(rule);
+            if append_rules {
+                self.omit.rules.push(rule);
+            }
         }
         for (index, entry) in file.keep.iter().enumerate() {
             let method = entry.method.parse().map_err(|error: UnknownOmitToken| {
@@ -476,9 +506,11 @@ impl Spec {
                     index + 1
                 ))
             })?;
-            self.omit
-                .keep
-                .push(KeepRule::operation(method, entry.path.clone()));
+            if append_rules {
+                self.omit
+                    .keep
+                    .push(KeepRule::operation(method, entry.path.clone()));
+            }
         }
         for name in file.bind_headers {
             self = self.bind_header(name);
@@ -712,7 +744,7 @@ mod tests {
     use crate::compat::{ComponentKind, OmitMethod};
 
     fn apply(text: &str) -> Result<Spec, ConfigError> {
-        Spec::new("openapi.yaml").apply_config(text, Utf8Path::new("spargen.toml"))
+        Spec::new("openapi.yaml").apply_config(text, Utf8Path::new("spargen.toml"), true)
     }
 
     /// Two config errors are equal exactly when their messages are, and a clone keeps the message
@@ -754,6 +786,7 @@ mod tests {
             .apply_config(
                 "bind_headers = [\"X-Tenant\", \"x-api-version\"]\n",
                 Utf8Path::new("spargen.toml"),
+                true,
             )
             .unwrap()
             .bind_header("X-TENANT");
@@ -860,7 +893,11 @@ mod tests {
     fn config_file_omits_are_appended_not_replaced() {
         let spec = Spec::new("openapi.yaml")
             .omit_rule(OmitRule::path("/first"))
-            .apply_config("[[omit]]\npath = \"/second\"\n", Utf8Path::new("c.toml"))
+            .apply_config(
+                "[[omit]]\npath = \"/second\"\n",
+                Utf8Path::new("c.toml"),
+                true,
+            )
             .unwrap();
         assert_eq!(
             spec.omit.rules,
@@ -877,6 +914,7 @@ mod tests {
             .apply_config(
                 "[[keep]]\nmethod = \"POST\"\npath = \"/second\"\n\n[[keep]]\nmethod = \"get\"\npath = \"/v1/*\"\n",
                 Utf8Path::new("c.toml"),
+                true,
             )
             .unwrap();
         assert_eq!(
