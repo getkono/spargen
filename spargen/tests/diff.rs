@@ -644,6 +644,8 @@ mod narrowing;
 mod operations;
 #[path = "diff/servers.rs"]
 mod servers;
+#[path = "diff/settings.rs"]
+mod settings;
 #[path = "diff/types.rs"]
 mod types;
 

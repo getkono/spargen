@@ -833,6 +833,7 @@ pub(super) fn split_union_sibling(sibling: &Schema) -> (Schema, Schema) {
         content_schema: None,
         xml: None,
         validation: ValidationKeywords::default(),
+        oas30_nullable: false,
         deprecated: false,
         read_only: false,
         write_only: false,

@@ -136,8 +136,9 @@ impl serde::Serialize for DiffRejection {
 pub(crate) fn diff_inner(old: &Spec, new: &Spec) -> Result<(DiffReport, DiffSides), DiffRejection> {
     match (lower_side(old), lower_side(new)) {
         (Ok((old_api, old_names, old_report)), Ok((new_api, new_names, new_report))) => {
-            let old_surface = surface::build(&old_api, &old_names);
-            let new_surface = surface::build(&new_api, &new_names);
+            // Each side under its own settings: the two specs are configured independently.
+            let old_surface = surface::build(&old_api, &old_names, surface_settings(old));
+            let new_surface = surface::build(&new_api, &new_names, surface_settings(new));
             Ok((
                 surface::diff(&old_surface, &new_surface),
                 DiffSides {
@@ -151,6 +152,15 @@ pub(crate) fn diff_inner(old: &Spec, new: &Spec) -> Result<(DiffReport, DiffSide
             old: old_lowered.err(),
             new: new_lowered.err(),
         }),
+    }
+}
+
+/// The settings of `spec` that shape its surface, read as `build_emit_plan` reads them for codegen.
+fn surface_settings(spec: &Spec) -> surface::Settings {
+    surface::Settings {
+        uuid: spec.uuid.is_on(),
+        datetime: spec.datetime,
+        testing: spec.testing.is_on(),
     }
 }
 

@@ -52,16 +52,17 @@ impl Drop for FallbackGuard {
 
 /// Parsed macro arguments: a spec path (positional string or `spec = "..."`) plus optional flags.
 ///
-/// Each switch is `None` when the macro was not given it, so the config file's value stands.
+/// Each switch holds the value of the `Spec` setting it controls, and is `None` when the macro was
+/// not given it, so the config file's value stands.
 struct Args {
     spec: LitStr,
-    uuid: Option<bool>,
+    uuid: Option<spargen::UuidMapping>,
     datetime: Option<spargen::DateTimeBackend>,
-    carve: Option<bool>,
-    open_narrowing: Option<bool>,
-    open_unions: Option<bool>,
-    verbatim_docs: Option<bool>,
-    testing: Option<bool>,
+    carve: Option<spargen::Carve>,
+    open_narrowing: Option<spargen::Narrowing>,
+    open_unions: Option<spargen::UnionTags>,
+    verbatim_docs: Option<spargen::CarriedDocs>,
+    testing: Option<spargen::TestingModule>,
     error_body_cap: Option<usize>,
     batch_cap: Option<usize>,
     omit: spargen::Omit,
@@ -71,22 +72,41 @@ struct Args {
     bind_headers: Vec<String>,
 }
 
-/// Parse the switch `key` into `slot`. Its own key takes `= true` or `= false`, and alone means
-/// `true`; a `negated` key (`no_uuid`) takes no value and means `false`, and names the
-/// switch without its `no_` prefix. A switch set twice, in either spelling, is an error rather than
-/// a silent last-wins.
-fn parse_switch(
+/// Every switch `generate_api!` takes, in the order its errors list them. Each is spelled `<name>`
+/// (alone, `= true` or `= false`) or `no_<name>`.
+const SWITCHES: [&str; 6] = [
+    "uuid",
+    "carve",
+    "open_narrowing",
+    "open_unions",
+    "verbatim_docs",
+    "testing",
+];
+
+/// The switch `key` spells, as its name in [`SWITCHES`] and whether `key` is its `no_<name>`
+/// form, or `None` when `key` names no switch.
+fn switch_key(key: &str) -> Option<(&'static str, bool)> {
+    let (name, negated) = match key.strip_prefix("no_") {
+        Some(name) => (name, true),
+        None => (key, false),
+    };
+    SWITCHES
+        .iter()
+        .find(|switch| **switch == name)
+        .map(|name| (*name, negated))
+}
+
+/// Parse the switch `name`, spelled `key`, into `slot`: `on` for the bare key or `= true`, `off`
+/// for `= false` or the `no_` form (`negated`), which takes no value. A switch set twice, in
+/// either spelling, is an error rather than a silent last-wins.
+fn parse_switch<T>(
     input: ParseStream,
     key: &Ident,
-    slot: &mut Option<bool>,
-    negated: bool,
+    (name, negated): (&str, bool),
+    slot: &mut Option<T>,
+    on: T,
+    off: T,
 ) -> syn::Result<()> {
-    let key_text = key.to_string();
-    let name = if negated {
-        key_text.strip_prefix("no_").unwrap_or(&key_text)
-    } else {
-        &key_text
-    };
     let value = if negated {
         if input.peek(Token![=]) {
             return Err(syn::Error::new(
@@ -104,15 +124,17 @@ fn parse_switch(
     if slot.is_some() {
         return Err(syn::Error::new(
             key.span(),
-            format!("`{name}` given more than once"),
+            format!("`{name}` given more than once (as `{name}`, `{name} = …` or `no_{name}`)"),
         ));
     }
-    *slot = Some(value);
+    *slot = Some(if value { on } else { off });
     Ok(())
 }
 
 impl Parse for Args {
     fn parse(input: ParseStream) -> syn::Result<Self> {
+        use spargen::{CarriedDocs, Carve, Narrowing, TestingModule, UnionTags, UuidMapping};
+
         let mut spec: Option<LitStr> = None;
         let mut uuid = None;
         let mut datetime = None;
@@ -139,48 +161,91 @@ impl Parse for Args {
                 spec = Some(lit);
             } else {
                 let key: Ident = input.parse()?;
-                match key.to_string().as_str() {
-                    "spec" => {
-                        input.parse::<Token![=]>()?;
-                        let lit: LitStr = input.parse()?;
-                        if spec.is_some() {
+                let text = key.to_string();
+                if let Some(switch) = switch_key(&text) {
+                    match switch.0 {
+                        "uuid" => parse_switch(
+                            input,
+                            &key,
+                            switch,
+                            &mut uuid,
+                            UuidMapping::Uuid,
+                            UuidMapping::String,
+                        )?,
+                        "carve" => {
+                            parse_switch(input, &key, switch, &mut carve, Carve::Auto, Carve::Off)?
+                        }
+                        "open_narrowing" => parse_switch(
+                            input,
+                            &key,
+                            switch,
+                            &mut open_narrowing,
+                            Narrowing::Open,
+                            Narrowing::Exact,
+                        )?,
+                        "open_unions" => parse_switch(
+                            input,
+                            &key,
+                            switch,
+                            &mut open_unions,
+                            UnionTags::Open,
+                            UnionTags::Closed,
+                        )?,
+                        "verbatim_docs" => parse_switch(
+                            input,
+                            &key,
+                            switch,
+                            &mut verbatim_docs,
+                            CarriedDocs::Verbatim,
+                            CarriedDocs::Rewritten,
+                        )?,
+                        "testing" => parse_switch(
+                            input,
+                            &key,
+                            switch,
+                            &mut testing,
+                            TestingModule::Emitted,
+                            TestingModule::Omitted,
+                        )?,
+                        other => unreachable!("switch `{other}` has no slot"),
+                    }
+                } else {
+                    match text.as_str() {
+                        "spec" => {
+                            input.parse::<Token![=]>()?;
+                            let lit: LitStr = input.parse()?;
+                            if spec.is_some() {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    "spec path given more than once",
+                                ));
+                            }
+                            spec = Some(lit);
+                        }
+                        "datetime" => parse_datetime(input, &key, &mut datetime)?,
+                        "error_body_cap" => parse_cap(input, &key, &mut error_body_cap)?,
+                        "batch_cap" => parse_cap(input, &key, &mut batch_cap)?,
+                        "omit" => parse_omit(input, &mut omit)?,
+                        "keep" => {
+                            let body;
+                            braced!(body in input);
+                            keep.extend(parse_method_paths(&body)?);
+                        }
+                        "bind_header" => {
+                            input.parse::<Token![=]>()?;
+                            bind_headers.push(input.parse::<LitStr>()?.value());
+                        }
+                        other => {
                             return Err(syn::Error::new(
-                                lit.span(),
-                                "spec path given more than once",
+                                key.span(),
+                                format!(
+                                    "unknown argument `{other}`; expected a spec path, a switch \
+                                 ({}, each also as `no_<switch>`), or one of: datetime, \
+                                 error_body_cap, batch_cap, omit, keep, bind_header",
+                                    SWITCHES.join(", ")
+                                ),
                             ));
                         }
-                        spec = Some(lit);
-                    }
-                    "uuid" => parse_switch(input, &key, &mut uuid, false)?,
-                    "no_uuid" => parse_switch(input, &key, &mut uuid, true)?,
-                    "datetime" => parse_datetime(input, &key, &mut datetime)?,
-                    "carve" => parse_switch(input, &key, &mut carve, false)?,
-                    "open_narrowing" => parse_switch(input, &key, &mut open_narrowing, false)?,
-                    "open_unions" => parse_switch(input, &key, &mut open_unions, false)?,
-                    "verbatim_docs" => parse_switch(input, &key, &mut verbatim_docs, false)?,
-                    "testing" => parse_switch(input, &key, &mut testing, false)?,
-                    "error_body_cap" => parse_cap(input, &key, &mut error_body_cap)?,
-                    "batch_cap" => parse_cap(input, &key, &mut batch_cap)?,
-                    "omit" => parse_omit(input, &mut omit)?,
-                    "keep" => {
-                        let body;
-                        braced!(body in input);
-                        keep.extend(parse_method_paths(&body)?);
-                    }
-                    "bind_header" => {
-                        input.parse::<Token![=]>()?;
-                        bind_headers.push(input.parse::<LitStr>()?.value());
-                    }
-                    other => {
-                        return Err(syn::Error::new(
-                            key.span(),
-                            format!(
-                                "unknown argument `{other}`; expected a spec path or one of: \
-                                 uuid, no_uuid, datetime, carve, open_narrowing, open_unions, \
-                                 verbatim_docs, testing, error_body_cap, batch_cap, omit, keep, \
-                                 bind_header"
-                            ),
-                        ));
                     }
                 }
             }
@@ -299,37 +364,27 @@ fn tracking(preview: &spargen::__private::MacroPreview) -> proc_macro2::TokenStr
 /// given leaves the config file's value in place, and omit rules and header bindings are appended
 /// to the file's own.
 fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
-    use spargen::{CarriedDocs, Carve, Narrowing, TestingModule, UnionTags, UuidMapping};
-
     let mut config = discovered;
     if let Some(uuid) = args.uuid {
-        config = config.with_uuid(switch(uuid, UuidMapping::Uuid, UuidMapping::String));
+        config = config.with_uuid(uuid);
     }
     if let Some(backend) = args.datetime {
         config = config.with_datetime(backend);
     }
     if let Some(carve) = args.carve {
-        config = config.with_carve(switch(carve, Carve::Auto, Carve::Off));
+        config = config.with_carve(carve);
     }
-    if let Some(open) = args.open_narrowing {
-        config = config.with_open_narrowing(switch(open, Narrowing::Open, Narrowing::Exact));
+    if let Some(narrowing) = args.open_narrowing {
+        config = config.with_open_narrowing(narrowing);
     }
-    if let Some(open) = args.open_unions {
-        config = config.with_open_unions(switch(open, UnionTags::Open, UnionTags::Closed));
+    if let Some(tags) = args.open_unions {
+        config = config.with_open_unions(tags);
     }
-    if let Some(verbatim) = args.verbatim_docs {
-        config = config.with_verbatim_docs(switch(
-            verbatim,
-            CarriedDocs::Verbatim,
-            CarriedDocs::Rewritten,
-        ));
+    if let Some(docs) = args.verbatim_docs {
+        config = config.with_verbatim_docs(docs);
     }
     if let Some(testing) = args.testing {
-        config = config.with_testing(switch(
-            testing,
-            TestingModule::Emitted,
-            TestingModule::Omitted,
-        ));
+        config = config.with_testing(testing);
     }
     for rule in &args.omit.rules {
         config = config.omit_rule(rule.clone());
@@ -347,15 +402,6 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
         config = config.with_batch_cap(cap);
     }
     config
-}
-
-/// The value a switch argument selects: `on_value` for `true`, `off_value` for `false`.
-fn switch<T>(on: bool, on_value: T, off_value: T) -> T {
-    if on {
-        on_value
-    } else {
-        off_value
-    }
 }
 
 /// Parse `datetime = "<backend>"` into `slot`: the date-time backend by the spelling
