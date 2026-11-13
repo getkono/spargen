@@ -131,7 +131,9 @@ Each one that elapses fails the request with `Error::Timeout`, which is transien
 total `timeout` is applied to each request as it is sent, as a `TotalTimeout` extension the
 backend enforces (`ReqwestBackend` does, and a backend of your own reads it from the request), and
 an operation returning an `EventStream` never applies it, since a stream may rightly stay open
-indefinitely. An event stream whose server sends nothing for longer than
+indefinitely. It bounds one exchange: a call replayed after its refreshable credential was rejected
+and refreshed sends the replay with a `TotalTimeout` of its own, so the call may take the timeout,
+then the refresh, then the timeout again. An event stream whose server sends nothing for longer than
 `read_timeout` still fails with `Error::Timeout`, which a reconnect policy may answer.
 
 `Client::with_timeout(Option<Duration>)` (and `BlockingClient::with_timeout`) sets the total
@@ -167,7 +169,9 @@ let page = client
 
 - `max_body` bounds the response body of a non-streaming operation. A `Content-Length` past it is
   refused before the body is read, and a body that grows past it is abandoned at the chunk that
-  crosses it; either is `Error::BodyTooLarge { limit, status }`, which is not transient. It
+  crosses it; either is `Error::BodyTooLarge { limit, status }`, which is not transient. The answer
+  to a `HEAD` request and a `1xx`, `204` or `304` response carry no body, so their
+  `Content-Length` refuses nothing, and whatever body they do carry is bounded as it is read. It
   replaces `ClientConfig::max_success_body` (default none: a structured success body is read whole,
   and a raw binary one within `ClientConfig::DEFAULT_MAX_BINARY_BODY`, 64 MiB), which
   `with_config` sets for every call. An error body is read no further than `max_error_body` in any
@@ -459,7 +463,7 @@ read as the method reads it, within the client's body limits. That enum has the 
 `status()`, and an `into_body()` where every bodied status is binary. A `ByteStream` is the body
 handed over unread: `next()` yields it chunk by chunk,
 `collect_bounded(limit)` reads the rest whole within a limit of the caller's choosing (a
-`Content-Length` past it refused unread), and `into_body()` hands over the `HttpBody` for a reader
+`Content-Length` past it refused unread, unless the response carries no body), and `into_body()` hands over the `HttpBody` for a reader
 of the caller's own. `collect_bounded` is its only collector. Like an `EventStream`, the
 twin is exempt from the total timeout and the body limits; the connect and read timeouts still
 apply. Its errors are `Error<Infallible>`, which `Error::widen` turns into the operation's.

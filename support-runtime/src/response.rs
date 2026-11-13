@@ -88,7 +88,9 @@ impl ByteStream {
     /// The rest of the body as one `Bytes`, or [`Error::BodyTooLarge`] once it is known to hold
     /// more than `limit` bytes: before anything is read, where nothing has been and the response
     /// declared a `Content-Length` past `limit`, and otherwise at the chunk that carries it past
-    /// `limit`, which is never buffered. Nothing of an over-limit body is returned.
+    /// `limit`, which is never buffered. Nothing of an over-limit body is returned. A `1xx`, `204`
+    /// or `304` response, or the answer to a `HEAD` request, declares no body it carries, so its
+    /// `Content-Length` refuses nothing.
     pub async fn collect_bounded(self, limit: usize) -> Result<Bytes, Error<Infallible>> {
         if self
             .declared
@@ -129,7 +131,7 @@ impl std::fmt::Debug for ByteStream {
 /// response with its body read as it arrives (the `chunked` module's `read_as_it_arrives`).
 pub fn stream_success_bytes(response: http::Response<HttpBody>) -> ResponseValue<ByteStream> {
     let (parts, body) = response.into_parts();
-    let declared = crate::dispatch::declared_length(&parts.headers);
+    let declared = crate::dispatch::declared_body_length(&parts);
     ResponseValue::new(
         parts.status,
         parts.headers,
@@ -231,6 +233,27 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(pulled.load(Ordering::SeqCst), 0);
+    }
+
+    /// Issue #1308: a bodiless status's `Content-Length` declares no body the stream carries, so a
+    /// length past the limit is not refused; what the body does carry is bounded as it is read.
+    #[test]
+    fn collect_bounded_reads_a_bodiless_status_past_its_declared_length() {
+        let bodiless = |chunks: Chunks| {
+            let mut response = chunks.into_response(204);
+            response
+                .headers_mut()
+                .insert(reqwest::header::CONTENT_LENGTH, 5000.into());
+            stream_success_bytes(response).into_inner()
+        };
+        let empty = bodiless(Chunks::new([]));
+        assert!(poll_ready(empty.collect_bounded(11)).unwrap().is_empty());
+        let carrying = bodiless(Chunks::repeat(4, 4));
+        let error = poll_ready(carrying.collect_bounded(11)).unwrap_err();
+        assert!(
+            matches!(error, Error::BodyTooLarge { limit: 11, status } if status == 204),
+            "{error:?}"
+        );
     }
 
     /// Issue #1263: an undeclared body is abandoned at the chunk that carries it past the limit,

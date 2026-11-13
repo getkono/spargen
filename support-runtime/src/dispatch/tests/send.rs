@@ -451,3 +451,73 @@ fn only_a_well_formed_content_length_declares_a_body_past_the_limit() {
         0
     ));
 }
+
+/// A `HEAD https://example.com/op` as the transport seam carries it.
+fn head_request() -> http::Request<crate::HttpBody> {
+    crate::tests::builder(reqwest::Method::HEAD, "https://example.com/op")
+        .build()
+        .expect("build request")
+}
+
+/// Issue #1308: the answer to a `HEAD` request, and a `1xx`, `204` or `304` response, carries no
+/// body whatever its `Content-Length` says, so a length past `max_body` is not refused: the
+/// operation's status error classifies it.
+#[test]
+fn a_bodiless_response_declaring_a_length_past_max_body_classifies_as_its_status() {
+    for (head, status) in [
+        (true, 404),
+        (true, 200),
+        (false, 304),
+        (false, 204),
+        (false, 103),
+    ] {
+        let backend = Canned::answering([declaring(response(status, ""), 5000)]);
+        let core = core_with(backend, max_body(1024));
+        let request = if head {
+            head_request()
+        } else {
+            crate::tests::request()
+        };
+        let sent = poll_ready(crate::dispatch::send(&core, request)).unwrap();
+        let error = poll_ready(unexpected_status::<Infallible>(&core, sent));
+        assert!(
+            matches!(&error, Error::UnexpectedStatus { status: got, body, .. }
+                if *got == status && body.is_empty()),
+            "HEAD: {head}, {status}: {error:?}"
+        );
+    }
+}
+
+/// Issue #1308: a `HEAD` request's raw binary success declaring more than the binary default is
+/// read, empty, rather than refused; a `204` success past `max_body` is read the same way.
+#[test]
+fn a_bodiless_success_declaring_a_length_past_its_limit_decodes() {
+    let default = crate::ClientConfig::DEFAULT_MAX_BINARY_BODY;
+    let backend = Canned::answering([declaring(response(200, ""), default + 1)]);
+    let core = core_with(backend, crate::RequestOptions::default());
+    let sent = poll_ready(crate::dispatch::send(&core, head_request())).unwrap();
+    let read = poll_ready(decode_success_bytes(&core, sent)).unwrap();
+    assert!(read.into_inner().is_empty());
+
+    let backend = Canned::answering([declaring(response(204, ""), 5000)]);
+    let core = core_with(backend, max_body(1024));
+    let read = send_and_read(&core).unwrap();
+    assert_eq!((read.status().as_u16(), read.inner().len()), (204, 0));
+}
+
+/// Issue #1308: a bodiless response whose body does carry bytes is still bounded as it is read,
+/// abandoned at the chunk that carries it past `max_body`.
+#[test]
+fn a_bodiless_response_that_carries_a_body_is_bounded_as_it_is_read() {
+    let chunks = Chunks::repeat(4, 4);
+    let pulled = chunks.pulled();
+    let backend = Canned::answering([declaring(chunks.into_response(304), 16)]);
+    let core = core_with(backend, max_body(6));
+    let sent = poll_ready(crate::dispatch::send(&core, crate::tests::request())).unwrap();
+    let error = poll_ready(unexpected_status::<Infallible>(&core, sent));
+    assert!(
+        matches!(error, Error::BodyTooLarge { limit: 6, status } if status == 304),
+        "{error:?}"
+    );
+    assert_eq!(pulled.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
