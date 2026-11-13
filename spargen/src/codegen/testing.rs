@@ -173,14 +173,18 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                     }
                 }
 
-                /// `body` as `text/plain`, read back by the client as the JSON string it is.
+                /// `body` as `text/plain`: a string as itself, a number or boolean as its JSON
+                /// spelling, each read back by the client's text codec.
                 fn text<T: ::serde::Serialize + ?Sized>(status: u16, body: &T) -> Self {
                     match ::serde_json::to_value(body) {
                         Ok(::serde_json::Value::String(text)) => {
                             Self::encoded(status, "text/plain; charset=utf-8", text.into())
                         }
+                        Ok(scalar @ (::serde_json::Value::Number(_) | ::serde_json::Value::Bool(_))) => {
+                            Self::encoded(status, "text/plain; charset=utf-8", scalar.to_string().into())
+                        }
                         Ok(other) => panic!(
-                            "testing::Reply: a text body must serialize to a string, not {other}"
+                            "testing::Reply: a text body must serialize to a scalar, not {other}"
                         ),
                         Err(error) => panic!("testing::Reply: the body has no text form: {error}"),
                     }

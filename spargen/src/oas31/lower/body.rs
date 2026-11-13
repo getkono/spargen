@@ -4,8 +4,7 @@ use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{
-    BytesEncoding, Docs, MediaType, Prim, RequestBody, ScalarRepr, Ty, TypeDef, TypeGraph, TypeId,
-    TypeKind,
+    BytesEncoding, Docs, MediaType, RequestBody, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
 };
 use crate::oas31::media::{
     classify_media_range, media_essence, media_essence_is_suffix_range, media_object_is_opaque,
@@ -163,7 +162,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // E009 case: raw-schema
                 Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                     .message(format!(
-                        "media type `{media_name}` requires a string-like or binary schema that can be sent as a raw body"
+                        "media type `{media_name}` requires a {} schema that can be sent as a raw body",
+                        raw_schema_wording(media)
                     ))
                     .remedy("use a string/binary schema, choose a structured media type, or omit this API segment with spargen::omit!")
                     .emit(self.diags);
@@ -341,7 +341,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Whether a lowered body type can travel as `media`'s raw content: under raw text it must be
-    /// proved string-like ([`raw_text_type_supported`]), under `application/octet-stream` it must
+    /// proved a scalar ([`raw_text_type_supported`]), under `application/octet-stream` it must
     /// be [`TypeKind::Bytes`], and under every other media any type is accepted here. Shared by the
     /// request and response body gates, which refuse with their own `E009` wording.
     pub(super) fn raw_body_compatible(&self, media: MediaType, ty: Ty) -> bool {
@@ -366,21 +366,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 }
 
+/// The schemas `media`'s raw codec carries, as the `E009` raw-schema message names them.
+pub(super) fn raw_schema_wording(media: MediaType) -> &'static str {
+    match media {
+        MediaType::Text => "scalar (string, number, integer or boolean) or binary",
+        _ => "string-like or binary",
+    }
+}
+
+/// Whether `ty` is proved to be a scalar the raw text codec carries both ways: the runtime renders
+/// a request body through `serialize_simple` and reads a response through `decode_text_body`, so
+/// a string, number, integer or boolean (a primitive, an enum, or a union of them), raw bytes, and
+/// the untyped `{}` schema travel as their bare text. An object, array or map has no text form.
 fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {
     fn visit(graph: &TypeGraph, ty: Ty, seen: &mut HashSet<TypeId>) -> bool {
         if !seen.insert(ty.id) {
             return true;
         }
         let supported = match graph.get(ty.id).map(|definition| &definition.kind) {
-            Some(TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date))
+            // Every primitive and every enum's value set is a JSON scalar.
+            Some(TypeKind::Primitive(_))
+            | Some(TypeKind::Enum(_))
             | Some(TypeKind::Bytes(_))
             | Some(TypeKind::Any) => true,
-            Some(TypeKind::Enum(enumeration)) => enumeration.repr == ScalarRepr::String,
             Some(TypeKind::Union(union)) => union
                 .variants
                 .iter()
                 .all(|variant| visit(graph, variant.ty, seen)),
-            // An unlowered body cannot be proved string-like, and this answers "is it proved":
+            // An unlowered body cannot be proved a scalar, and this answers "is it proved":
             // no, so the raw text body is refused rather than admitted on the strength of nothing.
             Some(TypeKind::Reserved) => false,
             _ => false,

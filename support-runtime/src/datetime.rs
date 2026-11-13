@@ -130,15 +130,15 @@ impl<T: FromStr<Err = DateParseError>> Visitor<'_> for ParseVisitor<T> {
 impl fmt::Display for DateTime {
     /// The RFC 3339 rendering — the same bytes `Serialize` writes.
     ///
-    /// This matters beyond convenience: a `multipart/form-data` text part and a `text/plain` body
-    /// are rendered through `Display`, so a `Display` that disagreed with `Serialize` would put two
-    /// different encodings of the same value on the wire depending on the body's media type.
+    /// This matters beyond convenience: a `multipart/form-data` text part is rendered through
+    /// `Display`, so a `Display` that disagreed with `Serialize` would put two different encodings
+    /// of the same value on the wire depending on the body's media type.
     ///
     /// RFC 3339 fixes the year at four digits, so a year outside `0..=9999` — which `time` can hold
     /// but RFC 3339 cannot express — has no rendering here. It falls back to `time`'s own form
-    /// rather than failing, because `Display` failure would panic through `to_string()` at exactly
-    /// those two call sites. `Serialize` still refuses such a value, so it can never reach a JSON
-    /// body claiming to be RFC 3339.
+    /// rather than failing, because `Display` failure would panic through `to_string()` at that
+    /// call site. `Serialize` still refuses such a value, so it can never reach a JSON body
+    /// claiming to be RFC 3339.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0.format(&Rfc3339) {
             Ok(text) => formatter.write_str(&text),

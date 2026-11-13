@@ -676,3 +676,109 @@ fn a_string_enum_valued_err_compiles() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Issue #1324: spellings of the methods a generated type gets from a std trait or defines itself,
+/// taken by the spec. `operationId: clone` would emit an inherent `Client::clone` that shadows
+/// `Clone::clone`; an optional parameter `default` or `clone` a `…Params` setter that shadows
+/// `Default::default` or `Clone::clone`; and a server variable `url`, `new`, `default` or `clone` a
+/// setter beside the server builder's own `url`/`new` (`E0592`) or one that `Self::default()`
+/// inside `new()` resolves to.
+const STD_METHOD_SPELLINGS_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: "https://{url}.{new}.example.com/{default}/{clone}"
+    variables:
+      url: { default: api }
+      new: { default: eu, enum: [eu, us] }
+      default: { default: v1 }
+      clone: { default: c }
+paths:
+  /clone:
+    get:
+      operationId: clone
+      parameters:
+        - { name: default, in: query, required: false, schema: { type: string } }
+        - { name: clone, in: query, required: false, schema: { type: string } }
+        - { name: new, in: query, required: false, schema: { type: string } }
+      responses: { "204": { description: ok } }
+"##;
+
+/// What the fixture crate's own test asserts: each std or builder method keeps its meaning beside
+/// the spec's spellings, so `client.clone().with_timeout(..)` still derives a `Client`.
+const STD_METHOD_SPELLINGS_TEST: &str = r##"
+#[test]
+fn std_and_builder_methods_keep_their_meaning() {
+    let client = std_names::Client::new("http://127.0.0.1:1").unwrap();
+    let derived: std_names::Client = client.clone().with_timeout(None);
+    drop(derived);
+
+    let params = std_names::CloneParams::default();
+    let copied: std_names::CloneParams = params.clone();
+    drop(copied);
+
+    let server = std_names::servers::Server0::new();
+    let copied: std_names::servers::Server0 = server.clone();
+    assert_eq!(copied.url(), "https://api.eu.example.com/v1/c");
+    assert_eq!(
+        std_names::servers::Server0::default().url(),
+        std_names::servers::default_url()
+    );
+}
+"##;
+
+#[test]
+fn std_method_spellings_keep_their_std_meaning() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "api.yaml", STD_METHOD_SPELLINGS_SPEC);
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "std_names");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    // No generated item defines `clone` or `default` itself (the derives and `impl Default`
+    // spell neither `pub fn clone(` nor `pub fn default(`), and the only `new` and `url` that
+    // take `self` by value would be a server variable's setter.
+    for (spelling, owner) in [
+        ("pub fn clone(", "`Clone::clone`"),
+        ("pub async fn clone(", "`Clone::clone`"),
+        ("pub fn default(", "`Default::default`"),
+        ("pub fn new(mut self", "the server builder's `new`"),
+        ("pub fn url(mut self", "the server builder's `url`"),
+    ] {
+        assert!(
+            !generated.contains(spelling),
+            "`{spelling}` must yield to {owner}:\n{generated}"
+        );
+    }
+
+    let output = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "std method spellings must generate compiling, lint-clean code:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    write_fixture_test(&out, "std_names", STD_METHOD_SPELLINGS_TEST);
+    let output = fixture_cargo(&out)
+        .args(["test", "--test", "std_names"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "each std and builder method must keep its meaning beside the spec's spellings:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

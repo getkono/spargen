@@ -217,6 +217,28 @@ pub(crate) const CLIENT_METHODS: &[&str] = &[
     "inner",
 ];
 
+/// The trait methods a caller reaches on `Client` by method-call syntax: it derives `Clone`, and
+/// `client.clone().with_timeout(..)` is the documented way to derive a client. An inherent method
+/// of the same name wins method resolution, so an `operationId: clone` would take that call over.
+/// Reserved in the operation scope beside [`CLIENT_METHODS`], which lists only the inherent
+/// methods codegen emits.
+pub(crate) const CLIENT_TRAIT_METHODS: &[&str] = &["clone"];
+
+/// The methods a `…Params` struct already answers to beside its setters, which are named after its
+/// optional parameters: `default` (its derived `Default`, the builder's entry point
+/// `…Params::default()`), `clone` (its derived `Clone`), and `new`, the conventional constructor
+/// spelling. A setter of one of these names would shadow the trait method or read as a
+/// constructor, so an optional parameter spelling one is disambiguated, field and setter alike.
+pub(crate) const PARAMS_METHODS: &[&str] = &["clone", "default", "new"];
+
+/// The methods a server builder in the `servers` module already answers to beside its setters,
+/// which are named after its server variables: its inherent `new` and `url`, and its `Clone` and
+/// `Default` methods, which `new()` calls as `Self::default()`. A variable spelling one of them is
+/// disambiguated instead of emitting a duplicate definition (`E0592`) or a setter that
+/// `Self::default()` resolves to. `codegen`'s tests hold the inherent half of this list to the
+/// methods it emits.
+pub(crate) const SERVER_METHODS: &[&str] = &["clone", "default", "new", "url"];
+
 /// The type-namespace names codegen's `types` module already uses when a model is emitted into
 /// it: the items it brings in with `use` (`serde`'s derives, `BTreeMap`, and the runtime `Date` and
 /// `DateTime`) and the prelude types it writes bare. Model type names are allocated after these are
@@ -396,7 +418,12 @@ pub(crate) fn allocate(api: &Api) -> Names {
         names
             .servers
             .push(server_scope.alloc(&hint, IdentRole::Type, &pointer));
+        // A variable's field and its setter share one spelling, so the builder's own methods are
+        // taken first.
         let mut field_scope = Scope::default();
+        for method in SERVER_METHODS {
+            field_scope.reserve(method, IdentRole::Field);
+        }
         for (variable_name, variable) in &server.variables {
             names.server_variable_fields.insert(
                 (index, variable_name.clone()),
@@ -468,7 +495,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
     // Operation methods share `impl Client` and `impl BlockingClient` with the fixed methods, so
     // those spellings are taken before any operation asks for one.
     let mut operation_scope = Scope::default();
-    for method in CLIENT_METHODS {
+    for method in CLIENT_METHODS.iter().chain(CLIENT_TRAIT_METHODS) {
         operation_scope.reserve(method, IdentRole::Method);
     }
     // The `…Params` structs, the error types, and the success enums are all declared in the
@@ -512,10 +539,14 @@ pub(crate) fn allocate(api: &Api) -> Names {
         // Required parameters are fixed by the generated public surface. Allocate them first, then
         // every generator-owned binding in the same lexical scope so the implementation yields on
         // collision without renaming ordinary arguments. Optional parameters are fields of the
-        // `…Params` struct, a scope of their own.
+        // `…Params` struct, a scope of their own, which holds the struct's own methods first
+        // because each field's setter shares its spelling.
         let pointer = &operation.provenance.pointer;
         let mut binding_scope = Scope::default();
         let mut field_scope = Scope::default();
+        for method in PARAMS_METHODS {
+            field_scope.reserve(method, IdentRole::Field);
+        }
         let parameters = allocate_parameters(operation, &mut binding_scope, &mut field_scope);
         let params = operation
             .has_optional_params()

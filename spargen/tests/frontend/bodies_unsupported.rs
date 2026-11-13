@@ -92,9 +92,78 @@ paths:
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert_eq!(
         messages_for(&report, Code::UnsupportedMediaType),
-        ["media type `text/html` requires a string-like or binary response schema"],
+        ["media type `text/html` requires a scalar (string, number, integer or boolean) or binary response schema"],
         "{report:#?}"
     );
+}
+
+// E009 case: raw-schema
+#[test]
+fn e009_a_text_request_body_with_an_array_schema_is_a_raw_schema_mismatch() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema: { type: array, items: { type: integer } }
+      responses:
+        "204": { description: ok }
+"##,
+    );
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::UnsupportedMediaType),
+        [
+            "media type `text/plain` requires a scalar (string, number, integer or boolean) or \
+             binary schema that can be sent as a raw body"
+        ],
+        "{report:#?}"
+    );
+}
+
+/// Every scalar schema travels as raw text both ways (#1323): an integer, number or boolean, an
+/// integer enum, and a union of them generate under `text/plain`, with no `E009`.
+#[test]
+fn a_text_body_of_any_scalar_schema_generates() {
+    for schema in [
+        "{ type: integer }",
+        "{ type: integer, format: int32 }",
+        "{ type: number }",
+        "{ type: boolean }",
+        "{ type: integer, enum: [1, 2] }",
+        "{ oneOf: [{ type: integer }, { type: boolean }] }",
+    ] {
+        let report = generate(&format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    post:
+      requestBody:
+        required: true
+        content:
+          text/plain: {{ schema: {schema} }}
+      responses:
+        "200":
+          description: ok
+          content:
+            text/plain: {{ schema: {schema} }}
+"##
+        ));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{schema}: {report:#?}"
+        );
+        assert!(!has_code(&report, Code::UnsupportedMediaType), "{schema}");
+    }
 }
 
 // E009 case: form-response
