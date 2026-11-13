@@ -32,23 +32,25 @@ pub(crate) fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path
             }
         }
     };
-    let rerun_inputs = |snapshot: Option<&cache::InputSnapshot>| {
+    // A load that fails names what it read, the file that failed it included, so fixing that
+    // file reruns the build.
+    let rerun_inputs = |read: &[Utf8PathBuf]| {
         if emit_cargo_directives {
-            runtime_contract::print_rerun(&cache::rerun_paths(build, snapshot));
+            runtime_contract::print_rerun(&cache::rerun_paths(spec, read, Some(&build.output)));
         }
     };
 
     let mut snapshot = match run_on_frontend_stack(|| cache::InputSnapshot::load(spec)) {
         Ok(snapshot) => snapshot,
-        Err(diagnostics) => {
-            rerun_inputs(None);
+        Err(failure) => {
+            rerun_inputs(&failure.paths);
             return with_leading(
-                Report::new(diagnostics, Outcome::Rejected),
+                Report::new(*failure.diagnostics, Outcome::Rejected),
                 cargo_diagnostics,
             );
         }
     };
-    rerun_inputs(Some(&snapshot));
+    rerun_inputs(&snapshot.paths);
 
     let cache_path = cache_dir.map(|dir| cache::cache_path(dir, &build.output));
     if let Some(path) = &cache_path {
@@ -90,16 +92,17 @@ pub(crate) fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path
 
         let after = match run_on_frontend_stack(|| cache::InputSnapshot::load(spec)) {
             Ok(snapshot) => snapshot,
-            Err(diagnostics) => {
+            Err(failure) => {
+                rerun_inputs(&failure.paths);
                 return with_leading(
-                    Report::new(diagnostics, Outcome::Rejected),
+                    Report::new(*failure.diagnostics, Outcome::Rejected),
                     cargo_diagnostics,
                 );
             }
         };
         if snapshot.digest != after.digest {
             snapshot = after;
-            rerun_inputs(Some(&snapshot));
+            rerun_inputs(&snapshot.paths);
             continue;
         }
 

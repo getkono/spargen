@@ -17,7 +17,7 @@ use crate::{Build, CargoIntegration, Code, Severity};
 
 /// Whether this process is an actual Cargo build script. Only there do `cargo:` directives reach
 /// Cargo and does the environment name the consuming package.
-pub(super) fn under_build_script() -> bool {
+pub(crate) fn under_build_script() -> bool {
     std::env::var_os("OUT_DIR").is_some() && std::env::var_os("CARGO_CFG_TARGET_ARCH").is_some()
 }
 
