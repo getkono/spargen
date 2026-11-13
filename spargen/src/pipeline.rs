@@ -313,12 +313,15 @@ fn build_emit_plan(
     )
     .map_err(|error| emit_pipeline_error(diags, error.to_string()))?;
 
+    // The spec's file name, not its path: the header is committed output, so it must read the same
+    // in every checkout and on every OS (#1347).
+    let name = crate::cache::spec_name(&spec.path);
     let emit_options = emit::EmitOptions {
         spec: emit::SpecMeta {
             source: if spec.omit.is_empty() {
-                spec.path.to_string()
+                name.to_owned()
             } else {
-                format!("{} omit={}", spec.path, spec.omit.fingerprint())
+                format!("{name} omit={}", spec.omit.fingerprint())
             },
             spargen_version: env!("CARGO_PKG_VERSION").to_owned(),
         },

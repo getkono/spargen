@@ -68,8 +68,9 @@ components:
 
 /// Generate `spec_path` twice into two output directories and require the same outcome, the same
 /// diagnostics in the same order, and a byte-identical module. Same spec path + config, different
-/// output dirs: the provenance header (which records the source path) is held constant, isolating
-/// the invariant to generation order. Returns the outcome both runs reached.
+/// output dirs, isolating the invariant to generation order; the spellings of the spec's path are
+/// [`the_module_does_not_depend_on_the_spec_path_or_where_the_checkout_lives`]'s. Returns the
+/// outcome both runs reached.
 fn assert_generates_identically(spec_path: &Utf8PathBuf, label: &str) -> Outcome {
     assert_configured_generates_identically(spec_path, label, |spec| spec).0
 }
