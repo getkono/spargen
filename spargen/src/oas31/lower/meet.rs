@@ -371,7 +371,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// that fails. Where one side carries the name only because it requires it,
     /// [`take_declaration`] keeps the other side's declaration and nothing is met (`None`).
     /// Otherwise the two types are met under `hint`, the field is required where either side
-    /// requires it, and a met field that is required drops its applied `default`. A failed meet
+    /// requires it and `readOnly` or `writeOnly` where either side says so, and a met field that
+    /// decodes as required drops its applied `default`. A failed meet
     /// leaves `existing.ty` as it was for the caller to settle.
     ///
     /// `pairwise_defaults` merges the two sides' `default`s first (see [`merge_field_default`]),
@@ -402,6 +403,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // compatible type.
         let intersection = self.intersect_types(existing.ty, field.ty, hint);
         existing.required = existing.required || field.required;
+        // An instance of the intersection validates against both sides, so a property either one
+        // marks `readOnly` (or `writeOnly`) is that in the merge, whichever side came first.
+        existing.read_only = existing.read_only || field.read_only;
+        existing.write_only = existing.write_only || field.write_only;
         Some(intersection.map(|met| {
             existing.ty = met;
             drop_applied_default_if_required(existing);
@@ -700,10 +705,11 @@ fn take_declaration(existing: &mut Field, other: &Field) -> bool {
 }
 
 /// Keep a required field consistent with its default: a serde default fires only for an absent
-/// optional field, so a required field drops its applied `default`, which stays documented in
-/// rustdoc.
+/// member, so a field that decodes as required drops its applied `default`, which stays documented
+/// in rustdoc. A `required` `readOnly` or `writeOnly` one decodes as optional
+/// ([`Field::decodes_optional`]), so it keeps its default as every other optional member does.
 pub(super) fn drop_applied_default_if_required(field: &mut Field) {
-    if field.required {
+    if !field.decodes_optional() {
         if let Some(default) = &mut field.default {
             default.applied = None;
         }

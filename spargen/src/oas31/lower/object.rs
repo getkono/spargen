@@ -30,9 +30,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.claim_field_xml(child);
             let ty = self.lower_schema_or(child, &format!("{hint}{}", hint_segment(name)))?;
             let is_required = required.contains(name);
-            let default = self.field_default(child, ty, is_required);
-            let xml = field_xml(child);
             let (deprecated, read_only, write_only) = field_flags(child);
+            // A `required` `readOnly` or `writeOnly` member decodes as optional
+            // (`Field::decodes_optional`), so it takes its default as an optional one does.
+            let decodes_required = is_required && !read_only && !write_only;
+            let default = self.field_default(child, ty, decodes_required);
+            let xml = field_xml(child);
             fields.push(Field {
                 name: PropertyName { wire: name.clone() },
                 ty,

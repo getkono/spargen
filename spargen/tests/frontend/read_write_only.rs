@@ -145,3 +145,34 @@ fn an_optional_read_or_write_only_property_is_not_warned() {
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(relaxed(&report).is_empty(), "{report:#?}");
 }
+
+/// Where both `allOf` members declare the property, the merge is `readOnly` whichever member says
+/// so: the requirement is relaxed and warned once in either order of the members.
+#[test]
+fn a_property_both_all_of_members_declare_is_relaxed_in_either_order() {
+    let required = "- type: object\n          required: [id]\n          properties:\n            \
+                    id: { type: integer }";
+    let read_only = "- type: object\n          properties:\n            \
+                     id: { type: integer, readOnly: true }";
+    for (order, first, second) in [
+        ("required first", required, read_only),
+        ("readOnly first", read_only, required),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!("    Item:\n      allOf:\n        {first}\n        {second}\n"),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{order}: {report:#?}");
+        let warned = relaxed(&report);
+        assert_eq!(warned.len(), 1, "{order}: {report:#?}");
+        assert!(
+            warned[0].contains("property `id` of `Item`"),
+            "{order}: {warned:?}"
+        );
+        assert_carries(
+            &code,
+            &["#[serde( rename = \"id\", default, skip_serializing, deserialize_with = \"decode_present\", )] pub id: Option<"],
+        );
+    }
+}
