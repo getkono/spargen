@@ -115,13 +115,23 @@ pub fn generate(build: &Build) -> Report {
 /// `E023` is catchable before a single line of code is generated. Elsewhere there is no consuming
 /// package to audit — `spargen deps` prints the dependency tables generated output
 /// requires instead.
+///
+/// From a build script it also prints the `cargo:rerun-if-changed` directives [`generate`] prints
+/// for its inputs: the spec, every file it references, `spargen.lock` and the applied config files
+/// (or, when they fail to load, every file the attempt read, the one that failed it included),
+/// and the manifests and lockfile the audit read.
 #[must_use = "the report carries the outcome and every diagnostic; a rejection is lost unless it is read, e.g. with `.expect_success()`"]
 pub fn check(spec: &Spec) -> Report {
+    if runtime_contract::under_build_script() {
+        let read = pipeline::run_on_frontend_stack(|| cache::read_paths(spec));
+        runtime_contract::print_rerun(&cache::rerun_paths(spec, &read, None));
+    }
     let result = pipeline::run_mode(spec, pipeline::PipelineMode::Requirements);
     let mut report = result.report;
     let manifest = runtime_contract::build_script_manifest();
     if let (Some(manifest), Some(requirements)) = (manifest, result.requirements) {
-        pipeline::apply_audit(&mut report, &manifest, &requirements);
+        let manifests = pipeline::apply_audit(&mut report, &manifest, &requirements);
+        runtime_contract::print_rerun(&manifests);
     }
     report
 }

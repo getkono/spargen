@@ -68,6 +68,9 @@ pub(crate) struct InputBundle {
     /// of the path for the bundle's whole life. `None` when it is unreadable or not UTF-8, and then
     /// relative paths are compared relative.
     working_dir: Option<Utf8PathBuf>,
+    /// Every file the load read or tried to read, in order: what
+    /// [`load_recording`](Self::load_recording) hands back.
+    read: Vec<Utf8PathBuf>,
 }
 
 impl InputBundle {
@@ -80,32 +83,57 @@ impl InputBundle {
     /// read, unless a reference that is followed addresses the extension's contents: then that
     /// target is walked like a document of its own (see [`collect_refs`]).
     pub(crate) fn load(root: &Utf8Path, diags: &mut Diagnostics) -> Result<InputBundle, Aborted> {
+        Self::load_recording(root, diags, &mut Vec::new())
+    }
+
+    /// [`Self::load`], appending to `read` every file the load read or tried to read, whether or
+    /// not it succeeds: `spargen.lock` beside `root` when it exists, each local document in the
+    /// order it was reached (the root, then each relative-file `$ref` target, the one whose read
+    /// or parse failed included), and each vendored copy of a pinned remote document. A build
+    /// names them to Cargo when the load fails, so fixing the file that failed it reruns the build.
+    pub(crate) fn load_recording(
+        root: &Utf8Path,
+        diags: &mut Diagnostics,
+        read: &mut Vec<Utf8PathBuf>,
+    ) -> Result<InputBundle, Aborted> {
         let mut bundle = InputBundle {
             working_dir: working_dir(),
             ..InputBundle::default()
         };
+        let walked = bundle.walk(root, diags);
+        read.append(&mut bundle.read);
+        walked?;
+        diags.result(bundle)
+    }
 
+    /// Load the root document at `root` into this empty bundle, then every document reachable
+    /// from it: the body of [`Self::load_recording`].
+    fn walk(&mut self, root: &Utf8Path, diags: &mut Diagnostics) -> Result<(), Aborted> {
         let spec_dir = root.parent().unwrap_or_else(|| Utf8Path::new(""));
-        bundle.vendor_dir = spec_dir.join(VENDOR_DIR);
-        bundle.lock = load_lock(&spec_dir.join(LOCK_FILE_NAME), diags)?;
+        self.vendor_dir = spec_dir.join(VENDOR_DIR);
+        let lock_path = spec_dir.join(LOCK_FILE_NAME);
+        if lock_path.exists() {
+            self.read.push(lock_path.clone());
+        }
+        self.lock = load_lock(&lock_path, diags)?;
 
         // The root document is read before any reference is walked, so a failure to read it is
         // about the input as a whole and is located at its root.
         let root_site = Provenance::new(JsonPointer::root(), None);
-        let root_id = bundle.load_file(root.to_path_buf(), root_site, diags)?;
-        bundle.root = Some(root_id);
+        let root_id = self.load_file(root.to_path_buf(), root_site, diags)?;
+        self.root = Some(root_id);
 
         // Each entry is a value to walk: a loaded document's root, or a reference target inside a
         // specification extension, which the walk of its document skipped (`enters_extension`).
         let mut queue = VecDeque::from([(root_id, JsonPointer::root())]);
         let mut walked_targets = HashSet::new();
         while let Some((file, pointer)) = queue.pop_front() {
-            let remote_base = match bundle.origins.get(&file) {
+            let remote_base = match self.origins.get(&file) {
                 Some(Origin::Remote(url)) => Some(url.clone()),
                 _ => None,
             };
             // A dangling target is the resolver's to report, where a site interprets it (`E004`).
-            let Some(value) = bundle.value_at(file).pointer(&pointer) else {
+            let Some(value) = self.value_at(file).pointer(&pointer) else {
                 continue;
             };
             let refs = collect_refs(value, &pointer);
@@ -115,23 +143,23 @@ impl InputBundle {
                     RefTarget::LocalRelative(path) => {
                         // Only a *local* document produces a local-relative target: a relative ref
                         // inside a vendored remote doc is classified `Remote` against its URL.
-                        let resolved = bundle.resolve_path(file, &path);
-                        if bundle.file_id_by_path(&resolved).is_none() {
+                        let resolved = self.resolve_path(file, &path);
+                        if self.file_id_by_path(&resolved).is_none() {
                             let site = referring_site(collected);
-                            let loaded = bundle.load_file(resolved, site, diags)?;
+                            let loaded = self.load_file(resolved, site, diags)?;
                             queue.push_back((loaded, JsonPointer::root()));
                         }
                     }
-                    RefTarget::UnsupportedRemote(url) if bundle.url_to_file.contains_key(&url) => {}
+                    RefTarget::UnsupportedRemote(url) if self.url_to_file.contains_key(&url) => {}
                     RefTarget::UnsupportedRemote(url) => {
                         reject_unpinned(&url, referring_site(collected), diags)
                     }
                     RefTarget::Remote(url) => {
-                        if bundle.url_to_file.contains_key(&url) {
+                        if self.url_to_file.contains_key(&url) {
                             continue;
                         }
                         let site = referring_site(collected);
-                        if let Some(loaded) = bundle.load_remote(&url, site, diags)? {
+                        if let Some(loaded) = self.load_remote(&url, site, diags)? {
                             queue.push_back((loaded, JsonPointer::root()));
                         }
                     }
@@ -142,7 +170,7 @@ impl InputBundle {
                 .iter()
                 .filter(|collected| enters_extension(&collected.reference))
             {
-                if let Some(target) = bundle.reference_target(&collected.reference, file) {
+                if let Some(target) = self.reference_target(&collected.reference, file) {
                     if walked_targets.insert(target.clone()) {
                         queue.push_back(target);
                     }
@@ -150,7 +178,7 @@ impl InputBundle {
             }
         }
 
-        diags.result(bundle)
+        Ok(())
     }
 
     /// The root document's value tree.
@@ -333,6 +361,7 @@ impl InputBundle {
         if let Some(id) = self.file_id_by_path(&path) {
             return Ok(id);
         }
+        self.read.push(path.clone());
         let text = std::fs::read_to_string(&path).map_err(|error| {
             Diagnostic::error(Code::InvalidInput, site)
                 .message(format!("failed to read `{path}`: {error}"))
@@ -371,6 +400,7 @@ impl InputBundle {
             return Ok(None);
         };
         let vendored = self.vendor_dir.join(&entry.path);
+        self.read.push(vendored.clone());
         let bytes = match std::fs::read(&vendored) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -777,6 +807,55 @@ mod tests {
         assert_eq!(file("sub/lib.yaml#/x"), file("./sub/./lib.yaml#/x"));
         assert_ne!(file("./lib.yaml#/x"), file("sub/lib.yaml#/x"));
         assert_ne!(file("./lib.yaml#/x"), Some(bundle.root_id()));
+    }
+
+    /// A failed load records every file it read or tried to read, so a build that names them to
+    /// Cargo reruns once the broken one is fixed (#1350): the lock, the root, a sub-file that
+    /// loaded, and the `$ref` target that failed, whether it failed to parse or to be read.
+    #[test]
+    fn a_failed_load_records_every_file_it_read_and_the_failing_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::create_dir(dir.join("schemas")).unwrap();
+        std::fs::write(dir.join(LOCK_FILE_NAME), "version = 1\n").unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+             schemas:\n    A: { $ref: 'schemas/a.yaml' }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("schemas/a.yaml"),
+            "type: object\nproperties:\n  pet: { $ref: 'pet.yaml' }\n",
+        )
+        .unwrap();
+        let expected = [
+            dir.join(LOCK_FILE_NAME),
+            dir.join("openapi.yaml"),
+            dir.join("schemas/a.yaml"),
+            dir.join("schemas/pet.yaml"),
+        ];
+
+        // Missing, then present and malformed: each fails the load, and each names the target.
+        for pet in [None, Some("type: [unclosed\n")] {
+            if let Some(contents) = pet {
+                std::fs::write(dir.join("schemas/pet.yaml"), contents).unwrap();
+            }
+            let mut diags = Diagnostics::default();
+            let mut read = Vec::new();
+            let loaded =
+                InputBundle::load_recording(&dir.join("openapi.yaml"), &mut diags, &mut read);
+            assert!(loaded.is_err(), "{pet:?}: {:?}", diags.items());
+            assert_eq!(read, expected, "{pet:?}");
+        }
+
+        // A load that succeeds records the same files.
+        std::fs::write(dir.join("schemas/pet.yaml"), "type: string\n").unwrap();
+        let mut diags = Diagnostics::default();
+        let mut read = Vec::new();
+        InputBundle::load_recording(&dir.join("openapi.yaml"), &mut diags, &mut read)
+            .expect("the bundle loads");
+        assert_eq!(read, expected);
     }
 
     /// A spec that names a redirect's target before the redirecting URL loads the target from its

@@ -185,6 +185,9 @@ components:
       type: object
       required: [detail]
       properties:
+        # The fallback keeps the unrecognized tag it was decoded with, and writes it back; a
+        # `null` tag reads as an absent one, so it decodes into the fallback too.
+        outcome: { type: [string, "null"] }
         detail: { type: string }
   mediaTypes:
     QueryBody:

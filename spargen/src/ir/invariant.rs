@@ -9,7 +9,7 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 
 /// Check the IR's well-formedness invariants, reporting any violation through `diags`.
 ///
-/// Run unconditionally after every lowering, on every entry point. It checks four invariants:
+/// Run unconditionally after every lowering, on every entry point. It checks six invariants:
 ///
 /// 1. Referential integrity of the type graph: every [`super::Ty`] reachable from the API —
 ///    operation parameters, request bodies, response bodies, response headers, and, transitively,
@@ -27,6 +27,8 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 /// 5. No whole non-streaming body — a request body, or a response body that is not a stream — is
 ///    of a [`BytesEncoding::Base64`] definition: the emitter sends and decodes a whole `bytes` body
 ///    raw, as `bytes::Bytes`, which the base64 newtype is not.
+/// 6. Every request body has a type: the emitter gives an operation a body argument, and sends a
+///    body, only for a typed one, so an untyped body would be dropped from the request.
 ///
 /// A failure here is a frontend bug, not a spec problem, so it is reported as
 /// [`Code::InvalidInput`] against the construct that carries the violation.
@@ -47,6 +49,17 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
             );
         }
         if let Some(body) = &operation.request_body {
+            // An untyped body takes no argument, so its method would send nothing for a body the
+            // operation declares: lowering types every body it keeps, even a schema-less one.
+            if body.ty.is_none() {
+                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                    .message(format!(
+                        "{INVARIANT_FAILURE}: request body `{}` has no type, so its operation \
+                         would send no body",
+                        body.content_type
+                    ))
+                    .emit(diags);
+            }
             if let Some(ty) = body.ty {
                 check_ty(api, ty, diags, "request body", operation.provenance.clone());
                 check_raw_body(api, ty, diags, "request body", &operation.provenance);
@@ -842,12 +855,30 @@ mod tests {
         }
     }
 
+    /// Lowering types every request body it keeps, even a schema-less one (#1339); an untyped
+    /// one would take no argument and send nothing, so one here is a frontend bug, under any
+    /// media.
     #[test]
-    fn an_untyped_octet_stream_request_body_is_left_to_the_frontend() {
-        let api = api_with_request_body(MediaType::OctetStream, "application/octet-stream", None);
-        let mut diags = Diagnostics::new(100);
-        check_invariants(&api, &mut diags);
-        assert!(!diags.has_errors(), "{diags:#?}");
+    fn an_untyped_request_body_is_caught() {
+        for (media, content_type) in [
+            (MediaType::Json, "application/json"),
+            (MediaType::Text, "text/plain"),
+            (MediaType::OctetStream, "application/octet-stream"),
+        ] {
+            let api = api_with_request_body(media, content_type, None);
+            let mut diags = Diagnostics::new(100);
+            check_invariants(&api, &mut diags);
+            let [diagnostic] = diags.items() else {
+                panic!("{content_type}: expected exactly one diagnostic: {diags:#?}");
+            };
+            assert_eq!(diagnostic.code, Code::InvalidInput, "{diags:#?}");
+            assert!(
+                diagnostic
+                    .message
+                    .contains(&format!("request body `{content_type}` has no type")),
+                "{diags:#?}"
+            );
+        }
     }
 
     #[test]
