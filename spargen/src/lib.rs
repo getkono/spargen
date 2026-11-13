@@ -236,7 +236,7 @@ pub fn vendor(spec: &Spec) -> Result<VendorReport, Report> {
     pipeline::run_on_frontend_stack(|| {
         let mut diags = diag::Diagnostics::new(spec.batch_cap);
         let fetcher = source::ReqwestFetcher;
-        match source::vendor(&spec.path, &fetcher, &mut diags) {
+        match source::vendor(&spec.path, &fetcher, &output::atomic_write_all, &mut diags) {
             Ok(vendored) if !diags.has_errors() => Ok(vendored),
             _ => Err(Report::new(diags, Outcome::Rejected)),
         }

@@ -2,8 +2,10 @@
 //!
 //! A plain-HTTP server on `127.0.0.1` serves the remote documents, and the public
 //! [`spargen::vendor`] facade (and, under `cli`, the `spargen lock` binary) fetches them through
-//! the reqwest-backed fetcher: request, status handling, redirect following, and connection
-//! failure are all the real ones, reached through the public entry points.
+//! the reqwest-backed fetcher: request, status handling, redirect following, the body size limit,
+//! and connection failure are all the real ones, reached through the public entry points. The
+//! refusal of an `https` → `http` redirect needs an `https` origin, so it is driven by the
+//! in-module `tls` tests.
 //!
 //! This suite speaks plain HTTP only, because the fetcher trusts the bundled web roots. A completed
 //! TLS handshake is driven by the in-module `tls` test in `src/source/vendor/tests.rs`, which adds
@@ -35,6 +37,11 @@ enum Reply {
     Redirect(&'static str),
     /// A bodyless response with this status line (e.g. `404 Not Found`).
     Status(&'static str),
+    /// `200 OK` declaring this `Content-Length`, then closing without a body.
+    Declared(u64),
+    /// `200 OK` with no `Content-Length`, delimited by the connection closing after this many
+    /// bytes of a YAML comment.
+    Unframed(usize),
 }
 
 /// The route table a [`MockServer`] answers from, shared with its serving thread.
@@ -102,6 +109,30 @@ fn answer(
     let head = String::from_utf8(head).ok()?;
     let path = head.split_whitespace().nth(1)?.to_owned();
     let reply = routes.lock().unwrap().get(path.as_str()).cloned();
+    match reply {
+        Some(Reply::Declared(length)) => {
+            recorded.lock().unwrap().push(path);
+            let head =
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n");
+            return stream.write_all(head.as_bytes()).ok();
+        }
+        Some(Reply::Unframed(length)) => {
+            recorded.lock().unwrap().push(path);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n#")
+                .ok()?;
+            // The client may stop reading once it has seen enough; a failed write ends the reply.
+            let chunk = vec![b' '; 64 * 1024];
+            let mut left = length.saturating_sub(1);
+            while left > 0 {
+                let take = left.min(chunk.len());
+                stream.write_all(&chunk[..take]).ok()?;
+                left -= take;
+            }
+            return Some(());
+        }
+        _ => {}
+    }
     let (status, headers, body) = match reply {
         Some(Reply::Body(body)) => ("200 OK", String::new(), body),
         Some(Reply::Redirect(location)) => (
@@ -110,6 +141,7 @@ fn answer(
             "",
         ),
         Some(Reply::Status(status)) => (status, String::new(), ""),
+        Some(Reply::Declared(_) | Reply::Unframed(_)) => unreachable!("answered above"),
         None => ("404 Not Found", String::new(), ""),
     };
     let response = format!(
@@ -209,6 +241,57 @@ fn an_http_error_status_is_e025_naming_the_url_and_the_status() {
 
     let message = fetch_failure(&report, &spec_path, &url);
     assert!(message.contains("410"), "{message}");
+}
+
+/// The 64 MiB limit on one fetched document that `spargen lock` holds.
+const MAX_REMOTE_BODY: u64 = 64 * 1024 * 1024;
+
+/// A body whose declared `Content-Length` is over the limit is refused before it is read.
+#[test]
+fn a_body_declared_over_the_size_limit_is_e025() {
+    let server = MockServer::start(&[("/huge.yaml", Reply::Declared(MAX_REMOTE_BODY + 1))]);
+    let url = server.url("/huge.yaml");
+    let (_temp, spec_path) = workspace(&url);
+
+    let report = spargen::vendor(&Spec::new(spec_path.clone())).unwrap_err();
+
+    let message = fetch_failure(&report, &spec_path, &url);
+    assert!(
+        message.contains(&format!("larger than the {MAX_REMOTE_BODY}-byte limit")),
+        "{message}"
+    );
+}
+
+/// A body that declares no length is read only up to the limit: one byte over it is refused.
+#[test]
+fn a_body_streamed_over_the_size_limit_is_e025() {
+    let over = usize::try_from(MAX_REMOTE_BODY + 1).unwrap();
+    let server = MockServer::start(&[("/huge.yaml", Reply::Unframed(over))]);
+    let url = server.url("/huge.yaml");
+    let (_temp, spec_path) = workspace(&url);
+
+    let report = spargen::vendor(&Spec::new(spec_path.clone())).unwrap_err();
+
+    let message = fetch_failure(&report, &spec_path, &url);
+    assert!(
+        message.contains(&format!("larger than the {MAX_REMOTE_BODY}-byte limit")),
+        "{message}"
+    );
+}
+
+/// A body of exactly the limit is vendored and pinned whole.
+#[test]
+fn a_body_streamed_at_the_size_limit_is_vendored() {
+    let at = usize::try_from(MAX_REMOTE_BODY).unwrap();
+    let server = MockServer::start(&[("/big.yaml", Reply::Unframed(at))]);
+    let url = server.url("/big.yaml");
+    let (_temp, spec_path) = workspace(&url);
+
+    let report = spargen::vendor(&Spec::new(spec_path)).unwrap_or_else(|r| panic!("{r:#?}"));
+
+    let on_disk = std::fs::read(report.vendor_dir.join(&report.refs[0].path)).unwrap();
+    assert_eq!(on_disk.len(), at);
+    assert_eq!(report.refs[0].sha256, sha256_hex(&on_disk));
 }
 
 #[test]
