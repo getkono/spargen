@@ -18,9 +18,11 @@
 //! types, so types cannot be compared by id. Every type reference is instead rendered to a *stable
 //! structural string* by [`canon_ty`](extract::canon_ty):
 //!
-//! * primitives → their canonical scalar label (`String`, `i32`, `i64`, `f64`, `bool`, `Uuid`,
-//!   `DateTime`, `Date`) — independent of the `uuid`/`time` feature flags, which only change the
-//!   concrete Rust type, not the surface identity;
+//! * primitives → their canonical scalar label (`String`, `i32`, `i64`, `f64`, `bool`, …), and a
+//!   format a setting maps → what that side's [`Settings`] emit for it: `Uuid` or `String` by the
+//!   `uuid` mapping, and `DateTime<backend>`/`Date<backend>` or `String` by the `datetime` backend.
+//!   The two sides of a diff are configured independently, so a mapping one side alone changes is
+//!   a type change at every use site;
 //! * a **nominal** type — a `struct`, a string `enum`, a union (the models a consumer names,
 //!   constructs, and matches), an array or tuple that closes an alias cycle (emitted as a
 //!   newtype, #648), a `contentEncoding: base64` schema (emitted as a newtype over the bytes), or
@@ -62,6 +64,22 @@ pub(crate) struct Surface {
     aliases: BTreeSet<String>,
     /// The server builders of the generated `servers` module, keyed by generated builder name.
     servers: BTreeMap<String, ServerSurface>,
+    /// Whether the generated module carries the `testing` module (`Spec::testing`). Its items
+    /// follow the operations (an `on_{method}` and a `{method}::Reply` per operation), whose
+    /// changes the operations already report, so its presence is what is compared.
+    testing: bool,
+}
+
+/// The generation settings that change one side's surface without a change to its spec. Each side
+/// of a diff carries its own, read from its own `Spec`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Settings {
+    /// `format: uuid` maps to `uuid::Uuid` (else `String`).
+    pub(crate) uuid: bool,
+    /// The backend `format: date-time` and `format: date` map through.
+    pub(crate) datetime: crate::ir::DateTimeBackend,
+    /// The `testing` module is emitted.
+    pub(crate) testing: bool,
 }
 
 /// One server builder's surface: a setter per server variable, keyed by the generated setter name.
@@ -387,6 +405,11 @@ pub enum ChangeKind {
     /// An operation lost its `{method}_stream` twin and its companions. **Major** — the methods a
     /// consumer calls disappear.
     StreamTwinRemoved,
+    /// The generated module gained its `testing` module (`Spec::testing`). **Minor** — additive.
+    TestingModuleAdded,
+    /// The generated module lost its `testing` module. **Major** — code naming
+    /// `testing::MockBackend` or a `Reply` breaks.
+    TestingModuleRemoved,
 }
 
 impl ChangeKind {
@@ -404,7 +427,8 @@ impl ChangeKind {
             | ChangeKind::ServerAdded
             | ChangeKind::ServerVariableAdded
             | ChangeKind::AdditionalPropertiesAdded
-            | ChangeKind::StreamTwinAdded => Impact::Minor,
+            | ChangeKind::StreamTwinAdded
+            | ChangeKind::TestingModuleAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::UrlAccessorArgsChanged
@@ -438,7 +462,8 @@ impl ChangeKind {
             | ChangeKind::ServerVariableTypeChanged
             | ChangeKind::AdditionalPropertiesRemoved
             | ChangeKind::AdditionalPropertiesTypeChanged
-            | ChangeKind::StreamTwinRemoved => Impact::Major,
+            | ChangeKind::StreamTwinRemoved
+            | ChangeKind::TestingModuleRemoved => Impact::Major,
         }
     }
 
@@ -491,6 +516,8 @@ impl ChangeKind {
             ChangeKind::AdditionalPropertiesTypeChanged => "additional-properties-type-changed",
             ChangeKind::StreamTwinAdded => "stream-twin-added",
             ChangeKind::StreamTwinRemoved => "stream-twin-removed",
+            ChangeKind::TestingModuleAdded => "testing-module-added",
+            ChangeKind::TestingModuleRemoved => "testing-module-removed",
         }
     }
 }

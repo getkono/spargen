@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|field-type-changed|Pet.born|field type `DateTime<time>` -> `DateTime<jiff>`
+major|field-type-changed|Pet.day|field type `Date<time>` -> `Date<jiff>`
+bump=major

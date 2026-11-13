@@ -555,6 +555,16 @@ fn diff_classifies_a_setting_only_one_sides_config_file_changes() {
         "{stdout}"
     );
     assert!(stderr.is_empty(), "{stderr}");
+
+    // The new side's config alone emitting the `testing` module is additive, which the gate passes.
+    std::fs::write(new_dir.join("spargen.toml"), "testing = true\n").unwrap();
+    let (status, stdout, stderr) = spargen(temp.path(), &["diff", &old, &new, "--exit-code"]);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(
+        stdout.contains("[testing-module-added] testing: `testing` module added")
+            && stdout.contains("recommended bump: minor"),
+        "{stdout}"
+    );
 }
 
 #[test]

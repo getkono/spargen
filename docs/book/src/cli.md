@@ -220,6 +220,11 @@ spec lowers with warnings, the comparison is printed on stdout as usual and thos
 stderr in the same format: each warning side's report under an `old spec:` / `new spec:` heading,
 or, under `--format json`, one object keyed `old` and `new`.
 
+Each side is compared as generated under its own settings, so a `uuid`, `datetime` or `testing`
+setting that only one side's config file changes is classified like a spec change: every member it
+retypes is a type change (`major`), and the `testing` module appearing is `minor`, disappearing
+`major`.
+
 `--format json` prints one object: `changes`, an array of `{ kind, impact, location, detail }`
 sorted most-severe first, plus the top-level `bump`. `kind` is the stable kebab-case change code
 (`operation-added`, `method-renamed`, …) and `impact`/`bump` are the lowercase semver labels

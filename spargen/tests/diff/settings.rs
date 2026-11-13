@@ -108,3 +108,30 @@ fn a_changed_datetime_backend_retypes_every_date_member() {
         assert!(same.changes.is_empty(), "{backend}: {same:?}");
     }
 }
+
+/// The `testing` module is a public item: emitting it is additive, dropping it breaks every test
+/// that builds a `testing::MockBackend`.
+#[test]
+fn the_testing_module_is_added_as_minor_and_removed_as_major() {
+    let emitted = |spec: Spec| spec.with_testing(spargen::TestingModule::Emitted);
+
+    let added = diff_configured(&formatted(), &formatted(), |spec| spec, emitted);
+    assert_eq!(
+        kinds(&added),
+        vec![ChangeKind::TestingModuleAdded],
+        "{added:?}"
+    );
+    assert_eq!(added.bump, Impact::Minor);
+    assert_eq!(details(&added), vec!["testing: `testing` module added"]);
+
+    let removed = diff_configured(&formatted(), &formatted(), emitted, |spec| spec);
+    assert_eq!(
+        kinds(&removed),
+        vec![ChangeKind::TestingModuleRemoved],
+        "{removed:?}"
+    );
+    assert_eq!(removed.bump, Impact::Major);
+
+    let kept = diff_configured(&formatted(), &formatted(), emitted, emitted);
+    assert!(kept.changes.is_empty(), "{kept:?}");
+}
