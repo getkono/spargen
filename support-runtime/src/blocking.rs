@@ -108,11 +108,12 @@ mod tests {
         // A blocking task still running keeps a waiting shutdown from finishing; the drop below
         // returns without it.
         let (release, parked) = std::sync::mpsc::channel::<()>();
-        drop(inner.block_on(async {
-            tokio::task::spawn_blocking(move || {
+        inner.block_on(async {
+            // Detached: the task outlives this future and is still parked at the drop.
+            drop(tokio::task::spawn_blocking(move || {
                 let _ = parked.recv();
-            })
-        }));
+            }));
+        });
         let outer = BlockingRuntime::new().expect("current-thread runtime builds");
         outer.block_on(async move { drop(inner) });
         release.send(()).ok();
