@@ -8,10 +8,10 @@
 //! sends an explicit `null`.
 //!
 //! On the wire it is an `Option<T>`: `Value` writes the value, `Null` writes `null`, and decoding
-//! reads `null` as `Null` and anything else as `Value` of `T`'s own decode. `Absent` is the one
-//! state a value cannot carry: a generated field skips it when serializing
+//! reads `null` as `Null` and anything else as `Value` of `T`'s own decode. `Absent` is the field's
+//! business: a generated field skips it when serializing
 //! (`skip_serializing_if = "Nullable::is_absent"`) and decodes a missing key as it
-//! (`#[serde(default)]`). Serialized anywhere else, `Absent` writes `null` too.
+//! (`#[serde(default)]`). Serialized anywhere else, `Absent` writes `null`, as `Null` does.
 
 use serde::de::{Deserialize, Deserializer, Visitor};
 use serde::ser::{Serialize, Serializer};
