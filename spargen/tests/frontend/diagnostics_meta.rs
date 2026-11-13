@@ -50,19 +50,11 @@ fn located(
     message: &str,
 ) -> Diagnostic {
     let (line, start, end) = span;
-    let span = spargen::Span {
+    let span = spargen::Span::new(
         file,
-        start: spargen::Loc {
-            line,
-            col: 1,
-            offset: start,
-        },
-        end: spargen::Loc {
-            line,
-            col: 1,
-            offset: end,
-        },
-    };
+        spargen::Loc::new(line, 1, start),
+        spargen::Loc::new(line, 1, end),
+    );
     let mut diagnostic = check("openapi: 3.0.0\n")
         .diagnostics()
         .first()
