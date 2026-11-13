@@ -148,6 +148,7 @@ fn the_dot_segment_refusal_escapes_the_segments_tab_lf_and_cr() {
         let error =
             build_url_on(&core, None, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
         let cause = std::error::Error::source(&error)
+            .and_then(std::error::Error::source)
             .map(ToString::to_string)
             .expect("a refusal carries its message");
         assert!(
@@ -228,7 +229,9 @@ fn build_url_refuses_a_path_value_that_forms_a_dot_segment() {
             matches!(error, Error::RequestConstruction(RequestError::Other(_))),
             "{segment}: {error:?}"
         );
-        let cause = std::error::Error::source(&error).map(ToString::to_string);
+        let cause = std::error::Error::source(&error)
+            .and_then(std::error::Error::source)
+            .map(ToString::to_string);
         assert!(
             cause.as_deref().is_some_and(|c| c.contains("dot segment")),
             "{cause:?}"
