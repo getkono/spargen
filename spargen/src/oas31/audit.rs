@@ -355,6 +355,14 @@ impl Audit<'_, '_> {
                 .emit(diags);
         }
         if schema.oas30_nullable {
+            // Beside a `$ref`, a `type` is intersected with the target's non-null `type`, so only
+            // the `oneOf` form admits `null` there.
+            let remedy = if schema.reference.is_some() {
+                "replace the `$ref` with `oneOf: [{type: 'null'}, {$ref: …}]`: a `type` beside it \
+                 is intersected with the target's and still excludes `null`"
+            } else {
+                "list `null` in the schema's `type` instead, as `type: [T, 'null']`"
+            };
             // W001 case: oas30-nullable
             Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
                 .message(
@@ -362,7 +370,7 @@ impl Audit<'_, '_> {
                      `null` is valid is read from `type`, `enum`, `const` and the schema's \
                      applicators alone",
                 )
-                .remedy("list `null` in the schema's `type` instead, as `type: [T, 'null']`")
+                .remedy(remedy)
                 .emit(diags);
         }
 
