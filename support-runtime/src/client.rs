@@ -298,7 +298,9 @@ impl ClientCore {
     /// Bind `value` to the header `name`, matched in any letter case, replacing any value already
     /// bound to it. An operation of a generated client whose header parameter the build bound
     /// (`Spec::bind_header`) sends this value, as written, instead of taking an argument for it.
-    /// `ClientCore`'s `Debug` prints the bound name and redacts the value.
+    /// `ClientCore`'s `Debug` prints the bound name and redacts the value, and the operation sends
+    /// it through [`crate::RequestBuilder::sensitive_header`], so the request's `Debug` redacts it
+    /// too.
     pub fn bind_header(&mut self, name: &str, value: impl Into<String>) {
         self.bound_headers
             .insert(name.to_ascii_lowercase(), SecretString::from(value.into()));

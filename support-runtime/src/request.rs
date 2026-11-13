@@ -66,7 +66,32 @@ impl RequestBuilder {
 
     /// Add a header, after any value the request already carries under `name`. A name or value
     /// that does not convert fails the builder.
-    pub fn header<K, V>(mut self, name: K, value: V) -> Self
+    pub fn header<K, V>(self, name: K, value: V) -> Self
+    where
+        HeaderName: TryFrom<K>,
+        <HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+        HeaderValue: TryFrom<V>,
+        <HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
+    {
+        self.append_header(name, value, false)
+    }
+
+    /// Add a header as [`Self::header`] does, its value marked sensitive
+    /// (`HeaderValue::set_sensitive`), so the `Debug` of the built request prints it redacted: for
+    /// a value the client holds as a secret, such as one bound with `ClientCore::bind_header`.
+    pub fn sensitive_header<K, V>(self, name: K, value: V) -> Self
+    where
+        HeaderName: TryFrom<K>,
+        <HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+        HeaderValue: TryFrom<V>,
+        <HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
+    {
+        self.append_header(name, value, true)
+    }
+
+    /// Append `name: value`, marked sensitive when `sensitive` is set, after any value the request
+    /// already carries under `name`; a name or value that does not convert fails the builder.
+    fn append_header<K, V>(mut self, name: K, value: V, sensitive: bool) -> Self
     where
         HeaderName: TryFrom<K>,
         <HeaderName as TryFrom<K>>::Error: Into<http::Error>,
@@ -82,7 +107,10 @@ impl RequestBuilder {
                         .map(|value| (name, value))
                 });
             match header {
-                Ok((name, value)) => {
+                Ok((name, mut value)) => {
+                    if sensitive {
+                        value.set_sensitive(true);
+                    }
                     parts.headers.append(name, value);
                 }
                 Err(error) => self.request = Err(Error::request_construction(error)),
