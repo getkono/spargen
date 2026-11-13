@@ -171,7 +171,14 @@ here as well.
 
 Commit `.spargen/vendor/`, `spargen.lock`, the root document, and all relative source files.
 
-A fetch that fails (an error status, a refused connection) is reported as `E025` and fails the
+A fetch follows up to ten redirects, refuses one that leaves `https` for plain `http`, and refuses
+a document over 64 MiB. Nothing is written until every fetch has ended: then each vendored copy
+is written to a temporary file beside it before any replaces the file it updates, and
+`spargen.lock` is renamed into place last, so a file that cannot be written (a blocked directory,
+a full disk) leaves the earlier lock and copies as they were.
+
+A fetch that fails (an error status, a refused connection, a refused redirect, a body over the
+limit) is reported as `E025` and fails the
 command, but what it leaves on disk is still a usable lock. Every document it did fetch is
 re-vendored and re-pinned at what the server served. A document it could not fetch, and any
 document reachable only through it, keeps the pin the earlier `spargen.lock` held, beside the

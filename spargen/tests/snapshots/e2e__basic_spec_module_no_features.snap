@@ -20,11 +20,11 @@ pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
     Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
     LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next, Nullable,
-    ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
-    RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
-    RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
-    TokenProvider, TokenRefresher, TotalTimeout, TransportError, UnknownVariant,
-    exponential_backoff, next_link, token_provider,
+    ParameterError, ProblemDetails, ProtocolError, RedirectError, RejectionCheck,
+    RequestCause, RequestError, RequestOptions, ReqwestBackend, ResponseValue,
+    RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
+    TokenFuture, TokenProvider, TokenRefresher, TotalTimeout, TransportError,
+    UnknownVariant, exponential_backoff, full_jitter, next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -1910,7 +1910,7 @@ mod support {
         /// The closed error taxonomy shared by every spargen-generated client. `E` is the
         /// operation's typed error body (an enum when several error statuses are documented).
         ///
-        /// Eleven variants are constructed: classes #1 to #9, #11 and #12. Taxonomy class #10, cancellation, is a
+        /// Twelve variants are constructed: classes #1 to #9, and #11 to #13. Taxonomy class #10, cancellation, is a
         /// documented drop-safety guarantee rather than a variant: dropping a returned future is safe and
         /// side-effect-free beyond standard HTTP semantics. The enum implements [`std::error::Error`], whose `source()` reaches
         /// each retained cause, and `Debug` never leaks secrets.
@@ -1998,6 +1998,19 @@ mod support {
                 /// The status of the response whose body exceeded it.
                 status: StatusCode,
             },
+            /// #13 — a `LinkPaginator` page's `rel="next"` link named a URL whose scheme, host or port
+            /// differs from the first page the paginator fetched: another host, another port, or an
+            /// `https` chain dropping to `http`. Following it would send whatever the injected client
+            /// attaches to every request (a default `Authorization` header, say) to that origin. Every
+            /// page before it was yielded; nothing was sent for `to`. Not transient: the same link is
+            /// refused again.
+            PaginationOriginChanged {
+                /// The first page the paginator fetched, whose origin every later page must share,
+                /// without its userinfo and query, where a credential would ride.
+                from: url::Url,
+                /// The refused URL the `next` link resolved to, without its userinfo and query.
+                to: url::Url,
+            },
         }
         impl<E> Error<E> {
             /// Build a request-construction error from any owned error value.
@@ -2058,6 +2071,7 @@ mod support {
                     | Error::Protocol(_)
                     | Error::Redirect(_)
                     | Error::PaginationCycle { .. }
+                    | Error::PaginationOriginChanged { .. }
                     | Error::BodyTooLarge { .. } => false,
                 }
             }
@@ -2079,7 +2093,8 @@ mod support {
                     | Error::Protocol(_)
                     | Error::Redirect(_)
                     | Error::InterruptedBody(_)
-                    | Error::PaginationCycle { .. } => None,
+                    | Error::PaginationCycle { .. }
+                    | Error::PaginationOriginChanged { .. } => None,
                 }
             }
             /// The headers of the response the failed call received: `Some` for [`Error::Api`] (the same
@@ -2099,6 +2114,7 @@ mod support {
                     | Error::Redirect(_)
                     | Error::InterruptedBody(_)
                     | Error::PaginationCycle { .. }
+                    | Error::PaginationOriginChanged { .. }
                     | Error::BodyTooLarge { .. } => None,
                 }
             }
@@ -2140,6 +2156,12 @@ mod support {
                     }
                     Error::InterruptedBody(e) => Error::InterruptedBody(e),
                     Error::PaginationCycle { url } => Error::PaginationCycle { url },
+                    Error::PaginationOriginChanged { from, to } => {
+                        Error::PaginationOriginChanged {
+                            from,
+                            to,
+                        }
+                    }
                     Error::BodyTooLarge { limit, status } => {
                         Error::BodyTooLarge {
                             limit,
@@ -2195,6 +2217,7 @@ mod support {
                     | Error::Decode { .. }
                     | Error::InterruptedBody(_)
                     | Error::PaginationCycle { .. }
+                    | Error::PaginationOriginChanged { .. }
                     | Error::BodyTooLarge { .. } => None,
                 }
             }
@@ -2213,6 +2236,7 @@ mod support {
                     | Error::Decode { .. }
                     | Error::InterruptedBody(_)
                     | Error::PaginationCycle { .. }
+                    | Error::PaginationOriginChanged { .. }
                     | Error::BodyTooLarge { .. } => None,
                 }
             }
@@ -2335,6 +2359,7 @@ mod support {
                     | Error::Redirect(_)
                     | Error::InterruptedBody(_)
                     | Error::PaginationCycle { .. }
+                    | Error::PaginationOriginChanged { .. }
                     | Error::BodyTooLarge { .. } => None,
                 }
             }
@@ -2364,6 +2389,14 @@ mod support {
                     }
                     Error::PaginationCycle { url } => {
                         write!(f, "pagination cycle: the next link revisits {url}")
+                    }
+                    Error::PaginationOriginChanged { from, to } => {
+                        write!(
+                            f,
+                            "pagination origin changed: the next link leaves {} for {}",
+                            from.origin().ascii_serialization(), to.origin()
+                            .ascii_serialization()
+                        )
                     }
                     Error::BodyTooLarge { limit, status } => {
                         write!(
@@ -2401,6 +2434,7 @@ mod support {
                     | Error::UnexpectedStatus { .. }
                     | Error::Decode { .. }
                     | Error::PaginationCycle { .. }
+                    | Error::PaginationOriginChanged { .. }
                     | Error::BodyTooLarge { .. } => None,
                 }
             }
@@ -3463,6 +3497,8 @@ mod support {
             }
         }
         /// A typed parameter could not be represented by OpenAPI's scalar/array/object wire model.
+        ///
+        /// An operation reports it as `RequestError::Other`, whose `source()` downcasts to this type.
         #[derive(Debug)]
         pub enum ParameterError {
             /// Serialization of the generated Rust value failed.
@@ -3470,13 +3506,13 @@ mod support {
             /// A nested array or object appeared where OpenAPI parameter serialization requires a scalar.
             NestedValue,
             /// A `style: deepObject` query parameter's value was not an object
-            /// ([`serialize_deep_object`]).
+            /// (`serialize_deep_object`).
             ExpectedObject,
             /// A form-urlencoded request body did not serialize to a JSON object
-            /// ([`serialize_form_body`]).
+            /// (`serialize_form_body`).
             FormBodyNotObject,
             /// A multipart part was asked for the query-only `deepObject` style
-            /// ([`serialize_multipart_values`]).
+            /// (`serialize_multipart_values`).
             DeepObjectInMultipart,
             /// A style defined only for arrays and objects (`spaceDelimited`, `pipeDelimited`) received a
             /// scalar or undefined value.
@@ -4162,6 +4198,12 @@ mod support {
         //! carries them. A page that comes back non-`2xx` (e.g. a `401` on an unauthenticated page 2)
         //! terminates the paginator as an [`Error::UnexpectedStatus`](super::Error), never a decoded page.
         //!
+        //! Because those headers ride on every page request, the paginator follows a `next` link only
+        //! within the origin of the first page it fetched: the same scheme, host and port. A link to
+        //! another host, to another port, or from `https` down to `http` ends the chain with
+        //! [`Error::PaginationOriginChanged`](super::Error) without sending anything there. The rule
+        //! holds for every paginator; to continue across origins, start a new paginator at that URL.
+        //!
         //! Termination is otherwise driven by the server's `rel="next"` links. The paginator remembers
         //! every URL it has fetched, and a `next` link that resolves to one of them — a page linking to
         //! itself, or a longer cycle such as page 1 → page 2 → page 1 — ends the chain with
@@ -4223,6 +4265,9 @@ mod support {
             /// Every URL this paginator has requested, fragment removed: a `next` that names one of them
             /// is a cycle.
             fetched: HashSet<Url>,
+            /// The first URL this paginator fetched: every later page must share its scheme, host and
+            /// port.
+            first: Option<Url>,
             /// `T` is produced, never consumed; the `fn() -> T` marker keeps `LinkPaginator<T>: Send + Sync`
             /// regardless of `T`.
             _marker: PhantomData<fn() -> T>,
@@ -4235,6 +4280,7 @@ mod support {
                     core,
                     next: Some(first),
                     fetched: HashSet::new(),
+                    first: None,
                     _marker: PhantomData,
                 }
             }
@@ -4243,17 +4289,19 @@ mod support {
             /// its headers. Only an absolute `next` URL is followed; a relative one yields no next page (use
             /// [`Self::new`] with the resolved URL instead). The first page's own URL is not known here,
             /// so a cycle back to it is caught one fetch later, when the refetched first page links on to
-            /// a page this paginator already fetched.
+            /// a page this paginator already fetched. For the same reason the origin every later page must
+            /// share is that of the seeded `next` link, the first URL this paginator fetches.
             pub fn from_headers(core: ClientCore, headers: &HeaderMap) -> Self {
                 Self {
                     core,
                     next: next_link(headers),
                     fetched: HashSet::new(),
+                    first: None,
                     _marker: PhantomData,
                 }
             }
             /// Whether the next [`Self::next_page`] call returns `Some`: a fetched page, or the error that
-            /// ends the chain, [`Error::PaginationCycle`] included.
+            /// ends the chain, [`Error::PaginationCycle`] and [`Error::PaginationOriginChanged`] included.
             pub fn has_next(&self) -> bool {
                 self.next.is_some()
             }
@@ -4263,8 +4311,11 @@ mod support {
             ///
             /// `GET`s the current `next` URL, parses its response `Link` header for `rel="next"` (resolving a
             /// relative target against the fetched URL) to arm the following page, then decodes the body as
-            /// `T`. Five things terminate the paginator (subsequent calls return `None`):
+            /// `T`. Six things terminate the paginator (subsequent calls return `None`):
             ///
+            /// * a `next` URL whose scheme, host or port differs from the first URL this paginator
+            ///   fetched → `Some(Err(Error::PaginationOriginChanged { from, to }))`, without sending a
+            ///   request. The page whose link left the origin was already yielded by the call before;
             /// * a `next` URL the paginator has already fetched (fragments aside) →
             ///   `Some(Err(Error::PaginationCycle { url }))`, without sending a request. The page whose
             ///   link closed the cycle was already yielded by the call before;
@@ -4284,6 +4335,18 @@ mod support {
                 &mut self,
             ) -> Option<Result<ResponseValue<T>, Error<Infallible>>> {
                 let url = self.next.take()?;
+                match &self.first {
+                    Some(first) if !same_origin(first, &url) => {
+                        return Some(
+                            Err(Error::PaginationOriginChanged {
+                                from: without_credentials(first.clone()),
+                                to: without_credentials(url),
+                            }),
+                        );
+                    }
+                    Some(_) => {}
+                    None => self.first = Some(url.clone()),
+                }
                 let mut key = url.clone();
                 key.set_fragment(None);
                 if !self.fetched.insert(key) {
@@ -4324,6 +4387,21 @@ mod support {
                     Err(error) => Some(Err(error)),
                 }
             }
+        }
+        /// Whether two URLs share a scheme, host and port, as the URL parser normalises them: a host's
+        /// case and a spelled-out default port make no difference.
+        fn same_origin(a: &Url, b: &Url) -> bool {
+            a.scheme() == b.scheme() && a.host() == b.host()
+                && a.port_or_known_default() == b.port_or_known_default()
+        }
+        /// `url` without its userinfo and query, the two places a URL carries a credential (an `apiKey`
+        /// query parameter, a `user:password@` prefix), so an error holding it prints neither through
+        /// `Display` or `Debug`.
+        fn without_credentials(mut url: Url) -> Url {
+            url.set_query(None);
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url
         }
         /// Extract the `rel="next"` target from a response's `Link` header(s) as an absolute [`Url`], or
         /// `None` when there is no usable next link. Pure and side-effect-free — the building block callers
@@ -4843,6 +4921,11 @@ mod support {
             pub fn into_inner(self) -> T {
                 self.inner
             }
+            /// Consume the wrapper, yielding its status, headers and decoded body, each owned, so a caller
+            /// keeping the headers beside the body need not clone them before [`Self::into_inner`].
+            pub fn into_parts(self) -> (StatusCode, HeaderMap, T) {
+                (self.status, self.headers, self.inner)
+            }
             /// Borrow the decoded body.
             pub fn inner(&self) -> &T {
                 &self.inner
@@ -4953,7 +5036,8 @@ mod support {
         //! `tokio::time::sleep`).
         //! [`RetryBackend`] simply `.await`s that future; it never sleeps itself. A pure
         //! [`exponential_backoff`] helper computes the delay [`Duration`] a policy hands to its timer, so
-        //! exponential backoff needs no runtime support either.
+        //! exponential backoff needs no runtime support either, and [`full_jitter`] spreads that delay
+        //! over a random fraction the caller draws, so the runtime needs no source of randomness.
         //!
         //! ## Request replay and cloneability
         //!
@@ -4988,20 +5072,29 @@ mod support {
         //! budget there. Pick a `base` above a typical loss burst and a `max` above a typical outage, so
         //! later attempts arrive after the condition has cleared.
         //!
+        //! Clients that failed together and wait exactly the backoff retry together, and can keep the
+        //! server in the state that failed them. [`full_jitter`] spreads each wait over `[0, backoff)`
+        //! with a draw the caller supplies; keep the `Retry-After` floor by raising the jittered wait to
+        //! [`RetryOutcome::retry_after`], as the example below does.
+        //!
         //! ```ignore
         //! use std::sync::Arc;
         //! use std::time::{Duration, SystemTime};
         //!
         //! // A policy that retries transient failures of idempotent requests up to five times with
-        //! // exponential backoff, never sooner than the server's `Retry-After`, using the caller's tokio
-        //! // timer for the wait — no timer lives in the runtime. The wait is a `RetryWait`, which is `Send`
-        //! // on native and not on `wasm32`, so the policy compiles on both.
+        //! // fully jittered exponential backoff, never sooner than the server's `Retry-After`, using the
+        //! // caller's tokio timer for the wait and the caller's `rand` for the jitter — no timer or random
+        //! // source lives in the runtime. The wait is a `RetryWait`, which is `Send` on native and not on
+        //! // `wasm32`, so the policy compiles on both.
         //! struct Backoff;
         //! impl RetryPolicy for Backoff {
         //!     fn retry<'a>(&'a self, attempt: u32, outcome: &RetryOutcome<'_>) -> Option<RetryWait<'a>> {
         //!         if attempt < 5 && outcome.is_transient() {
-        //!             let max = Duration::from_secs(5);
-        //!             let wait = outcome.backoff(attempt, Duration::from_millis(100), max, SystemTime::now());
+        //!             let backoff = exponential_backoff(attempt, Duration::from_millis(100), Duration::from_secs(5));
+        //!             let jittered = full_jitter(backoff, rand::random::<f64>());
+        //!             let wait = outcome
+        //!                 .retry_after(SystemTime::now())
+        //!                 .map_or(jittered, |floor| jittered.max(floor));
         //!             // A server asking for more than a minute is not worth waiting on here.
         //!             (wait <= Duration::from_secs(60)).then(|| Box::pin(tokio::time::sleep(wait)) as RetryWait<'a>)
         //!         } else {
@@ -5236,6 +5329,23 @@ mod support {
         ) -> Duration {
             let factor = 2u32.saturating_pow(attempt);
             base.checked_mul(factor).unwrap_or(max).min(max)
+        }
+        /// Full jitter: `backoff` scaled by `unit`, a uniformly random draw from `[0, 1)` the caller
+        /// supplies, so the wait is spread over `[0, backoff)` and clients that failed together do not
+        /// retry in lockstep. The runtime reads no randomness of its own: pass, for example,
+        /// `rand::random::<f64>()`.
+        ///
+        /// A draw at or below `0` (or not a number) waits nothing, and one at or above `1` the whole
+        /// `backoff`; the result never exceeds `backoff`, and the helper never panics.
+        pub fn full_jitter(backoff: Duration, unit: f64) -> Duration {
+            if unit.is_nan() || unit <= 0.0 {
+                return Duration::ZERO;
+            }
+            if unit >= 1.0 {
+                return backoff;
+            }
+            Duration::try_from_secs_f64(backoff.as_secs_f64() * unit)
+                .map_or(backoff, |jittered| jittered.min(backoff))
         }
         /// A `Retry-After` field value as the delay it asks for from `now` (RFC 9110 §10.2.3): its
         /// delay-seconds, saturating where they exceed `u64`, or the time until its HTTP-date, zero once
@@ -6056,7 +6166,7 @@ mod support {
         use reqwest::StatusCode;
         use serde::de::DeserializeOwned;
         use super::chunked::read_as_it_arrives;
-        use super::dispatch::{cap_body, send_on, unexpected_status_capped};
+        use super::dispatch::{cap_body, read_prefix, send_on, unexpected_status_capped};
         use super::transport::try_clone_request;
         use super::wasm::BoxFuture;
         use super::{
@@ -6069,7 +6179,20 @@ mod support {
         /// The caller-provided wait before an automatic reconnect attempt. `Send` off `wasm32` and not on
         /// it, as the `wasm` module explains.
         pub type ReconnectWait = BoxFuture<'static, ()>;
-        type ReconnectFuture = BoxFuture<'static, Result<Response, StreamError>>;
+        type ReconnectFuture = BoxFuture<'static, Reconnected>;
+        /// How a reconnect request was answered.
+        enum Reconnected {
+            /// A response whose body is framed in place of the closed one.
+            Opened(Response),
+            /// A failure the reconnect policy is asked about, as one reading the body is.
+            Failed(StreamError),
+            /// A `204`: the server's request to stop reconnecting. The stream ends cleanly.
+            NoContent,
+            /// A response the stream cannot frame (an SSE reconnect answered with a body that is not
+            /// `text/event-stream`). It is yielded, and the stream ends without asking the policy again,
+            /// since resending the request would be answered the same way.
+            Refused(StreamError),
+        }
         /// Why an automatic SSE reconnect is being considered.
         #[derive(Debug)]
         pub enum ReconnectReason<'a> {
@@ -6084,6 +6207,11 @@ mod support {
         /// attempt limits and timing. `attempt` starts at zero, increases after each accepted reconnect,
         /// and resets after a successfully decoded item. `server_delay` is the latest valid SSE `retry:`
         /// value, when present.
+        ///
+        /// A reconnect answered with a non-success status, or failing in transit, is offered to the
+        /// policy again. Two answers end the stream without asking it: a `204`, the server's request to
+        /// stop reconnecting, ends it cleanly; and an SSE reconnect whose response is not
+        /// `text/event-stream` yields an [`Error::Decode`] carrying that response, then ends it.
         pub trait ReconnectPolicy: MaybeSend + MaybeSync {
             /// Decide whether to reconnect and provide the future that waits until the next attempt.
             fn reconnect(
@@ -6344,7 +6472,7 @@ mod support {
                                     }
                                 }
                                 Poll::Ready(Err(error)) => {
-                                    let error = Error::InterruptedBody(error);
+                                    let error = Error::from_transport(error);
                                     if let Some(error) = this
                                         .schedule_reconnect(OwnedReconnectReason::Failure(error))
                                     {
@@ -6390,19 +6518,25 @@ mod support {
                                     this.state = StreamState::Connecting(future);
                                     return Poll::Pending;
                                 }
-                                Poll::Ready(Ok(response)) => {
+                                Poll::Ready(Reconnected::Opened(response)) => {
                                     let (parts, body) = response.into_parts();
                                     this.status = parts.status;
                                     this.headers = parts.headers;
                                     this.bom_pending = is_sse(this.framing);
                                     this.state = StreamState::Body(read_as_it_arrives(body));
                                 }
-                                Poll::Ready(Err(error)) => {
+                                Poll::Ready(Reconnected::Failed(error)) => {
                                     if let Some(error) = this
                                         .schedule_reconnect(OwnedReconnectReason::Failure(error))
                                     {
                                         return Poll::Ready(Some(Err(error)));
                                     }
+                                }
+                                Poll::Ready(Reconnected::NoContent) => {
+                                    return Poll::Ready(None);
+                                }
+                                Poll::Ready(Reconnected::Refused(error)) => {
+                                    return Poll::Ready(Some(Err(error)));
                                 }
                             }
                         }
@@ -6488,16 +6622,74 @@ mod support {
                         }
                     }
                 }
+                let sse = is_sse(self.framing);
                 Some(
                     Box::pin(async move {
-                        let response = send_on(backend.as_ref(), request).await?;
-                        if response.status().is_success() {
-                            Ok(response)
-                        } else {
-                            Err(unexpected_status_capped(max_error_body, response).await)
+                        let response = match send_on(backend.as_ref(), request).await {
+                            Ok(response) => response,
+                            Err(error) => return Reconnected::Failed(error),
+                        };
+                        if !response.status().is_success() {
+                            return Reconnected::Failed(
+                                unexpected_status_capped(max_error_body, response).await,
+                            );
                         }
+                        if response.status() == StatusCode::NO_CONTENT {
+                            return Reconnected::NoContent;
+                        }
+                        if sse && !is_event_stream(response.headers()) {
+                            return Reconnected::Refused(
+                                not_an_event_stream(max_error_body, response).await,
+                            );
+                        }
+                        Reconnected::Opened(response)
                     }),
                 )
+            }
+        }
+        /// Whether `headers` declare a `text/event-stream` body: the media type alone decides, in any case
+        /// and whatever parameters follow it.
+        fn is_event_stream(headers: &HeaderMap) -> bool {
+            headers
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next())
+                .is_some_and(|essence| {
+                    essence.trim().eq_ignore_ascii_case("text/event-stream")
+                })
+        }
+        /// The `Decode` error an SSE reconnect answered with a body that is not `text/event-stream` is
+        /// reported as: its status and headers, and its body capped at `max_error_body`. A failure while
+        /// reading that body is reported instead, by its transport class.
+        async fn not_an_event_stream(
+            max_error_body: usize,
+            response: Response,
+        ) -> StreamError {
+            let (parts, body) = response.into_parts();
+            let path = match parts.headers.get(reqwest::header::CONTENT_TYPE) {
+                Some(value) => {
+                    format!(
+                        "reconnect response Content-Type is {:?}, not text/event-stream",
+                        String::from_utf8_lossy(value.as_bytes())
+                    )
+                }
+                None => {
+                    "reconnect response has no Content-Type, not text/event-stream"
+                        .to_owned()
+                }
+            };
+            match read_prefix(max_error_body, body).await {
+                Ok(prefix) => {
+                    let (body, truncated) = cap_body(prefix, max_error_body);
+                    Error::Decode {
+                        status: parts.status,
+                        headers: parts.headers,
+                        path,
+                        body,
+                        truncated,
+                    }
+                }
+                Err(error) => Error::from_transport(error),
             }
         }
         /// The outcome of attempting to frame one item out of the buffer.
@@ -6571,8 +6763,9 @@ mod support {
             }
         }
         /// Frame the next item out of `buffer`, consuming the bytes it uses. `at_eof` is `true` once no
-        /// further bytes will arrive, which lets a trailing frame not terminated by a delimiter still be
-        /// emitted. Pure: no IO, no async.
+        /// further bytes will arrive, which lets a trailing ndjson line or JSON-seq record not terminated
+        /// by a delimiter still be emitted, and drops an SSE event not yet dispatched by its blank line.
+        /// Pure: no IO, no async.
         fn next_frame(
             buffer: &mut FrameBuffer,
             framing: Framing,
@@ -6713,16 +6906,14 @@ mod support {
                         std::mem::take(&mut buffer.event)
                     }
                     None if !at_eof => return FramePoll::NeedMore,
-                    None => {
-                        if buffer.line_start < buffer.len() {
-                            append_sse_field(
-                                trim_cr(&buffer.bytes[buffer.line_start..]),
-                                &mut buffer.event,
-                            );
-                        }
+                    None if buffer.bytes[buffer.line_start..] == *b"\r" => {
                         let fields = std::mem::take(&mut buffer.event);
                         buffer.clear();
                         fields
+                    }
+                    None => {
+                        buffer.clear();
+                        return FramePoll::NeedMore;
                     }
                 };
                 match finish_sse_fields(fields, output) {
@@ -6830,8 +7021,8 @@ mod support {
         /// requires, a line ends at CRLF, at a bare LF, or at a bare CR. Returns `Err` with the offset the
         /// next search starts from when no full line is buffered yet, which includes a CR that is the last
         /// buffered byte: the byte after it decides whether it ends the line alone or begins a CRLF, so it
-        /// is held, and searched again, until that byte arrives (at EOF, `sse_next` takes the tail
-        /// itself).
+        /// is held, and searched again, until that byte arrives (at EOF, where none will, `sse_next`
+        /// reads the tail itself).
         fn take_line(
             buf: &[u8],
             from: usize,
@@ -6865,7 +7056,7 @@ mod support {
             false
         }
         /// `line` without one trailing `\r`, so a CRLF line ending reads the same as a bare `\n` to the
-        /// ndjson framer, and an SSE tail at EOF ending in a CR loses that line ending.
+        /// ndjson framer.
         fn trim_cr(line: &[u8]) -> &[u8] {
             line.strip_suffix(b"\r").unwrap_or(line)
         }
@@ -6977,8 +7168,8 @@ mod support {
         //!
         //! Encoding always writes the padded standard alphabet. Decoding takes the same alphabet with or
         //! without its trailing padding, and refuses anything else: another alphabet's characters
-        //! (base64url's `-` and `_`), whitespace or line breaks, padding before the end, or a length no
-        //! encoding produces.
+        //! (base64url's `-` and `_`), whitespace or line breaks, padding before the end, a length no
+        //! encoding produces, or a final quantum whose bits past its last whole byte are not zero.
         use std::fmt;
         use bytes::Bytes;
         use serde::de::{Deserializer, Unexpected, Visitor};
@@ -7075,6 +7266,10 @@ mod support {
                 for (index, character) in chunk.iter().enumerate() {
                     group |= sextet(*character)? << (18 - 6 * index);
                 }
+                let carried = 24 - 8 * (chunk.len() - 1);
+                if group & ((1 << carried) - 1) != 0 {
+                    return None;
+                }
                 for index in 0..chunk.len() - 1 {
                     out.push((group >> (16 - 8 * index)) as u8);
                 }
@@ -7097,15 +7292,23 @@ mod support {
         //!
         //! # Nested-runtime caveat
         //!
-        //! A [`BlockingRuntime`] must NOT be constructed or used from inside another async runtime:
-        //! tokio's `block_on` panics when called from within a runtime's context. Build and drive one on a
-        //! plain (non-async) thread — for example a `std::thread`, or `tokio::task::spawn_blocking` when
-        //! you are already inside an async context.
+        //! A [`BlockingRuntime`] must NOT be *driven* from inside another async runtime: tokio's
+        //! `block_on` panics when called from within a runtime's context. Drive one on a plain (non-async)
+        //! thread — for example a `std::thread`, or `tokio::task::spawn_blocking` when you are already
+        //! inside an async context. Building one inside an async runtime is fine, and so is dropping one
+        //! there: the drop shuts the owned runtime down in the background rather than waiting on it, which
+        //! inside an async context would panic, so a blocking client held in async state can be dropped at
+        //! shutdown.
         /// A current-thread tokio runtime used to drive async operation futures to completion
         /// synchronously. Held by the generated blocking client alongside the async client it wraps.
+        ///
+        /// Dropping it shuts the runtime down without waiting for its blocking-pool threads (tokio's
+        /// `Runtime::shutdown_background`), so the drop never blocks and never panics, whatever context
+        /// it runs in.
         #[derive(Debug)]
         pub struct BlockingRuntime {
-            runtime: tokio::runtime::Runtime,
+            /// The owned runtime; `Some` until the drop takes it to shut it down.
+            runtime: Option<tokio::runtime::Runtime>,
         }
         impl BlockingRuntime {
             /// Build a fresh current-thread runtime with all available drivers enabled. Returns the
@@ -7114,7 +7317,7 @@ mod support {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?;
-                Ok(Self { runtime })
+                Ok(Self { runtime: Some(runtime) })
             }
             /// Drive a future to completion on the owned runtime, blocking the current thread until it
             /// resolves.
@@ -7123,7 +7326,19 @@ mod support {
             ///
             /// Panics if called from within another async runtime — tokio forbids nested `block_on`.
             pub fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
-                self.runtime.block_on(future)
+                let Some(runtime) = &self.runtime else {
+                    unreachable!("the runtime is taken only by the drop")
+                };
+                runtime.block_on(future)
+            }
+        }
+        impl Drop for BlockingRuntime {
+            /// Shut the runtime down without waiting: a plain drop of a tokio runtime waits on its
+            /// blocking pool, which panics inside an async context.
+            fn drop(&mut self) {
+                if let Some(runtime) = self.runtime.take() {
+                    runtime.shutdown_background();
+                }
             }
         }
     }
@@ -7152,13 +7367,14 @@ mod support {
         encode, serialize_deep_object, serialize_delimited, serialize_form,
         serialize_form_body, serialize_label, serialize_matrix,
         serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty,
-        FormStyle, PercentEncoding,
+        FormStyle, ParameterError, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
     pub use request::{MultipartForm, MultipartPart, RequestBuilder};
     pub use response::{stream_success_bytes, ByteStream, ResponseValue};
     pub use retry::{
-        exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+        exponential_backoff, full_jitter, RetryBackend, RetryOutcome, RetryPolicy,
+        RetryWait,
     };
     pub use transport::{
         try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend,
@@ -8619,9 +8835,10 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Ok(inner) = serde_json::from_value::<
-                Box<AnyStringVariant0>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_string()
+                .then(|| serde_json::from_value::<Box<AnyStringVariant0>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 500u32 > *selected_priority,
@@ -8631,9 +8848,10 @@ pub mod types {
                     selected = Some((500u32, AnyString::AnyStringVariant0(inner)));
                 }
             }
-            if let Ok(inner) = serde_json::from_value::<
-                Box<StringLiteral>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_string()
+                .then(|| serde_json::from_value::<Box<StringLiteral>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 1999u32 > *selected_priority,
@@ -8672,10 +8890,15 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if serde_json::from_value::<Box<AnyStringVariant0>>(value.clone()).is_ok() {
+            if value.is_string()
+                && serde_json::from_value::<Box<AnyStringVariant0>>(value.clone())
+                    .is_ok()
+            {
                 match_count += 1;
             }
-            if serde_json::from_value::<Box<StringLiteral>>(value.clone()).is_ok() {
+            if value.is_string()
+                && serde_json::from_value::<Box<StringLiteral>>(value.clone()).is_ok()
+            {
                 match_count += 1;
             }
             if match_count >= 1 {
@@ -8703,9 +8926,10 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Ok(inner) = serde_json::from_value::<
-                Box<AnyNumberVariant0>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_number()
+                .then(|| serde_json::from_value::<Box<AnyNumberVariant0>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 500u32 > *selected_priority,
@@ -8715,9 +8939,10 @@ pub mod types {
                     selected = Some((500u32, AnyNumber::AnyNumberVariant0(inner)));
                 }
             }
-            if let Ok(inner) = serde_json::from_value::<
-                Box<AnyNumberVariant1>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_number()
+                .then(|| serde_json::from_value::<Box<AnyNumberVariant1>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 650u32 > *selected_priority,
@@ -8756,10 +8981,16 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if serde_json::from_value::<Box<AnyNumberVariant0>>(value.clone()).is_ok() {
+            if value.is_number()
+                && serde_json::from_value::<Box<AnyNumberVariant0>>(value.clone())
+                    .is_ok()
+            {
                 match_count += 1;
             }
-            if serde_json::from_value::<Box<AnyNumberVariant1>>(value.clone()).is_ok() {
+            if value.is_number()
+                && serde_json::from_value::<Box<AnyNumberVariant1>>(value.clone())
+                    .is_ok()
+            {
                 match_count += 1;
             }
             if match_count >= 1 {
@@ -8788,9 +9019,12 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Ok(inner) = serde_json::from_value::<
-                Box<OneOverlapVariant0>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_string()
+                .then(|| serde_json::from_value::<
+                    Box<OneOverlapVariant0>,
+                >(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 500u32 > *selected_priority,
@@ -8800,9 +9034,10 @@ pub mod types {
                     selected = Some((500u32, OneOverlap::OneOverlapVariant0(inner)));
                 }
             }
-            if let Ok(inner) = serde_json::from_value::<
-                Box<StringLiteral>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_string()
+                .then(|| serde_json::from_value::<Box<StringLiteral>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 1999u32 > *selected_priority,
@@ -8841,10 +9076,15 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if serde_json::from_value::<Box<OneOverlapVariant0>>(value.clone()).is_ok() {
+            if value.is_string()
+                && serde_json::from_value::<Box<OneOverlapVariant0>>(value.clone())
+                    .is_ok()
+            {
                 match_count += 1;
             }
-            if serde_json::from_value::<Box<StringLiteral>>(value.clone()).is_ok() {
+            if value.is_string()
+                && serde_json::from_value::<Box<StringLiteral>>(value.clone()).is_ok()
+            {
                 match_count += 1;
             }
             if match_count == 1 {
@@ -8894,7 +9134,10 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Ok(inner) = serde_json::from_value::<Box<BroadOwner>>(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_object()
+                .then(|| serde_json::from_value::<Box<BroadOwner>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 1000u32 > *selected_priority,
@@ -8904,9 +9147,10 @@ pub mod types {
                     selected = Some((1000u32, AnyOwner::BroadOwner(inner)));
                 }
             }
-            if let Ok(inner) = serde_json::from_value::<
-                Box<DetailedOwner>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_object()
+                .then(|| serde_json::from_value::<Box<DetailedOwner>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 1021u32 > *selected_priority,
@@ -8945,10 +9189,14 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if serde_json::from_value::<Box<BroadOwner>>(value.clone()).is_ok() {
+            if value.is_object()
+                && serde_json::from_value::<Box<BroadOwner>>(value.clone()).is_ok()
+            {
                 match_count += 1;
             }
-            if serde_json::from_value::<Box<DetailedOwner>>(value.clone()).is_ok() {
+            if value.is_object()
+                && serde_json::from_value::<Box<DetailedOwner>>(value.clone()).is_ok()
+            {
                 match_count += 1;
             }
             if match_count >= 1 {
@@ -9719,9 +9967,12 @@ pub mod types {
                 return {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    if let Ok(inner) = serde_json::from_value::<
-                        Box<LooseAnimalVariant2>,
-                    >(value.clone()) {
+                    if let Some(Ok(inner)) = value
+                        .is_object()
+                        .then(|| serde_json::from_value::<
+                            Box<LooseAnimalVariant2>,
+                        >(value.clone()))
+                    {
                         match_count += 1;
                         let replace = match &selected {
                             Some((selected_priority, _)) => 1042u32 > *selected_priority,
@@ -9760,9 +10011,12 @@ pub mod types {
                 _ => {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    if let Ok(inner) = serde_json::from_value::<
-                        Box<LooseAnimalVariant2>,
-                    >(value.clone()) {
+                    if let Some(Ok(inner)) = value
+                        .is_object()
+                        .then(|| serde_json::from_value::<
+                            Box<LooseAnimalVariant2>,
+                        >(value.clone()))
+                    {
                         match_count += 1;
                         let replace = match &selected {
                             Some((selected_priority, _)) => 1042u32 > *selected_priority,
@@ -20240,7 +20494,7 @@ mod __spargen_blocking {
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
     /**A synchronous client: owns the async `Client` plus a current-thread tokio runtime and `block_on`s each operation. Enable the crate's `blocking` feature to use it; it compiles only on a non-wasm32 target.
 
-Must NOT be constructed or called from inside another async runtime — tokio's `block_on` panics when nested. Build one on a plain thread (e.g. `std::thread` or `tokio::task::spawn_blocking`).*/
+Must NOT be called from inside another async runtime — tokio's `block_on` panics when nested. Call it on a plain thread (e.g. `std::thread` or `tokio::task::spawn_blocking`). Building or dropping one inside an async runtime is fine: the drop shuts its runtime down in the background without waiting.*/
     #[derive(Debug)]
     #[allow(dead_code)]
     pub struct BlockingClient {

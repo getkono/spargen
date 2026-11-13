@@ -11,7 +11,8 @@ use super::*;
 /// and serialize→deserialize→serialize is a fixed point on the `serde_json::Value` — this catches a
 /// disjoint union misrouting a value to the wrong variant and `allOf` field loss. A stronger
 /// per-variant assertion proves a value built as variant K deserializes back onto variant K (not
-/// misrouted).
+/// misrouted), and the trial-matched unions decode a payload only into a variant of its JSON
+/// category (#1340).
 ///
 /// Confirms, before appending, that the fixture manifest carries no `proptest`: the dependency is
 /// scoped strictly to this throwaway test crate.
@@ -181,13 +182,58 @@ proptest! {
         let back: types::Shape = serde_json::from_value(json).expect("deserialize");
         prop_assert_eq!(was_circle, matches!(back, types::Shape::Circle(_)));
     }
+
+    // A trial-matched union tries a variant only on a payload of its JSON category: serde_json
+    // reads an array into a derived struct field by field, so an unguarded struct attempt takes
+    // any array whose items fit its leading fields.
+    #[test]
+    fn a_trial_one_of_decodes_an_array_only_as_its_array_variant(
+        items in proptest::collection::vec("[a-z]{1,8}", 1..4)
+    ) {
+        let back: types::Mixed = serde_json::from_value(serde_json::json!(items))
+            .expect("only the array variant takes an array");
+        prop_assert_eq!(back, types::Mixed::Labels(Box::new(items.clone())));
+        let written = serde_json::to_value(types::Mixed::Labels(Box::new(items.clone())))
+            .expect("the array variant serializes");
+        prop_assert_eq!(written, serde_json::json!(items));
+    }
+
+    #[test]
+    fn a_trial_any_of_decodes_an_array_only_as_its_array_variant(
+        items in proptest::collection::vec("[a-z]{1,8}", 1..4)
+    ) {
+        let back: types::MixedAny = serde_json::from_value(serde_json::json!(items))
+            .expect("only the array variant takes an array");
+        prop_assert_eq!(back, types::MixedAny::Labels(Box::new(items)));
+    }
+
+    #[test]
+    fn an_untagged_discriminated_variant_refuses_an_array(
+        items in proptest::collection::vec("[a-z]{1,8}", 1..4)
+    ) {
+        let decoded = serde_json::from_value::<types::Vehicle>(serde_json::json!(items));
+        prop_assert!(decoded.is_err(), "an array is no object variant: {:?}", decoded);
+    }
+}
+
+// A unit string-enum variant refuses the one-key object serde_json would otherwise read as that
+// variant, so the `anyOf` takes only strings.
+#[test]
+fn a_trial_string_variant_refuses_a_one_key_object() {
+    let decoded = serde_json::from_value::<types::Status>(serde_json::json!({ "queued": null }));
+    assert!(decoded.is_err(), "an object is no string variant: {decoded:?}");
+    let back: types::Status = serde_json::from_value(serde_json::json!("queued")).unwrap();
+    assert_eq!(back, types::Status::Phase(Box::new(types::Phase::Queued)));
 }
 "####;
 
 /// The spec generated for [`union_and_allof_roundtrip_under_proptest`]: a `User` object pulling in a
 /// discriminated union (`Pet`), a string-vs-array disjoint union (`StringOrList`), a nullable-variant
-/// union (`StringListOrNull`), a required-key-disjoint closed-object union (`Shape`), and an
-/// `allOf`-merged struct (`Account`). One operation references `User` so every type is emitted.
+/// union (`StringListOrNull`), a required-key-disjoint closed-object union (`Shape`), an
+/// `allOf`-merged struct (`Account`), and the trial-matched unions a payload of another JSON
+/// category must not satisfy: two open objects and an array as a `oneOf` (`Mixed`) and an `anyOf`
+/// (`MixedAny`), a string enum beside a string (`Status`), and a discriminated union with an
+/// untagged object member (`Vehicle`). One operation references `User` so every type is emitted.
 const ROUNDTRIP_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: Roundtrip, version: 1.0.0 }
@@ -216,6 +262,55 @@ components:
         notes: { $ref: "#/components/schemas/StringListOrNull" }
         shape: { $ref: "#/components/schemas/Shape" }
         account: { $ref: "#/components/schemas/Account" }
+        mixed: { $ref: "#/components/schemas/Mixed" }
+        mixedAny: { $ref: "#/components/schemas/MixedAny" }
+        status: { $ref: "#/components/schemas/Status" }
+        vehicle: { $ref: "#/components/schemas/Vehicle" }
+    Labelled:
+      type: object
+      properties:
+        id: { type: string }
+    Named:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+    Labels:
+      type: array
+      items: { type: string }
+    Mixed:
+      oneOf:
+        - $ref: "#/components/schemas/Labelled"
+        - $ref: "#/components/schemas/Named"
+        - $ref: "#/components/schemas/Labels"
+    MixedAny:
+      anyOf:
+        - $ref: "#/components/schemas/Labelled"
+        - $ref: "#/components/schemas/Named"
+        - $ref: "#/components/schemas/Labels"
+    Phase:
+      type: string
+      enum: [queued, running]
+    Status:
+      anyOf:
+        - $ref: "#/components/schemas/Phase"
+        - type: string
+    Car:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+        wheels: { type: integer }
+    Vehicle:
+      oneOf:
+        - $ref: "#/components/schemas/Car"
+        - type: object
+          properties:
+            label: { type: string }
+      discriminator:
+        propertyName: kind
+        mapping:
+          car: "#/components/schemas/Car"
     Cat:
       type: object
       required: [petType, name]
