@@ -10,7 +10,8 @@
 //! `tokio::time::sleep`).
 //! [`RetryBackend`] simply `.await`s that future; it never sleeps itself. A pure
 //! [`exponential_backoff`] helper computes the delay [`Duration`] a policy hands to its timer, so
-//! exponential backoff needs no runtime support either.
+//! exponential backoff needs no runtime support either, and [`full_jitter`] spreads that delay
+//! over a random fraction the caller draws, so the runtime needs no source of randomness.
 //!
 //! ## Request replay and cloneability
 //!
@@ -45,20 +46,29 @@
 //! budget there. Pick a `base` above a typical loss burst and a `max` above a typical outage, so
 //! later attempts arrive after the condition has cleared.
 //!
+//! Clients that failed together and wait exactly the backoff retry together, and can keep the
+//! server in the state that failed them. [`full_jitter`] spreads each wait over `[0, backoff)`
+//! with a draw the caller supplies; keep the `Retry-After` floor by raising the jittered wait to
+//! [`RetryOutcome::retry_after`], as the example below does.
+//!
 //! ```ignore
 //! use std::sync::Arc;
 //! use std::time::{Duration, SystemTime};
 //!
 //! // A policy that retries transient failures of idempotent requests up to five times with
-//! // exponential backoff, never sooner than the server's `Retry-After`, using the caller's tokio
-//! // timer for the wait — no timer lives in the runtime. The wait is a `RetryWait`, which is `Send`
-//! // on native and not on `wasm32`, so the policy compiles on both.
+//! // fully jittered exponential backoff, never sooner than the server's `Retry-After`, using the
+//! // caller's tokio timer for the wait and the caller's `rand` for the jitter — no timer or random
+//! // source lives in the runtime. The wait is a `RetryWait`, which is `Send` on native and not on
+//! // `wasm32`, so the policy compiles on both.
 //! struct Backoff;
 //! impl RetryPolicy for Backoff {
 //!     fn retry<'a>(&'a self, attempt: u32, outcome: &RetryOutcome<'_>) -> Option<RetryWait<'a>> {
 //!         if attempt < 5 && outcome.is_transient() {
-//!             let max = Duration::from_secs(5);
-//!             let wait = outcome.backoff(attempt, Duration::from_millis(100), max, SystemTime::now());
+//!             let backoff = exponential_backoff(attempt, Duration::from_millis(100), Duration::from_secs(5));
+//!             let jittered = full_jitter(backoff, rand::random::<f64>());
+//!             let wait = outcome
+//!                 .retry_after(SystemTime::now())
+//!                 .map_or(jittered, |floor| jittered.max(floor));
 //!             // A server asking for more than a minute is not worth waiting on here.
 //!             (wait <= Duration::from_secs(60)).then(|| Box::pin(tokio::time::sleep(wait)) as RetryWait<'a>)
 //!         } else {
@@ -318,6 +328,26 @@ pub fn exponential_backoff(attempt: u32, base: Duration, max: Duration) -> Durat
     // `2^attempt` saturates at `u32::MAX`; a `base * factor` overflow then falls back to `max`.
     let factor = 2u32.saturating_pow(attempt);
     base.checked_mul(factor).unwrap_or(max).min(max)
+}
+
+/// Full jitter: `backoff` scaled by `unit`, a uniformly random draw from `[0, 1)` the caller
+/// supplies, so the wait is spread over `[0, backoff)` and clients that failed together do not
+/// retry in lockstep. The runtime reads no randomness of its own: pass, for example,
+/// `rand::random::<f64>()`.
+///
+/// A draw at or below `0` (or not a number) waits nothing, and one at or above `1` the whole
+/// `backoff`; the result never exceeds `backoff`, and the helper never panics.
+pub fn full_jitter(backoff: Duration, unit: f64) -> Duration {
+    if unit.is_nan() || unit <= 0.0 {
+        return Duration::ZERO;
+    }
+    if unit >= 1.0 {
+        return backoff;
+    }
+    // `as_secs_f64` rounds, so the product can land just past `backoff` or past what a `Duration`
+    // holds; either way the backoff itself is the bound.
+    Duration::try_from_secs_f64(backoff.as_secs_f64() * unit)
+        .map_or(backoff, |jittered| jittered.min(backoff))
 }
 
 /// A `Retry-After` field value as the delay it asks for from `now` (RFC 9110 §10.2.3): its

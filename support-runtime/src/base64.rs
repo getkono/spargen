@@ -12,8 +12,8 @@
 //!
 //! Encoding always writes the padded standard alphabet. Decoding takes the same alphabet with or
 //! without its trailing padding, and refuses anything else: another alphabet's characters
-//! (base64url's `-` and `_`), whitespace or line breaks, padding before the end, or a length no
-//! encoding produces.
+//! (base64url's `-` and `_`), whitespace or line breaks, padding before the end, a length no
+//! encoding produces, or a final quantum whose bits past its last whole byte are not zero.
 
 use std::fmt;
 
@@ -114,7 +114,13 @@ fn decode(text: &str) -> Option<Vec<u8>> {
         for (index, character) in chunk.iter().enumerate() {
             group |= sextet(*character)? << (18 - 6 * index);
         }
-        // `n` characters carry `n - 1` whole bytes.
+        // `n` characters carry `n - 1` whole bytes; the bits a short final quantum holds past
+        // them are zero in every encoding (RFC 4648 §3.5), so a set one is refused rather than
+        // dropped, and each byte string has exactly one accepted spelling per padding form.
+        let carried = 24 - 8 * (chunk.len() - 1);
+        if group & ((1 << carried) - 1) != 0 {
+            return None;
+        }
         for index in 0..chunk.len() - 1 {
             out.push((group >> (16 - 8 * index)) as u8);
         }
@@ -195,6 +201,10 @@ mod tests {
             "-_8=",       // the base64url alphabet
             "Zm9v!",      // a character of no alphabet
             "====",       // padding alone
+            "Zh==",       // non-zero trailing bits after one byte
+            "Zh",         // the same unpadded
+            "Zm9=",       // non-zero trailing bits after two bytes
+            "Zm9vZh==",   // the same after a whole quantum
         ] {
             assert_eq!(super::decode(text), None, "{text:?}");
         }
