@@ -9,7 +9,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use super::CodegenOptions;
-use crate::ir::{closes_fence, fence_opener};
+use crate::ir::{closes_fence, fence_opener, leading_columns, list_indent};
 
 /// Spec-carried prose as it is rendered under `options`: [`sanitize_carried`] applied, or, under
 /// `Spec::verbatim_docs(true)`, the text as written.
@@ -240,18 +240,6 @@ fn indented_fence_length(lines: &[Cow<'_, str>], kinds: &[LineKind]) -> usize {
         }
     }
     (longest + 1).max(3)
-}
-
-/// The width of `line`'s leading whitespace, a tab counted as the four spaces
-/// [`normalize_rustdoc`] turns it into.
-fn leading_columns(line: &str) -> usize {
-    line.bytes()
-        .map_while(|byte| match byte {
-            b' ' => Some(1),
-            b'\t' => Some(4),
-            _ => None,
-        })
-        .sum()
 }
 
 /// How [`sanitize_carried`] treats one line of carried text.
@@ -768,30 +756,6 @@ fn html_tag(rest: &str) -> Option<(usize, String, TagKind)> {
     Some((end + 1, name, kind))
 }
 
-/// The content column of the list item `line` opens, or `None` when it opens none: a `-`, `*` or
-/// `+` bullet, or digits then `.` or `)`, each followed by at least one space.
-fn list_indent(line: &str) -> Option<usize> {
-    let leading = line.len() - line.trim_start_matches(' ').len();
-    let text = &line[leading..];
-    if matches!(text.as_bytes().first(), Some(b'-' | b'*' | b'+')) {
-        let spacing = text.as_bytes()[1..]
-            .iter()
-            .take_while(|byte| **byte == b' ')
-            .count();
-        return (spacing > 0).then_some(leading + 1 + spacing);
-    }
-    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
-    let marker = *text.as_bytes().get(digits)?;
-    if digits == 0 || !matches!(marker, b'.' | b')') {
-        return None;
-    }
-    let spacing = text.as_bytes()[digits + 1..]
-        .iter()
-        .take_while(|byte| **byte == b' ')
-        .count();
-    (spacing > 0).then_some(leading + digits + 1 + spacing)
-}
-
 /// Normalize spec-authored prose for Rust's documentation lint surface, without altering what it
 /// says:
 ///
@@ -1210,6 +1174,11 @@ mod tests {
                 "an unclosed fence is closed before a trailing newline",
                 "x\n  ````json\nVec<T>\n",
                 "x\n  ````json\nVec<T>\n  ````\n",
+            ),
+            (
+                "an unclosed fence at a list item's content indentation is closed there",
+                "- a\n\n    ```json\n    {}",
+                "- a\n\n    ```json\n    {}\n    ```",
             ),
             (
                 "an indented code block becomes a fenced one",

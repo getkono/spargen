@@ -351,13 +351,52 @@ pub(crate) fn closes_fence(line: &str, marker: u8, length: usize) -> bool {
     run >= length && trimmed[run..].trim().is_empty()
 }
 
+/// The width of `line`'s leading whitespace, a tab counted as the four spaces `normalize_rustdoc`
+/// turns it into.
+pub(crate) fn leading_columns(line: &str) -> usize {
+    line.bytes()
+        .map_while(|byte| match byte {
+            b' ' => Some(1),
+            b'\t' => Some(4),
+            _ => None,
+        })
+        .sum()
+}
+
+/// The content column of the list item `line` opens, or `None` when it opens none: a `-`, `*` or
+/// `+` bullet, or digits then `.` or `)`, each followed by at least one space.
+pub(crate) fn list_indent(line: &str) -> Option<usize> {
+    let leading = line.len() - line.trim_start_matches(' ').len();
+    let text = &line[leading..];
+    if matches!(text.as_bytes().first(), Some(b'-' | b'*' | b'+')) {
+        let spacing = text.as_bytes()[1..]
+            .iter()
+            .take_while(|byte| **byte == b' ')
+            .count();
+        return (spacing > 0).then_some(leading + 1 + spacing);
+    }
+    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+    let marker = *text.as_bytes().get(digits)?;
+    if digits == 0 || !matches!(marker, b'.' | b')') {
+        return None;
+    }
+    let spacing = text.as_bytes()[digits + 1..]
+        .iter()
+        .take_while(|byte| **byte == b' ')
+        .count();
+    (spacing > 0).then_some(leading + digits + 1 + spacing)
+}
+
 /// The line that closes the code fence Markdown `text` leaves open at its end, at the opening
 /// fence's indentation, or `None` when it leaves none open. A line indented four columns or more
-/// after a blank line opens no fence: it is an indented code block's.
+/// past the content column of the list item it is in (the margin outside one), after a blank line,
+/// opens no fence: it is an indented code block's. A prose line indented less than two columns
+/// ends the list item.
 pub(crate) fn unclosed_fence(text: &str) -> Option<String> {
     let mut fence: Option<(u8, usize, &str)> = None;
     let mut previous_blank = true;
     let mut previous_indented = false;
+    let mut list_column: Option<usize> = None;
     for line in text.lines() {
         let trimmed = line.trim_start_matches([' ', '\t']);
         let blank = trimmed.trim_end().is_empty();
@@ -368,12 +407,16 @@ pub(crate) fn unclosed_fence(text: &str) -> Option<String> {
             }
         } else if !blank
             && (previous_blank || previous_indented)
-            && (line.starts_with('\t') || line.starts_with("    "))
+            && leading_columns(line) >= list_column.unwrap_or(0) + 4
         {
             indented = true;
         } else if let Some((marker, length, _)) = fence_opener(line) {
             let indent = &line[..line.len() - trimmed.len()];
             fence = Some((marker, length, indent));
+        } else if let Some(column) = list_indent(line) {
+            list_column = Some(column);
+        } else if !blank && line.len() - trimmed.len() < 2 {
+            list_column = None;
         }
         previous_blank = blank;
         previous_indented = indented;
@@ -1127,6 +1170,21 @@ mod tests {
                 "an indented line straight after a paragraph opens one",
                 "a\n    ```",
                 Some("    ```"),
+            ),
+            (
+                "a fence at a list item's content indentation opens one",
+                "- a\n\n    ```json\n    {}",
+                Some("    ```"),
+            ),
+            (
+                "a list item's indented code block's line is no fence",
+                "- a\n\n      ```",
+                None,
+            ),
+            (
+                "a line back at the margin ends the list",
+                "- a\n\nb\n\n    ```",
+                None,
             ),
             ("an empty text", "", None),
         ];
