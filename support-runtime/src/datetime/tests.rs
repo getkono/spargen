@@ -32,6 +32,18 @@ fn date_time_keeps_a_non_utc_offset_in_rfc3339_form() {
     assert_eq!(serde_json::from_str::<DateTime>(&json).unwrap(), value);
 }
 
+/// RFC 3339's `-00:00` (UTC, local offset unknown) reads as UTC and is written back as `Z`: the
+/// unknown-offset marker is not kept.
+#[test]
+fn date_time_writes_an_unknown_local_offset_back_as_z() {
+    let value: DateTime = serde_json::from_str("\"2023-11-14T22:13:20-00:00\"").unwrap();
+    assert_eq!(value, date_time());
+    assert_eq!(
+        serde_json::to_string(&value).unwrap(),
+        "\"2023-11-14T22:13:20Z\""
+    );
+}
+
 #[test]
 fn date_time_display_matches_serialization() {
     let value = date_time();

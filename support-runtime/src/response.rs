@@ -299,6 +299,24 @@ mod tests {
         assert_eq!(poll_ready(stream.collect_bounded(8)).unwrap().len(), 8);
     }
 
+    /// Reads interleave with the collector: whatever `next` read before `collect_bounded` is not
+    /// counted against its limit, and a rest past the limit is refused at the chunk that crosses
+    /// it, the chunks after it unread.
+    #[test]
+    fn collect_bounded_after_reads_refuses_a_rest_past_its_limit() {
+        let chunks = Chunks::repeat(4, 5);
+        let pulled = chunks.pulled();
+        let mut stream = streamed(chunks, Some(20)).into_inner();
+        assert_eq!(poll_ready(stream.next()).unwrap().unwrap().len(), 4);
+        assert_eq!(poll_ready(stream.next()).unwrap().unwrap().len(), 4);
+        let error = poll_ready(stream.collect_bounded(7)).unwrap_err();
+        assert!(
+            matches!(error, Error::BodyTooLarge { limit: 7, status } if status == 200),
+            "{error:?}"
+        );
+        assert_eq!(pulled.load(Ordering::SeqCst), 4);
+    }
+
     /// Issue #1263: the body handed over is the rest of the response's body.
     #[test]
     fn into_body_hands_over_the_rest_of_the_body() {

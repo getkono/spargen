@@ -1996,7 +1996,8 @@ mod support {
             /// fetched (a self-link, or a longer cycle such as page 1 → page 2 → page 1), so following it
             /// would never end. Every page before it was yielded; nothing was sent for `url`.
             PaginationCycle {
-                /// The revisited URL the `next` link resolved to.
+                /// The revisited URL the `next` link resolved to, without its userinfo and query, where a
+                /// credential would ride.
                 url: url::Url,
             },
             /// #12 — a non-streaming operation's response body exceeded the limit the call was made
@@ -4443,8 +4444,9 @@ mod support {
             ///   fetched → `Some(Err(Error::PaginationOriginChanged { from, to }))`, without sending a
             ///   request. The page whose link left the origin was already yielded by the call before;
             /// * a `next` URL the paginator has already fetched (fragments aside) →
-            ///   `Some(Err(Error::PaginationCycle { url }))`, without sending a request. The page whose
-            ///   link closed the cycle was already yielded by the call before;
+            ///   `Some(Err(Error::PaginationCycle { url }))`, its `url` without userinfo or query, without
+            ///   sending a request. The page whose link closed the cycle was already yielded by the call
+            ///   before;
             /// * a request for the `next` URL that cannot be built →
             ///   `Some(Err(Error::RequestConstruction(..)))`;
             /// * a **transport failure** → `Some(Err(..))`;
@@ -4476,7 +4478,11 @@ mod support {
                 let mut key = url.clone();
                 key.set_fragment(None);
                 if !self.fetched.insert(key) {
-                    return Some(Err(Error::PaginationCycle { url }));
+                    return Some(
+                        Err(Error::PaginationCycle {
+                            url: without_credentials(url),
+                        }),
+                    );
                 }
                 let request = match RequestBuilder::new(http::Method::GET, url.clone())
                     .build()
@@ -4927,11 +4933,13 @@ mod support {
                 (content_type, body.freeze())
             }
         }
-        /// One part of a [`MultipartForm`]: its bytes, and the `Content-Type` and other headers it
-        /// carries beside its `Content-Disposition`.
+        /// One part of a [`MultipartForm`]: its bytes, the `filename` its `Content-Disposition` gives,
+        /// and the `Content-Type` and other headers it carries beside that `Content-Disposition`.
         #[derive(Debug, Clone)]
         pub struct MultipartPart {
             body: Bytes,
+            /// The `filename` parameter of the part's `Content-Disposition`.
+            file_name: Option<String>,
             /// The part's own `Content-Type`.
             mime: Option<HeaderValue>,
             headers: HeaderMap,
@@ -4946,6 +4954,7 @@ mod support {
             pub fn bytes(bytes: impl Into<Bytes>) -> Self {
                 Self {
                     body: bytes.into(),
+                    file_name: None,
                     mime: None,
                     headers: HeaderMap::new(),
                 }
@@ -4958,29 +4967,46 @@ mod support {
                 );
                 Ok(self)
             }
-            /// Set the headers the part carries after its `Content-Disposition` and `Content-Type`,
-            /// replacing any set before.
-            pub fn headers(mut self, headers: HeaderMap) -> Self {
-                self.headers = headers;
+            /// Set the `filename` parameter of the part's `Content-Disposition`, replacing any set before.
+            /// RFC 7578 §4.2 says a part holding a file's content should carry one, and many servers read
+            /// a part without it as a plain field rather than a file. It is escaped as the part's name is.
+            pub fn file_name(mut self, file_name: impl Into<String>) -> Self {
+                self.file_name = Some(file_name.into());
                 self
             }
-            /// The part's header lines, each ending in CRLF: `Content-Disposition` naming it, then its
-            /// `Content-Type`, then its other headers.
-            ///
-            /// The name is written as the WHATWG HTML standard's `multipart/form-data` encoding writes a
-            /// form field's: as UTF-8, quoted, with `"`, CR and LF percent-encoded, and nothing else
-            /// escaped. RFC 7578 §4.2 rules out the RFC 2231 `name*=` form.
-            fn head(&self, name: &str) -> Vec<u8> {
-                let mut head = b"Content-Disposition: form-data; name=\"".to_vec();
-                for byte in name.bytes() {
-                    match byte {
-                        b'"' => head.extend_from_slice(b"%22"),
-                        b'\r' => head.extend_from_slice(b"%0D"),
-                        b'\n' => head.extend_from_slice(b"%0A"),
-                        byte => head.push(byte),
-                    }
+            /// Set the headers the part carries after its `Content-Disposition` and `Content-Type`,
+            /// replacing any set before. A map holding a `Content-Disposition` is refused as
+            /// [`Error::RequestConstruction`]: the part writes its own, from its name and
+            /// [`Self::file_name`], and a second would leave the reader to pick one.
+            pub fn headers(
+                mut self,
+                headers: HeaderMap,
+            ) -> Result<Self, Error<Infallible>> {
+                if headers.contains_key(http::header::CONTENT_DISPOSITION) {
+                    return Err(
+                        Error::request_message(
+                            "a multipart part header sets `Content-Disposition`, which the part writes itself",
+                        ),
+                    );
                 }
-                head.extend_from_slice(b"\"\r\n");
+                self.headers = headers;
+                Ok(self)
+            }
+            /// The part's header lines, each ending in CRLF: `Content-Disposition` naming it, and giving
+            /// its `filename` where it has one, then its `Content-Type`, then its other headers.
+            ///
+            /// The name and filename are written as the WHATWG HTML standard's `multipart/form-data`
+            /// encoding writes a form field's: as UTF-8, quoted, with `"`, CR and LF percent-encoded, and
+            /// nothing else escaped. RFC 7578 §4.2 rules out the RFC 2231 `name*=` and `filename*=`
+            /// forms.
+            fn head(&self, name: &str) -> Vec<u8> {
+                let mut head = b"Content-Disposition: form-data; name=".to_vec();
+                quote_parameter(&mut head, name);
+                if let Some(file_name) = &self.file_name {
+                    head.extend_from_slice(b"; filename=");
+                    quote_parameter(&mut head, file_name);
+                }
+                head.extend_from_slice(b"\r\n");
                 let mime = self.mime.iter().map(|value| ("Content-Type", value));
                 let headers = self
                     .headers
@@ -4994,6 +5020,20 @@ mod support {
                 }
                 head
             }
+        }
+        /// Append `value` to `head` quoted, with `"`, CR and LF percent-encoded and every other byte as
+        /// it is, as [`MultipartPart`] writes a `Content-Disposition` parameter.
+        fn quote_parameter(head: &mut Vec<u8>, value: &str) {
+            head.push(b'"');
+            for byte in value.bytes() {
+                match byte {
+                    b'"' => head.extend_from_slice(b"%22"),
+                    b'\r' => head.extend_from_slice(b"%0D"),
+                    b'\n' => head.extend_from_slice(b"%0A"),
+                    byte => head.push(byte),
+                }
+            }
+            head.push(b'"');
         }
         /// A boundary of 32 lowercase hexadecimal digits, from `std`'s randomly keyed hasher (keyed per
         /// process where the platform supplies randomness) over `seed`. [`MultipartForm`] moves to the
@@ -16853,7 +16893,8 @@ Response `409`: Conflict*/
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         let mut form = support::MultipartForm::new();
-        let mut part = support::MultipartPart::bytes(body.file.to_vec());
+        let mut part = support::MultipartPart::bytes(body.file.to_vec())
+            .file_name("file");
         part = part.mime_str("application/octet-stream").map_err(support::Error::widen)?;
         form = form.part("file", part);
         let mut part = support::MultipartPart::text(body.caption.to_string());
@@ -16866,7 +16907,7 @@ Response `409`: Conflict*/
                 reqwest::header::HeaderValue::try_from("caption text")
                     .map_err(support::Error::request_construction)?,
             );
-        part = part.headers(part_headers);
+        part = part.headers(part_headers).map_err(support::Error::widen)?;
         form = form.part("caption", part);
         if let Some(value) = &body.count {
             let mut part = support::MultipartPart::text(value.to_string());
@@ -17275,14 +17316,16 @@ Response `409`: Conflict*/
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         let mut form = support::MultipartForm::new();
         if let Some(value) = &body.file {
-            let mut part = support::MultipartPart::bytes(value.to_vec());
+            let mut part = support::MultipartPart::bytes(value.to_vec())
+                .file_name("file");
             part = part
                 .mime_str("application/octet-stream")
                 .map_err(support::Error::widen)?;
             form = form.part("file", part);
         }
         if let support::Nullable::Value(value) = &body.thumb {
-            let mut part = support::MultipartPart::bytes(value.to_vec());
+            let mut part = support::MultipartPart::bytes(value.to_vec())
+                .file_name("thumb");
             part = part
                 .mime_str("application/octet-stream")
                 .map_err(support::Error::widen)?;

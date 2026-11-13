@@ -709,6 +709,79 @@ fn tracking_includes_the_spec_its_refs_the_manifest_the_lock_and_the_config() {
     );
 }
 
+/// A remote `$ref` read from its vendored copy is tracked too: the copy under `.spargen/vendor/`
+/// and the `spargen.lock` pinning it, so a re-run of `spargen lock` re-expands the macro.
+#[test]
+fn tracking_includes_a_vendored_remote_document() {
+    let scratch = Scratch::new("tracking-vendored");
+    let spec = scratch.write(
+        "openapi.yaml",
+        &SPLIT_SPEC.replace("schemas.yaml#/Pet", "https://example.com/schemas.yaml#/Pet"),
+    );
+    // The sha256 of `SPLIT_SCHEMAS`, which the build checks the vendored copy against.
+    let lock = scratch.write(
+        "spargen.lock",
+        "version = 1\n\n[[remote]]\nurl = \"https://example.com/schemas.yaml\"\n\
+         sha256 = \"2631dc5f74523ef77cd6eb2a5b4c6d3fba915bbded45ad04b1bf5d7008056b02\"\n\
+         path = \"example.com/schemas.yaml\"\n",
+    );
+    let vendored = scratch.write(".spargen/vendor/example.com/schemas.yaml", SPLIT_SCHEMAS);
+    let (requirements, _) = spargen::requirements(&Spec::new(spec.clone()))
+        .unwrap_or_else(|report| panic!("{report:#?}"));
+    let manifest = scratch.write(
+        "Cargo.toml",
+        &format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+                 [workspace]\n\n{}",
+            requirements.manifest_block()
+        ),
+    );
+
+    let configured = spec_for(&args(r#""openapi.yaml""#), &scratch.consumer()).unwrap();
+    let preview = spargen::__private::preview_for_macro(&configured, &manifest);
+    assert_eq!(failure_message("openapi.yaml", &preview), None);
+    let mut expected = vec![manifest, spec, lock, vendored];
+    expected.sort();
+    assert_eq!(
+        tracking(&preview).to_string(),
+        quote::quote! { #(const _: &[u8] = include_bytes!(#expected);)* }.to_string()
+    );
+}
+
+/// A spec that generates but whose consumer manifest fails the runtime-dependency audit is a
+/// failure too, though a module was rendered: the message lists each `E023` the audit reported.
+#[test]
+fn an_audit_only_rejection_renders_its_e023_errors() {
+    let scratch = Scratch::new("audit-only");
+    let spec = scratch.write("openapi.yaml", SPLIT_SPEC);
+    scratch.write("schemas.yaml", SPLIT_SCHEMAS);
+    let manifest = scratch.write(
+        "Cargo.toml",
+        "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+             [workspace]\n",
+    );
+
+    let preview = spargen::__private::preview_for_macro(&Spec::new(spec), &manifest);
+    assert_eq!(preview.report.outcome(), spargen::Outcome::Rejected);
+    assert!(preview.contents.is_some(), "the audit runs after rendering");
+    let errors: Vec<&spargen::Diagnostic> = preview.report.errors().collect();
+    assert!(!errors.is_empty(), "{:#?}", preview.report);
+    assert!(
+        errors
+            .iter()
+            .all(|error| error.code == spargen::Code::RuntimeDependencyContract),
+        "{:#?}",
+        preview.report
+    );
+    let mut expected = String::from("spargen could not generate a client from `openapi.yaml`");
+    for error in &errors {
+        expected.push_str(&format!("\n{error}"));
+    }
+    let message = failure_message("openapi.yaml", &preview).unwrap();
+    assert_eq!(message, expected);
+    assert!(message.contains("error[E023]"), "{message}");
+}
+
 /// An `omit { file("…") { … } }` path is relative to the spec's directory, as a `$ref` is, not to
 /// the crate's `Cargo.toml` the spec path itself is relative to.
 #[test]

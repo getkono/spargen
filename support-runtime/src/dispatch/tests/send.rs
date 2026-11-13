@@ -505,6 +505,26 @@ fn a_bodiless_success_declaring_a_length_past_its_limit_decodes() {
     assert_eq!((read.status().as_u16(), read.inner().len()), (204, 0));
 }
 
+/// The answer to a `HEAD` request reaches a `_stream` twin's `ByteStream` as bodiless too: its
+/// `Content-Length` past the limit refuses nothing, and it collects empty. The same answer to a
+/// `GET` is refused unread.
+#[test]
+fn a_head_answer_through_stream_success_bytes_ignores_its_declared_length() {
+    let read = |request: http::Request<crate::HttpBody>| {
+        let backend = Canned::answering([declaring(response(200, ""), 5000)]);
+        let core = core_with(backend, crate::RequestOptions::default());
+        let sent = poll_ready(crate::dispatch::send(&core, request)).unwrap();
+        let stream = crate::stream_success_bytes(sent).into_inner();
+        poll_ready(stream.collect_bounded(11))
+    };
+    assert!(read(head_request()).unwrap().is_empty());
+    let error = read(crate::tests::request()).unwrap_err();
+    assert!(
+        matches!(error, Error::BodyTooLarge { limit: 11, status } if status == 200),
+        "{error:?}"
+    );
+}
+
 /// Issue #1308: a bodiless response whose body does carry bytes is still bounded as it is read,
 /// abandoned at the chunk that carries it past `max_body`.
 #[test]

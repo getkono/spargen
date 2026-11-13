@@ -45,6 +45,13 @@ fn union_and_allof_roundtrip_under_proptest() {
         status.success(),
         "the generated union/allOf types must survive the proptest JSON round-trip"
     );
+    // The union serde these types exercise, the `defaultMapping` trial check among it, lints
+    // clean.
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the round-trip fixture must lint clean");
 }
 
 /// The generated `tests/roundtrip.rs` for [`union_and_allof_roundtrip_under_proptest`]. Hand-written
@@ -269,6 +276,43 @@ fn an_untagged_discriminated_variant_holding_a_claimed_tag_does_not_serialize() 
     }
 }
 
+// The `defaultMapping` variant holding an unclaimed tag decodes through the untagged variants'
+// trial before the fallback, so a payload the untagged variant's schema accepts would come back as
+// that variant (#1376): it is refused. One no untagged variant accepts, or holding its own tag,
+// decodes back as itself.
+#[test]
+fn a_default_mapping_payload_an_untagged_variant_claims_does_not_serialize() {
+    let claimed = types::Ride::RideOther(Box::new(types::RideOther {
+        kind: Some("bus".to_owned()),
+        label: Some("x".to_owned()),
+        note: None,
+    }));
+    let error = serde_json::to_value(&claimed).expect_err("claimed by the untagged variant");
+    let error = error.to_string();
+    assert!(error.contains("Ride::RideOther"), "{error}");
+    assert!(error.contains("Ride::RideVariant1"), "{error}");
+    for (kind, label) in [(Some("bus"), None), (Some("RideOther"), Some("x"))] {
+        let ride = types::Ride::RideOther(Box::new(types::RideOther {
+            kind: kind.map(str::to_owned),
+            label: label.map(str::to_owned),
+            note: Some("n".to_owned()),
+        }));
+        let written = serde_json::to_value(&ride).expect("unclaimed by any untagged variant");
+        let back: types::Ride = serde_json::from_value(written).expect("decodes back");
+        assert_eq!(back, ride);
+    }
+    // Holding no tag, the variant is written with its own, which routes it back by tag.
+    let untagged = types::Ride::RideOther(Box::new(types::RideOther {
+        kind: None,
+        label: Some("x".to_owned()),
+        note: None,
+    }));
+    let written = serde_json::to_value(&untagged).expect("its own tag is inserted");
+    assert_eq!(written["kind"], "RideOther", "{written}");
+    let back: types::Ride = serde_json::from_value(written).expect("decodes back");
+    assert!(matches!(back, types::Ride::RideOther(_)), "{back:?}");
+}
+
 // A unit string-enum variant refuses the one-key object serde_json would otherwise read as that
 // variant, so the `anyOf` takes only strings.
 #[test]
@@ -286,7 +330,8 @@ fn a_trial_string_variant_refuses_a_one_key_object() {
 /// `allOf`-merged struct (`Account`), and the trial-matched unions a payload of another JSON
 /// category must not satisfy: two open objects and an array as a `oneOf` (`Mixed`) and an `anyOf`
 /// (`MixedAny`), a string enum beside a string (`Status`), and a discriminated union with an
-/// untagged object member (`Vehicle`). One operation references `User` so every type is emitted.
+/// untagged object member (`Vehicle`), and one whose `defaultMapping` member overlaps an untagged
+/// one (`Ride`). One operation references `User` so every type is emitted.
 const ROUNDTRIP_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: Roundtrip, version: 1.0.0 }
@@ -319,6 +364,7 @@ components:
         mixedAny: { $ref: "#/components/schemas/MixedAny" }
         status: { $ref: "#/components/schemas/Status" }
         vehicle: { $ref: "#/components/schemas/Vehicle" }
+        ride: { $ref: "#/components/schemas/Ride" }
     Labelled:
       type: object
       properties:
@@ -365,6 +411,26 @@ components:
         propertyName: kind
         mapping:
           car: "#/components/schemas/Car"
+    RideOther:
+      type: object
+      properties:
+        kind: { type: string }
+        label: { type: string }
+        note: { type: string }
+    Ride:
+      oneOf:
+        - $ref: "#/components/schemas/Car"
+        - type: object
+          required: [label]
+          properties:
+            kind: { type: string }
+            label: { type: string }
+        - $ref: "#/components/schemas/RideOther"
+      discriminator:
+        propertyName: kind
+        mapping:
+          car: "#/components/schemas/Car"
+        defaultMapping: "#/components/schemas/RideOther"
     Cat:
       type: object
       required: [petType, name]

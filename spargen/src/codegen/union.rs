@@ -92,7 +92,8 @@ pub(super) fn emit_union(
             });
             // A tag the variant already wrote is kept only if decoding it selects that variant
             // again: one of its own tags, or, for the `defaultMapping` variant, any value no other
-            // variant's tag claims. Any other held value is refused, never written out (#1344).
+            // variant's tag claims, so long as no untagged variant takes the payload first
+            // (`fallback_claim_check`). Any other held value is refused, never written out (#1344).
             let refusal_arms = union.variants.iter().enumerate().map(|(index, variant)| {
                 let variant_ident = union_variant_ident(names, id, variant);
                 let refusal = format!(
@@ -316,6 +317,80 @@ pub(super) fn emit_union(
                     }
                 }
             };
+            // The `defaultMapping` variant's payload reaches the fallback on decode only when its
+            // tag is absent, unclaimed or no string, and then only after the untagged variants'
+            // trial has taken nothing: a payload the trial would take is refused (#1376), naming
+            // the variant it would decode as. A tag a tagged variant claims routes by tag instead
+            // (its own) or was refused above (another's).
+            let fallback_claim_check =
+                default_variant
+                    .filter(|_| !attempts.is_empty())
+                    .map(|index| {
+                        let fallback_ident = union_variant_ident(names, id, &union.variants[index]);
+                        let reaches_trial = if claimed.is_empty() {
+                            quote! { matches!(self, #ident::#fallback_ident(_)) }
+                        } else {
+                            quote! {
+                                matches!(self, #ident::#fallback_ident(_))
+                                    && !matches!(
+                                        value.get(#tag_field).and_then(serde_json::Value::as_str),
+                                        #(Some(#claimed))|*
+                                    )
+                            }
+                        };
+                        let valid = trial_match_rule_tokens(*mode);
+                        let fallback_decl = fallback_member.then(unknown_fallback_decl_tokens);
+                        let unmatched = if fallback_member {
+                            quote! {
+                                if match_count == 0 {
+                                    unknown_fallback
+                                } else {
+                                    None
+                                }
+                            }
+                        } else {
+                            quote! { None }
+                        };
+                        let claimant_names = union.variants.iter().map(|variant| {
+                            let variant_ident = union_variant_ident(names, id, variant);
+                            let name = format!("{}::{}", ident.as_str(), variant_ident.as_str());
+                            quote! { #ident::#variant_ident(_) => #name, }
+                        });
+                        // Lowering never opens a union with a fallback; the arm keeps the match
+                        // exhaustive regardless.
+                        let unknown_name = unknown.map(|unknown| {
+                            let name = format!("{}::{}", ident.as_str(), unknown.as_str());
+                            quote! { #ident::#unknown { .. } => #name, }
+                        });
+                        let refusal = format!(
+                            "payload of variant {}::{} decodes as variant ",
+                            ident.as_str(),
+                            fallback_ident.as_str()
+                        );
+                        quote! {
+                            if #reaches_trial {
+                                let mut match_count = 0_usize;
+                                let mut selected: Option<(u32, Self)> = None;
+                                #fallback_decl
+                                #(#attempts)*
+                                let claimant = match selected {
+                                    Some((_, selected)) if #valid => Some(selected),
+                                    _ => #unmatched,
+                                };
+                                if let Some(claimant) = claimant {
+                                    let claimant = match claimant {
+                                        #(#claimant_names)*
+                                        #unknown_name
+                                    };
+                                    return Err(serde::ser::Error::custom(format_args!(
+                                        "{}{}",
+                                        #refusal,
+                                        claimant
+                                    )));
+                                }
+                            }
+                        }
+                    });
             let missing_tag_arm = untagged_trial(missing_tag_arm);
             let unknown_tag_arm = untagged_trial(unknown_tag_arm);
             quote! {
@@ -358,6 +433,7 @@ pub(super) fn emit_union(
                             #tag_write
                         }
                         #tagless_check
+                        #fallback_claim_check
                         value.serialize(serializer)
                     }
                 }

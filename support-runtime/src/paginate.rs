@@ -153,8 +153,9 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
     ///   fetched → `Some(Err(Error::PaginationOriginChanged { from, to }))`, without sending a
     ///   request. The page whose link left the origin was already yielded by the call before;
     /// * a `next` URL the paginator has already fetched (fragments aside) →
-    ///   `Some(Err(Error::PaginationCycle { url }))`, without sending a request. The page whose
-    ///   link closed the cycle was already yielded by the call before;
+    ///   `Some(Err(Error::PaginationCycle { url }))`, its `url` without userinfo or query, without
+    ///   sending a request. The page whose link closed the cycle was already yielded by the call
+    ///   before;
     /// * a request for the `next` URL that cannot be built →
     ///   `Some(Err(Error::RequestConstruction(..)))`;
     /// * a **transport failure** → `Some(Err(..))`;
@@ -184,7 +185,9 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
         let mut key = url.clone();
         key.set_fragment(None);
         if !self.fetched.insert(key) {
-            return Some(Err(Error::PaginationCycle { url }));
+            return Some(Err(Error::PaginationCycle {
+                url: without_credentials(url),
+            }));
         }
         let request = match RequestBuilder::new(http::Method::GET, url.clone()).build() {
             Ok(request) => request,

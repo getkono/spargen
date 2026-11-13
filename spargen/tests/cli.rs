@@ -938,6 +938,40 @@ fn every_spec_subcommand_exits_three_on_an_unreadable_config() {
     );
 }
 
+/// `--format json` does not reshape a usage error: a configuration that cannot be read and an
+/// unknown `explain` code each print the one human `error:` line on stderr, as without it, exit
+/// `3`, and print nothing on stdout.
+#[test]
+fn a_usage_error_under_format_json_is_the_human_error_line() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = spec_arg(temp.path(), "openapi.yaml", ONE_OPERATION);
+    for args in [
+        vec!["check", spec.as_str(), "--config", "missing.toml"],
+        vec!["explain", "E999"],
+    ] {
+        let (human_status, human_stdout, human_stderr) = spargen(temp.path(), &args);
+        let json_args: Vec<&str> = args.iter().copied().chain(["--format", "json"]).collect();
+        let (status, stdout, stderr) = spargen(temp.path(), &json_args);
+        assert_eq!(
+            status,
+            Some(3),
+            "{json_args:?}: stdout {stdout} stderr {stderr}"
+        );
+        assert!(stdout.is_empty(), "{json_args:?}: {stdout}");
+        assert!(stderr.starts_with("error: "), "{json_args:?}: {stderr}");
+        assert_eq!(stderr.lines().count(), 1, "{json_args:?}: {stderr}");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&stderr).is_err(),
+            "{json_args:?}: {stderr}"
+        );
+        assert_eq!(
+            (status, stdout, stderr),
+            (human_status, human_stdout, human_stderr),
+            "{json_args:?}"
+        );
+    }
+}
+
 /// A command line clap itself rejects, here one missing a required argument, exits with clap's
 /// own status 2 rather than spargen's usage status 3, and prints nothing on stdout.
 #[test]
