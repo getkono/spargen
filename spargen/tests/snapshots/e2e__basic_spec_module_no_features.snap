@@ -9323,8 +9323,41 @@ pub mod types {
                         ),
                     );
                 };
-                map.entry("type".to_owned())
-                    .or_insert_with(|| { serde_json::Value::String(tag.to_owned()) });
+                if let Some(held) = map.get("type") {
+                    let refusal: Option<&str> = match self {
+                        MixedContent::MixedContentVariant0(_) => None,
+                        MixedContent::ContentFile(_) => {
+                            match held.as_str() {
+                                Some("file") | Some("ContentFile") => None,
+                                _ => {
+                                    Some(" does not select variant MixedContent::ContentFile")
+                                }
+                            }
+                        }
+                        MixedContent::ContentLink(_) => {
+                            match held.as_str() {
+                                Some("symlink") | Some("ContentLink") => None,
+                                _ => {
+                                    Some(" does not select variant MixedContent::ContentLink")
+                                }
+                            }
+                        }
+                    };
+                    if let Some(refusal) = refusal {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format_args!(
+                                    "{}{}{}", "discriminator `type` value ", held, refusal
+                                ),
+                            ),
+                        );
+                    }
+                } else {
+                    map.insert(
+                        "type".to_owned(),
+                        serde_json::Value::String(tag.to_owned()),
+                    );
+                }
             }
             value.serialize(serializer)
         }
@@ -9853,8 +9886,36 @@ pub mod types {
                         ),
                     );
                 };
-                map.entry("petType".to_owned())
-                    .or_insert_with(|| { serde_json::Value::String(tag.to_owned()) });
+                if let Some(held) = map.get("petType") {
+                    let refusal: Option<&str> = match self {
+                        Pet::Cat(_) => {
+                            match held.as_str() {
+                                Some("cat") | Some("kitty") | Some("Cat") => None,
+                                _ => Some(" does not select variant Pet::Cat"),
+                            }
+                        }
+                        Pet::Dog(_) => {
+                            match held.as_str() {
+                                Some("dog") | Some("Dog") => None,
+                                _ => Some(" does not select variant Pet::Dog"),
+                            }
+                        }
+                    };
+                    if let Some(refusal) = refusal {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format_args!(
+                                    "{}{}{}", "discriminator `petType` value ", held, refusal
+                                ),
+                            ),
+                        );
+                    }
+                } else {
+                    map.insert(
+                        "petType".to_owned(),
+                        serde_json::Value::String(tag.to_owned()),
+                    );
+                }
             }
             value.serialize(serializer)
         }
@@ -10017,8 +10078,37 @@ pub mod types {
                         ),
                     );
                 };
-                map.entry("petType".to_owned())
-                    .or_insert_with(|| { serde_json::Value::String(tag.to_owned()) });
+                if let Some(held) = map.get("petType") {
+                    let refusal: Option<&str> = match self {
+                        LooseAnimal::Cat(_) => {
+                            match held.as_str() {
+                                Some("Cat") => None,
+                                _ => Some(" does not select variant LooseAnimal::Cat"),
+                            }
+                        }
+                        LooseAnimal::Dog(_) => {
+                            match held.as_str() {
+                                Some("Dog") => None,
+                                _ => Some(" does not select variant LooseAnimal::Dog"),
+                            }
+                        }
+                        LooseAnimal::LooseAnimalVariant2(_) => None,
+                    };
+                    if let Some(refusal) = refusal {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format_args!(
+                                    "{}{}{}", "discriminator `petType` value ", held, refusal
+                                ),
+                            ),
+                        );
+                    }
+                } else {
+                    map.insert(
+                        "petType".to_owned(),
+                        serde_json::Value::String(tag.to_owned()),
+                    );
+                }
             }
             value.serialize(serializer)
         }
@@ -10200,8 +10290,36 @@ pub mod types {
                         ),
                     );
                 };
-                map.entry("type".to_owned())
-                    .or_insert_with(|| { serde_json::Value::String(tag.to_owned()) });
+                if let Some(held) = map.get("type") {
+                    let refusal: Option<&str> = match self {
+                        Channel::Webhook(_) => {
+                            match held.as_str() {
+                                Some("webhook") => None,
+                                _ => Some(" does not select variant Channel::Webhook"),
+                            }
+                        }
+                        Channel::Apprise(_) => {
+                            match held.as_str() {
+                                Some("apprise") => None,
+                                _ => Some(" does not select variant Channel::Apprise"),
+                            }
+                        }
+                    };
+                    if let Some(refusal) = refusal {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format_args!(
+                                    "{}{}{}", "discriminator `type` value ", held, refusal
+                                ),
+                            ),
+                        );
+                    }
+                } else {
+                    map.insert(
+                        "type".to_owned(),
+                        serde_json::Value::String(tag.to_owned()),
+                    );
+                }
             }
             value.serialize(serializer)
         }
