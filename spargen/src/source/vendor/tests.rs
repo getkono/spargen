@@ -1,5 +1,14 @@
 use super::*;
 
+/// [`super::vendor`] writing through the writer the facade passes it.
+fn vendor(
+    spec: &Utf8Path,
+    fetcher: &dyn RemoteFetch,
+    diags: &mut Diagnostics,
+) -> Result<VendorReport, Aborted> {
+    super::vendor(spec, fetcher, &crate::output::atomic_write_all, diags)
+}
+
 /// A stubbed fetcher backed by an in-memory URL → bytes map; no network.
 struct StubFetcher {
     docs: std::collections::HashMap<String, Vec<u8>>,
@@ -702,6 +711,107 @@ fn a_reference_through_an_opaque_self_into_an_extension_pins_what_it_holds() {
     assert_eq!(urls, ["https://api.example.com/owner.yaml"]);
 }
 
+/// A redirect may leave `https` for nothing but `https`, wherever in the chain the `https` hop
+/// was; a chain that never used `https` may go anywhere.
+#[test]
+fn a_redirect_is_refused_exactly_when_it_downgrades_an_https_chain() {
+    let url = |text: &str| reqwest::Url::parse(text).unwrap();
+    let cases: &[(&[&str], &str, bool)] = &[
+        (&["https://a.example/x"], "http://a.example/x", true),
+        (&["https://a.example/x"], "http://b.example/x", true),
+        (&["https://a.example/x"], "https://b.example/x", false),
+        (&["http://a.example/x"], "http://b.example/x", false),
+        (&["http://a.example/x"], "https://b.example/x", false),
+        (
+            &["http://a.example/x", "https://b.example/x"],
+            "http://c.example/x",
+            true,
+        ),
+        (
+            &["https://a.example/x", "https://b.example/x"],
+            "https://c.example/x",
+            false,
+        ),
+        (&["https://a.example/x"], "ftp://a.example/x", true),
+    ];
+    for (previous, next, refused) in cases {
+        let previous: Vec<reqwest::Url> = previous.iter().map(|text| url(text)).collect();
+        assert_eq!(
+            refuses_downgrade(&previous, &url(next)),
+            *refused,
+            "{previous:?} -> {next}"
+        );
+    }
+}
+
+/// A write that fails part-way through a run (here, the second document's vendor directory is
+/// blocked by a regular file) replaces nothing: the earlier lock and every earlier vendored copy
+/// keep their bytes, so the lock still verifies, and the run is rejected naming the path.
+#[test]
+fn a_failed_write_leaves_the_earlier_lock_and_copies_consistent() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let spec = dir.join("openapi.yaml");
+    std::fs::write(
+        &spec,
+        "openapi: 3.1.0\n\
+         components:\n\
+         \x20 schemas:\n\
+         \x20   A:\n\
+         \x20     $ref: \"https://a.example.com/a.yaml\"\n\
+         \x20   B:\n\
+         \x20     $ref: \"https://b.example.com/b.yaml\"\n",
+    )
+    .unwrap();
+    let fetcher = |a: &str, b: &str| StubFetcher {
+        docs: [
+            ("https://a.example.com/a.yaml".to_owned(), a.into()),
+            ("https://b.example.com/b.yaml".to_owned(), b.into()),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let mut diags = Diagnostics::default();
+    let first = vendor(
+        &spec,
+        &fetcher("type: string\n", "type: integer\n"),
+        &mut diags,
+    )
+    .unwrap_or_else(|_| panic!("{:?}", diags.items()));
+    let lock_before = std::fs::read(&first.lock_path).unwrap();
+    let a_copy = first.vendor_dir.join(&first.refs[0].path);
+    let a_before = std::fs::read(&a_copy).unwrap();
+    assert_eq!(first.refs[0].url, "https://a.example.com/a.yaml");
+
+    // The second run's copy of `b.yaml` cannot be written: its host directory is now a file.
+    let b_host = first.vendor_dir.join("b.example.com");
+    std::fs::remove_dir_all(&b_host).unwrap();
+    std::fs::write(&b_host, "in the way").unwrap();
+
+    let mut diags = Diagnostics::default();
+    let second = vendor(
+        &spec,
+        &fetcher("type: boolean\n", "type: number\n"),
+        &mut diags,
+    );
+    assert!(second.is_err());
+    let codes: Vec<Code> = diags.items().iter().map(|diag| diag.code).collect();
+    assert_eq!(codes, [Code::InvalidInput], "{:?}", diags.items());
+    assert!(
+        diags.items()[0].message.contains("b.yaml"),
+        "{}",
+        diags.items()[0].message
+    );
+    assert_eq!(std::fs::read(&first.lock_path).unwrap(), lock_before);
+    assert_eq!(std::fs::read(&a_copy).unwrap(), a_before);
+    assert!(
+        String::from_utf8(lock_before)
+            .unwrap()
+            .contains(&sha256_hex(&a_before)),
+        "the kept lock still pins the kept copy"
+    );
+}
+
 /// The linked reqwest/rustls stack itself (#292): `spargen lock`'s fetch path completing a TLS
 /// handshake against a local HTTPS server. `tests/vendor_remote.rs` drives the binary over
 /// plain HTTP only, because the fetcher trusts only the bundled `webpki-roots` and a local
@@ -781,12 +891,24 @@ z/A/Lwh8zf2sORpx5dzRI7oSp+ICMvIiTbGx8VlQAm0vsSPk0M/34yZj
         )
     }
 
+    /// A `200 OK` carrying `DOCUMENT`.
+    fn document_response() -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            DOCUMENT.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(DOCUMENT);
+        response
+    }
+
     /// Accept one connection on `listener`, complete a TLS handshake offering `h2` and
-    /// `http/1.1`, and answer its request with `DOCUMENT`. The error is the handshake's.
+    /// `http/1.1`, and answer its request with `response`. The error is the handshake's.
     fn serve_one(
         listener: TcpListener,
         cert: CertificateDer<'static>,
         key: PrivatePkcs8KeyDer<'static>,
+        response: Vec<u8>,
     ) -> JoinHandle<Result<Served, String>> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut config = rustls::ServerConfig::builder_with_provider(provider)
@@ -833,12 +955,7 @@ z/A/Lwh8zf2sORpx5dzRI7oSp+ICMvIiTbGx8VlQAm0vsSPk0M/34yZj
             let request = String::from_utf8_lossy(&request);
             let request_line = request.lines().next().unwrap_or_default().to_owned();
 
-            let head = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                DOCUMENT.len()
-            );
-            tls.write_all(head.as_bytes())
-                .and_then(|()| tls.write_all(DOCUMENT))
+            tls.write_all(&response)
                 .and_then(|()| tls.flush())
                 .map_err(|error| error.to_string())?;
             tls.conn.send_close_notify();
@@ -876,7 +993,7 @@ z/A/Lwh8zf2sORpx5dzRI7oSp+ICMvIiTbGx8VlQAm0vsSPk0M/34yZj
         let root = reqwest::Certificate::from_der(&cert).expect("a DER certificate");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("https://{}/pet.yaml", listener.local_addr().unwrap());
-        let server = serve_one(listener, cert, key);
+        let server = serve_one(listener, cert, key, document_response());
         let (_temp, spec) = spec_referencing(&url);
 
         let mut diags = Diagnostics::default();
@@ -905,7 +1022,7 @@ z/A/Lwh8zf2sORpx5dzRI7oSp+ICMvIiTbGx8VlQAm0vsSPk0M/34yZj
         let (cert, key) = self_signed();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("https://{}/pet.yaml", listener.local_addr().unwrap());
-        let server = serve_one(listener, cert, key);
+        let server = serve_one(listener, cert, key, document_response());
         let (_temp, spec) = spec_referencing(&url);
 
         let mut diags = Diagnostics::default();
@@ -922,5 +1039,47 @@ z/A/Lwh8zf2sORpx5dzRI7oSp+ICMvIiTbGx8VlQAm0vsSPk0M/34yZj
             message.contains("UnknownIssuer"),
             "the certificate-verification cause must be carried: {message}"
         );
+    }
+
+    /// An `https` server redirecting to plain `http` is refused as `E025` before the plaintext
+    /// server is ever connected to, and nothing is vendored or pinned.
+    #[test]
+    fn an_https_redirect_to_http_is_refused_with_e025() {
+        let (cert, key) = self_signed();
+        let root = reqwest::Certificate::from_der(&cert).expect("a DER certificate");
+        let plaintext = TcpListener::bind("127.0.0.1:0").unwrap();
+        plaintext.set_nonblocking(true).unwrap();
+        let downgraded = format!("http://{}/pet.yaml", plaintext.local_addr().unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}/pet.yaml", listener.local_addr().unwrap());
+        let redirect = format!(
+            "HTTP/1.1 301 Moved Permanently\r\nlocation: {downgraded}\r\n\
+             content-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        let server = serve_one(listener, cert, key, redirect.into_bytes());
+        let (_temp, spec) = spec_referencing(&url);
+
+        let mut diags = Diagnostics::default();
+        let outcome = vendor(&spec, &TrustingFetcher(root), &mut diags);
+        server
+            .join()
+            .expect("the server thread does not panic")
+            .expect("the server completes the handshake");
+        assert!(outcome.is_err());
+
+        let codes: Vec<Code> = diags.items().iter().map(|diag| diag.code).collect();
+        assert_eq!(codes, [Code::RemoteFetchFailed], "{:?}", diags.items());
+        let message = &diags.items()[0].message;
+        assert!(message.contains(&url), "{message}");
+        assert!(
+            message.contains(&format!("refused a redirect from https to `{downgraded}`")),
+            "{message}"
+        );
+        assert!(
+            matches!(plaintext.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "the plaintext server must never be connected to"
+        );
+        let lock = std::fs::read_to_string(spec.with_file_name(LOCK_FILE_NAME)).unwrap();
+        assert!(!lock.contains("pet.yaml"), "{lock}");
     }
 }

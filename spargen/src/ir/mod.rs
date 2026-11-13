@@ -1155,7 +1155,10 @@ mod tests {
                         let variant = |ty| UnionVariant {
                             name_hint: "V".to_owned(),
                             ty,
-                            dispatch: VariantDispatch::Trial { priority: 0 },
+                            dispatch: VariantDispatch::Trial {
+                                priority: 0,
+                                category: None,
+                            },
                         };
                         insert(
                             api,

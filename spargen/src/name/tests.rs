@@ -1024,7 +1024,10 @@ fn synthetic_api(
                                 untagged: None,
                             }
                         } else {
-                            VariantDispatch::Trial { priority: 0 }
+                            VariantDispatch::Trial {
+                                priority: 0,
+                                category: None,
+                            }
                         },
                     })
                     .collect(),

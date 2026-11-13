@@ -291,9 +291,11 @@ pub(crate) const SERVERS_MODULE_NAMES: &[&str] = &["Default", "Into", "String"];
 /// error shape, and `ProblemDetails` is what that reader returns. The list follows signatures, not
 /// bodies: a runtime item the output names only inside a function body, such as the `HeaderShape`
 /// each `…Headers::from_headers` passes to the header readers, is spelled `support::…` there and
-/// stays on the private side. The one name past signatures is `TotalTimeout`: no signature carries
+/// stays on the private side. Two names go past signatures. `TotalTimeout`: no signature carries
 /// it, but it is the request extension an `HttpBackend` reads the call's total timeout from, so a
-/// backend outside the crate has to name it to enforce that timeout.
+/// backend outside the crate has to name it to enforce that timeout. And `ParameterError`: it is
+/// what `RequestError::Other`'s source downcasts to when a parameter fails to serialize, so a
+/// caller routing on that failure has to name it.
 ///
 /// `codegen` emits the root `pub use` from these lists and the root scope [`allocate`] draws the
 /// operation types from reserves them, so the two read one source.
@@ -320,6 +322,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "MiddlewareBackend",
     "Next",
     "Nullable",
+    "ParameterError",
     "ProblemDetails",
     "ProtocolError",
     "RedirectError",
@@ -342,6 +345,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "TransportError",
     "UnknownVariant",
     "exponential_backoff",
+    "full_jitter",
     "next_link",
     "token_provider",
 ];

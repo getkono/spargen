@@ -26,6 +26,12 @@
 //! carries them. A page that comes back non-`2xx` (e.g. a `401` on an unauthenticated page 2)
 //! terminates the paginator as an [`Error::UnexpectedStatus`](crate::Error), never a decoded page.
 //!
+//! Because those headers ride on every page request, the paginator follows a `next` link only
+//! within the origin of the first page it fetched: the same scheme, host and port. A link to
+//! another host, to another port, or from `https` down to `http` ends the chain with
+//! [`Error::PaginationOriginChanged`](crate::Error) without sending anything there. The rule
+//! holds for every paginator; to continue across origins, start a new paginator at that URL.
+//!
 //! Termination is otherwise driven by the server's `rel="next"` links. The paginator remembers
 //! every URL it has fetched, and a `next` link that resolves to one of them — a page linking to
 //! itself, or a longer cycle such as page 1 → page 2 → page 1 — ends the chain with
@@ -91,6 +97,9 @@ pub struct LinkPaginator<T> {
     /// Every URL this paginator has requested, fragment removed: a `next` that names one of them
     /// is a cycle.
     fetched: HashSet<Url>,
+    /// The first URL this paginator fetched: every later page must share its scheme, host and
+    /// port.
+    first: Option<Url>,
     /// `T` is produced, never consumed; the `fn() -> T` marker keeps `LinkPaginator<T>: Send + Sync`
     /// regardless of `T`.
     _marker: PhantomData<fn() -> T>,
@@ -104,6 +113,7 @@ impl<T> LinkPaginator<T> {
             core,
             next: Some(first),
             fetched: HashSet::new(),
+            first: None,
             _marker: PhantomData,
         }
     }
@@ -113,18 +123,20 @@ impl<T> LinkPaginator<T> {
     /// its headers. Only an absolute `next` URL is followed; a relative one yields no next page (use
     /// [`Self::new`] with the resolved URL instead). The first page's own URL is not known here,
     /// so a cycle back to it is caught one fetch later, when the refetched first page links on to
-    /// a page this paginator already fetched.
+    /// a page this paginator already fetched. For the same reason the origin every later page must
+    /// share is that of the seeded `next` link, the first URL this paginator fetches.
     pub fn from_headers(core: ClientCore, headers: &HeaderMap) -> Self {
         Self {
             core,
             next: next_link(headers),
             fetched: HashSet::new(),
+            first: None,
             _marker: PhantomData,
         }
     }
 
     /// Whether the next [`Self::next_page`] call returns `Some`: a fetched page, or the error that
-    /// ends the chain, [`Error::PaginationCycle`] included.
+    /// ends the chain, [`Error::PaginationCycle`] and [`Error::PaginationOriginChanged`] included.
     pub fn has_next(&self) -> bool {
         self.next.is_some()
     }
@@ -135,8 +147,11 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
     ///
     /// `GET`s the current `next` URL, parses its response `Link` header for `rel="next"` (resolving a
     /// relative target against the fetched URL) to arm the following page, then decodes the body as
-    /// `T`. Five things terminate the paginator (subsequent calls return `None`):
+    /// `T`. Six things terminate the paginator (subsequent calls return `None`):
     ///
+    /// * a `next` URL whose scheme, host or port differs from the first URL this paginator
+    ///   fetched → `Some(Err(Error::PaginationOriginChanged { from, to }))`, without sending a
+    ///   request. The page whose link left the origin was already yielded by the call before;
     /// * a `next` URL the paginator has already fetched (fragments aside) →
     ///   `Some(Err(Error::PaginationCycle { url }))`, without sending a request. The page whose
     ///   link closed the cycle was already yielded by the call before;
@@ -156,6 +171,16 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
         // Take the pending URL: the paginator is now disarmed and only re-armed on a successful
         // decode, so any error path below leaves `next` as `None` and terminates the chain.
         let url = self.next.take()?;
+        match &self.first {
+            Some(first) if !same_origin(first, &url) => {
+                return Some(Err(Error::PaginationOriginChanged {
+                    from: without_credentials(first.clone()),
+                    to: without_credentials(url),
+                }));
+            }
+            Some(_) => {}
+            None => self.first = Some(url.clone()),
+        }
         let mut key = url.clone();
         key.set_fragment(None);
         if !self.fetched.insert(key) {
@@ -200,6 +225,25 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
             Err(error) => Some(Err(error)),
         }
     }
+}
+
+/// Whether two URLs share a scheme, host and port, as the URL parser normalises them: a host's
+/// case and a spelled-out default port make no difference.
+fn same_origin(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host() == b.host()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// `url` without its userinfo and query, the two places a URL carries a credential (an `apiKey`
+/// query parameter, a `user:password@` prefix), so an error holding it prints neither through
+/// `Display` or `Debug`.
+fn without_credentials(mut url: Url) -> Url {
+    url.set_query(None);
+    // Both fail only for a URL with no host, which an `http(s)` page URL always has.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url
 }
 
 /// Extract the `rel="next"` target from a response's `Link` header(s) as an absolute [`Url`], or

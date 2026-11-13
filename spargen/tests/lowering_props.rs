@@ -304,6 +304,36 @@ fn has_required_type_conflict(members: &[Member]) -> bool {
     })
 }
 
+/// The trial attempts of union `U`'s generated serde impls that no JSON-category guard precedes
+/// (#1340), as their whitespace-free text. A trial decodes the buffered value as each variant's
+/// type through `serde_json::from_value::<T>`, and serde_json's `Value` deserializer takes a
+/// payload of a foreign category (an array into a struct, a one-key object into a unit enum
+/// variant), so every variant of a category these specs write is tried only once its guard holds:
+/// `guard.then(|| …)` on decode, `guard && …` in the serialize-side validation. A disjoint union's
+/// dispatch decodes without the turbofish, so it has no attempt to count.
+fn unguarded_trial_attempts(source: &str) -> Vec<String> {
+    let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    let Some(start) = compact.find("serde::Deserialize<'de>forU{") else {
+        return Vec::new();
+    };
+    let impls = &compact[start..];
+    // Both impls, up to the next item after `U`'s `Serialize`.
+    let serialize = impls.find("implserde::SerializeforU{").unwrap_or(0);
+    let end = impls[serialize + 1..]
+        .find("impl")
+        .map_or(impls.len(), |next| serialize + 1 + next);
+    let impls = &impls[..end];
+    let attempt = "serde_json::from_value::<";
+    impls
+        .match_indices(attempt)
+        .filter(|(at, _)| {
+            let before = &impls[..*at];
+            !before.ends_with(".then(||") && !before.ends_with("&&")
+        })
+        .map(|(at, _)| impls[at..(at + 80).min(impls.len())].to_owned())
+        .collect()
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
 
@@ -352,6 +382,9 @@ proptest! {
             variants,
             source
         );
+        // A trial (`integer | number` beside the rest) tries each variant on its category alone.
+        let unguarded = unguarded_trial_attempts(source);
+        prop_assert!(unguarded.is_empty(), "union of {:?}: {:?}\n{}", variants, unguarded, source);
         let nullable = variants.len() - typed.len() == 1;
         let holder = holder_p_shape(source)?;
         prop_assert_eq!(
@@ -404,6 +437,9 @@ proptest! {
             variants,
             source
         );
+        // Overlapping key sets are a trial, which tries each struct on an object alone.
+        let unguarded = unguarded_trial_attempts(source);
+        prop_assert!(unguarded.is_empty(), "union of {:?}: {:?}\n{}", variants, unguarded, source);
         assert_relocation_changes_nothing(&spec, Some(&generated))?;
     }
 
