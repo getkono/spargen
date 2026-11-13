@@ -79,7 +79,8 @@ pub enum Error<E> {
     /// fetched (a self-link, or a longer cycle such as page 1 → page 2 → page 1), so following it
     /// would never end. Every page before it was yielded; nothing was sent for `url`.
     PaginationCycle {
-        /// The revisited URL the `next` link resolved to.
+        /// The revisited URL the `next` link resolved to, without its userinfo and query, where a
+        /// credential would ride.
         url: url::Url,
     },
     /// #12 — a non-streaming operation's response body exceeded the limit the call was made
