@@ -34,6 +34,18 @@ mod rest {
 pub use rest::Client;
 "#;
 
+/// A crate root that `include!`s the generated module into a public module (#1302), so rustdoc
+/// documents every item the module makes public, the runtime's re-exports among them, while the
+/// embedded `support` module stays private.
+const PUBLIC_ROOT: &str = r#"//! A consumer of the generated client that publishes the whole module.
+#![deny(warnings, missing_docs)]
+
+/// The API.
+pub mod rest {
+    include!("rest_client.rs");
+}
+"#;
+
 /// A description with components and a server but no operation: the `ops` module holds the
 /// `Operation` type and no constant, so nothing in the generated module builds an `Operation`.
 const NO_OPERATIONS_SPEC: &str = r"openapi: 3.1.0
@@ -70,12 +82,24 @@ fn strict_fixture_of(
     name: &str,
     configure: impl FnOnce(Spec) -> Spec,
 ) -> std::path::PathBuf {
+    fixture_with_root(temp, contents, name, STRICT_ROOT, configure)
+}
+
+/// Generate `contents` under `configure` into a fixture crate named `name` whose root is `root`,
+/// which includes the generated module as `rest_client.rs`, and return its directory.
+fn fixture_with_root(
+    temp: &std::path::Path,
+    contents: &str,
+    name: &str,
+    root: &str,
+    configure: impl FnOnce(Spec) -> Spec,
+) -> std::path::PathBuf {
     let spec = write_spec(temp, "moderation.yaml", contents);
     let out = temp.join(name);
     let report = generate_configured_fixture_crate(&spec, &out, name, "2021", configure);
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     std::fs::rename(out.join("src/lib.rs"), out.join("src/rest_client.rs")).unwrap();
-    std::fs::write(out.join("src/lib.rs"), STRICT_ROOT).unwrap();
+    std::fs::write(out.join("src/lib.rs"), root).unwrap();
     out
 }
 
@@ -163,6 +187,31 @@ fn the_include_site_needs_no_lint_attribute() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The carried-docs module, and one embedding every conditional runtime module (XML, event
+/// streams, date-time), each `include!`d into a public module, document with every rustdoc warning
+/// denied: no runtime doc a public item carries links an item of the private `support` module
+/// (#1302).
+#[test]
+fn a_public_include_site_documents_with_warnings_denied() {
+    let temp = tempfile::tempdir().unwrap();
+    for (name, contents) in [
+        ("public_docs_client", CARRIED_DOCS_SPEC),
+        ("public_capabilities_client", EVERY_CAPABILITY_SPEC),
+    ] {
+        let dir = temp.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = fixture_with_root(&dir, contents, name, PUBLIC_ROOT, |spec| spec);
+
+        let output = doc_denying_warnings(&out);
+        assert!(
+            output.status.success(),
+            "`{name}` must document from a public include site with every rustdoc warning \
+             denied:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 /// A description with no operation, `include!`d into the same private module: the `ops` module's
