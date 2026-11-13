@@ -124,19 +124,33 @@ impl DateTime {
     /// offset RFC 3339 cannot write.
     fn rfc3339(&self) -> Option<String> {
         let local = self.0.naive_local();
-        // `chrono` holds a leap second as a nanosecond count past one second; RFC 3339 writes it
-        // as second 60.
+        let date = full_date(local.date())?;
+        let offset_seconds = self.0.offset().local_minus_utc();
+        // `chrono` holds a leap second as a nanosecond count past one second, at second 59 of any
+        // minute. RFC 3339 writes it as second 60, which the codec (like `time`) reads only in the
+        // minute that is 23:59 UTC on a month's last day; in any other minute it is written as the
+        // last nanosecond of the second, which every backend reads.
         let (second, nanosecond) = match local.nanosecond() {
-            leap @ 1_000_000_000.. => (60, leap - 1_000_000_000),
+            leap @ 1_000_000_000.. => {
+                if crate::rfc3339::is_leap_second_minute(
+                    date,
+                    local.hour() * 60 + local.minute(),
+                    offset_seconds,
+                ) {
+                    (60, leap - 1_000_000_000)
+                } else {
+                    (local.second(), 999_999_999)
+                }
+            }
             nanosecond => (local.second(), nanosecond),
         };
         crate::rfc3339::format_date_time(DateTimeFields {
-            date: full_date(local.date())?,
+            date,
             hour: u8::try_from(local.hour()).ok()?,
             minute: u8::try_from(local.minute()).ok()?,
             second: u8::try_from(second).ok()?,
             nanosecond,
-            offset_seconds: self.0.offset().local_minus_utc(),
+            offset_seconds,
         })
     }
 }

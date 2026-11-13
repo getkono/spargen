@@ -6805,12 +6805,20 @@ mod support {
         }
         impl FromStr for DateTime {
             type Err = DateParseError;
+            /// Parses an RFC 3339 `date-time`, keeping its offset. `time`'s `Rfc3339` reads any byte
+            /// between the date and the time (a space, say); RFC 3339's ABNF, which JSON Schema's
+            /// `date-time` is, admits only `T` or `t` there, so any other is refused before `time` reads
+            /// the rest, as the other backends' codec (`rfc3339.rs`) refuses it.
             fn from_str(text: &str) -> Result<Self, Self::Err> {
+                let invalid = || DateParseError {
+                    expected: "date-time",
+                };
+                if !matches!(text.as_bytes().get(10), Some(b'T' | b't')) {
+                    return Err(invalid());
+                }
                 time::OffsetDateTime::parse(text, &Rfc3339)
                     .map(Self)
-                    .map_err(|_| DateParseError {
-                        expected: "date-time",
-                    })
+                    .map_err(|_| invalid())
             }
         }
         impl Serialize for DateTime {

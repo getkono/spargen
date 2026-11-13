@@ -123,7 +123,7 @@ fn every_typed_backend_puts_rfc3339_on_the_wire() {
         (
             DateTimeBackend::Jiff,
             "jiff",
-            "pub struct DateTime(pub jiff::Timestamp)",
+            "pub struct DateTime {",
             JIFF_DATE_WIRE_TEST,
         ),
         (
@@ -211,7 +211,7 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
     );
     let client = dates_client::BlockingClient::new(&base).unwrap();
 
-    let at = dates_client::DateTime(jiff::Timestamp::from_second(1_700_000_000).unwrap());
+    let at = dates_client::DateTime::from(jiff::Timestamp::from_second(1_700_000_000).unwrap());
     let day = dates_client::Date(jiff::civil::date(2023, 11, 14));
     let event = dates_client::types::Event { at, day };
 
@@ -233,12 +233,14 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
     let body = String::from_utf8_lossy(&request.body);
     assert_eq!(body, r#"{"at":"2023-11-14T22:13:20Z","day":"2023-11-14"}"#);
 
-    // A `Timestamp` holds no offset: the instant survives, normalized to UTC.
+    // Decoding: an offset and a subsecond survive the round trip as the server wrote them.
     let decoded = response.into_inner();
     assert_eq!(decoded.day.to_string(), "2024-02-29");
-    assert_eq!(decoded.at.to_string(), "2024-02-28T19:32:03.5Z");
-    // The newtype is transparent: `jiff`'s API is one deref away.
-    assert_eq!(decoded.at.as_second(), 1_709_148_723);
+    assert_eq!(decoded.at.to_string(), "2024-02-29T01:02:03.5+05:30");
+    // The parts and the instant are `jiff` values; `Date` is one deref from `jiff`'s API.
+    assert_eq!(decoded.at.offset().seconds(), 19_800);
+    assert_eq!(decoded.at.datetime().hour(), 1);
+    assert_eq!(decoded.at.to_timestamp().unwrap().as_second(), 1_709_148_723);
     assert_eq!(decoded.day.year(), 2024);
 }
 "##;

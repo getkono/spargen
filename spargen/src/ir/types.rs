@@ -298,21 +298,24 @@ pub(crate) enum Prim {
 /// The crate `format: date-time` and `format: date` map to, chosen with
 /// [`Spec::datetime`](crate::Spec::datetime).
 ///
-/// Every typed backend keeps the same generated surface: an embedded `DateTime` newtype for
-/// `date-time` and a `Date` newtype for `date`, each with spargen's own RFC 3339
-/// `Serialize`/`Deserialize`, `Display` and `FromStr`, `Deref` to the wrapped value, and `From` in
-/// both directions. Only the wrapped type, and so the crate the dependency audit (`E023`) requires,
-/// changes.
+/// Every typed backend emits an embedded `DateTime` newtype for `date-time` and a `Date` newtype
+/// for `date`, each with spargen's own RFC 3339 `Serialize`/`Deserialize`, `Display` and `FromStr`.
+/// `Date`, and the `Time` and `Chrono` backends' `DateTime`, also `Deref` to the wrapped value and
+/// convert with `From` in both directions; the `Jiff` backend's `DateTime` has the surface the last
+/// paragraph states. The wrapped type, and so the crate the dependency audit (`E023`) requires,
+/// differs by backend. Every backend reads the same strings (RFC 3339 §5.6's `date-time`, every year from
+/// `0000` to `9999`) and keeps the offset a value was written with.
 ///
 /// | backend | `DateTime` wraps | `Date` wraps | required crate |
 /// | --- | --- | --- | --- |
 /// | [`Time`](Self::Time) (default) | `time::OffsetDateTime` | `time::Date` | `time` |
-/// | [`Jiff`](Self::Jiff) | `jiff::Timestamp` | `jiff::civil::Date` | `jiff` |
+/// | [`Jiff`](Self::Jiff) | `jiff::civil::DateTime` and `jiff::tz::Offset` | `jiff::civil::Date` | `jiff` |
 /// | [`Chrono`](Self::Chrono) | `chrono::DateTime<chrono::FixedOffset>` | `chrono::NaiveDate` | `chrono` |
 /// | [`String`](Self::String) | — (`String`) | — (`String`) | none |
 ///
-/// `jiff::Timestamp` is an instant without an offset, so the `Jiff` backend normalizes a decoded
-/// value to UTC and always encodes it with `Z`; the other two keep the offset the value carried.
+/// The `Jiff` backend's `DateTime` holds two values, because `jiff::Timestamp` ends before year
+/// 9999 does: it reads them through `datetime()` and `offset()` rather than `Deref`, converts from a
+/// `jiff::Timestamp`, and back to one through the fallible `to_timestamp()`.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -322,7 +325,7 @@ pub enum DateTimeBackend {
     /// The `time` crate: `time::OffsetDateTime` and `time::Date`.
     #[default]
     Time,
-    /// The `jiff` crate: `jiff::Timestamp` (normalized to UTC) and `jiff::civil::Date`.
+    /// The `jiff` crate: a `jiff::civil::DateTime` at a `jiff::tz::Offset`, and `jiff::civil::Date`.
     Jiff,
     /// The `chrono` crate: `chrono::DateTime<chrono::FixedOffset>` and `chrono::NaiveDate`.
     Chrono,
