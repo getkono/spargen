@@ -298,11 +298,12 @@ pub(crate) enum Prim {
 /// The crate `format: date-time` and `format: date` map to, chosen with
 /// [`Spec::datetime`](crate::Spec::datetime).
 ///
-/// Every typed backend keeps the same generated surface: an embedded `DateTime` newtype for
-/// `date-time` and a `Date` newtype for `date`, each with spargen's own RFC 3339
-/// `Serialize`/`Deserialize`, `Display` and `FromStr`, `Deref` to the wrapped value, and `From` in
-/// both directions. Only the wrapped type, and so the crate the dependency audit (`E023`) requires,
-/// changes. Every backend reads the same strings (RFC 3339 §5.6's `date-time`, every year from
+/// Every typed backend emits an embedded `DateTime` newtype for `date-time` and a `Date` newtype
+/// for `date`, each with spargen's own RFC 3339 `Serialize`/`Deserialize`, `Display` and `FromStr`.
+/// `Date`, and the `Time` and `Chrono` backends' `DateTime`, also `Deref` to the wrapped value and
+/// convert with `From` in both directions; the `Jiff` backend's `DateTime` has the surface the last
+/// paragraph states. The wrapped type, and so the crate the dependency audit (`E023`) requires,
+/// differs by backend. Every backend reads the same strings (RFC 3339 §5.6's `date-time`, every year from
 /// `0000` to `9999`) and keeps the offset a value was written with.
 ///
 /// | backend | `DateTime` wraps | `Date` wraps | required crate |

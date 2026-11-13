@@ -399,9 +399,10 @@ API.
 Dates are emitted as the embedded `DateTime` and `Date` newtypes rather than the crate's own types,
 because `time`'s serde output is not the RFC 3339 text these formats are defined as, and so that
 every backend reads and writes one wire form. They carry a hand-written RFC 3339 codec, so no
-backend's `serde` feature is needed (only `time`'s `formatting` and `parsing`); they `Deref` to and
-convert with `From` from the inner type, and parse with `FromStr`, failing with `DateParseError`,
-which the generated root re-exports beside them. The `jiff` and `chrono` newtypes share the
+backend's `serde` feature is needed (only `time`'s `formatting` and `parsing`). `Date`, and the
+`time` and `chrono` backends' `DateTime`, `Deref` to and convert with `From` from the inner type
+(the `jiff` `DateTime`'s conversions are set out below). Every newtype parses with `FromStr`,
+failing with `DateParseError`, which the generated root re-exports beside them. The `jiff` and `chrono` newtypes share the
 [`rfc3339` codec](https://github.com/getkono/spargen/blob/master/support-runtime/src/rfc3339.rs),
 which states the grammar they accept and write.
 
