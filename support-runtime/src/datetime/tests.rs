@@ -99,8 +99,8 @@ fn date_rejects_a_sign_prefixed_field() {
     }
 }
 
-/// `Display` must never fail: generated code renders a `multipart/form-data` text part and a
-/// `text/plain` body through `to_string()`, which panics on a `Display` error. A year outside
+/// `Display` must never fail: generated code renders a `multipart/form-data` text part through
+/// `to_string()`, which panics on a `Display` error. A year outside
 /// RFC 3339's four-digit range is constructible (`time` holds -9999..=9999), so this is
 /// reachable from ordinary user input rather than only from a malformed response. Such a value
 /// renders in `time`'s own form instead, as `Display` documents.

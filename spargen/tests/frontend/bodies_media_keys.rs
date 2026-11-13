@@ -717,7 +717,7 @@ paths:
     );
     assert_eq!(
         messages_for(&report, Code::UnsupportedMediaType),
-        ["media type `text/plain` requires a string-like or binary response schema"],
+        ["media type `text/plain` requires a scalar (string, number, integer or boolean) or binary response schema"],
         "{report:#?}"
     );
 }

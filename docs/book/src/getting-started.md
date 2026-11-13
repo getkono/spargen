@@ -192,7 +192,8 @@ Key points of the surface:
   `Error::Timeout(TimeoutKind::Total)` past that deadline (an `EventStream` operation excepted);
   the runtime guide's [Timeouts](./runtime.md#timeouts) section states every bound.
 - One `async` method per operation returning `Result<ResponseValue<T>, Error<E>>`;
-  `.into_inner()` unwraps the decoded body. Required string parameters take `impl Into<String>`
+  `.into_inner()` unwraps the decoded body, and `.into_parts()` yields the status, headers and
+  body, each owned. Required string parameters take `impl Into<String>`
   and the `…Params` bundle takes `impl Into<Option<…>>`, so `None`, `Some(params)`, and `params`
   all compile.
 - An object struct is built with `types::Pet::new(..)`, taking its required members, then one

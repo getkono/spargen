@@ -11,16 +11,24 @@
 //!
 //! # Nested-runtime caveat
 //!
-//! A [`BlockingRuntime`] must NOT be constructed or used from inside another async runtime:
-//! tokio's `block_on` panics when called from within a runtime's context. Build and drive one on a
-//! plain (non-async) thread — for example a `std::thread`, or `tokio::task::spawn_blocking` when
-//! you are already inside an async context.
+//! A [`BlockingRuntime`] must NOT be *driven* from inside another async runtime: tokio's
+//! `block_on` panics when called from within a runtime's context. Drive one on a plain (non-async)
+//! thread — for example a `std::thread`, or `tokio::task::spawn_blocking` when you are already
+//! inside an async context. Building one inside an async runtime is fine, and so is dropping one
+//! there: the drop shuts the owned runtime down in the background rather than waiting on it, which
+//! inside an async context would panic, so a blocking client held in async state can be dropped at
+//! shutdown.
 
 /// A current-thread tokio runtime used to drive async operation futures to completion
 /// synchronously. Held by the generated blocking client alongside the async client it wraps.
+///
+/// Dropping it shuts the runtime down without waiting for its blocking-pool threads (tokio's
+/// `Runtime::shutdown_background`), so the drop never blocks and never panics, whatever context
+/// it runs in.
 #[derive(Debug)]
 pub struct BlockingRuntime {
-    runtime: tokio::runtime::Runtime,
+    /// The owned runtime; `Some` until the drop takes it to shut it down.
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl BlockingRuntime {
@@ -30,7 +38,9 @@ impl BlockingRuntime {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        Ok(Self { runtime })
+        Ok(Self {
+            runtime: Some(runtime),
+        })
     }
 
     /// Drive a future to completion on the owned runtime, blocking the current thread until it
@@ -40,7 +50,21 @@ impl BlockingRuntime {
     ///
     /// Panics if called from within another async runtime — tokio forbids nested `block_on`.
     pub fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
-        self.runtime.block_on(future)
+        // Only the drop takes the runtime, and nothing borrows `self` after it begins.
+        let Some(runtime) = &self.runtime else {
+            unreachable!("the runtime is taken only by the drop")
+        };
+        runtime.block_on(future)
+    }
+}
+
+impl Drop for BlockingRuntime {
+    /// Shut the runtime down without waiting: a plain drop of a tokio runtime waits on its
+    /// blocking pool, which panics inside an async context.
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }
 
@@ -76,5 +100,24 @@ mod tests {
         let runtime = BlockingRuntime::new().expect("current-thread runtime builds");
         assert_eq!(runtime.block_on(async { 1 }), 1);
         assert_eq!(runtime.block_on(async { 2 }), 2);
+    }
+
+    /// A blocking client held in async state is dropped inside that runtime's context, where
+    /// blocking is not allowed; the drop must not wait on the owned runtime's blocking pool.
+    #[test]
+    fn dropping_inside_an_async_context_does_not_panic() {
+        let inner = BlockingRuntime::new().expect("current-thread runtime builds");
+        // A blocking task still running keeps a waiting shutdown from finishing; the drop below
+        // returns without it.
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        inner.block_on(async {
+            // Detached: the task outlives this future and is still parked at the drop.
+            drop(tokio::task::spawn_blocking(move || {
+                let _ = parked.recv();
+            }));
+        });
+        let outer = BlockingRuntime::new().expect("current-thread runtime builds");
+        outer.block_on(async move { drop(inner) });
+        release.send(()).ok();
     }
 }

@@ -121,9 +121,10 @@ fn field_type(items: &[syn::Item], struct_name: &str, field: &str) -> Option<syn
 
 /// Render `ty` in the label's notation, expanding every alias in `aliases`. The normalisations are
 /// the ones `canon_ty`'s documentation states: a path is named by its last segment
-/// (`types::Leaf`, `bytes::Bytes`, `serde_json::Value`), `Box` is not rendered, and a `format`
-/// scalar is labelled by its format (`Uuid`, `DateTime`, `Date`) whatever Rust type the `uuid` and
-/// date-time mappings choose for it, so both sides spell those `String` here.
+/// (`types::Leaf`, `bytes::Bytes`, `uuid::Uuid`), `Box` is not rendered, and a date label names
+/// its backend (`DateTime<time>`), which the declared `DateTime`/`Date` newtype does not spell, so
+/// the backend argument is dropped here. The generated module is the default settings', the ones
+/// the diff reads too.
 fn normalise(ty: &syn::Type, aliases: &std::collections::BTreeMap<String, syn::Type>) -> String {
     match ty {
         syn::Type::Tuple(tuple) => {
@@ -160,7 +161,7 @@ fn normalise(ty: &syn::Type, aliases: &std::collections::BTreeMap<String, syn::T
             };
             match (name.as_str(), arguments.as_slice()) {
                 ("Box", [inner]) => inner.clone(),
-                ("Uuid" | "DateTime" | "Date", []) => "String".to_owned(),
+                ("DateTime" | "Date", [_backend]) => name,
                 (_, []) => match aliases.get(&name) {
                     Some(target) => normalise(target, aliases),
                     None => name,

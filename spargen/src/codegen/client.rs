@@ -774,6 +774,85 @@ mod tests {
         }
     }
 
+    /// Issue #1324: a server builder's inherent methods are `new` and `url` beside one setter per
+    /// variable, both in `name::SERVER_METHODS`, and a variable spelling any method of that list
+    /// takes a setter of another spelling instead of duplicating or shadowing it.
+    #[test]
+    fn server_builder_methods_are_reserved_and_variables_yield_to_them() {
+        let variables: IndexMap<String, crate::ir::ServerVariable> = crate::name::SERVER_METHODS
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_owned(),
+                    crate::ir::ServerVariable {
+                        default: "v".to_owned(),
+                        enum_values: Vec::new(),
+                        description: None,
+                    },
+                )
+            })
+            .collect();
+        let api = Api {
+            info: Info {
+                title: "T".to_owned(),
+                version: "1".to_owned(),
+                description: None,
+            },
+            servers: vec![Server {
+                name: None,
+                url: "https://{clone}.{default}.{new}.{url}".to_owned(),
+                segments: variables
+                    .keys()
+                    .map(|name| UrlSegment::Variable(name.clone()))
+                    .collect(),
+                variables,
+                description: None,
+            }],
+            operations: Vec::new(),
+            types: TypeGraph::default(),
+            security_schemes: IndexMap::new(),
+        };
+        let names = crate::name::allocate(&api);
+        let file: syn::File = syn::parse2(super::emit_servers(
+            &api,
+            &names,
+            &CodegenOptions::default(),
+        ))
+        .expect("the emitted servers module parses");
+        let mut methods = Vec::new();
+        inherent_methods(&file.items, names.servers[0].as_str(), &mut methods);
+        let unique: std::collections::BTreeSet<&String> = methods.iter().collect();
+        assert_eq!(unique.len(), methods.len(), "a method twice: {methods:?}");
+        let setters: std::collections::BTreeSet<String> = api.servers[0]
+            .variables
+            .keys()
+            .map(|name| {
+                names.server_variable_fields[&(0, name.clone())]
+                    .as_str()
+                    .to_owned()
+            })
+            .collect();
+        let fixed: std::collections::BTreeSet<&str> = methods
+            .iter()
+            .map(String::as_str)
+            .filter(|method| !setters.contains(*method))
+            .collect();
+        assert_eq!(
+            fixed,
+            ["new", "url"].into_iter().collect(),
+            "the builder's fixed methods: {methods:?}"
+        );
+        for method in fixed {
+            assert!(crate::name::SERVER_METHODS.contains(&method), "{method}");
+        }
+        for method in crate::name::SERVER_METHODS {
+            assert!(
+                !setters.contains(*method),
+                "variable `{method}` kept the bare spelling of a builder method: {setters:?}"
+            );
+        }
+    }
+
     /// The `#[doc]` text of `method` in the inherent `impl <self_ty>` among `items`, nested modules
     /// included, or `None` where that impl does not define it.
     fn method_docs(items: &[syn::Item], self_ty: &str, method: &str) -> Option<Vec<String>> {
