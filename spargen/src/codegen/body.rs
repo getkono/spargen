@@ -235,7 +235,8 @@ fn form_style_tokens(style: &crate::ir::ParamStyle) -> TokenStream {
 /// is style-serialized, one plain text part per value, each carrying any header the Encoding Object
 /// pins to a literal value. Otherwise the property's own lowered type
 /// decides how its value becomes bytes — the only thing the generator can know for a media type it
-/// has no codec for: a binary field (`bytes::Bytes`) becomes a bytes part, a scalar a text part via
+/// has no codec for: a binary field (`bytes::Bytes`) becomes a file part whose `filename` is the
+/// property's name, a scalar a text part via
 /// `Display`, and anything composite a JSON-encoded text part; and that part carries the
 /// Content-Type its Encoding Object resolves to — explicit, or defaulted from the property's type
 /// by the specification's table — and any header the Encoding Object pins to a literal value. An
@@ -288,7 +289,7 @@ fn emit_multipart_body(
             quote! {
                 let mut part_headers = reqwest::header::HeaderMap::new();
                 #(#inserts)*
-                part = part.headers(part_headers);
+                part = part.headers(part_headers).map_err(support::Error::widen)?;
             }
         });
         // `receiver` is the value for method calls (`.to_vec()`/`.to_string()` auto-ref); `reference`
@@ -323,7 +324,7 @@ fn emit_multipart_body(
                         }
                     };
                 }
-                _ => media_part_tokens(kind, receiver, reference),
+                _ => media_part_tokens(kind, receiver, reference, &quote! { #wire }),
             };
             let set_type = set_part_type_tokens(property.map(|property| &property.mode));
             quote! {
@@ -407,7 +408,12 @@ fn additional_parts_tokens(
         }
     });
     let kind = api.types.get(value_ty.id).map(|def| &def.kind);
-    let build = media_part_tokens(kind, &quote! { value }, &quote! { value });
+    let build = media_part_tokens(
+        kind,
+        &quote! { value },
+        &quote! { value },
+        &quote! { name.as_str() },
+    );
     let set_type = set_part_type_tokens(Some(mode));
     quote! {
         for (name, value) in &#body_binding.#overflow {
@@ -421,19 +427,24 @@ fn additional_parts_tokens(
 }
 
 /// The statement binding `part` to a media-mode multipart part built from one value, by the
-/// value's lowered type: a binary value becomes a bytes part, a scalar a text part via `Display`,
-/// and anything composite a JSON-encoded text part. `receiver` is the value for method calls;
-/// `reference` is a `&value` for `serde_json::to_string`.
+/// value's lowered type: a binary value becomes a file part, whose `filename` is `file_name` (the
+/// part's name), a scalar a text part via `Display`, and anything composite a JSON-encoded text
+/// part. `receiver` is the value for method calls; `reference` is a `&value` for
+/// `serde_json::to_string`.
 fn media_part_tokens(
     kind: Option<&TypeKind>,
     receiver: &TokenStream,
     reference: &TokenStream,
+    file_name: &TokenStream,
 ) -> TokenStream {
     match kind {
-        // A binary/bytes property → a file/bytes part carrying the raw bytes; a base64 newtype
-        // reaches them through its `Deref`, so its part is the decoded bytes, not their text.
+        // A binary/bytes property → a file part carrying the raw bytes; a base64 newtype reaches
+        // them through its `Deref`, so its part is the decoded bytes, not their text. RFC 7578
+        // §4.2 says file content should carry a `filename`, and servers that see none read the
+        // part as a plain field, so the part's name stands in for the one the document cannot
+        // give.
         Some(TypeKind::Bytes(_)) => quote! {
-            let mut part = support::MultipartPart::bytes(#receiver.to_vec());
+            let mut part = support::MultipartPart::bytes(#receiver.to_vec()).file_name(#file_name);
         },
         // A scalar property → a text part rendered through `Display`.
         Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => quote! {

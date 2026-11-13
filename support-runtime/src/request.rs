@@ -324,11 +324,13 @@ impl MultipartForm {
     }
 }
 
-/// One part of a [`MultipartForm`]: its bytes, and the `Content-Type` and other headers it
-/// carries beside its `Content-Disposition`.
+/// One part of a [`MultipartForm`]: its bytes, the `filename` its `Content-Disposition` gives,
+/// and the `Content-Type` and other headers it carries beside that `Content-Disposition`.
 #[derive(Debug, Clone)]
 pub struct MultipartPart {
     body: Bytes,
+    /// The `filename` parameter of the part's `Content-Disposition`.
+    file_name: Option<String>,
     /// The part's own `Content-Type`.
     mime: Option<HeaderValue>,
     headers: HeaderMap,
@@ -345,6 +347,7 @@ impl MultipartPart {
     pub fn bytes(bytes: impl Into<Bytes>) -> Self {
         Self {
             body: bytes.into(),
+            file_name: None,
             mime: None,
             headers: HeaderMap::new(),
         }
@@ -357,30 +360,43 @@ impl MultipartPart {
         Ok(self)
     }
 
-    /// Set the headers the part carries after its `Content-Disposition` and `Content-Type`,
-    /// replacing any set before.
-    pub fn headers(mut self, headers: HeaderMap) -> Self {
-        self.headers = headers;
+    /// Set the `filename` parameter of the part's `Content-Disposition`, replacing any set before.
+    /// RFC 7578 §4.2 says a part holding a file's content should carry one, and many servers read
+    /// a part without it as a plain field rather than a file. It is escaped as the part's name is.
+    pub fn file_name(mut self, file_name: impl Into<String>) -> Self {
+        self.file_name = Some(file_name.into());
         self
     }
 
-    /// The part's header lines, each ending in CRLF: `Content-Disposition` naming it, then its
-    /// `Content-Type`, then its other headers.
-    ///
-    /// The name is written as the WHATWG HTML standard's `multipart/form-data` encoding writes a
-    /// form field's: as UTF-8, quoted, with `"`, CR and LF percent-encoded, and nothing else
-    /// escaped. RFC 7578 §4.2 rules out the RFC 2231 `name*=` form.
-    fn head(&self, name: &str) -> Vec<u8> {
-        let mut head = b"Content-Disposition: form-data; name=\"".to_vec();
-        for byte in name.bytes() {
-            match byte {
-                b'"' => head.extend_from_slice(b"%22"),
-                b'\r' => head.extend_from_slice(b"%0D"),
-                b'\n' => head.extend_from_slice(b"%0A"),
-                byte => head.push(byte),
-            }
+    /// Set the headers the part carries after its `Content-Disposition` and `Content-Type`,
+    /// replacing any set before. A map holding a `Content-Disposition` is refused as
+    /// [`Error::RequestConstruction`]: the part writes its own, from its name and
+    /// [`Self::file_name`], and a second would leave the reader to pick one.
+    pub fn headers(mut self, headers: HeaderMap) -> Result<Self, Error<Infallible>> {
+        if headers.contains_key(http::header::CONTENT_DISPOSITION) {
+            return Err(Error::request_message(
+                "a multipart part header sets `Content-Disposition`, which the part writes itself",
+            ));
         }
-        head.extend_from_slice(b"\"\r\n");
+        self.headers = headers;
+        Ok(self)
+    }
+
+    /// The part's header lines, each ending in CRLF: `Content-Disposition` naming it, and giving
+    /// its `filename` where it has one, then its `Content-Type`, then its other headers.
+    ///
+    /// The name and filename are written as the WHATWG HTML standard's `multipart/form-data`
+    /// encoding writes a form field's: as UTF-8, quoted, with `"`, CR and LF percent-encoded, and
+    /// nothing else escaped. RFC 7578 §4.2 rules out the RFC 2231 `name*=` and `filename*=`
+    /// forms.
+    fn head(&self, name: &str) -> Vec<u8> {
+        let mut head = b"Content-Disposition: form-data; name=".to_vec();
+        quote_parameter(&mut head, name);
+        if let Some(file_name) = &self.file_name {
+            head.extend_from_slice(b"; filename=");
+            quote_parameter(&mut head, file_name);
+        }
+        head.extend_from_slice(b"\r\n");
         // `Content-Type` is written in the case RFC 7578's examples use; any other header in the
         // lowercase `HeaderName` holds, which every reader matches without regard to case.
         let mime = self.mime.iter().map(|value| ("Content-Type", value));
@@ -396,6 +412,21 @@ impl MultipartPart {
         }
         head
     }
+}
+
+/// Append `value` to `head` quoted, with `"`, CR and LF percent-encoded and every other byte as
+/// it is, as [`MultipartPart`] writes a `Content-Disposition` parameter.
+fn quote_parameter(head: &mut Vec<u8>, value: &str) {
+    head.push(b'"');
+    for byte in value.bytes() {
+        match byte {
+            b'"' => head.extend_from_slice(b"%22"),
+            b'\r' => head.extend_from_slice(b"%0D"),
+            b'\n' => head.extend_from_slice(b"%0A"),
+            byte => head.push(byte),
+        }
+    }
+    head.push(b'"');
 }
 
 /// A boundary of 32 lowercase hexadecimal digits, from `std`'s randomly keyed hasher (keyed per
