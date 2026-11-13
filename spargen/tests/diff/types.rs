@@ -133,6 +133,57 @@ fn flipping_a_field_between_required_and_optional_is_major_both_ways() {
     }
 }
 
+#[test]
+fn an_optional_field_becoming_nullable_or_no_longer_nullable_is_major_both_ways() {
+    // `Option<T>` ↔ `Nullable<T>` on a public struct field.
+    let optional_name = base();
+    let nullable_name = spec(
+        "",
+        "id",
+        "        id: { type: integer }\n        name: { type: [string, 'null'] }\n",
+        "",
+    );
+
+    for (old, new) in [
+        (&optional_name, &nullable_name),
+        (&nullable_name, &optional_name),
+    ] {
+        let report = diff(old, new);
+        assert_eq!(
+            kinds(&report),
+            vec![ChangeKind::FieldTypeChanged],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
+#[test]
+fn a_nullable_field_flipping_between_required_and_optional_changes_its_type_too() {
+    // `Option<T>` (required, maybe `null`) ↔ `Nullable<T>` (optional and nullable).
+    let props = "        id: { type: integer }\n        name: { type: [string, 'null'] }\n";
+    let required_name = spec("", "id, name", props, "");
+    let optional_name = spec("", "id", props, "");
+
+    for (old, new) in [
+        (&optional_name, &required_name),
+        (&required_name, &optional_name),
+    ] {
+        let report = diff(old, new);
+        assert_eq!(
+            kinds(&report),
+            vec![
+                ChangeKind::FieldRequirednessChanged,
+                ChangeKind::FieldTypeChanged
+            ],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
 /// The `/pets` spec whose `Pet` carries `additional` (an `additionalProperties:` line at 6-space
 /// indent, or `""` for none).
 fn with_additional(additional: &str) -> String {

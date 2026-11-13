@@ -373,6 +373,9 @@ impl Spec {
     }
 
     /// Cap the diagnostics collected before batching stops (default 100).
+    ///
+    /// Past the cap an error displaces the most recent retained warning, so a rejected run
+    /// lists an error whenever the cap is at least one.
     pub fn with_batch_cap(mut self, count: usize) -> Self {
         self.batch_cap = count;
         self

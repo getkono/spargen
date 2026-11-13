@@ -1077,8 +1077,8 @@ fn nullable_limit(declaration: &str) -> String {
 
 #[test]
 fn moving_a_nullable_parameter_onto_or_off_json_content_is_major_both_ways() {
-    // A nullable JSON `content` parameter sends `Some(None)` as `null`, so its field is
-    // `Option<Option<T>>`, where the same schema serialized by a style is `Option<T>` (#996).
+    // A nullable JSON `content` parameter sends `Nullable::Null` as `null`, so its field is
+    // `Nullable<T>`, where the same schema serialized by a style is `Option<T>` (#996).
     let styled = nullable_limit("          schema: { type: [integer, 'null'] }\n");
     let json = nullable_limit(
         "          content:

@@ -19,7 +19,7 @@ expression: module
 pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
     Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
-    LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next,
+    LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next, Nullable,
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
     RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
     RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
@@ -3271,6 +3271,137 @@ mod support {
             }
         }
     }
+    mod nullable {
+        //! The tri-state value of an optional, nullable member: absent, an explicit `null`, or a value.
+        //!
+        //! A schema member that is both optional and nullable has three wire states — the key missing,
+        //! the key holding `null`, and the key holding a value — and a request that clears a member (a
+        //! JSON Merge Patch's `{"nickname": null}`) needs the second as much as a decoder needs to tell
+        //! it from the first. `Option<T>` holds two of them, so a generated model declares such a member
+        //! as a `Nullable<T>` instead, and a generated `…Params` bundle does the same for a parameter that
+        //! sends an explicit `null`.
+        //!
+        //! On the wire it is an `Option<T>`: `Value` writes the value, `Null` writes `null`, and decoding
+        //! reads `null` as `Null` and anything else as `Value` of `T`'s own decode. `Absent` is the field's
+        //! business: a generated field skips it when serializing
+        //! (`skip_serializing_if = "Nullable::is_absent"`) and decodes a missing key as it
+        //! (`#[serde(default)]`). Serialized anywhere else, `Absent` writes `null`, as `Null` does.
+        use serde::de::{Deserialize, Deserializer, Visitor};
+        use serde::ser::{Serialize, Serializer};
+        use std::fmt;
+        use std::marker::PhantomData;
+        /// An optional, nullable member: absent, an explicit `null`, or a value.
+        ///
+        /// `Default` is `Absent`, so a member nobody sets is left off the wire. `From<T>` gives `Value`,
+        /// and `From<Option<T>>` maps `None` to `Null`, so a generated `with_<field>` setter taking
+        /// `impl Into<Nullable<T>>` accepts `value`, `Some(value)` and `None` alike.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        pub enum Nullable<T> {
+            /// The member is left off the wire, or was missing from what was decoded.
+            #[default]
+            Absent,
+            /// The member is an explicit `null`.
+            Null,
+            /// The member holds a value.
+            Value(T),
+        }
+        impl<T> Nullable<T> {
+            /// Whether the member is absent: the predicate a generated field's `skip_serializing_if`
+            /// names.
+            pub fn is_absent(&self) -> bool {
+                matches!(self, Self::Absent)
+            }
+            /// Whether the member is an explicit `null`.
+            pub fn is_null(&self) -> bool {
+                matches!(self, Self::Null)
+            }
+            /// Whether the member holds a value.
+            pub fn is_value(&self) -> bool {
+                matches!(self, Self::Value(_))
+            }
+            /// The value, borrowed: `Some` for `Value`, and `None` for both `Null` and `Absent`.
+            pub fn as_option(&self) -> Option<&T> {
+                match self {
+                    Self::Value(value) => Some(value),
+                    Self::Null | Self::Absent => None,
+                }
+            }
+            /// The value: `Some` for `Value`, and `None` for both `Null` and `Absent`.
+            pub fn into_option(self) -> Option<T> {
+                match self {
+                    Self::Value(value) => Some(value),
+                    Self::Null | Self::Absent => None,
+                }
+            }
+            /// The same state, with any value borrowed.
+            pub fn as_ref(&self) -> Nullable<&T> {
+                match self {
+                    Self::Absent => Nullable::Absent,
+                    Self::Null => Nullable::Null,
+                    Self::Value(value) => Nullable::Value(value),
+                }
+            }
+        }
+        impl<T> From<T> for Nullable<T> {
+            fn from(value: T) -> Self {
+                Self::Value(value)
+            }
+        }
+        impl<T> From<Option<T>> for Nullable<T> {
+            /// `Some(value)` is `Value`, and `None` is an explicit `Null`, never `Absent`.
+            fn from(value: Option<T>) -> Self {
+                match value {
+                    Some(value) => Self::Value(value),
+                    None => Self::Null,
+                }
+            }
+        }
+        impl<T: Serialize> Serialize for Nullable<T> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                match self {
+                    Self::Value(value) => serializer.serialize_some(value),
+                    Self::Null | Self::Absent => serializer.serialize_none(),
+                }
+            }
+        }
+        impl<'de, T: Deserialize<'de>> Deserialize<'de> for Nullable<T> {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                deserializer.deserialize_option(NullableVisitor(PhantomData))
+            }
+        }
+        /// Reads what `Option<T>` reads: `null` (or a unit) as `Null`, anything else as `Value`.
+        struct NullableVisitor<T>(PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for NullableVisitor<T> {
+            type Value = Nullable<T>;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("null or a value")
+            }
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Nullable::Null)
+            }
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Nullable::Null)
+            }
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                T::deserialize(deserializer).map(Nullable::Value)
+            }
+        }
+    }
     mod parameter {
         //! OpenAPI parameter serialization for every style the specification defines.
         //!
@@ -5925,7 +6056,7 @@ mod support {
         use reqwest::StatusCode;
         use serde::de::DeserializeOwned;
         use super::chunked::read_as_it_arrives;
-        use super::dispatch::{cap_body, send_on, unexpected_status_capped};
+        use super::dispatch::{cap_body, read_prefix, send_on, unexpected_status_capped};
         use super::transport::try_clone_request;
         use super::wasm::BoxFuture;
         use super::{
@@ -5938,7 +6069,20 @@ mod support {
         /// The caller-provided wait before an automatic reconnect attempt. `Send` off `wasm32` and not on
         /// it, as the `wasm` module explains.
         pub type ReconnectWait = BoxFuture<'static, ()>;
-        type ReconnectFuture = BoxFuture<'static, Result<Response, StreamError>>;
+        type ReconnectFuture = BoxFuture<'static, Reconnected>;
+        /// How a reconnect request was answered.
+        enum Reconnected {
+            /// A response whose body is framed in place of the closed one.
+            Opened(Response),
+            /// A failure the reconnect policy is asked about, as one reading the body is.
+            Failed(StreamError),
+            /// A `204`: the server's request to stop reconnecting. The stream ends cleanly.
+            NoContent,
+            /// A response the stream cannot frame (an SSE reconnect answered with a body that is not
+            /// `text/event-stream`). It is yielded, and the stream ends without asking the policy again,
+            /// since resending the request would be answered the same way.
+            Refused(StreamError),
+        }
         /// Why an automatic SSE reconnect is being considered.
         #[derive(Debug)]
         pub enum ReconnectReason<'a> {
@@ -5953,6 +6097,11 @@ mod support {
         /// attempt limits and timing. `attempt` starts at zero, increases after each accepted reconnect,
         /// and resets after a successfully decoded item. `server_delay` is the latest valid SSE `retry:`
         /// value, when present.
+        ///
+        /// A reconnect answered with a non-success status, or failing in transit, is offered to the
+        /// policy again. Two answers end the stream without asking it: a `204`, the server's request to
+        /// stop reconnecting, ends it cleanly; and an SSE reconnect whose response is not
+        /// `text/event-stream` yields an [`Error::Decode`] carrying that response, then ends it.
         pub trait ReconnectPolicy: MaybeSend + MaybeSync {
             /// Decide whether to reconnect and provide the future that waits until the next attempt.
             fn reconnect(
@@ -6213,7 +6362,7 @@ mod support {
                                     }
                                 }
                                 Poll::Ready(Err(error)) => {
-                                    let error = Error::InterruptedBody(error);
+                                    let error = Error::from_transport(error);
                                     if let Some(error) = this
                                         .schedule_reconnect(OwnedReconnectReason::Failure(error))
                                     {
@@ -6259,19 +6408,25 @@ mod support {
                                     this.state = StreamState::Connecting(future);
                                     return Poll::Pending;
                                 }
-                                Poll::Ready(Ok(response)) => {
+                                Poll::Ready(Reconnected::Opened(response)) => {
                                     let (parts, body) = response.into_parts();
                                     this.status = parts.status;
                                     this.headers = parts.headers;
                                     this.bom_pending = is_sse(this.framing);
                                     this.state = StreamState::Body(read_as_it_arrives(body));
                                 }
-                                Poll::Ready(Err(error)) => {
+                                Poll::Ready(Reconnected::Failed(error)) => {
                                     if let Some(error) = this
                                         .schedule_reconnect(OwnedReconnectReason::Failure(error))
                                     {
                                         return Poll::Ready(Some(Err(error)));
                                     }
+                                }
+                                Poll::Ready(Reconnected::NoContent) => {
+                                    return Poll::Ready(None);
+                                }
+                                Poll::Ready(Reconnected::Refused(error)) => {
+                                    return Poll::Ready(Some(Err(error)));
                                 }
                             }
                         }
@@ -6357,16 +6512,74 @@ mod support {
                         }
                     }
                 }
+                let sse = is_sse(self.framing);
                 Some(
                     Box::pin(async move {
-                        let response = send_on(backend.as_ref(), request).await?;
-                        if response.status().is_success() {
-                            Ok(response)
-                        } else {
-                            Err(unexpected_status_capped(max_error_body, response).await)
+                        let response = match send_on(backend.as_ref(), request).await {
+                            Ok(response) => response,
+                            Err(error) => return Reconnected::Failed(error),
+                        };
+                        if !response.status().is_success() {
+                            return Reconnected::Failed(
+                                unexpected_status_capped(max_error_body, response).await,
+                            );
                         }
+                        if response.status() == StatusCode::NO_CONTENT {
+                            return Reconnected::NoContent;
+                        }
+                        if sse && !is_event_stream(response.headers()) {
+                            return Reconnected::Refused(
+                                not_an_event_stream(max_error_body, response).await,
+                            );
+                        }
+                        Reconnected::Opened(response)
                     }),
                 )
+            }
+        }
+        /// Whether `headers` declare a `text/event-stream` body: the media type alone decides, in any case
+        /// and whatever parameters follow it.
+        fn is_event_stream(headers: &HeaderMap) -> bool {
+            headers
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next())
+                .is_some_and(|essence| {
+                    essence.trim().eq_ignore_ascii_case("text/event-stream")
+                })
+        }
+        /// The `Decode` error an SSE reconnect answered with a body that is not `text/event-stream` is
+        /// reported as: its status and headers, and its body capped at `max_error_body`. A failure while
+        /// reading that body is reported instead, by its transport class.
+        async fn not_an_event_stream(
+            max_error_body: usize,
+            response: Response,
+        ) -> StreamError {
+            let (parts, body) = response.into_parts();
+            let path = match parts.headers.get(reqwest::header::CONTENT_TYPE) {
+                Some(value) => {
+                    format!(
+                        "reconnect response Content-Type is {:?}, not text/event-stream",
+                        String::from_utf8_lossy(value.as_bytes())
+                    )
+                }
+                None => {
+                    "reconnect response has no Content-Type, not text/event-stream"
+                        .to_owned()
+                }
+            };
+            match read_prefix(max_error_body, body).await {
+                Ok(prefix) => {
+                    let (body, truncated) = cap_body(prefix, max_error_body);
+                    Error::Decode {
+                        status: parts.status,
+                        headers: parts.headers,
+                        path,
+                        body,
+                        truncated,
+                    }
+                }
+                Err(error) => Error::from_transport(error),
             }
         }
         /// The outcome of attempting to frame one item out of the buffer.
@@ -6440,8 +6653,9 @@ mod support {
             }
         }
         /// Frame the next item out of `buffer`, consuming the bytes it uses. `at_eof` is `true` once no
-        /// further bytes will arrive, which lets a trailing frame not terminated by a delimiter still be
-        /// emitted. Pure: no IO, no async.
+        /// further bytes will arrive, which lets a trailing ndjson line or JSON-seq record not terminated
+        /// by a delimiter still be emitted, and drops an SSE event not yet dispatched by its blank line.
+        /// Pure: no IO, no async.
         fn next_frame(
             buffer: &mut FrameBuffer,
             framing: Framing,
@@ -6582,16 +6796,14 @@ mod support {
                         std::mem::take(&mut buffer.event)
                     }
                     None if !at_eof => return FramePoll::NeedMore,
-                    None => {
-                        if buffer.line_start < buffer.len() {
-                            append_sse_field(
-                                trim_cr(&buffer.bytes[buffer.line_start..]),
-                                &mut buffer.event,
-                            );
-                        }
+                    None if buffer.bytes[buffer.line_start..] == *b"\r" => {
                         let fields = std::mem::take(&mut buffer.event);
                         buffer.clear();
                         fields
+                    }
+                    None => {
+                        buffer.clear();
+                        return FramePoll::NeedMore;
                     }
                 };
                 match finish_sse_fields(fields, output) {
@@ -6699,8 +6911,8 @@ mod support {
         /// requires, a line ends at CRLF, at a bare LF, or at a bare CR. Returns `Err` with the offset the
         /// next search starts from when no full line is buffered yet, which includes a CR that is the last
         /// buffered byte: the byte after it decides whether it ends the line alone or begins a CRLF, so it
-        /// is held, and searched again, until that byte arrives (at EOF, `sse_next` takes the tail
-        /// itself).
+        /// is held, and searched again, until that byte arrives (at EOF, where none will, `sse_next`
+        /// reads the tail itself).
         fn take_line(
             buf: &[u8],
             from: usize,
@@ -6734,7 +6946,7 @@ mod support {
             false
         }
         /// `line` without one trailing `\r`, so a CRLF line ending reads the same as a bare `\n` to the
-        /// ndjson framer, and an SSE tail at EOF ending in a CR loses that line ending.
+        /// ndjson framer.
         fn trim_cr(line: &[u8]) -> &[u8] {
             line.strip_suffix(b"\r").unwrap_or(line)
         }
@@ -7015,6 +7227,7 @@ mod support {
         UnknownVariant,
     };
     pub use middleware::{Middleware, MiddlewareBackend, Next};
+    pub use nullable::Nullable;
     pub use header::{parse_header, require_header, HeaderError, HeaderShape};
     pub use parameter::{
         encode, serialize_deep_object, serialize_delimited, serialize_form,
@@ -8143,19 +8356,28 @@ pub mod types {
     }
     #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct NullOnlyProperty {
-        #[serde(rename = "x", default, skip_serializing_if = "Option::is_none")]
-        pub x: Option<NullOnlyPropertyX>,
+        #[serde(
+            rename = "x",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub x: super::support::Nullable<NullOnlyPropertyX>,
     }
     impl NullOnlyProperty {
         ///A `NullOnlyProperty` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         pub fn new() -> Self {
-            Self { x: None }
+            Self {
+                x: super::support::Nullable::Absent,
+            }
         }
-        ///Set the `x` member.
+        ///Set the `x` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_x(mut self, value: NullOnlyPropertyX) -> Self {
-            self.x = Some(value);
+        pub fn with_x(
+            mut self,
+            value: impl std::convert::Into<super::support::Nullable<NullOnlyPropertyX>>,
+        ) -> Self {
+            self.x = value.into();
             self
         }
     }
@@ -8251,8 +8473,12 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub anything: Option<OptionalFieldsAnything>,
-        #[serde(rename = "maybe", default, skip_serializing_if = "Option::is_none")]
-        pub maybe: Option<OptionalFieldsMaybe>,
+        #[serde(
+            rename = "maybe",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub maybe: super::support::Nullable<OptionalFieldsMaybe>,
     }
     impl OptionalFields {
         ///A `OptionalFields` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
@@ -8268,7 +8494,7 @@ pub mod types {
                 choice: None,
                 colour: self::default_79_colour(),
                 anything: None,
-                maybe: None,
+                maybe: super::support::Nullable::Absent,
             }
         }
         ///Set the `name` member.
@@ -8325,10 +8551,13 @@ pub mod types {
             self.anything = Some(value);
             self
         }
-        ///Set the `maybe` member.
+        ///Set the `maybe` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_maybe(mut self, value: OptionalFieldsMaybe) -> Self {
-            self.maybe = Some(value);
+        pub fn with_maybe(
+            mut self,
+            value: impl std::convert::Into<super::support::Nullable<OptionalFieldsMaybe>>,
+        ) -> Self {
+            self.maybe = value.into();
             self
         }
     }
@@ -9074,8 +9303,12 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub alias_node: Option<AliasNode>,
-        #[serde(rename = "priority", default, skip_serializing_if = "Option::is_none")]
-        pub priority: Option<Priority>,
+        #[serde(
+            rename = "priority",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub priority: super::support::Nullable<Priority>,
         #[serde(
             rename = "pet",
             default,
@@ -9097,8 +9330,12 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub alias: Option<StringOrList>,
-        #[serde(rename = "notes", default, skip_serializing_if = "Option::is_none")]
-        pub notes: Option<StringListOrNull>,
+        #[serde(
+            rename = "notes",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub notes: super::support::Nullable<StringListOrNull>,
         #[serde(
             rename = "refined",
             default,
@@ -9155,11 +9392,11 @@ pub mod types {
                 category: None,
                 dict: None,
                 alias_node: None,
-                priority: None,
+                priority: super::support::Nullable::Absent,
                 pet: None,
                 animal: None,
                 alias: None,
-                notes: None,
+                notes: super::support::Nullable::Absent,
                 refined: None,
                 any_string: None,
                 any_number: None,
@@ -9204,10 +9441,13 @@ pub mod types {
             self.alias_node = Some(value);
             self
         }
-        ///Set the `priority` member.
+        ///Set the `priority` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_priority(mut self, value: Priority) -> Self {
-            self.priority = Some(value);
+        pub fn with_priority(
+            mut self,
+            value: impl std::convert::Into<super::support::Nullable<Priority>>,
+        ) -> Self {
+            self.priority = value.into();
             self
         }
         ///Set the `pet` member.
@@ -9228,10 +9468,13 @@ pub mod types {
             self.alias = Some(value);
             self
         }
-        ///Set the `notes` member.
+        ///Set the `notes` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_notes(mut self, value: StringListOrNull) -> Self {
-            self.notes = Some(value);
+        pub fn with_notes(
+            mut self,
+            value: impl std::convert::Into<super::support::Nullable<StringListOrNull>>,
+        ) -> Self {
+            self.notes = value.into();
             self
         }
         ///Set the `refined` member.
@@ -9395,19 +9638,29 @@ pub mod types {
     pub struct AliasNode {
         #[serde(rename = "value")]
         pub value: AliasNodeValue,
-        #[serde(rename = "parent", default, skip_serializing_if = "Option::is_none")]
-        pub parent: Option<Box<AliasNode>>,
+        #[serde(
+            rename = "parent",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub parent: super::support::Nullable<Box<AliasNode>>,
     }
     impl AliasNode {
         ///A `AliasNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
         pub fn new(value: AliasNodeValue) -> Self {
-            Self { value, parent: None }
+            Self {
+                value,
+                parent: super::support::Nullable::Absent,
+            }
         }
-        ///Set the `parent` member.
+        ///Set the `parent` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_parent(mut self, value: Box<AliasNode>) -> Self {
-            self.parent = Some(value);
+        pub fn with_parent(
+            mut self,
+            value: impl std::convert::Into<super::support::Nullable<Box<AliasNode>>>,
+        ) -> Self {
+            self.parent = value.into();
             self
         }
     }
@@ -9907,19 +10160,29 @@ pub mod types {
     pub struct MaybeAliasNode {
         #[serde(rename = "value")]
         pub value: AliasNodeValue,
-        #[serde(rename = "parent", default, skip_serializing_if = "Option::is_none")]
-        pub parent: Option<Box<AliasNode>>,
+        #[serde(
+            rename = "parent",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub parent: super::support::Nullable<Box<AliasNode>>,
     }
     impl MaybeAliasNode {
         ///A `MaybeAliasNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
         pub fn new(value: AliasNodeValue) -> Self {
-            Self { value, parent: None }
+            Self {
+                value,
+                parent: super::support::Nullable::Absent,
+            }
         }
-        ///Set the `parent` member.
+        ///Set the `parent` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_parent(mut self, value: Box<AliasNode>) -> Self {
-            self.parent = Some(value);
+        pub fn with_parent(
+            mut self,
+            value: impl std::convert::Into<super::support::Nullable<Box<AliasNode>>>,
+        ) -> Self {
+            self.parent = value.into();
             self
         }
     }
@@ -10571,19 +10834,31 @@ pub mod types {
     pub struct PostNullablePartsBody {
         #[serde(rename = "file")]
         pub file: Option<PostNullablePartsBodyFile>,
-        #[serde(rename = "thumb", default, skip_serializing_if = "Option::is_none")]
-        pub thumb: Option<PostNullablePartsBodyThumb>,
+        #[serde(
+            rename = "thumb",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub thumb: super::support::Nullable<PostNullablePartsBodyThumb>,
     }
     impl PostNullablePartsBody {
         ///A `PostNullablePartsBody` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
         pub fn new(file: Option<PostNullablePartsBodyFile>) -> Self {
-            Self { file, thumb: None }
+            Self {
+                file,
+                thumb: super::support::Nullable::Absent,
+            }
         }
-        ///Set the `thumb` member.
+        ///Set the `thumb` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_thumb(mut self, value: PostNullablePartsBodyThumb) -> Self {
-            self.thumb = Some(value);
+        pub fn with_thumb(
+            mut self,
+            value: impl std::convert::Into<
+                super::support::Nullable<PostNullablePartsBodyThumb>,
+            >,
+        ) -> Self {
+            self.thumb = value.into();
             self
         }
     }
@@ -16610,7 +16885,7 @@ Response `409`: Conflict*/
                 .map_err(support::Error::widen)?;
             form = form.part("file", part);
         }
-        if let Some(value) = &body.thumb {
+        if let support::Nullable::Value(value) = &body.thumb {
             let mut part = support::MultipartPart::bytes(value.to_vec());
             part = part
                 .mime_str("application/octet-stream")

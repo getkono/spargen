@@ -603,6 +603,67 @@ fn a_report_that_hit_the_batch_cap_says_it_is_truncated() {
     );
 }
 
+/// Warnings that fill `batch_cap` before the run's error is emitted do not crowd that error out:
+/// it evicts the most recent retained warning, so the rejected report still lists it and
+/// `has_errors` agrees with the outcome. A zero cap retains nothing, and `has_errors` still
+/// answers from what the run emitted (#1345).
+#[test]
+fn an_error_emitted_after_the_cap_is_full_of_warnings_is_retained() {
+    // The audit warns (W001) on each `pattern` before lowering reports the unresolved reference.
+    let mut spec = String::from(
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n  /a:\n    get:\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema: { $ref: '#/components/schemas/Missing' }\ncomponents:\n  schemas:\n",
+    );
+    let warnings = 4;
+    for index in 0..warnings {
+        spec.push_str(&format!(
+            "    Name{index}: {{ type: string, pattern: '^{index}' }}\n"
+        ));
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("openapi.yaml");
+    std::fs::write(&path, &spec).unwrap();
+    let spec_path = Utf8PathBuf::from_path_buf(path).unwrap();
+
+    let uncapped = run_check(&Spec::new(spec_path.clone()).with_batch_cap(100));
+    assert_eq!(uncapped.outcome(), Outcome::Rejected, "{uncapped:#?}");
+    assert_eq!(uncapped.warnings().count(), warnings, "{uncapped:#?}");
+    assert_eq!(
+        uncapped.diagnostics().last().map(|d| d.code.as_str()),
+        Some("E004"),
+        "the error must come after every warning: {uncapped:#?}"
+    );
+
+    let capped = run_check(&Spec::new(spec_path.clone()).with_batch_cap(warnings));
+    assert_eq!(capped.outcome(), Outcome::Rejected, "{capped:#?}");
+    assert!(capped.truncated(), "{capped:#?}");
+    assert!(capped.has_errors(), "{capped:#?}");
+    assert_eq!(capped.diagnostics().len(), warnings, "{capped:#?}");
+    assert_eq!(
+        capped.errors().map(|d| d.code.as_str()).collect::<Vec<_>>(),
+        ["E004"],
+        "{capped:#?}"
+    );
+    // The evicted warning is the most recent one; the earlier ones keep their order.
+    assert_eq!(
+        capped
+            .warnings()
+            .map(|d| d.pointer.clone())
+            .collect::<Vec<_>>(),
+        uncapped
+            .warnings()
+            .take(warnings - 1)
+            .map(|d| d.pointer.clone())
+            .collect::<Vec<_>>(),
+    );
+    assert!(!capped.succeeded());
+
+    let zero = run_check(&Spec::new(spec_path).with_batch_cap(0));
+    assert_eq!(zero.outcome(), Outcome::Rejected, "{zero:#?}");
+    assert!(zero.diagnostics().is_empty(), "{zero:#?}");
+    assert!(zero.has_errors(), "{zero:#?}");
+}
+
 /// Run `spec` through [`generate`], which holds `check` to its verdict and to the identical
 /// diagnostics ([`assert_check_agrees`]), and hold a fixture whose name begins with a code to
 /// reporting it, with the verdict its severity gives: an `E###` rejects, and a `W###` generates, so
