@@ -45,6 +45,8 @@ components:
         level: { $ref: '#/components/schemas/Level' }
         on: { type: boolean, const: true }
         tier: { type: integer, format: uint8, enum: [1, 2], default: 2 }
+        repeated: { type: integer, enum: [1, 1.0, 2] }
+        twice: { type: boolean, enum: [true, true] }
 "##;
 
 #[test]

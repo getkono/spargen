@@ -614,6 +614,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .emit(self.diags);
                 return None;
             }
+            // An integer or boolean set names each member by its value (`V1`, `TRUE`), so a value
+            // listed twice (`1` and `1.0` under `integer`, or `true` twice) is one member.
+            if scalar_repr != ScalarRepr::String && variants.contains(&scalar) {
+                continue;
+            }
             variants.push(scalar);
         }
         // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate

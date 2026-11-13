@@ -36,7 +36,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// An integer set meets an integer primitive at the narrower of the two widths
     /// ([`intersect_primitives`]), keeping the members that width holds: none left is
-    /// [`NoMeet::Empty`], and a narrower width is a new set under `hint`.
+    /// [`NoMeet::Empty`], and a narrower width is a new set under `hint`. A member that width
+    /// drops is outside the intersection, as a member one set lists and the other does not is,
+    /// so it is dropped, not reported. The same member beside its own schema's `format` is a
+    /// set contradicting itself in one schema, which `lower_enum` rejects as `E008`.
     ///
     /// A set the response already opened, met where [`Self::narrowing_opens`] does not hold (a
     /// union variant `intersect_union` meets it with), is a new closed copy under `hint`, for the

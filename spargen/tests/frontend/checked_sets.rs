@@ -139,8 +139,9 @@ fn a_member_outside_its_formats_range_is_rejected() {
 }
 
 /// An `allOf` meets an integer set with an integer `format` at the narrower width, keeping the
-/// members it holds, and two sets at the narrower of theirs; a set no member of which the width
-/// holds is empty, the uninhabited type an empty meet is.
+/// members it holds, and two sets at the narrower of theirs. A member the narrower width cannot
+/// hold is outside the intersection, as a member one set lists and the other does not is, so it is
+/// dropped where the same member beside its own schema's `format` is `E008`.
 #[test]
 fn an_intersection_holds_an_integer_set_in_the_narrower_width() {
     let (report, code) = generate_with_code(&with_schemas(
@@ -164,6 +165,39 @@ fn an_intersection_holds_an_integer_set_in_the_narrower_width() {
     ] {
         assert!(types.contains(item), "no `{item}` in {types}");
     }
+}
+
+/// An `allOf` meeting an integer set at a width that holds none of its members has no common
+/// value, so it is `E013` at the composition, at a component root and inside a property alike, as
+/// two sets sharing no member are.
+#[test]
+fn an_intersection_whose_width_holds_no_member_is_irreconcilable() {
+    let report = generate(&with_schemas(
+        "3.1.0",
+        "    Holder:\n      \
+         type: object\n      \
+         properties:\n        \
+         gone:\n          \
+         allOf: [{ type: integer, format: int32 }, { enum: [3000000000] }]\n    \
+         Empty:\n      \
+         allOf: [{ type: integer, format: int32 }, { enum: [3000000000] }]\n",
+    ));
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let e013: Vec<(&str, &str)> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == Code::AllOfIrreconcilable)
+        .map(|diagnostic| (diagnostic.pointer.as_str(), diagnostic.message.as_str()))
+        .collect();
+    let message = "`allOf` scalar members have an empty or unrepresentable intersection";
+    assert_eq!(
+        e013,
+        [
+            ("/components/schemas/Holder/properties/gone", message),
+            ("/components/schemas/Empty", message),
+        ],
+        "{report:#?}"
+    );
 }
 
 /// Two integer sets listing different values are distinct checked newtypes a value tells apart, so
@@ -190,6 +224,28 @@ components:
         2,
         "{types}"
     );
+}
+
+/// A value listed twice (`1` and `1.0` under `type: integer`, or `true` twice) is one member of the
+/// set, named by one `const`, so the newtype's impl compiles.
+#[test]
+fn a_repeated_value_is_one_member_of_the_set() {
+    let (report, code) = generate_with_code(&with_schemas(
+        "3.1.0",
+        "    Repeated: { type: integer, enum: [1, 1.0, 2, 1] }\n    \
+         Twice: { type: boolean, enum: [true, true] }\n",
+    ));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let types = flat(&types_module(&code));
+    for (item, count) in [
+        ("pub const V1: Self = Self(1);", 1),
+        ("pub const V2: Self = Self(2);", 1),
+        ("pub const ALL: &'static [Self] = &[Self::V1, Self::V2];", 1),
+        ("pub const TRUE: Self = Self(true);", 1),
+        ("pub const ALL: &'static [Self] = &[Self::TRUE];", 1),
+    ] {
+        assert_eq!(types.matches(item).count(), count, "`{item}` in {types}");
+    }
 }
 
 /// A representable `default` on an optional field whose type is a checked newtype is the newtype
