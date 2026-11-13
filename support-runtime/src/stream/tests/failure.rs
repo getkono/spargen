@@ -116,6 +116,112 @@ fn an_sse_reconnect_response_that_is_not_an_event_stream_ends_the_stream() {
     }
 }
 
+/// A transport that answers its one request with the response it was built with.
+struct AnswersOnce(std::sync::Mutex<Option<crate::tests::Response>>);
+
+impl std::fmt::Debug for AnswersOnce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AnswersOnce")
+    }
+}
+
+impl crate::HttpBackend for AnswersOnce {
+    fn execute(&self, _: http::Request<HttpBody>) -> crate::ExecuteFuture<'_> {
+        let response = self.0.lock().unwrap().take().expect("one request");
+        Box::pin(std::future::ready(Ok(response)))
+    }
+}
+
+/// An SSE stream over `initial` whose reconnects go to `backend` under `policy`, through a core
+/// retaining at most `max_error_body` bytes of an error body.
+fn refused_reconnect_stream(
+    initial: &str,
+    backend: Arc<dyn crate::HttpBackend>,
+    max_error_body: usize,
+    policy: Arc<ImmediateReconnect>,
+) -> EventStream<serde_json::Value> {
+    let mut core = ClientCore::with_backend(backend, "https://example.com").unwrap();
+    core.config_mut().max_error_body = max_error_body;
+    let request = crate::tests::builder(Method::GET, "https://example.com/events")
+        .build()
+        .unwrap();
+    EventStream::new_reconnectable(
+        response(initial),
+        Framing::SseJsonData,
+        &core,
+        prepared(&core, request),
+    )
+    .with_reconnect(policy)
+    .unwrap()
+}
+
+/// A refused reconnect's body is retained only up to `max_error_body`: the `Decode` error holds
+/// that prefix with `truncated` set, and the stream ends without consulting the policy again.
+#[test]
+fn a_refused_reconnect_body_past_max_error_body_is_truncated() {
+    let backend = SequenceBackend::new([
+        Reply::status(200, "<html>maintenance</html>").header("content-type", "text/html")
+    ]);
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 5,
+        ..ImmediateReconnect::default()
+    });
+    let mut stream =
+        refused_reconnect_stream("data: {\"seq\":1}\n\n", backend.clone(), 6, policy.clone());
+
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 1})
+    );
+    match poll_ready(stream.next()) {
+        Some(Err(Error::Decode {
+            ref body,
+            truncated,
+            ..
+        })) => {
+            assert_eq!(&body[..], b"<html>");
+            assert!(truncated);
+        }
+        other => panic!("expected a truncated Decode error, got {other:?}"),
+    }
+    assert!(poll_ready(stream.next()).is_none());
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(reasons(&policy), [(0, "eof")]);
+}
+
+/// A refused reconnect whose body fails mid-read is reported by that failure's transport class,
+/// not as a `Decode` error over a partial body, and still ends the stream without consulting the
+/// policy again.
+#[test]
+fn a_refused_reconnect_body_that_fails_mid_read_reports_its_transport_class() {
+    let mut refused = failing_response(
+        "<html>maint",
+        crate::TransportError::protocol("corrupt gzip frame"),
+    );
+    refused.headers_mut().insert(
+        reqwest::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("text/html"),
+    );
+    let backend = Arc::new(AnswersOnce(std::sync::Mutex::new(Some(refused))));
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 5,
+        ..ImmediateReconnect::default()
+    });
+    let mut stream =
+        refused_reconnect_stream("data: {\"seq\":1}\n\n", backend, 64 * 1024, policy.clone());
+
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 1})
+    );
+    match poll_ready(stream.next()) {
+        Some(Err(error @ Error::Protocol(_))) => assert!(!error.is_transient()),
+        other => panic!("expected Protocol, got {other:?}"),
+    }
+    assert!(poll_ready(stream.next()).is_none());
+    assert_eq!(reasons(&policy), [(0, "eof")]);
+}
+
 /// The `Content-Type` an SSE reconnect is held to is the media type alone: its case and its
 /// parameters do not matter.
 #[test]
