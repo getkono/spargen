@@ -245,7 +245,17 @@ fn spec_for(args: &Args, consumer: &Consumer) -> syn::Result<spargen::Spec> {
     let spec_path = consumer.resolve_spec_path(&args.spec.value());
     let discovered = match spargen::Spec::new(spec_path).discover_config_file() {
         Ok(spec) => spec,
-        Err(error) => return Err(syn::Error::new(args.spec.span(), error.to_string())),
+        Err(error) => {
+            // `Display` leaves a read failure's I/O error to `source`, so the chain is written
+            // out here, as the CLI writes it.
+            let mut message = error.to_string();
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                message.push_str(&format!(": {cause}"));
+                source = cause.source();
+            }
+            return Err(syn::Error::new(args.spec.span(), message));
+        }
     };
     Ok(config(args, discovered))
 }
@@ -289,27 +299,37 @@ fn tracking(preview: &spargen::__private::MacroPreview) -> proc_macro2::TokenStr
 /// given leaves the config file's value in place, and omit rules and header bindings are appended
 /// to the file's own.
 fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
+    use spargen::{CarriedDocs, Carve, Narrowing, TestingModule, UnionTags, UuidMapping};
+
     let mut config = discovered;
     if let Some(uuid) = args.uuid {
-        config = config.uuid(uuid);
+        config = config.with_uuid(switch(uuid, UuidMapping::Uuid, UuidMapping::String));
     }
     if let Some(backend) = args.datetime {
-        config = config.datetime(backend);
+        config = config.with_datetime(backend);
     }
     if let Some(carve) = args.carve {
-        config = config.carve(carve);
+        config = config.with_carve(switch(carve, Carve::Auto, Carve::Off));
     }
     if let Some(open) = args.open_narrowing {
-        config = config.open_narrowing(open);
+        config = config.with_open_narrowing(switch(open, Narrowing::Open, Narrowing::Exact));
     }
     if let Some(open) = args.open_unions {
-        config = config.open_unions(open);
+        config = config.with_open_unions(switch(open, UnionTags::Open, UnionTags::Closed));
     }
     if let Some(verbatim) = args.verbatim_docs {
-        config = config.verbatim_docs(verbatim);
+        config = config.with_verbatim_docs(switch(
+            verbatim,
+            CarriedDocs::Verbatim,
+            CarriedDocs::Rewritten,
+        ));
     }
     if let Some(testing) = args.testing {
-        config = config.testing(testing);
+        config = config.with_testing(switch(
+            testing,
+            TestingModule::Emitted,
+            TestingModule::Omitted,
+        ));
     }
     for rule in &args.omit.rules {
         config = config.omit_rule(rule.clone());
@@ -321,12 +341,21 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
         config = config.bind_header(name.clone());
     }
     if let Some(cap) = args.error_body_cap {
-        config = config.error_body_cap(cap);
+        config = config.with_error_body_cap(cap);
     }
     if let Some(cap) = args.batch_cap {
-        config = config.batch_cap(cap);
+        config = config.with_batch_cap(cap);
     }
     config
+}
+
+/// The value a switch argument selects: `on_value` for `true`, `off_value` for `false`.
+fn switch<T>(on: bool, on_value: T, off_value: T) -> T {
+    if on {
+        on_value
+    } else {
+        off_value
+    }
 }
 
 /// Parse `datetime = "<backend>"` into `slot`: the date-time backend by the spelling

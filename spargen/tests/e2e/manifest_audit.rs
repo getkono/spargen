@@ -169,7 +169,7 @@ components:
     let audit = |backend: spargen::DateTimeBackend, manifest_text: &str| {
         std::fs::write(&manifest, format!("{manifest_text}\n[workspace]\n")).unwrap();
         let preview = spargen::__private::preview_for_macro(
-            &Spec::new(spec.clone()).datetime(backend),
+            &Spec::new(spec.clone()).with_datetime(backend),
             manifest.to_str().unwrap(),
         );
         preview
@@ -193,7 +193,7 @@ components:
         );
         assert!(!messages.contains("`time`"), "{messages}");
 
-        let line = spargen::requirements(&Spec::new(spec.clone()).datetime(backend))
+        let line = spargen::requirements(&Spec::new(spec.clone()).with_datetime(backend))
             .expect("spec lowers")
             .0
             .dependencies

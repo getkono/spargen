@@ -338,12 +338,22 @@ fn carve_diffs_the_carved_surfaces_of_a_pair_that_lowers_only_under_carve() {
         "{uncarved}"
     );
 
-    let report = diff_configured(&old, &new, |spec| spec.carve(true), |spec| spec.carve(true));
+    let report = diff_configured(
+        &old,
+        &new,
+        |spec| spec.with_carve(spargen::Carve::Auto),
+        |spec| spec.with_carve(spargen::Carve::Auto),
+    );
     assert_eq!(kinds(&report), [ChangeKind::OperationAdded], "{report:?}");
     assert_eq!(report.bump, Impact::Minor);
 
     // Each carved side's report succeeds as `Clean` and keeps the `W009` naming what it carved.
-    let (_, sides) = diff_with_sides(&old, &new, |spec| spec.carve(true), |spec| spec.carve(true));
+    let (_, sides) = diff_with_sides(
+        &old,
+        &new,
+        |spec| spec.with_carve(spargen::Carve::Auto),
+        |spec| spec.with_carve(spargen::Carve::Auto),
+    );
     for (side, side_report) in sides.reports() {
         assert_eq!(side_report.outcome(), spargen::Outcome::Clean, "{side:?}");
         let carved: Vec<_> = side_report
@@ -358,7 +368,7 @@ fn carve_diffs_the_carved_surfaces_of_a_pair_that_lowers_only_under_carve() {
     // The carved operation is on neither surface: each carved side diffs clean against the same
     // spec written without `/bad` and not carved, where a surviving `GET /bad` would be a removal
     // or an addition.
-    let carve = |spec: Spec| spec.carve(true);
+    let carve = |spec: Spec| spec.with_carve(spargen::Carve::Auto);
     let old_without_bad = base();
     let new_without_bad = spec("", "id", PET_PROPS, EXTRA_OP);
     let old_side = unsnapshotted_diff(&old, &old_without_bad, carve, |spec| spec);
@@ -400,10 +410,11 @@ paths:
 #[test]
 fn carve_reports_an_uncarvable_side_with_the_carve_drivers_report() {
     let temp = tempfile::tempdir().unwrap();
-    let old = Spec::new(write_spec(temp.path(), "old.yaml", &base())).carve(true);
+    let old =
+        Spec::new(write_spec(temp.path(), "old.yaml", &base())).with_carve(spargen::Carve::Auto);
     let new = Spec::new(write_spec(temp.path(), "new.yaml", UNCARVABLE))
-        .carve(true)
-        .batch_cap(1);
+        .with_carve(spargen::Carve::Auto)
+        .with_batch_cap(1);
 
     let rejection = spargen::diff(&old, &new).expect_err("the new side cannot be carved to lower");
     assert!(rejection.old_report().is_none(), "{rejection}");
@@ -725,5 +736,11 @@ const STATUS_STRUCT: &str = "    Status:
 
 /// The module `spec_text` generates, with `open_narrowing` set to `open`.
 fn generated_source(spec_text: &str, open: bool) -> String {
-    generate_text(spec_text, |spec| spec.open_narrowing(open))
+    generate_text(spec_text, |spec| {
+        spec.with_open_narrowing(if open {
+            spargen::Narrowing::Open
+        } else {
+            spargen::Narrowing::Exact
+        })
+    })
 }
