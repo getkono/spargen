@@ -10,7 +10,8 @@ use crate::name::{ByteStreamNames, Names, OperationNames};
 
 use super::body::{accept_tokens, body_send_tokens};
 use super::dispatch::{
-    attach_auth_tokens, error_branch_tokens, success_decode_tokens, success_type,
+    attach_auth_tokens, error_branch_tokens, success_decode_tokens, success_enum_dispatch,
+    success_type,
 };
 use super::docs::{doc_tokens, normalize_rustdoc};
 use super::params::{
@@ -165,11 +166,43 @@ pub(super) fn emit_operation(
             twin,
             request_builder: stream_request_builder,
             decoder: stream_decoder,
+            success_enum: stream_success_enum,
         } = stream_names;
-        let doc = byte_stream_doc(method_ident);
+        let doc = byte_stream_doc(method_ident, stream_success_enum.is_some());
         let stream_builder_doc = stream_request_builder_doc(method_ident, twin);
-        let stream_decoder_doc = stream_decoder_doc(twin, &operation_const);
+        let stream_decoder_doc =
+            stream_decoder_doc(twin, &operation_const, stream_success_enum.is_some());
         let twin_forwards = forwards_streaming(true);
+        // A single binary success is the `ByteStream` itself; a success enum's twin returns its own
+        // enum, whose binary arms carry one.
+        let (twin_success_ty, twin_success) = match (
+            stream_success_enum,
+            operation.responses.success(),
+        ) {
+            (Some(enum_ident), crate::ir::SuccessShape::Enum(entries)) => (
+                quote! { #enum_ident },
+                success_enum_dispatch(
+                    operation,
+                    api,
+                    names,
+                    &entries,
+                    enum_ident,
+                    error_ident,
+                    true,
+                ),
+            ),
+            _ => (
+                quote! { support::ByteStream },
+                quote! {
+                    Ok(support::stream_success_bytes(
+                        response.map(support::read_as_it_arrives),
+                    ))
+                },
+            ),
+        };
+        let twin_return = quote! {
+            Result<support::ResponseValue<#twin_success_ty>, support::Error<#error_ty>>
+        };
         quote! {
             #[doc = #doc]
             #deprecated
@@ -177,7 +210,7 @@ pub(super) fn emit_operation(
             pub async fn #twin(
                 &self,
                 #(#decls),*
-            ) -> Result<support::ResponseValue<support::ByteStream>, support::Error<#error_ty>> {
+            ) -> #twin_return {
                 let (#request_binding, #replay_binding) = self
                     .#preparer(#(#twin_forwards),*)
                     .await
@@ -206,11 +239,9 @@ pub(super) fn emit_operation(
             pub async fn #stream_decoder(
                 &self,
                 response: http::Response<support::HttpBody>,
-            ) -> Result<support::ResponseValue<support::ByteStream>, support::Error<#error_ty>> {
+            ) -> #twin_return {
                 if response.status().is_success() {
-                    Ok(support::stream_success_bytes(
-                        response.map(support::read_as_it_arrives),
-                    ))
+                    #twin_success
                 } else {
                     #error_branch
                 }
@@ -385,17 +416,31 @@ pub(super) fn emit_ops(api: &Api, names: &Names) -> TokenStream {
     }
 }
 
-/// The rustdoc of a binary operation's `_stream` twin.
-fn byte_stream_doc(method_ident: &crate::name::Ident) -> String {
+/// The rustdoc of a binary operation's `_stream` twin; `enumerated` where its success is an enum,
+/// whose binary arms alone are streamed.
+fn byte_stream_doc(method_ident: &crate::name::Ident, enumerated: bool) -> String {
     let method = method_ident.unraw();
+    let body = if enumerated {
+        "with each raw binary success body handed over unread as a `ByteStream` in its status's \
+         variant"
+    } else {
+        "with its success body handed over unread as a `ByteStream`"
+    };
+    let other_bodies = if enumerated {
+        format!(
+            " Every other success body is read whole under the client's body limits, as \
+             `{method}` reads it."
+        )
+    } else {
+        String::new()
+    };
     normalize_rustdoc(&format!(
-        "`{method}`, with its success body handed over unread as a `ByteStream`, to read as it \
-         arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The \
-         request and the error branch are `{method}`'s. Like an `EventStream`, the call is exempt \
-         from the client's total timeout and its body limits; its connect and read timeouts \
-         still apply. It sends its request builder's request through the client's backend, \
-         replays it once where a refreshable credential was rejected, and decodes the response \
-         with its decoder."
+        "`{method}`, {body}, to read as it arrives, or whole with `collect_bounded` under a \
+         limit of the caller's choosing. The request and the error branch are `{method}`'s. Like \
+         an `EventStream`, the call is exempt from the client's total timeout and its body \
+         limits; its connect and read timeouts still apply.{other_bodies} It sends its request \
+         builder's request through the client's backend, replays it once where a refreshable \
+         credential was rejected, and decodes the response with its decoder."
     ))
 }
 
@@ -415,13 +460,23 @@ fn stream_request_builder_doc(
 }
 
 /// The rustdoc of a `_stream` twin's response decoder.
-fn stream_decoder_doc(twin: &crate::name::Ident, operation_const: &proc_macro2::Ident) -> String {
+fn stream_decoder_doc(
+    twin: &crate::name::Ident,
+    operation_const: &proc_macro2::Ident,
+    enumerated: bool,
+) -> String {
     let twin = twin.unraw();
+    let success = if enumerated {
+        "a raw binary success body handed over unread as a `ByteStream`, exempt from the \
+         client's body limits, any other success body read whole within them"
+    } else {
+        "a success body handed over unread as a `ByteStream`, exempt from the client's body \
+         limits"
+    };
     normalize_rustdoc(&format!(
         "Decode a response to the request `{twin}` sends (`ops::{operation_const}`), obtained \
-         however the caller sent it, exactly as `{twin}` decodes its own: a success body handed \
-         over unread as a `ByteStream`, exempt from the client's body limits, and an error status \
-         dispatched into the operation's typed error."
+         however the caller sent it, exactly as `{twin}` decodes its own: {success}, and an error \
+         status dispatched into the operation's typed error."
     ))
 }
 

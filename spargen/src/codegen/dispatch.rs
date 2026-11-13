@@ -193,68 +193,18 @@ pub(super) fn success_decode_tokens(
                 #decode.await.map_err(support::Error::widen)
             }
         }
-        // Multi-status success: dispatch by status in precedence order (exact code ascending, then
-        // range ascending) into the matching variant, and only then read the body. `default` never
-        // enters this shape, so there is no `Default` arm. A success status matching no documented
-        // variant is an unexpected-status error — there is no untyped fallback. Every body an
-        // error keeps goes through a runtime helper that caps it at `max_error_body`.
+        // Multi-status success: dispatch by status into the matching variant.
         SuccessShape::Enum(entries) => {
             let enum_ident = names.operation(&operation.id).success_enum();
-            let arms = entries.iter().map(|(spec, ty)| {
-                let spec_tokens = runtime_status_spec(*spec);
-                let variant_ident = status_variant_ident(*spec);
-                match ty {
-                    // A raw-bytes status: read through the binary decoder, so the body is bounded
-                    // by the binary default where the call set no limit, as a single binary
-                    // success body is.
-                    Some(ty) if is_bytes_ty(api, *ty) => quote! {
-                        if #spec_tokens.matches(status) {
-                            return support::decode_success_bytes(&self.core, response)
-                                .await
-                                .map(|value| {
-                                    value.map(|body| #enum_ident::#variant_ident(Box::new(body)))
-                                })
-                                .map_err(support::Error::widen);
-                        }
-                    },
-                    // Bodied status: read the whole body and parse it into the variant's type; a
-                    // parse failure is `Decode` with the body capped.
-                    Some(ty) => {
-                        let decode = variant_body_decode(
-                            operation,
-                            api,
-                            names,
-                            *spec,
-                            *ty,
-                            quote! { #enum_ident::#variant_ident },
-                        );
-                        quote! {
-                            if #spec_tokens.matches(status) {
-                                return support::decode_success_with(&self.core, response, |body| {
-                                    #decode
-                                })
-                                .await
-                                .map_err(support::Error::widen);
-                            }
-                        }
-                    }
-                    // Documented bodyless status (e.g. `204`): the unit variant, body unread.
-                    None => quote! {
-                        if #spec_tokens.matches(status) {
-                            return Ok(support::ResponseValue::new(
-                                status,
-                                response.headers().clone(),
-                                #enum_ident::#variant_ident,
-                            ));
-                        }
-                    },
-                }
-            });
-            quote! {
-                let status = response.status();
-                #(#arms)*
-                Err(support::unexpected_status::<#error_ident>(&self.core, response).await)
-            }
+            success_enum_dispatch(
+                operation,
+                api,
+                names,
+                &entries,
+                enum_ident,
+                error_ident,
+                false,
+            )
         }
     };
 
@@ -287,6 +237,99 @@ pub(super) fn success_decode_tokens(
             }
         }
         None => success_decode,
+    }
+}
+
+/// The success branch of a decoder whose success is the enum `enum_ident`, one arm per entry of
+/// `entries` (the operation's [`SuccessShape::Enum`]): dispatch by status in precedence order
+/// (exact code ascending, then range ascending) into the matching variant, and only then read the
+/// body. `default` never enters this shape, so there is no `Default` arm. A success status matching
+/// no documented variant is an unexpected-status error — there is no untyped fallback. Every body
+/// an error keeps goes through a runtime helper that caps it at `max_error_body`.
+///
+/// With `streamed`, this is the `_stream` twin's decoder, whose response carries no body limits:
+/// each raw binary arm ([`Api::streams_binary_arm`]) hands its body over unread as a
+/// `support::ByteStream`, and every other bodied arm is read under the client's body limits, as
+/// the method reads it.
+pub(super) fn success_enum_dispatch(
+    operation: &Operation,
+    api: &Api,
+    names: &Names,
+    entries: &[(crate::ir::StatusSpec, Option<Ty>)],
+    enum_ident: &crate::name::Ident,
+    error_ident: &crate::name::Ident,
+    streamed: bool,
+) -> TokenStream {
+    let arms = entries.iter().map(|(spec, ty)| {
+        let spec_tokens = runtime_status_spec(*spec);
+        let variant_ident = status_variant_ident(*spec);
+        // The twin reads a buffered arm's body under the limits the method's decoder gives its
+        // whole response.
+        let body_limits = streamed.then(|| {
+            quote! { let response = support::with_body_limits(&self.core, response); }
+        });
+        match ty {
+            // A raw-bytes status in the twin: the body handed over unread, exempt from the client's
+            // body limits, as a single binary success body's twin hands it over.
+            Some(_) if streamed && api.streams_binary_arm(*ty) => quote! {
+                if #spec_tokens.matches(status) {
+                    return Ok(support::stream_success_bytes(
+                        response.map(support::read_as_it_arrives),
+                    )
+                    .map(#enum_ident::#variant_ident));
+                }
+            },
+            // A raw-bytes status: read through the binary decoder, so the body is bounded by the
+            // binary default where the call set no limit, as a single binary success body is.
+            Some(ty) if is_bytes_ty(api, *ty) => quote! {
+                if #spec_tokens.matches(status) {
+                    #body_limits
+                    return support::decode_success_bytes(&self.core, response)
+                        .await
+                        .map(|value| {
+                            value.map(|body| #enum_ident::#variant_ident(Box::new(body)))
+                        })
+                        .map_err(support::Error::widen);
+                }
+            },
+            // Bodied status: read the whole body and parse it into the variant's type; a parse
+            // failure is `Decode` with the body capped.
+            Some(ty) => {
+                let decode = variant_body_decode(
+                    operation,
+                    api,
+                    names,
+                    *spec,
+                    *ty,
+                    quote! { #enum_ident::#variant_ident },
+                );
+                quote! {
+                    if #spec_tokens.matches(status) {
+                        #body_limits
+                        return support::decode_success_with(&self.core, response, |body| {
+                            #decode
+                        })
+                        .await
+                        .map_err(support::Error::widen);
+                    }
+                }
+            }
+            // Documented bodyless status (e.g. `204`): the unit variant, body unread.
+            None => quote! {
+                if #spec_tokens.matches(status) {
+                    return Ok(support::ResponseValue::new(
+                        status,
+                        response.headers().clone(),
+                        #enum_ident::#variant_ident,
+                    ));
+                }
+            },
+        }
+    });
+    quote! {
+        let status = response.status();
+        #(#arms)*
+        Err(support::unexpected_status::<#error_ident>(&self.core, response).await)
     }
 }
 
