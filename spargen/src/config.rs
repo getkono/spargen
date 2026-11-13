@@ -79,16 +79,18 @@ pub enum Carve {
 }
 switch!(Carve, off = Off, on = Auto);
 
-/// How a string `enum`/`const` narrowing a plain `string` in a response body's own schema lowers,
-/// set with [`Spec::with_open_narrowing`] and read with [`Spec::open_narrowing`]; the
-/// `open_narrowing` key of `spargen.toml`, where `true` is [`Open`](Self::Open).
+/// How an `enum`/`const` narrowing a plain `string`, `integer` or `boolean` in a response body's
+/// own schema lowers, set with [`Spec::with_open_narrowing`] and read with
+/// [`Spec::open_narrowing`]; the `open_narrowing` key of `spargen.toml`, where `true` is
+/// [`Open`](Self::Open).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Narrowing {
-    /// A closed enum: a value the description does not list is a decode failure.
+    /// A closed set: a value the description does not list is a decode failure.
     #[default]
     Exact,
-    /// An open enum: one more variant holds any other string.
+    /// An open set: a string enum's one more variant holds any other string, and an integer or
+    /// boolean set's checked newtype decodes any other value of its width.
     Open,
 }
 switch!(Narrowing, off = Exact, on = Open);

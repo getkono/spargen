@@ -5,8 +5,8 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::ir::{
-    AdditionalProps, Api, BytesEncoding, Emission, Field, ScalarRepr, ScalarValue, Ty, TypeDef,
-    TypeGraph, TypeKind,
+    AdditionalProps, Api, BytesEncoding, Emission, Field, ScalarValue, Ty, TypeDef, TypeGraph,
+    TypeKind,
 };
 use crate::name::Names;
 
@@ -258,7 +258,7 @@ fn emit_type_def(
             let providers = object
                 .fields
                 .iter()
-                .filter_map(|field| emit_default_provider(id, field, names));
+                .filter_map(|field| emit_default_provider(id, field, types, names));
             let additional = match &object.additional {
                 AdditionalProps::Typed(ty) => {
                     let ty = ty_tokens(**ty, names, false);
@@ -309,14 +309,8 @@ fn emit_type_def(
             }
             emit_closed_string_enum(ident, &listed, docs, deprecated, variants, display_arms)
         }
-        Emission::ScalarAlias(repr) => {
-            let ty = match repr {
-                ScalarRepr::String => unreachable!("a string enum is emitted as a `pub enum`"),
-                ScalarRepr::Int => quote! { i64 },
-                ScalarRepr::Bool => quote! { bool },
-            };
-            quote! { #docs #deprecated pub type #ident = #ty; }
-        }
+        Emission::Checked(set) => emit_checked_newtype(ident, set, docs, deprecated, options),
+        Emission::BoolAlias => quote! { #docs #deprecated pub type #ident = bool; },
         Emission::Never => {
             let error = format!("no JSON value can inhabit schema {}", ident.as_str());
             quote! {
@@ -362,6 +356,142 @@ fn emit_type_def(
         Emission::Alias => {
             let ty = type_kind_tokens(&def.kind, names, options);
             quote! { #docs #deprecated pub type #ident = #ty; }
+        }
+    }
+}
+
+/// The associated `const` naming one listed value of a checked newtype: `V3` for `3`, `V_MINUS_3`
+/// for `-3`, and `TRUE` or `FALSE` for a boolean. Distinct values have distinct names, and none is
+/// `ALL`.
+fn checked_const_ident(value: &ScalarValue) -> proc_macro2::Ident {
+    match value {
+        ScalarValue::Int(int) if *int < 0 => format_ident!("V_MINUS_{}", int.unsigned_abs()),
+        ScalarValue::Int(int) => format_ident!("V{int}"),
+        ScalarValue::Bool(true) => format_ident!("TRUE"),
+        ScalarValue::Bool(false) => format_ident!("FALSE"),
+        ScalarValue::String(_) => unreachable!("a string set is emitted as a `pub enum`"),
+    }
+}
+
+/// The Rust literal of one listed value of a checked newtype.
+fn checked_literal(value: &ScalarValue) -> TokenStream {
+    match value {
+        ScalarValue::Int(int) => {
+            let literal = proc_macro2::Literal::i64_unsuffixed(*int);
+            quote! { #literal }
+        }
+        ScalarValue::Bool(boolean) => quote! { #boolean },
+        ScalarValue::String(_) => unreachable!("a string set is emitted as a `pub enum`"),
+    }
+}
+
+/// Emit an integer or boolean `enum`/`const` set as a checked newtype over its
+/// [width](crate::ir::ScalarEnum::width) (#1327): a private field, an associated `const` per listed
+/// value and `ALL` listing them in declaration order, `get`, `Display`, `From` into the width,
+/// and a `TryFrom` from it that accepts exactly the listed values, failing with the runtime's
+/// `UnknownVariant`. Serde writes the bare value and reads it through `TryFrom`, so a value the set
+/// does not list is a decode error; an open set (`open_narrowing`) decodes any value of its width.
+fn emit_checked_newtype(
+    ident: &crate::name::Ident,
+    set: &crate::ir::ScalarEnum,
+    docs: TokenStream,
+    deprecated: Option<TokenStream>,
+    options: &CodegenOptions,
+) -> TokenStream {
+    let width = prim_tokens(set.width, options);
+    let type_name = ident.as_str();
+    let listed: Vec<String> = set
+        .variants
+        .iter()
+        .map(|value| format!("`{}`", value.wire()))
+        .collect();
+    let listing = if set.is_open() {
+        format!(
+            "Lists {}. Decoding also accepts any other value; `TryFrom` accepts only the listed \
+             ones.",
+            listed.join(", ")
+        )
+    } else {
+        format!("Holds exactly one of: {}.", listed.join(", "))
+    };
+    let separator = (!docs.is_empty()).then(|| quote! { #[doc = ""] });
+    let consts = set.variants.iter().map(|value| {
+        let name = checked_const_ident(value);
+        let literal = checked_literal(value);
+        let doc = format!("The value `{}`.", value.wire());
+        quote! {
+            #[doc = #doc]
+            pub const #name: Self = Self(#literal);
+        }
+    });
+    let all = set.variants.iter().map(checked_const_ident);
+    let decode = if set.is_open() {
+        quote! { Ok(Self(value)) }
+    } else {
+        quote! { Self::try_from(value).map_err(serde::de::Error::custom) }
+    };
+    quote! {
+        #docs
+        #separator
+        #[doc = #listing]
+        #deprecated
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct #ident(#width);
+
+        impl #ident {
+            #(#consts)*
+
+            /// Every listed value, in the order the description lists them.
+            pub const ALL: &'static [Self] = &[#(Self::#all,)*];
+
+            /// The value.
+            pub const fn get(self) -> #width {
+                self.0
+            }
+        }
+
+        impl std::fmt::Display for #ident {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                std::fmt::Display::fmt(&self.0, f)
+            }
+        }
+
+        impl From<#ident> for #width {
+            fn from(value: #ident) -> Self {
+                value.0
+            }
+        }
+
+        impl TryFrom<#width> for #ident {
+            type Error = super::support::UnknownVariant;
+
+            /// Accept exactly one of the listed values.
+            fn try_from(value: #width) -> Result<Self, super::support::UnknownVariant> {
+                if Self::ALL.iter().any(|listed| listed.0 == value) {
+                    Ok(Self(value))
+                } else {
+                    Err(super::support::UnknownVariant::new(#type_name, value.to_string()))
+                }
+            }
+        }
+
+        impl serde::Serialize for #ident {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serde::Serialize::serialize(&self.0, serializer)
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for #ident {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = <#width as serde::Deserialize>::deserialize(deserializer)?;
+                #decode
+            }
         }
     }
 }
@@ -749,6 +879,7 @@ fn default_provider_ident(
 fn emit_default_provider(
     id: crate::ir::TypeId,
     field: &Field,
+    types: &TypeGraph,
     names: &Names,
 ) -> Option<TokenStream> {
     let applied = field.default.as_ref()?.applied.as_ref()?;
@@ -758,7 +889,7 @@ fn emit_default_provider(
         .expect("field name allocated");
     let fn_ident = default_provider_ident(id, field_ident);
     let inner_ty = ty_tokens(field.ty, names, false);
-    let value = default_value_tokens(applied, field.ty, names);
+    let value = default_value_tokens(applied, field.ty, types, names);
     Some(quote! {
         fn #fn_ident() -> Option<#inner_ty> {
             Some(#value)
@@ -767,9 +898,29 @@ fn emit_default_provider(
 }
 
 /// Render a representable default as a Rust literal (or generated enum variant) for the field's
-/// Rust type.
-fn default_value_tokens(value: &crate::ir::DefaultValue, ty: Ty, names: &Names) -> TokenStream {
+/// Rust type. An integer or boolean default of a checked newtype is the newtype over the literal,
+/// which `types` may build through the private field: lowering applies only a listed value.
+fn default_value_tokens(
+    value: &crate::ir::DefaultValue,
+    ty: Ty,
+    types: &TypeGraph,
+    names: &Names,
+) -> TokenStream {
     use crate::ir::DefaultValue;
+    let checked = types
+        .get(ty.id)
+        .is_some_and(|def| matches!(types.emission(ty.id, def), Emission::Checked(_)));
+    if checked {
+        let newtype = names.types.get(&ty.id).expect("type name allocated");
+        let literal = match value {
+            DefaultValue::Int(int) => checked_literal(&ScalarValue::Int(*int)),
+            DefaultValue::Bool(boolean) => checked_literal(&ScalarValue::Bool(*boolean)),
+            DefaultValue::Float(_) | DefaultValue::Str(_) | DefaultValue::EnumVariant(_) => {
+                unreachable!("an integer or boolean set's default is an integer or a boolean")
+            }
+        };
+        return quote! { #newtype(#literal) };
+    }
     match value {
         DefaultValue::Bool(value) => quote! { #value },
         DefaultValue::Int(value) => {

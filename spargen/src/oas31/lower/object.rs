@@ -120,8 +120,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Homogeneity is decided by [`TypeGraph::same_generated_type`] over each value type with its
     /// top-level `Box` stripped (the map supplies the indirection): a shared `$ref`, or distinct
     /// definitions whose transparent aliases expand to one Rust type — `{type: string}` under two
-    /// patterns, or two integer `enum`s, each `i64` — collapse to one map, while two distinct
-    /// nominal items (structs, string enums, unions, `Never`s, cycle-closing newtypes) are
+    /// patterns, or two boolean `enum`s listing both values, each `bool` — collapse to one map,
+    /// while two distinct nominal items (structs, string enums, integer or boolean sets' checked
+    /// newtypes, unions, `Never`s, cycle-closing newtypes) are
     /// rejected (`E005`). The first collected value type is used as the map's value type.
     /// Deterministic: graph lookups by `TypeId`, over values collected in source order.
     ///

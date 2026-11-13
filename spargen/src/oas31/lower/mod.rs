@@ -668,8 +668,8 @@ struct LowerCtx<'a, 'doc> {
     /// decremented on exit. A `$ref`/allOf/array/object chain that pushes this past
     /// [`MAX_SCHEMA_DEPTH`] is rejected (`E014`) rather than allowed to overflow the stack.
     depth: u32,
-    /// The `open_narrowing` option: whether a string `enum`/`const` narrowing a plain `string`
-    /// is lowered as an open set where [`Self::narrowing_opens`] allows it.
+    /// The `open_narrowing` option: whether an `enum`/`const` narrowing a plain `string`,
+    /// `integer` or `boolean` is lowered as an open set where [`Self::narrowing_opens`] allows it.
     open_narrowing: bool,
     /// The `open_unions` option: whether a discriminated union with no `defaultMapping` is
     /// lowered open ([`UnionStrategy::Discriminated::open`](crate::ir::UnionStrategy)).
@@ -682,9 +682,9 @@ struct LowerCtx<'a, 'doc> {
     /// [`Self::closed_narrowing`] for every `$ref` target and every `oneOf`/`anyOf` lowered inside
     /// it. Always `false` while the option is off.
     narrowing_opens: bool,
-    /// The string sets [`Self::lower_enum`] lowered while [`Self::narrowing_opens`] held: each is
+    /// The scalar sets [`Self::lower_enum`] lowered while [`Self::narrowing_opens`] held: each is
     /// the type of one inline `enum`/`const` in a position `open_narrowing` applies to, and no
-    /// `$ref` target, memo, or union reaches it, so [`Self::narrowed_string`] opens it in place
+    /// `$ref` target, memo, or union reaches it, so [`Self::narrowed_set`] opens it in place
     /// rather than leaving it beside an open copy as an unused public type.
     open_candidates: HashSet<TypeId>,
     /// The authored schema each meet struct [`Self::intersect_structs`] built is located at (the
@@ -769,7 +769,7 @@ impl LowerCtx<'_, '_> {
 /// The options that change what lowering produces.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct LowerOptions<'a> {
-    /// `Spec::open_narrowing`: lower a response body's own string narrowings as open sets.
+    /// `Spec::open_narrowing`: lower a response body's own scalar narrowings as open sets.
     pub(crate) open_narrowing: bool,
     /// `Spec::open_unions`: give a discriminated union a variant for a tag value it does not list.
     pub(crate) open_unions: bool,

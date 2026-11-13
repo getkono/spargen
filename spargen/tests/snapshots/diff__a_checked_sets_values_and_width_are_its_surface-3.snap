@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|field-type-changed|Status.get()|checked scalar `i32` -> `i64`
+bump=major

@@ -394,6 +394,11 @@ mod tests {
         TypeKind::Enum(ScalarEnum {
             repr,
             variants,
+            width: match repr {
+                ScalarRepr::String => crate::ir::Prim::String,
+                ScalarRepr::Int => crate::ir::Prim::I64,
+                ScalarRepr::Bool => crate::ir::Prim::Bool,
+            },
             openness: Openness::Closed,
         })
     }

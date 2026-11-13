@@ -820,15 +820,17 @@ components:
 }
 
 /// Issue #731: a component's `deprecated: true` reached `#[deprecated]` on a struct, a string enum
-/// and a union, but not on an integer or boolean enum's alias, a generic `pub type` alias, or the
-/// transparent newtype that closes an alias cycle. Each now carries it, and an alias that does not
-/// say `deprecated` still carries none.
+/// and a union, but not on an integer or boolean enum's item, a generic `pub type` alias, or the
+/// transparent newtype that closes an alias cycle. Each now carries it — an integer or boolean set's
+/// checked newtype (#1327) and a boolean set listing both values' `bool` alias alike — and an alias
+/// that does not say `deprecated` still carries none.
 #[test]
 fn a_deprecated_component_is_deprecated_whatever_item_it_lowers_to() {
     let spec = with_schemas(
         "3.1.0",
         "    Level: { type: integer, enum: [1, 2], deprecated: true }\n    \
          Flag: { type: boolean, enum: [true], deprecated: true }\n    \
+         Either: { type: boolean, enum: [true, false], deprecated: true }\n    \
          Tags: { type: array, items: { type: string }, deprecated: true }\n    \
          Tree: { type: array, items: { $ref: '#/components/schemas/Tree' }, deprecated: true }\n    \
          Fresh: { type: array, items: { type: string } }\n",
@@ -851,8 +853,9 @@ fn a_deprecated_component_is_deprecated_whatever_item_it_lowers_to() {
             .collect()
     };
     for declaration in [
-        "pub type Level = i64;",
-        "pub type Flag = bool;",
+        "pub struct Level(i64);",
+        "pub struct Flag(bool);",
+        "pub type Either = bool;",
         "pub type Tags = Vec<TagsItem>;",
         "pub struct Tree(pub Vec<Tree>);",
     ] {
@@ -866,8 +869,8 @@ fn a_deprecated_component_is_deprecated_whatever_item_it_lowers_to() {
         "an alias that is not deprecated is marked deprecated: {types}"
     );
     // The deprecated array's inline item schema says nothing about deprecation, so its own alias
-    // (`TagsItem`) carries none: four items, the four components that say so.
-    assert_eq!(types.matches("#[deprecated]").count(), 4, "{types}");
+    // (`TagsItem`) carries none: five items, the five components that say so.
+    assert_eq!(types.matches("#[deprecated]").count(), 5, "{types}");
 }
 
 #[test]

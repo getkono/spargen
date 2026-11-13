@@ -993,6 +993,7 @@ fn int_enum() -> TypeKind {
     TypeKind::Enum(ScalarEnum {
         repr: ScalarRepr::Int,
         variants: vec![ScalarValue::Int(1)],
+        width: crate::ir::Prim::I64,
         openness: Openness::Closed,
     })
 }
@@ -1021,10 +1022,22 @@ fn distinct_definitions_generating_one_rust_type_share_it() {
         two_bodies(&strings, ty(0), ty(1)),
         Some(ApiErrorBodyImpl::Body(ty(0)))
     );
-    // An integer enum is a `pub type X = i64` alias, so it is an `i64` body, either way round.
+    // An integer set is a checked newtype (#1327), its own type, so it is no `i64` body, either
+    // way round; a boolean set listing both values is the `bool` alias, so it is a `bool` body.
     let ints = graph(vec![int_enum(), TypeKind::Primitive(Prim::I64)]);
-    assert!(two_bodies(&ints, ty(0), ty(1)).is_some());
-    assert!(two_bodies(&ints, ty(1), ty(0)).is_some());
+    assert!(two_bodies(&ints, ty(0), ty(1)).is_none());
+    assert!(two_bodies(&ints, ty(1), ty(0)).is_none());
+    let bools = graph(vec![
+        TypeKind::Enum(ScalarEnum {
+            repr: ScalarRepr::Bool,
+            variants: vec![ScalarValue::Bool(true), ScalarValue::Bool(false)],
+            width: Prim::Bool,
+            openness: Openness::Closed,
+        }),
+        TypeKind::Primitive(Prim::Bool),
+    ]);
+    assert!(two_bodies(&bools, ty(0), ty(1)).is_some());
+    assert!(two_bodies(&bools, ty(1), ty(0)).is_some());
     // Containers compare their items.
     let arrays = graph(vec![
         TypeKind::Primitive(Prim::String),

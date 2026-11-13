@@ -8,8 +8,8 @@ use super::{
     ServerVariableSurface, Settings, Surface, TypeSurface, UrlArgSurface,
 };
 use crate::ir::{
-    AdditionalProps, Api, ApiErrorBodyImpl, Emission, ErrorShape, Prim, ScalarRepr, ScalarValue,
-    StatusSpec, SuccessShape, Ty, TypeKind,
+    AdditionalProps, Api, ApiErrorBodyImpl, Emission, ErrorShape, Prim, ScalarValue, StatusSpec,
+    SuccessShape, Ty, TypeKind,
 };
 use crate::name::Names;
 
@@ -152,9 +152,13 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                 };
                 TypeSurface::Struct(fields, overflow)
             }
-            // Only string enums generate a real `pub enum` whose variants are surface. Integer /
-            // boolean enums lower to a scalar alias and carry no variant surface; they render as
-            // their scalar at every use site via `canon_ty`.
+            // A string enum generates a real `pub enum` whose variants are surface; an integer or
+            // boolean set a checked newtype whose scalar and associated `const`s are. A boolean set
+            // listing both values is the `bool` alias, rendered as `bool` at every use site.
+            Emission::Checked(set) => TypeSurface::Checked(
+                prim_label(set.width, settings),
+                set.variants.iter().map(ScalarValue::wire).collect(),
+            ),
             Emission::StringEnum(enumeration) => {
                 let variants = enumeration.variants.iter().map(ScalarValue::wire).collect();
                 let open = names
@@ -196,7 +200,7 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
             // A base64 schema is a nominal newtype over `bytes::Bytes`, whose serde form is the
             // base64 string; its public `.0` field is the bytes.
             Emission::Base64 => TypeSurface::Newtype("Bytes".to_owned()),
-            Emission::ScalarAlias(_) | Emission::Alias => {
+            Emission::BoolAlias | Emission::Alias => {
                 aliases.insert(name);
                 continue;
             }
@@ -319,16 +323,13 @@ pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names, settings: Settings) -> 
         // expanding its structure here would never terminate.
         Emission::Struct(_)
         | Emission::StringEnum(_)
+        | Emission::Checked(_)
         | Emission::Union(_)
         | Emission::Newtype
         | Emission::Never
         | Emission::Base64 => nominal_name(ty, names),
-        // An integer or boolean enum is its scalar alias.
-        Emission::ScalarAlias(ScalarRepr::Int) => "i64".to_owned(),
-        Emission::ScalarAlias(ScalarRepr::Bool) => "bool".to_owned(),
-        Emission::ScalarAlias(ScalarRepr::String) => {
-            unreachable!("a string enum is emitted as a `pub enum`")
-        }
+        // A boolean set listing both values is its `bool` alias.
+        Emission::BoolAlias => "bool".to_owned(),
         Emission::Alias => match &def.kind {
             TypeKind::Primitive(prim) => prim_label(*prim, settings),
             kind @ (TypeKind::Array(_) | TypeKind::Tuple(_)) => {

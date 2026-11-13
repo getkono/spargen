@@ -791,6 +791,7 @@ fn a_closed_string_enum_variant_never_takes_the_all_constants_spelling() {
             kind: TypeKind::Enum(ScalarEnum {
                 repr: ScalarRepr::String,
                 variants: vec![ScalarValue::String("a_l_l".to_owned())],
+                width: crate::ir::Prim::String,
                 openness,
             }),
             docs: Default::default(),
@@ -1004,6 +1005,7 @@ fn synthetic_api(
             Shape::Enum { values, open } => TypeKind::Enum(ScalarEnum {
                 repr: ScalarRepr::String,
                 variants: values.iter().cloned().map(ScalarValue::String).collect(),
+                width: crate::ir::Prim::String,
                 openness: if *open {
                     Openness::Open
                 } else {

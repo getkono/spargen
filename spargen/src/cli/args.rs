@@ -67,11 +67,11 @@ pub(crate) struct SpecArgs {
     /// Max diagnostics collected before batching stops (default 100).
     #[arg(long, value_name = "COUNT")]
     pub(crate) batch_cap: Option<usize>,
-    /// Lower a response body's own string `enum`/`const` narrowings of a plain `string` as open
-    /// enums, so a value the description does not list still decodes.
+    /// Lower a response body's own `enum`/`const` narrowings of a plain `string`, `integer` or
+    /// `boolean` as open sets, so a value the description does not list still decodes.
     #[arg(long, conflicts_with = "no_open_narrowing")]
     pub(crate) open_narrowing: bool,
-    /// Keep response-body string narrowings closed, overriding `open_narrowing = true` in
+    /// Keep response-body narrowings closed, overriding `open_narrowing = true` in
     /// `spargen.toml`.
     #[arg(long)]
     pub(crate) no_open_narrowing: bool,

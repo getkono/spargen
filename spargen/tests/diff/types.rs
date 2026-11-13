@@ -85,6 +85,50 @@ fn adding_an_enum_variant_is_minor_and_removing_one_is_major() {
     assert_eq!(removed.bump, Impact::Major);
 }
 
+/// An integer set is a checked newtype (#1327): a listed value is an associated `const`, so a new
+/// one is the additive rule's variant and a removed one breaks code naming it, while a new width
+/// changes what `get` returns and `TryFrom` takes. A set turning into a plain `integer` turns the
+/// newtype into an alias, a change of generation kind.
+#[test]
+fn a_checked_sets_values_and_width_are_its_surface() {
+    let level = |schema: &str| full(TWO_OPS, &with_status(&format!("    Status: {schema}\n")));
+    let two = level("{ type: integer, format: int32, enum: [1, 2] }");
+    let three = level("{ type: integer, format: int32, enum: [1, 2, 3] }");
+    let wide = level("{ type: integer, enum: [1, 2] }");
+    let plain = level("{ type: integer, format: int32 }");
+
+    let added = diff(&two, &three);
+    assert_eq!(
+        kinds(&added),
+        vec![ChangeKind::VariantAdded],
+        "{:?}",
+        added.changes
+    );
+    assert_eq!(added.bump, Impact::Minor);
+
+    let removed = diff(&three, &two);
+    assert_eq!(kinds(&removed), vec![ChangeKind::VariantRemoved]);
+    assert_eq!(removed.bump, Impact::Major);
+
+    let widened = diff(&two, &wide);
+    assert_eq!(
+        kinds(&widened),
+        vec![ChangeKind::FieldTypeChanged],
+        "{:?}",
+        widened.changes
+    );
+    assert_eq!(widened.changes[0].location, "Status.get()");
+    assert_eq!(widened.bump, Impact::Major);
+
+    let unchecked = diff(&two, &plain);
+    assert!(
+        kinds(&unchecked).contains(&ChangeKind::TypeKindChanged),
+        "{:?}",
+        unchecked.changes
+    );
+    assert_eq!(unchecked.bump, Impact::Major);
+}
+
 const UNION_STRING_OR_INT: &str = "    Status:
       oneOf:
         - { type: string }

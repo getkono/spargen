@@ -1,44 +1,93 @@
 //! Narrowing a string or enum type a meet produced, and the open / closed narrowing modes.
 
-use crate::ir::{Docs, Openness, Prim, ScalarEnum, ScalarRepr, Ty, TypeKind};
+use crate::ir::{Docs, Openness, Prim, ScalarEnum, ScalarRepr, ScalarValue, Ty, TypeKind};
 
+use super::meet::{intersect_primitives, NoMeet};
 use super::nullability::non_nullable;
 use super::LowerCtx;
 
+/// The members of `variants` a set held in `width` keeps, in their order: an integer member that
+/// width holds, and every string and boolean one.
+pub(super) fn held_values(variants: &[ScalarValue], width: Prim) -> Vec<ScalarValue> {
+    variants
+        .iter()
+        .filter(|value| match value {
+            ScalarValue::Int(int) => width.holds_integer(*int),
+            ScalarValue::Bool(_) | ScalarValue::String(_) => true,
+        })
+        .cloned()
+        .collect()
+}
+
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
-    /// The meet of the scalar set `set` (whose type is `enum_ty`) with the primitive `primitive` it
-    /// is a set of: the set itself, or — for a closed string set narrowing a plain `string` where
-    /// [`Self::narrowing_opens`] holds — an open set listing the same values, whose domain is the
-    /// `string` it narrowed. That is the set itself, opened, when it is one of
-    /// [`Self::open_candidates`], and a new open copy otherwise (a set that came from a `$ref`
-    /// target, or from another intersection, may be reached from where it must stay closed).
+    /// The meet of the scalar set `set` (whose type is `enum_ty`) with the primitive `primitive` of
+    /// its JSON category: the set itself, or — for a closed set narrowing a plain `string`,
+    /// `integer` or `boolean` where [`Self::narrowing_opens`] holds — an open set listing the same
+    /// values, whose domain is the primitive it narrowed. That is the set itself, opened, when it
+    /// is one of [`Self::open_candidates`], and a new open copy otherwise (a set that came from a
+    /// `$ref` target, or from another intersection, may be reached from where it must stay
+    /// closed).
     ///
-    /// Only a plain `string` widens it: `uuid` and the date formats have a decoded representation
-    /// of their own that an arbitrary string is not. Under `open_narrowing` (in a response body's
-    /// own schema or not), a string set meeting one of them is [`Openness::Locked`] instead, so no
-    /// plain `string` met before or after opens it: the set an `allOf` lowers to does not depend
-    /// on where its formatted member sits.
+    /// Of the strings, only a plain `string` widens it: `uuid` and the date formats have a decoded
+    /// representation of their own that an arbitrary string is not. Under `open_narrowing` (in a
+    /// response body's own schema or not), a string set meeting one of them is
+    /// [`Openness::Locked`] instead, so no plain `string` met before or after opens it: the set an
+    /// `allOf` lowers to does not depend on where its formatted member sits.
+    ///
+    /// An integer set meets an integer primitive at the narrower of the two widths
+    /// ([`intersect_primitives`]), keeping the members that width holds: none left is
+    /// [`NoMeet::Empty`], and a narrower width is a new set under `hint`. A member that width
+    /// drops is outside the intersection, as a member one set lists and the other does not is,
+    /// so it is dropped, not reported. The same member beside its own schema's `format` is a
+    /// set contradicting itself in one schema, which `lower_enum` rejects as `E008`.
     ///
     /// A set the response already opened, met where [`Self::narrowing_opens`] does not hold (a
     /// union variant `intersect_union` meets it with), is a new closed copy under `hint`, for the
     /// reason the enum-meet arm of [`Self::intersect_non_null`] gives.
-    pub(super) fn narrowed_string(
+    pub(super) fn narrowed_set(
         &mut self,
         enum_ty: Ty,
         set: &ScalarEnum,
         primitive: Prim,
         hint: &str,
-    ) -> Ty {
-        let openness = match (set.openness, primitive) {
-            _ if set.repr != ScalarRepr::String => set.openness,
-            (_, Prim::Uuid | Prim::Date | Prim::DateTime) if self.open_narrowing => {
+    ) -> Result<Ty, NoMeet> {
+        let openness = match (set.repr, set.openness, primitive) {
+            (ScalarRepr::String, _, Prim::Uuid | Prim::Date | Prim::DateTime)
+                if self.open_narrowing =>
+            {
                 Openness::Locked
             }
-            (Openness::Closed, Prim::String) if self.narrowing_opens => Openness::Open,
-            (Openness::Open, _) if !self.narrowing_opens => Openness::Closed,
-            (openness, _) => openness,
+            (ScalarRepr::String, Openness::Closed, Prim::String)
+            | (ScalarRepr::Int | ScalarRepr::Bool, Openness::Closed, _)
+                if self.narrowing_opens =>
+            {
+                Openness::Open
+            }
+            (_, Openness::Open, _) if !self.narrowing_opens => Openness::Closed,
+            (_, openness, _) => openness,
         };
-        self.reopened_set(enum_ty, set, openness, hint)
+        let width = match set.repr {
+            ScalarRepr::Int => intersect_primitives(set.width, primitive).unwrap_or(set.width),
+            ScalarRepr::String | ScalarRepr::Bool => set.width,
+        };
+        if width == set.width {
+            return Ok(self.reopened_set(enum_ty, set, openness, hint));
+        }
+        let variants = held_values(&set.variants, width);
+        if variants.is_empty() {
+            return Err(NoMeet::Empty);
+        }
+        Ok(self.insert_type(
+            hint,
+            TypeKind::Enum(ScalarEnum {
+                repr: set.repr,
+                variants,
+                width,
+                openness,
+            }),
+            Docs::default(),
+            None,
+        ))
     }
 
     /// The set `set` (whose type is `enum_ty`) with `openness`: the set itself when it already has
@@ -87,7 +136,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// The closed set `set` (whose type is `enum_ty`), opened: in place when it is one of
-    /// [`Self::open_candidates`], and as a new open copy otherwise, as [`Self::narrowed_string`]
+    /// [`Self::open_candidates`], and as a new open copy otherwise, as [`Self::narrowed_set`]
     /// describes.
     fn opened_set(&mut self, enum_ty: Ty, set: &ScalarEnum) -> Ty {
         if self.reopen_in_place(enum_ty, Openness::Open) {
@@ -105,9 +154,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.insert_type(
             &name_hint,
             TypeKind::Enum(ScalarEnum {
-                repr: ScalarRepr::String,
-                variants: set.variants.clone(),
                 openness: Openness::Open,
+                ..set.clone()
             }),
             docs,
             provenance,

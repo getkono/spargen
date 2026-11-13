@@ -287,22 +287,25 @@ components:
 }
 
 /// The `$ref` spelling of the merge above gives the same answer when its branches share a generated
-/// type only structurally (#402). `$ref: Int` beside `oneOf: [{enum: [1]}, {enum: [2]}]` meets to
-/// two distinct `i64`-alias enums, one generated type: emitted as two variants, every value would
-/// match both and fail exactly-one, so the position is that one type and `W001` reports it. Where
-/// only some branches share a type after the meet, they become one variant and the others stand.
+/// type only structurally (#402). `$ref: Int` beside `oneOf: [{type: integer, format: int32},
+/// {type: integer, format: int32, title: …}]` meets to two distinct `i32` aliases, one generated
+/// type: emitted as two variants, every value would match both and fail exactly-one, so the
+/// position is that one type and `W001` reports it. Where only some branches share a type after
+/// the meet, they become one variant and the others stand. (Two integer `enum`s listing different
+/// values are distinct checked newtypes, #1327, which a value tells apart.)
 #[test]
 fn a_ref_sibling_one_of_whose_branches_share_a_type_only_structurally_collapses() {
     for (shape, body, expect_variants) in [
         (
             "fully shared",
-            "{ $ref: '#/components/schemas/Int', oneOf: [ { enum: [1] }, { enum: [2] } ] }",
+            "{ $ref: '#/components/schemas/Int', oneOf: [ { type: integer, format: int32 }, { \
+             type: integer, format: int32, title: Small } ] }",
             None,
         ),
         (
             "partly shared",
-            "{ $ref: '#/components/schemas/Free', oneOf: [ { type: integer, enum: [1] }, { type: \
-             integer, enum: [2] }, { type: string } ] }",
+            "{ $ref: '#/components/schemas/Free', oneOf: [ { type: integer, title: One }, { type: \
+             integer, title: Two }, { type: string } ] }",
             Some(2),
         ),
     ] {

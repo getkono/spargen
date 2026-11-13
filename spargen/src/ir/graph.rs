@@ -175,7 +175,8 @@ impl TypeGraph {
             TypeKind::Enum(enumeration) if enumeration.repr == ScalarRepr::String => {
                 Emission::StringEnum(enumeration)
             }
-            TypeKind::Enum(enumeration) => Emission::ScalarAlias(enumeration.repr),
+            TypeKind::Enum(enumeration) if enumeration.is_every_boolean() => Emission::BoolAlias,
+            TypeKind::Enum(enumeration) => Emission::Checked(enumeration),
             TypeKind::Union(union) => Emission::Union(union),
             TypeKind::Never => Emission::Never,
             TypeKind::Bytes(BytesEncoding::Base64) => Emission::Base64,
@@ -240,7 +241,8 @@ impl TypeGraph {
     /// Whether two references emit the identical Rust type. Sound rather than complete: `true`
     /// means the generated types are one type, because every non-nominal definition is emitted as a
     /// transparent `pub type` alias of its structure. A nominal definition (a struct, string enum,
-    /// union, `Never`, base64 bytes, or an array or tuple that
+    /// integer or boolean set's checked newtype, union, `Never`, base64 bytes, or an array or tuple
+    /// that
     /// [closes an alias cycle](Self::closes_alias_cycle)) is its own item and matches only
     /// itself. Both use-site modifiers must agree, so callers
     /// strip the top-level ones they absorb; nested ones are compared, because a tuple item keeps
@@ -256,9 +258,10 @@ impl TypeGraph {
     /// ([`Field::decodes_optional`], which `required` and `readOnly`/`writeOnly` decide), with the
     /// same XML hints, each field's type matches by this same test, and their
     /// `additionalProperties` policies match;
-    /// two string enums match when they list the same value set and agree on whether they are
-    /// open; two `Never` definitions match, since neither decodes any value (#643), so arrays of
-    /// two such items both decode only `[]`; two base64 bytes newtypes match, since both decode
+    /// two string enums, or two integer or boolean sets' checked newtypes, match when they are held
+    /// in one width, list the same value set and agree on whether they are open; two `Never`
+    /// definitions match, since neither decodes any value (#643), so arrays of two such items both
+    /// decode only `[]`; two base64 bytes newtypes match, since both decode
     /// the same base64 strings. A union still matches only itself. Sound rather than
     /// complete, like
     /// [`same_generated_type`]: `true` means no value tells the two apart, which is what a `oneOf`'s
@@ -314,25 +317,29 @@ impl TypeGraph {
             (TypeKind::Struct(x), TypeKind::Struct(y)) if structural => {
                 self.same_struct_shape(x, y, visiting)
             }
-            // Integer and boolean enums are `pub type X = i64` / `bool` aliases; a string enum is a
-            // real `pub enum`, so it is nominal, and decodes the same values as another one only
-            // when both list the same values and both or neither admit the unlisted strings.
+            // A boolean set listing both values is a `pub type X = bool` alias. Every other set is
+            // nominal — a string enum's `pub enum`, an integer or boolean set's checked newtype —
+            // and decodes the same values as another one only when both are held in one width,
+            // list the same values, and both or neither admit the unlisted ones.
             (TypeKind::Enum(x), TypeKind::Enum(y))
-                if x.repr == ScalarRepr::String && y.repr == ScalarRepr::String =>
+                if x.is_every_boolean() && y.is_every_boolean() =>
             {
+                true
+            }
+            (TypeKind::Enum(x), TypeKind::Enum(y)) => {
                 structural
+                    && x.repr == y.repr
+                    && x.width == y.width
+                    && !x.is_every_boolean()
+                    && !y.is_every_boolean()
                     && x.is_open() == y.is_open()
                     && x.variants.iter().all(|value| y.variants.contains(value))
                     && y.variants.iter().all(|value| x.variants.contains(value))
             }
-            (TypeKind::Enum(x), TypeKind::Enum(y)) => {
-                x.repr == y.repr && x.repr != ScalarRepr::String
-            }
             (TypeKind::Enum(scalar), TypeKind::Primitive(prim))
-            | (TypeKind::Primitive(prim), TypeKind::Enum(scalar)) => matches!(
-                (scalar.repr, prim),
-                (ScalarRepr::Int, Prim::I64) | (ScalarRepr::Bool, Prim::Bool)
-            ),
+            | (TypeKind::Primitive(prim), TypeKind::Enum(scalar)) => {
+                scalar.is_every_boolean() && *prim == Prim::Bool
+            }
             (TypeKind::Array(x), TypeKind::Array(y)) => {
                 self.same_generated_type_guarded(**x, **y, structural, visiting)
             }
@@ -403,9 +410,12 @@ pub(crate) enum Emission<'a> {
     Struct(&'a Struct),
     /// A `pub enum` with one unit variant per listed string (plus a catch-all when open).
     StringEnum(&'a ScalarEnum),
-    /// `pub type X = i64;` or `pub type X = bool;`: an integer or boolean enum, whose values the
-    /// type does not narrow.
-    ScalarAlias(ScalarRepr),
+    /// A `pub struct X(i32);` checked newtype over an integer or boolean set's
+    /// [width](ScalarEnum::width), with an associated `const` per listed value, whose `TryFrom`
+    /// and decode refuse any other value (accept it, for an open set).
+    Checked(&'a ScalarEnum),
+    /// `pub type X = bool;`: a boolean set listing both values, which narrows nothing.
+    BoolAlias,
     /// A `pub enum` with one variant per union member.
     Union(&'a Union),
     /// `pub struct X(pub T);`, `#[serde(transparent)]`: an array or tuple that
@@ -495,6 +505,7 @@ mod tests {
                     .into_iter()
                     .map(|value| ScalarValue::String(value.to_owned()))
                     .collect(),
+                width: crate::ir::Prim::String,
                 openness,
             });
             Ty {
@@ -516,6 +527,61 @@ mod tests {
         assert!(!graph.same_decoded_values(locked, open));
         // Two distinct string enums are never one generated type, whatever their values.
         assert!(!graph.same_generated_type(closed, reordered));
+    }
+
+    /// An integer or boolean set is a checked newtype (#1327): nominal, so it is no other type,
+    /// and decodes the values of another set only where both are held in one width and list one
+    /// value set. A boolean set listing both values is the `bool` alias, one type with `bool`.
+    #[test]
+    fn integer_and_boolean_sets_are_nominal_unless_they_list_every_boolean() {
+        use crate::ir::{Openness, Prim, ScalarEnum, ScalarRepr, ScalarValue, Ty, TypeKind};
+        let mut graph = crate::ir::TypeGraph::default();
+        let mut insert = |kind: TypeKind| {
+            let mut def = primitive("S");
+            def.kind = kind;
+            Ty {
+                id: graph.insert(def),
+                nullable: false,
+                boxed: false,
+            }
+        };
+        let set = |repr: ScalarRepr, width: Prim, variants: Vec<ScalarValue>| {
+            TypeKind::Enum(ScalarEnum {
+                repr,
+                variants,
+                width,
+                openness: Openness::Closed,
+            })
+        };
+        let ints = |values: &[i64]| values.iter().copied().map(ScalarValue::Int).collect();
+        let small = insert(set(ScalarRepr::Int, Prim::I64, ints(&[1, 2])));
+        let reordered = insert(set(ScalarRepr::Int, Prim::I64, ints(&[2, 1])));
+        let narrow = insert(set(ScalarRepr::Int, Prim::I32, ints(&[1, 2])));
+        let wide = insert(TypeKind::Primitive(Prim::I64));
+        let bools = |values: &[bool]| values.iter().copied().map(ScalarValue::Bool).collect();
+        let only_true = insert(set(ScalarRepr::Bool, Prim::Bool, bools(&[true])));
+        let both = insert(set(ScalarRepr::Bool, Prim::Bool, bools(&[true, false])));
+        let both_reordered = insert(set(ScalarRepr::Bool, Prim::Bool, bools(&[false, true])));
+        let boolean = insert(TypeKind::Primitive(Prim::Bool));
+
+        assert!(graph.same_decoded_values(small, reordered));
+        assert!(!graph.same_decoded_values(small, narrow));
+        assert!(!graph.same_generated_type(small, reordered));
+        assert!(!graph.same_generated_type(small, wide));
+        assert!(!graph.same_decoded_values(small, wide));
+        assert!(graph.same_generated_type(both, boolean));
+        assert!(graph.same_generated_type(both, both_reordered));
+        assert!(!graph.same_generated_type(only_true, boolean));
+        assert!(!graph.same_decoded_values(only_true, both));
+        let crate::ir::Emission::Checked(_) =
+            graph.emission(only_true.id, graph.get(only_true.id).expect("inserted"))
+        else {
+            panic!("a one-value boolean set is a checked newtype");
+        };
+        assert!(matches!(
+            graph.emission(both.id, graph.get(both.id).expect("inserted")),
+            crate::ir::Emission::BoolAlias
+        ));
     }
 
     /// Two distinct `Never` definitions decode the same values, none (#643), and so do arrays of

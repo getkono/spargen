@@ -300,6 +300,37 @@ pub(crate) enum Prim {
     Date,
 }
 
+impl Prim {
+    /// The integer width an `integer` schema's `format` names: `int32`, `uint8`, `uint16`,
+    /// `uint32` and `uint64` their own, and any other (`int64` included) or none [`Prim::I64`].
+    pub(crate) fn integer_format(format: Option<&str>) -> Prim {
+        match format {
+            Some("int32") => Prim::I32,
+            Some("uint8") => Prim::U8,
+            Some("uint16") => Prim::U16,
+            Some("uint32") => Prim::U32,
+            Some("uint64") => Prim::U64,
+            _ => Prim::I64,
+        }
+    }
+
+    /// Whether the integer `value` is one this integer width holds; `false` for a width that is
+    /// not an integer one.
+    pub(crate) fn holds_integer(self, value: i64) -> bool {
+        match self {
+            Prim::I32 => i32::try_from(value).is_ok(),
+            Prim::I64 => true,
+            Prim::U8 => u8::try_from(value).is_ok(),
+            Prim::U16 => u16::try_from(value).is_ok(),
+            Prim::U32 => u32::try_from(value).is_ok(),
+            Prim::U64 => u64::try_from(value).is_ok(),
+            Prim::Bool | Prim::String | Prim::F64 | Prim::Uuid | Prim::DateTime | Prim::Date => {
+                false
+            }
+        }
+    }
+}
+
 /// The crate `format: date-time` and `format: date` map to, chosen with
 /// [`Spec::with_datetime`](crate::Spec::with_datetime).
 ///
@@ -566,16 +597,30 @@ pub(crate) struct ScalarEnum {
     pub(crate) repr: ScalarRepr,
     /// The variant wire values, in declared order.
     pub(crate) variants: Vec<ScalarValue>,
-    /// Whether the set is open, closed, or closed for good. Only an [`Openness::Open`] set emits
-    /// a variant beyond the listed values. Always [`Openness::Closed`] for an integer or boolean
-    /// set.
+    /// The Rust scalar the set's values are held in: the integer width its `format` names
+    /// (`int32` is [`Prim::I32`], an unformatted integer [`Prim::I64`]) for an integer set,
+    /// [`Prim::Bool`] for a boolean one and [`Prim::String`] for a string one. Every listed value
+    /// fits it.
+    pub(crate) width: Prim,
+    /// Whether the set is open, closed, or closed for good. Only an [`Openness::Open`] set admits
+    /// a value beyond the listed ones: a string enum's catch-all variant, or a checked newtype
+    /// whose decode accepts any value of its width.
     pub(crate) openness: Openness,
 }
 
 impl ScalarEnum {
-    /// Whether the set is [`Openness::Open`]: it emits a variant holding any unlisted string.
+    /// Whether the set is [`Openness::Open`]: it admits a value it does not list.
     pub(crate) fn is_open(&self) -> bool {
         self.openness == Openness::Open
+    }
+
+    /// Whether the set is a boolean one listing both `true` and `false`: it narrows nothing, so it
+    /// is emitted as `bool` rather than a checked newtype.
+    pub(crate) fn is_every_boolean(&self) -> bool {
+        self.repr == ScalarRepr::Bool
+            && [true, false]
+                .iter()
+                .all(|value| self.variants.contains(&ScalarValue::Bool(*value)))
     }
 }
 
@@ -583,14 +628,16 @@ impl ScalarEnum {
 /// produces anything but [`Openness::Closed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Openness {
-    /// The listed values and nothing else. A plain `string` it narrows inside a response body's
-    /// own schema opens it under `open_narrowing`.
+    /// The listed values and nothing else. A plain `string`, `integer` or `boolean` it narrows
+    /// inside a response body's own schema opens it under `open_narrowing`.
     Closed,
-    /// A string enum whose values name the members the description lists, beside one more
-    /// variant that holds any other string: a string `enum`/`const` that narrows a property
-    /// another `allOf` member (or the `$ref` it sits beside) declares as a plain `string`, inside
-    /// a response body's own schema. The open set's domain is that wider declaration's, so it is
-    /// still exactly what the description admits there, minus the narrowing.
+    /// A set whose values name the members the description lists, beside any other value of its
+    /// kind: an `enum`/`const` that narrows a property another `allOf` member (or the `$ref` it
+    /// sits beside) declares as a plain `string`, `integer` or `boolean`, inside a response body's
+    /// own schema. A string set holds the other string in one more variant; an integer or boolean
+    /// set's checked newtype decodes any value of its width. The open set's domain is that wider
+    /// declaration's, so it is still exactly what the description admits there, minus the
+    /// narrowing.
     Open,
     /// The listed values and nothing else, narrowed against a `uuid`, `date`, or `date-time`
     /// string (in its own schema, or in a schema it met). That format admits no arbitrary string,
