@@ -17,7 +17,7 @@
 //! The generated client never panics on network input; every failure maps to one [`Error`]
 //! variant. Taxonomy class **#10, cancellation**, is a *documented drop-safety guarantee* rather
 //! than an enum variant: dropping a returned future is safe and side-effect-free beyond standard
-//! HTTP semantics. The other eleven classes are the constructed [`Error`] variants.
+//! HTTP semantics. The other twelve classes are the constructed [`Error`] variants.
 
 #![forbid(unsafe_code)]
 // The API contract returns `Result<ResponseValue<T>, Error<E>>` with `Error` unboxed, and the

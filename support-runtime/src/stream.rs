@@ -24,7 +24,7 @@ use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 
 use crate::chunked::read_as_it_arrives;
-use crate::dispatch::{cap_body, send_on, unexpected_status_capped};
+use crate::dispatch::{cap_body, read_prefix, send_on, unexpected_status_capped};
 use crate::transport::try_clone_request;
 use crate::wasm::BoxFuture;
 use crate::{ClientConfig, ClientCore, Error, HttpBackend, HttpBody, MaybeSend, MaybeSync};
@@ -39,7 +39,21 @@ type Response = http::Response<HttpBody>;
 /// it, as the `wasm` module explains.
 pub type ReconnectWait = BoxFuture<'static, ()>;
 
-type ReconnectFuture = BoxFuture<'static, Result<Response, StreamError>>;
+type ReconnectFuture = BoxFuture<'static, Reconnected>;
+
+/// How a reconnect request was answered.
+enum Reconnected {
+    /// A response whose body is framed in place of the closed one.
+    Opened(Response),
+    /// A failure the reconnect policy is asked about, as one reading the body is.
+    Failed(StreamError),
+    /// A `204`: the server's request to stop reconnecting. The stream ends cleanly.
+    NoContent,
+    /// A response the stream cannot frame (an SSE reconnect answered with a body that is not
+    /// `text/event-stream`). It is yielded, and the stream ends without asking the policy again,
+    /// since resending the request would be answered the same way.
+    Refused(StreamError),
+}
 
 /// Why an automatic SSE reconnect is being considered.
 #[derive(Debug)]
@@ -56,6 +70,11 @@ pub enum ReconnectReason<'a> {
 /// attempt limits and timing. `attempt` starts at zero, increases after each accepted reconnect,
 /// and resets after a successfully decoded item. `server_delay` is the latest valid SSE `retry:`
 /// value, when present.
+///
+/// A reconnect answered with a non-success status, or failing in transit, is offered to the
+/// policy again. Two answers end the stream without asking it: a `204`, the server's request to
+/// stop reconnecting, ends it cleanly; and an SSE reconnect whose response is not
+/// `text/event-stream` yields an [`Error::Decode`] carrying that response, then ends it.
 pub trait ReconnectPolicy: MaybeSend + MaybeSync {
     /// Decide whether to reconnect and provide the future that waits until the next attempt.
     fn reconnect(
@@ -298,7 +317,8 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                     return Poll::Ready(None);
                 }
                 // Every complete item is framed out first, so what is left is one item still
-                // waiting for its terminator. At EOF the framer has already flushed it.
+                // waiting for its terminator. At EOF the framer has already flushed it (ndjson,
+                // JSON-seq) or dropped it (SSE).
                 FramePoll::NeedMore if this.buffer.len() > this.max_frame => {
                     return Poll::Ready(Some(Err(this.frame_overflow())));
                 }
@@ -318,11 +338,11 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                             this.bom_pending = this.buffer.strip_leading_bom();
                         }
                     }
-                    // Whatever class the read failure carries, the connection is gone partway
-                    // through the body, so it is the interruption a reconnect policy is asked
-                    // about.
+                    // The read failure surfaces as the variant its transport class names, as
+                    // `ByteStream` reports it (a stalled read is `Timeout`, a corrupt body
+                    // `Protocol`), and whatever its class, a reconnect policy is asked about it.
                     Poll::Ready(Err(error)) => {
-                        let error = Error::InterruptedBody(error);
+                        let error = Error::from_transport(error);
                         if let Some(error) =
                             this.schedule_reconnect(OwnedReconnectReason::Failure(error))
                         {
@@ -357,19 +377,23 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                         this.state = StreamState::Connecting(future);
                         return Poll::Pending;
                     }
-                    Poll::Ready(Ok(response)) => {
+                    Poll::Ready(Reconnected::Opened(response)) => {
                         let (parts, body) = response.into_parts();
                         this.status = parts.status;
                         this.headers = parts.headers;
                         this.bom_pending = is_sse(this.framing);
                         this.state = StreamState::Body(read_as_it_arrives(body));
                     }
-                    Poll::Ready(Err(error)) => {
+                    Poll::Ready(Reconnected::Failed(error)) => {
                         if let Some(error) =
                             this.schedule_reconnect(OwnedReconnectReason::Failure(error))
                         {
                             return Poll::Ready(Some(Err(error)));
                         }
+                    }
+                    Poll::Ready(Reconnected::NoContent) => return Poll::Ready(None),
+                    Poll::Ready(Reconnected::Refused(error)) => {
+                        return Poll::Ready(Some(Err(error)));
                     }
                 },
                 StreamState::Done => return Poll::Ready(None),
@@ -462,14 +486,62 @@ impl<T> EventStream<T> {
                 }
             }
         }
+        let sse = is_sse(self.framing);
         Some(Box::pin(async move {
-            let response = send_on(backend.as_ref(), request).await?;
-            if response.status().is_success() {
-                Ok(response)
-            } else {
-                Err(unexpected_status_capped(max_error_body, response).await)
+            let response = match send_on(backend.as_ref(), request).await {
+                Ok(response) => response,
+                Err(error) => return Reconnected::Failed(error),
+            };
+            if !response.status().is_success() {
+                return Reconnected::Failed(
+                    unexpected_status_capped(max_error_body, response).await,
+                );
             }
+            if response.status() == StatusCode::NO_CONTENT {
+                return Reconnected::NoContent;
+            }
+            if sse && !is_event_stream(response.headers()) {
+                return Reconnected::Refused(not_an_event_stream(max_error_body, response).await);
+            }
+            Reconnected::Opened(response)
         }))
+    }
+}
+
+/// Whether `headers` declare a `text/event-stream` body: the media type alone decides, in any case
+/// and whatever parameters follow it.
+fn is_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("text/event-stream"))
+}
+
+/// The `Decode` error an SSE reconnect answered with a body that is not `text/event-stream` is
+/// reported as: its status and headers, and its body capped at `max_error_body`. A failure while
+/// reading that body is reported instead, by its transport class.
+async fn not_an_event_stream(max_error_body: usize, response: Response) -> StreamError {
+    let (parts, body) = response.into_parts();
+    let path = match parts.headers.get(reqwest::header::CONTENT_TYPE) {
+        Some(value) => format!(
+            "reconnect response Content-Type is {:?}, not text/event-stream",
+            String::from_utf8_lossy(value.as_bytes())
+        ),
+        None => "reconnect response has no Content-Type, not text/event-stream".to_owned(),
+    };
+    match read_prefix(max_error_body, body).await {
+        Ok(prefix) => {
+            let (body, truncated) = cap_body(prefix, max_error_body);
+            Error::Decode {
+                status: parts.status,
+                headers: parts.headers,
+                path,
+                body,
+                truncated,
+            }
+        }
+        Err(error) => Error::from_transport(error),
     }
 }
 
@@ -556,8 +628,9 @@ impl FrameBuffer {
 }
 
 /// Frame the next item out of `buffer`, consuming the bytes it uses. `at_eof` is `true` once no
-/// further bytes will arrive, which lets a trailing frame not terminated by a delimiter still be
-/// emitted. Pure: no IO, no async.
+/// further bytes will arrive, which lets a trailing ndjson line or JSON-seq record not terminated
+/// by a delimiter still be emitted, and drops an SSE event not yet dispatched by its blank line.
+/// Pure: no IO, no async.
 fn next_frame(buffer: &mut FrameBuffer, framing: Framing, at_eof: bool) -> FramePoll {
     match framing {
         Framing::Ndjson => ndjson_next(buffer, at_eof),
@@ -702,20 +775,19 @@ fn sse_next(buffer: &mut FrameBuffer, at_eof: bool, output: SseOutput) -> FrameP
                 std::mem::take(&mut buffer.event)
             }
             None if !at_eof => return FramePoll::NeedMore,
-            None => {
-                // Mutation testing: replacing `<` with `<=` survives every test and is declared
-                // rather than killed: at `line_start == len` the field appended is the empty line,
-                // whose empty name matches no field, so `append_sse_field` leaves the event as it
-                // was.
-                if buffer.line_start < buffer.len() {
-                    append_sse_field(
-                        trim_cr(&buffer.bytes[buffer.line_start..]),
-                        &mut buffer.event,
-                    );
-                }
+            // A CR that is the body's last byte is held only for the LF that could follow it; at
+            // EOF none will, so it ends its line, and when that line is blank it dispatches.
+            None if buffer.bytes[buffer.line_start..] == *b"\r" => {
                 let fields = std::mem::take(&mut buffer.event);
                 buffer.clear();
                 fields
+            }
+            // The body ended before the blank line that dispatches the event in progress, so it
+            // is dropped, with the `id` and `retry` it set: "if the file ends in the middle of an
+            // event, before the final empty line, the incomplete event is not dispatched".
+            None => {
+                buffer.clear();
+                return FramePoll::NeedMore;
             }
         };
         match finish_sse_fields(fields, output) {
@@ -812,8 +884,8 @@ fn finish_sse_fields(mut fields: SseFields, output: SseOutput) -> FramePoll {
 /// requires, a line ends at CRLF, at a bare LF, or at a bare CR. Returns `Err` with the offset the
 /// next search starts from when no full line is buffered yet, which includes a CR that is the last
 /// buffered byte: the byte after it decides whether it ends the line alone or begins a CRLF, so it
-/// is held, and searched again, until that byte arrives (at EOF, `sse_next` takes the tail
-/// itself).
+/// is held, and searched again, until that byte arrives (at EOF, where none will, `sse_next`
+/// reads the tail itself).
 fn take_line(buf: &[u8], from: usize, scanned: usize) -> Result<(&[u8], usize), usize> {
     let Some(end) = buf[scanned..]
         .iter()
@@ -847,7 +919,7 @@ fn strip_leading_bom(buffer: &mut BytesMut) -> bool {
 }
 
 /// `line` without one trailing `\r`, so a CRLF line ending reads the same as a bare `\n` to the
-/// ndjson framer, and an SSE tail at EOF ending in a CR loses that line ending.
+/// ndjson framer.
 fn trim_cr(line: &[u8]) -> &[u8] {
     line.strip_suffix(b"\r").unwrap_or(line)
 }
