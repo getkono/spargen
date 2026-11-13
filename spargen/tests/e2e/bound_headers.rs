@@ -85,7 +85,7 @@ fn every_operation_declaring_the_header_sends_the_bound_value() {
     assert_eq!(client.get_status().unwrap().status(), 204);
 
     // A binding in any letter case reaches each operation, in its own spelling of the header.
-    let client = client.with_bound_header("x-API-version", "2026-01-01");
+    let client = client.with_bound_header("x-API-version", "2026-01-01").unwrap();
     assert_eq!(client.list_items("t-2").unwrap().status(), 204);
 
     let requests = server.join().unwrap();
@@ -102,7 +102,8 @@ fn every_operation_declaring_the_header_sends_the_bound_value() {
 fn the_built_request_marks_the_bound_value_sensitive() {
     let client = bound_headers::Client::new("http://127.0.0.1:1")
         .unwrap()
-        .with_bound_header("X-Api-Version", "TENANTSECRET");
+        .with_bound_header("X-Api-Version", "TENANTSECRET")
+        .unwrap();
     let mut built = std::pin::pin!(client.list_items_request("t-1"));
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     let std::task::Poll::Ready(request) = std::future::Future::poll(built.as_mut(), &mut cx) else {
@@ -116,5 +117,20 @@ fn the_built_request_marks_the_bound_value_sensitive() {
     assert!(!debug.contains("TENANTSECRET"), "{debug}");
     // The header the caller passes as an argument stays as it is.
     assert!(!request.headers()["x-trace"].is_sensitive());
+}
+
+/// Issue #1335: a value no request could carry as a header value is refused when it is bound,
+/// on the async and the blocking client alike, as `RequestConstruction`, instead of failing every
+/// later call; the refusal does not quote the value.
+#[test]
+fn an_invalid_bound_value_is_refused_when_it_is_bound() {
+    let client = bound_headers::Client::new("http://127.0.0.1:1").unwrap();
+    let error = client.with_bound_header("X-Api-Version", "a\r\nInjected: 1").unwrap_err();
+    assert!(matches!(error, bound_headers::Error::RequestConstruction(_)), "{error:?}");
+    assert!(!format!("{error:?}").contains("Injected"), "{error:?}");
+
+    let blocking = bound_headers::BlockingClient::new("http://127.0.0.1:1").unwrap();
+    let error = blocking.with_bound_header("X-Api-Version", "nul\0").unwrap_err();
+    assert!(matches!(error, bound_headers::Error::RequestConstruction(_)), "{error:?}");
 }
 "##;

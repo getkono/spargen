@@ -13,6 +13,7 @@ use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use url::Url;
 
+use crate::client::require_http_base;
 use crate::{ClientCore, Error, HttpBackend, HttpBody, ResponseValue, TotalTimeout};
 
 /// A request as the transport seam carries it.
@@ -98,13 +99,15 @@ fn strip_encoded_dot(segment: &str) -> Option<&str> {
         .map(|_| &segment[3..])
 }
 
-/// Resolve the base URL for one request: the client's own, or a per-operation server override.
+/// Resolve the base URL for one request: the client's own, or a per-operation server override,
+/// which is refused, as the client's base URL is, unless it resolves to an `http` or `https` URL.
 fn base_for(core: &ClientCore, server: Option<&str>) -> Result<Url, Error<Infallible>> {
     match server {
         None => Ok(core.base_url().clone()),
         Some(server) => match Url::parse(server) {
-            Ok(absolute) => Ok(absolute),
-            // A relative override is resolved against the client's base URL.
+            Ok(absolute) => require_http_base(absolute),
+            // A relative override is resolved against the client's base URL, so it keeps that
+            // URL's scheme.
             Err(_) => core
                 .base_url()
                 .join(server)

@@ -857,7 +857,7 @@ impl TransportError {
     /// every request-kind error stays [`Error::RequestConstruction`].
     ///
     /// A timeout is asked for before any of those, and the same connect discriminator splits it:
-    /// one raised while establishing the connection (the client's `connect_timeout`, which bounds
+    /// one raised while establishing the connection (`TransportConfig::connect_timeout`, which bounds
     /// name resolution, the TCP handshake, and TLS, or the operating system's own handshake
     /// timeout) is [`TimeoutKind::Connect`]; every other one,
     /// the total-request budget elapsing during the connect included, is [`TimeoutKind::Total`].
@@ -1014,13 +1014,13 @@ fn is_interrupted_read(error: &reqwest::Error) -> bool {
 /// Which timeout elapsed (taxonomy #3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeoutKind {
-    /// The connect timeout: no connection was established in time — the client's
-    /// `connect_timeout` (which covers name resolution, the TCP handshake, and TLS) elapsed, or
+    /// The connect timeout: no connection was established in time — the
+    /// `TransportConfig::connect_timeout` (which covers name resolution, the TCP handshake, and TLS) elapsed, or
     /// the operating system gave up on the handshake. Never reported on `wasm32`; see
     /// [`TransportError::from_reqwest`].
     Connect,
     /// Every other timeout: the client's total-request `timeout` elapsed, whichever phase the
-    /// request was in (connecting included), or a `read_timeout` elapsed on an established
+    /// request was in (connecting included), or `TransportConfig::read_timeout` elapsed on an established
     /// connection.
     Total,
 }

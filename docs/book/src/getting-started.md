@@ -163,7 +163,7 @@ use api::{types, Client, Credential};
 use secrecy::SecretString;
 
 # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-// `new` validates the base URL; `with_client` sends on a preconfigured reqwest::Client
+// `new` refuses a base URL that is not `http` or `https`; `with_client` sends on a preconfigured reqwest::Client
 // (TLS choice, proxies, timeouts); `with_backend` installs a retry or middleware adapter, or a
 // transport of your own. `with_base_url` repoints a clone without rebuilding it.
 let client = Client::new("https://api.example.com")?
@@ -204,10 +204,11 @@ Key points of the surface:
   token providers, which operation `security` requirements attach; the
   [generated surface](./generated-api.md#generated-surface) states how an
   alternative is selected and how each credential failure is typed.
-- `Client::with_bound_header(name, value)` sets a header every operation declares once on the
+- `Client::with_bound_header(name, value)?` sets a header every operation declares once on the
   client, where the build bound it with `Spec::bind_header("X-Api-Version")`: no operation takes
   an argument for it, and one that requires it fails before anything is sent, as
-  `RequestError::MissingBoundParameter`, while no value is bound.
+  `RequestError::MissingBoundParameter`, while no value is bound. A value that is not a valid
+  header value is refused when it is bound, as `Error::RequestConstruction`.
 - A closed error taxonomy, `Error<E>`, identical across all spargen output; every generated error
   type is a `std::error::Error`. The
   [generated surface](./generated-api.md#generated-surface) lists every variant

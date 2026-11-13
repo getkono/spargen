@@ -45,28 +45,6 @@ pub struct ClientConfig {
     /// fails to decode is reported as [`Error::Decode`] retaining the whole frame, uncapped by
     /// `max_error_body`, with `truncated` unset.
     pub max_stream_frame: usize,
-    /// How long establishing a connection may take — name resolution, the TCP handshake and TLS —
-    /// before the request fails with [`Error::Timeout`] (default 30 s; `None` waits as long as
-    /// the operating system does).
-    ///
-    /// It is read once, when [`ClientCore::with_config`] or [`ClientCore::new`] builds the default
-    /// backend's `reqwest::Client`, so changing it through [`ClientCore::config_mut`] afterwards
-    /// changes nothing. A client injected with [`ClientCore::with_client`] keeps its own connect
-    /// timeout instead, and a backend installed with [`ClientCore::with_backend`] executes
-    /// requests on its own terms. reqwest's `fetch` backend has no connect timeout, so on `wasm32`
-    /// it is ignored.
-    pub connect_timeout: Option<Duration>,
-    /// How long a read on an established connection may wait for its next bytes — the response
-    /// head, or the next chunk of a body, a streamed one included — before the request fails with
-    /// [`Error::Timeout`] (default 5 min; `None` waits indefinitely). Each read that arrives
-    /// restarts it, so it bounds a stall, not the length of a response. An event stream whose
-    /// server sends nothing, not even a comment or heartbeat, for longer than this fails with
-    /// [`Error::Timeout`], which a reconnect policy may answer by resuming it.
-    ///
-    /// It is read when the `reqwest::Client` is built and applies where it applies, exactly as
-    /// [`Self::connect_timeout`] describes; reqwest's `fetch` backend has no read timeout
-    /// either, so on `wasm32` it is ignored.
-    pub read_timeout: Option<Duration>,
     /// How long one non-streaming request may take in total, from connecting until its whole
     /// response body has been read, before it fails with [`Error::Timeout`] (default `None`: no
     /// total bound, only the connect and read timeouts).
@@ -123,10 +101,39 @@ impl Default for ClientConfig {
         Self {
             max_error_body: 64 * 1024,
             max_stream_frame: 16 * 1024 * 1024,
-            connect_timeout: Some(Duration::from_secs(30)),
-            read_timeout: Some(Duration::from_secs(5 * 60)),
             timeout: None,
             max_success_body: None,
+        }
+    }
+}
+
+/// How the `reqwest::Client` a core's default backend runs on bounds connecting and reading.
+///
+/// It is construction-only: [`ClientCore::with_config`] takes it by value and builds the client
+/// from it, and [`ClientCore::new`] builds one from the default. A client injected with
+/// [`ClientCore::with_client`] keeps its own timeouts instead, and a backend installed with
+/// [`ClientCore::with_backend`] executes requests on its own terms. reqwest's `fetch` backend has
+/// neither timeout, so on `wasm32` both are ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportConfig {
+    /// How long establishing a connection may take — name resolution, the TCP handshake and TLS —
+    /// before the request fails with [`Error::Timeout`] (default 30 s; `None` waits as long as
+    /// the operating system does).
+    pub connect_timeout: Option<Duration>,
+    /// How long a read on an established connection may wait for its next bytes — the response
+    /// head, or the next chunk of a body, a streamed one included — before the request fails with
+    /// [`Error::Timeout`] (default 5 min; `None` waits indefinitely). Each read that arrives
+    /// restarts it, so it bounds a stall, not the length of a response. An event stream whose
+    /// server sends nothing, not even a comment or heartbeat, for longer than this fails with
+    /// [`Error::Timeout`], which a reconnect policy may answer by resuming it.
+    pub read_timeout: Option<Duration>,
+}
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Some(Duration::from_secs(30)),
+            read_timeout: Some(Duration::from_secs(5 * 60)),
         }
     }
 }
@@ -191,28 +198,36 @@ pub struct ClientCore {
 }
 
 impl ClientCore {
-    /// Build a core with the default [`ClientConfig`] and the given base URL, as
-    /// [`Self::with_config`] does.
+    /// Build a core with the default [`ClientConfig`] and [`TransportConfig`] and the given base
+    /// URL, as [`Self::with_config`] does.
     pub fn new(base_url: &str) -> Result<Self, Error<Infallible>> {
-        Self::with_config(base_url, ClientConfig::default())
+        Self::with_config(
+            base_url,
+            ClientConfig::default(),
+            TransportConfig::default(),
+        )
     }
 
     /// Build a core with the given base URL and configuration, executing requests on the default
-    /// [`ReqwestBackend`] over a `reqwest::Client` built from `config`'s
-    /// [connect](ClientConfig::connect_timeout) and [read](ClientConfig::read_timeout) timeouts.
-    /// Returns a request-construction error if the base URL is invalid or reqwest cannot build
-    /// the client (its TLS backend fails to initialise).
-    pub fn with_config(base_url: &str, config: ClientConfig) -> Result<Self, Error<Infallible>> {
-        let backend = Arc::new(ReqwestBackend::new(http_client(&config)?));
-        Self::assemble(backend, base_url, config)
+    /// [`ReqwestBackend`] over a `reqwest::Client` built from `transport`'s
+    /// [connect](TransportConfig::connect_timeout) and [read](TransportConfig::read_timeout)
+    /// timeouts. Returns a request-construction error if the base URL is not an `http` or `https`
+    /// URL, or reqwest cannot build the client (its TLS backend fails to initialise).
+    pub fn with_config(
+        base_url: &str,
+        config: ClientConfig,
+        transport: TransportConfig,
+    ) -> Result<Self, Error<Infallible>> {
+        let base_url = parse_base_url(base_url)?;
+        let backend = Arc::new(ReqwestBackend::new(http_client(&transport)?));
+        Ok(Self::assemble(backend, base_url, config))
     }
 
     /// Build a core executing requests on a caller-supplied `reqwest::Client` — the injection
     /// point for TLS backend, proxies, and timeouts — wrapped in the default [`ReqwestBackend`],
     /// as [`Self::with_backend`] would with `Arc::new(ReqwestBackend::new(client))`. The client's
-    /// own connect and read timeouts apply instead of [`ClientConfig::connect_timeout`] and
-    /// [`ClientConfig::read_timeout`]; [`ClientConfig::timeout`] still applies to each request
-    /// the runtime's `send` sends.
+    /// own connect and read timeouts apply, and no [`TransportConfig`] is read;
+    /// [`ClientConfig::timeout`] still applies to each request the runtime's `send` sends.
     pub fn with_client(client: reqwest::Client, base_url: &str) -> Result<Self, Error<Infallible>> {
         Self::with_backend(Arc::new(ReqwestBackend::new(client)), base_url)
     }
@@ -223,28 +238,24 @@ impl ClientCore {
     /// request is executed by `backend`, so connecting and reading are bounded however `backend`
     /// bounds them. [`ClientConfig::timeout`] travels on each request the runtime's `send` sends,
     /// as a [`crate::TotalTimeout`] extension, for `backend` to enforce. Returns a
-    /// request-construction error if the base URL is invalid.
+    /// request-construction error if the base URL is not an `http` or `https` URL.
     pub fn with_backend(
         backend: Arc<dyn HttpBackend>,
         base_url: &str,
     ) -> Result<Self, Error<Infallible>> {
-        Self::assemble(backend, base_url, ClientConfig::default())
+        let base_url = parse_base_url(base_url)?;
+        Ok(Self::assemble(backend, base_url, ClientConfig::default()))
     }
 
-    fn assemble(
-        backend: Arc<dyn HttpBackend>,
-        base_url: &str,
-        config: ClientConfig,
-    ) -> Result<Self, Error<Infallible>> {
-        let base_url = Url::parse(base_url).map_err(Error::request_construction)?;
-        Ok(Self {
+    fn assemble(backend: Arc<dyn HttpBackend>, base_url: Url, config: ClientConfig) -> Self {
+        Self {
             backend,
             base_url,
             config,
             options: RequestOptions::default(),
             credentials: HashMap::new(),
             bound_headers: HashMap::new(),
-        })
+        }
     }
 
     /// The retention/config settings.
@@ -275,9 +286,9 @@ impl ClientCore {
 
     /// Replace the base URL every later request is resolved against, keeping the backend,
     /// configuration and credentials. Returns a request-construction error, leaving the base URL
-    /// as it was, if `base_url` is invalid.
+    /// as it was, if `base_url` is not an `http` or `https` URL.
     pub fn set_base_url(&mut self, base_url: &str) -> Result<(), Error<Infallible>> {
-        self.base_url = Url::parse(base_url).map_err(Error::request_construction)?;
+        self.base_url = parse_base_url(base_url)?;
         Ok(())
     }
 
@@ -313,9 +324,25 @@ impl ClientCore {
     /// `ClientCore`'s `Debug` prints the bound name and redacts the value, and the operation sends
     /// it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts it
     /// too.
-    pub fn bind_header(&mut self, name: &str, value: impl Into<String>) {
+    ///
+    /// Returns a request-construction error, leaving any value already bound to `name` in place,
+    /// if `value` is not a valid header value: it holds a control character other than a tab,
+    /// such as CR, LF, NUL or DEL. The error does not quote the value.
+    pub fn bind_header(
+        &mut self,
+        name: &str,
+        value: impl Into<String>,
+    ) -> Result<(), Error<Infallible>> {
+        let value = value.into();
+        if http::HeaderValue::from_str(&value).is_err() {
+            return Err(Error::request_message(format!(
+                "the value bound to the header `{}` is not a valid header value",
+                name.escape_debug()
+            )));
+        }
         self.bound_headers
-            .insert(name.to_ascii_lowercase(), SecretString::from(value.into()));
+            .insert(name.to_ascii_lowercase(), SecretString::from(value));
+        Ok(())
     }
 
     /// Unbind the header `name`, matched in any letter case, returning the value bound to it if
@@ -341,10 +368,30 @@ impl ClientCore {
     }
 }
 
+/// Parse `base_url` as a base URL: refused, as a request-construction error, unless it is an
+/// absolute `http` or `https` URL.
+fn parse_base_url(base_url: &str) -> Result<Url, Error<Infallible>> {
+    let url = Url::parse(base_url).map_err(Error::request_construction)?;
+    require_http_base(url)
+}
+
+/// `url` itself if its scheme is `http` or `https`, which the URL Standard parses with a host and
+/// a path every request path can be joined onto; any other scheme (`mailto:x`, or `localhost` in
+/// `localhost:8080`) is refused as a request-construction error naming it. The message carries
+/// the scheme alone, never the URL, which may hold userinfo.
+pub(crate) fn require_http_base(url: Url) -> Result<Url, Error<Infallible>> {
+    match url.scheme() {
+        "http" | "https" => Ok(url),
+        scheme => Err(Error::request_message(format!(
+            "a base URL must be an `http` or `https` URL, not one with the scheme `{scheme}`"
+        ))),
+    }
+}
+
 /// The `reqwest::Client` a core's default backend runs on, with `config`'s connect and read
 /// timeouts.
 /// reqwest's `fetch` backend has neither, so on `wasm32` `config` is not read.
-fn http_client(config: &ClientConfig) -> Result<reqwest::Client, Error<Infallible>> {
+fn http_client(config: &TransportConfig) -> Result<reqwest::Client, Error<Infallible>> {
     let builder = reqwest::Client::builder();
     #[cfg(not(target_arch = "wasm32"))]
     let builder = {

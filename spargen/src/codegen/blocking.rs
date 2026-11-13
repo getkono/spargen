@@ -54,7 +54,7 @@ pub(super) fn emit_blocking_client(
     let credential_docs = with_credential_docs(api, options);
     let with_bound_header = with_bound_header_tokens(
         api,
-        quote! { self.inner = self.inner.with_bound_header(name, value); },
+        quote! { self.inner = self.inner.with_bound_header(name, value)?; },
     );
     let default_server = (!api.servers.is_empty()).then(|| {
         let docs = default_server_docs();
@@ -106,11 +106,11 @@ pub(super) fn emit_blocking_client(
                 Ok(Self { inner, runtime })
             }
 
-            /// Build a blocking client whose `ClientConfig` is the default one as `configure`
-            /// leaves it, as `Client::with_config` does.
+            /// Build a blocking client whose `ClientConfig` and `TransportConfig` are the
+            /// default ones as `configure` leaves them, as `Client::with_config` does.
             pub fn with_config(
                 base_url: &str,
-                configure: impl FnOnce(&mut support::ClientConfig),
+                configure: impl FnOnce(&mut support::ClientConfig, &mut support::TransportConfig),
             ) -> Result<Self, support::Error<std::convert::Infallible>> {
                 let inner = Client::with_config(base_url, configure)?;
                 let runtime = new_runtime()?;

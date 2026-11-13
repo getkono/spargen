@@ -81,7 +81,10 @@ fn a_bound_header_leaves_every_operations_arguments() {
         "{code}"
     );
     assert!(
-        flat.contains("pub fn with_bound_header(mut self, name: &str, value: impl Into<String>)"),
+        flat.contains(
+            "pub fn with_bound_header( mut self, name: &str, value: impl Into<String>, ) -> \
+             Result<Self, support::Error<std::convert::Infallible>>"
+        ),
         "{code}"
     );
 }
