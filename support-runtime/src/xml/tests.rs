@@ -229,3 +229,41 @@ fn xml_codec_rejects_a_zero_length_success_body() {
         other => panic!("expected a Decode error for an empty body, got {other:?}"),
     }
 }
+
+/// `decode_xml_body` reads the body as UTF-8 and nothing else. A leading UTF-8 byte-order mark
+/// is skipped. An `encoding="ISO-8859-1"` declaration is not honoured: an all-ASCII document
+/// decodes, since it is also UTF-8, and a Latin-1 byte above 0x7F is refused as invalid UTF-8.
+/// A UTF-16 body, byte-order mark and all, is refused the same way.
+#[test]
+fn xml_bodies_are_read_as_utf8_whatever_they_declare() {
+    let doc = "<Point label=\"p\"><x>1</x><y>2</y></Point>";
+    let point = Point {
+        x: 1,
+        y: 2,
+        label: "p".to_owned(),
+    };
+
+    let bom = [b"\xef\xbb\xbf".as_slice(), doc.as_bytes()].concat();
+    assert_eq!(decode_xml_body::<Point>(&bom).unwrap(), point);
+
+    let latin_ascii = format!("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>{doc}");
+    assert_eq!(
+        decode_xml_body::<Point>(latin_ascii.as_bytes()).unwrap(),
+        point
+    );
+    let latin_high = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\
+        <Point label=\"\xe9\"><x>1</x><y>2</y></Point>";
+    assert_eq!(
+        decode_xml_body::<Point>(latin_high).unwrap_err(),
+        "invalid utf-8 sequence of 1 bytes from index 57"
+    );
+
+    let utf16: Vec<u8> = [0xFF, 0xFE]
+        .into_iter()
+        .chain(doc.encode_utf16().flat_map(u16::to_le_bytes))
+        .collect();
+    assert_eq!(
+        decode_xml_body::<Point>(&utf16).unwrap_err(),
+        "invalid utf-8 sequence of 1 bytes from index 0"
+    );
+}

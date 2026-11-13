@@ -809,4 +809,37 @@ mod tests {
         let body = HttpBody::wrap(Chunks::new([Chunk::data("a")]).with_trailers(trailers));
         assert_eq!(poll_ready(body.collect()).unwrap(), "a");
     }
+
+    /// A streaming body that carries trailers and no data, or one empty data frame and then
+    /// trailers, collects to an empty body within any limit, zero included.
+    #[test]
+    fn collect_within_reads_a_trailers_only_body_as_empty() {
+        let trailers = || {
+            let mut trailers = http::HeaderMap::new();
+            trailers.insert("x-checksum", "1".parse().unwrap());
+            trailers
+        };
+        let only = HttpBody::wrap(Chunks::new([]).with_trailers(trailers()));
+        assert_eq!(poll_ready(only.collect_within(0)).unwrap().unwrap(), "");
+        let empty_then_trailers =
+            HttpBody::wrap(Chunks::new([Chunk::data("")]).with_trailers(trailers()));
+        assert_eq!(
+            poll_ready(empty_then_trailers.collect_within(0))
+                .unwrap()
+                .unwrap(),
+            ""
+        );
+    }
+
+    /// A wrapped streaming body reports the end of its stream as the body it adopted does: not
+    /// ended while the adopted body holds data, ended once it has none.
+    #[test]
+    fn a_wrapped_body_delegates_is_end_stream() {
+        assert!(HttpBody::wrap(HttpBody::empty()).is_end_stream());
+        let mut body = HttpBody::wrap(HttpBody::from("a"));
+        assert!(!body.is_end_stream());
+        assert_eq!(poll_ready(body.chunk()).unwrap().unwrap(), "a");
+        assert!(body.is_end_stream());
+        assert!(!HttpBody::wrap(Chunks::new([])).is_end_stream());
+    }
 }
