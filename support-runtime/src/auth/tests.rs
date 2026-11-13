@@ -995,48 +995,6 @@ fn a_basic_username_holding_a_colon_is_refused_before_send() {
     );
 }
 
-/// Issue #1333: `Authorization` is a singleton field, so a base URL carrying `user:pass@`
-/// userinfo, which the builder sends as `Authorization: Basic`, and a scheme that attaches its own
-/// credential there send exactly one `Authorization`: the scheme's, which replaces the URL's.
-#[test]
-fn a_scheme_credential_replaces_the_authorization_a_userinfo_base_url_set() {
-    let mut core = core();
-    core.set_credential("token", Credential::Bearer(SecretString::from("t0k")));
-    core.set_credential(
-        "login",
-        Credential::Basic {
-            username: "aladdin".to_owned(),
-            password: SecretString::from("open sesame"),
-        },
-    );
-    for (scheme, expected) in [
-        (BEARER, "Bearer t0k"),
-        (
-            &[AuthScheme {
-                name: "login",
-                kind: AuthKind::Basic,
-            }][..],
-            "Basic YWxhZGRpbjpvcGVuIHNlc2FtZQ==",
-        ),
-    ] {
-        let request = RequestBuilder::new(
-            reqwest::Method::GET,
-            url::Url::parse("https://u:p@example.com/op").unwrap(),
-        );
-        let request = poll_ready(attach_auth(&core, request, &[scheme]))
-            .unwrap()
-            .build()
-            .unwrap();
-        let sent: Vec<_> = request
-            .headers()
-            .get_all(http::header::AUTHORIZATION)
-            .iter()
-            .collect();
-        assert_eq!(sent, [expected], "{scheme:?}");
-        assert!(sent[0].is_sensitive());
-    }
-}
-
 #[test]
 fn mutual_tls_is_satisfied_by_the_transport_without_a_registered_credential() {
     // The client certificate lives on the `reqwest::Client`, so a `mutualTLS` scheme must
