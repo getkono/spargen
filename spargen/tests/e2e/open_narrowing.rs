@@ -18,7 +18,7 @@ fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
 
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "open_problems", "2021", |spec| {
-        spec.open_narrowing(true)
+        spec.with_open_narrowing(spargen::Narrowing::Open)
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
@@ -283,7 +283,7 @@ components:
 fn a_ref_member_of_untyped_array_applicators_keeps_its_narrowing_closed() {
     let inline = "{ items: { allOf: [{ type: string }, { enum: [a, b] }] } }";
     let reference = "{ $ref: '#/components/schemas/It' }";
-    let open = |spec: Spec| spec.open_narrowing(true);
+    let open = |spec: Spec| spec.with_open_narrowing(spargen::Narrowing::Open);
     let catch_all = "Other(String)";
 
     // The option off: neither spelling opens anything.

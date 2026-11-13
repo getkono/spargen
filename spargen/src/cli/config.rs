@@ -10,7 +10,10 @@ use std::borrow::Cow;
 
 use camino::Utf8PathBuf;
 
-use spargen::{ComponentKind, ConfigError, OmitMethod, OmitRule, Spec, UnknownOmitToken};
+use spargen::{
+    CarriedDocs, Carve, ComponentKind, ConfigError, Narrowing, OmitMethod, OmitRule, Spec,
+    UnionTags, UnknownOmitToken, UuidMapping,
+};
 
 use super::args::SpecArgs;
 
@@ -26,29 +29,49 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
         Some(config) => Spec::new(path).config_file(config)?,
         None => Spec::new(path).discover_config_file()?,
     };
-    if let Some(carve) = switch(args.carve, args.no_carve) {
-        spec = spec.carve(carve);
+    if let Some(carve) = switch(args.carve, args.no_carve, Carve::Auto, Carve::Off) {
+        spec = spec.with_carve(carve);
     }
-    if let Some(uuid) = switch(args.uuid, args.no_uuid) {
-        spec = spec.uuid(uuid);
+    if let Some(uuid) = switch(
+        args.uuid,
+        args.no_uuid,
+        UuidMapping::Uuid,
+        UuidMapping::String,
+    ) {
+        spec = spec.with_uuid(uuid);
     }
     if let Some(backend) = args.datetime {
-        spec = spec.datetime(backend);
+        spec = spec.with_datetime(backend);
     }
     if let Some(cap) = args.error_body_cap {
-        spec = spec.error_body_cap(cap);
+        spec = spec.with_error_body_cap(cap);
     }
     if let Some(cap) = args.batch_cap {
-        spec = spec.batch_cap(cap);
+        spec = spec.with_batch_cap(cap);
     }
-    if let Some(open) = switch(args.open_narrowing, args.no_open_narrowing) {
-        spec = spec.open_narrowing(open);
+    if let Some(narrowing) = switch(
+        args.open_narrowing,
+        args.no_open_narrowing,
+        Narrowing::Open,
+        Narrowing::Exact,
+    ) {
+        spec = spec.with_open_narrowing(narrowing);
     }
-    if let Some(open) = switch(args.open_unions, args.no_open_unions) {
-        spec = spec.open_unions(open);
+    if let Some(tags) = switch(
+        args.open_unions,
+        args.no_open_unions,
+        UnionTags::Open,
+        UnionTags::Closed,
+    ) {
+        spec = spec.with_open_unions(tags);
     }
-    if let Some(verbatim) = switch(args.verbatim_docs, args.no_verbatim_docs) {
-        spec = spec.verbatim_docs(verbatim);
+    if let Some(docs) = switch(
+        args.verbatim_docs,
+        args.no_verbatim_docs,
+        CarriedDocs::Verbatim,
+        CarriedDocs::Rewritten,
+    ) {
+        spec = spec.with_verbatim_docs(docs);
     }
     for path in &args.omit_path {
         spec = spec.omit_rule(OmitRule::path(path.clone()));
@@ -72,12 +95,13 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
     Ok(spec)
 }
 
-/// The value a `--X` / `--no-X` flag pair sets, or `None` when neither was given, so the config
-/// file's value stands. Clap rejects the two together, so `on` and `off` are never both set.
-fn switch(on: bool, off: bool) -> Option<bool> {
+/// The value a `--X` / `--no-X` flag pair sets — `on_value` for `--X`, `off_value` for `--no-X` —
+/// or `None` when neither was given, so the config file's value stands. Clap rejects the two
+/// together, so `on` and `off` are never both set.
+fn switch<T>(on: bool, off: bool, on_value: T, off_value: T) -> Option<T> {
     match (on, off) {
-        (true, _) => Some(true),
-        (false, true) => Some(false),
+        (true, _) => Some(on_value),
+        (false, true) => Some(off_value),
         (false, false) => None,
     }
 }
@@ -226,11 +250,11 @@ mod tests {
             ),
             file_on
                 .clone()
-                .carve(false)
-                .uuid(false)
-                .open_narrowing(false)
-                .open_unions(false)
-                .verbatim_docs(false)
+                .with_carve(spargen::Carve::Off)
+                .with_uuid(spargen::UuidMapping::String)
+                .with_open_narrowing(spargen::Narrowing::Exact)
+                .with_open_unions(spargen::UnionTags::Closed)
+                .with_verbatim_docs(spargen::CarriedDocs::Rewritten)
         );
         assert_eq!(
             resolved(
@@ -245,14 +269,17 @@ mod tests {
             ),
             file_off
                 .clone()
-                .carve(true)
-                .uuid(true)
-                .open_narrowing(true)
-                .open_unions(true)
-                .verbatim_docs(true)
+                .with_carve(spargen::Carve::Auto)
+                .with_uuid(spargen::UuidMapping::Uuid)
+                .with_open_narrowing(spargen::Narrowing::Open)
+                .with_open_unions(spargen::UnionTags::Open)
+                .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
         );
         // One flag of a pair moves only its own setting.
-        assert_eq!(resolved(&off, &["--uuid"]), file_off.uuid(true));
+        assert_eq!(
+            resolved(&off, &["--uuid"]),
+            file_off.with_uuid(spargen::UuidMapping::Uuid)
+        );
     }
 
     /// Each of the ten switch flags, alone, moves its own setting off the file's value and leaves
@@ -274,18 +301,36 @@ mod tests {
         };
         type Moved = fn(Spec) -> Spec;
         let rows: [(&str, &Utf8PathBuf, Moved); 10] = [
-            ("--no-carve", &on, |spec| spec.carve(false)),
-            ("--no-uuid", &on, |spec| spec.uuid(false)),
-            ("--no-open-narrowing", &on, |spec| {
-                spec.open_narrowing(false)
+            ("--no-carve", &on, |spec| {
+                spec.with_carve(spargen::Carve::Off)
             }),
-            ("--no-open-unions", &on, |spec| spec.open_unions(false)),
-            ("--no-verbatim-docs", &on, |spec| spec.verbatim_docs(false)),
-            ("--carve", &off, |spec| spec.carve(true)),
-            ("--uuid", &off, |spec| spec.uuid(true)),
-            ("--open-narrowing", &off, |spec| spec.open_narrowing(true)),
-            ("--open-unions", &off, |spec| spec.open_unions(true)),
-            ("--verbatim-docs", &off, |spec| spec.verbatim_docs(true)),
+            ("--no-uuid", &on, |spec| {
+                spec.with_uuid(spargen::UuidMapping::String)
+            }),
+            ("--no-open-narrowing", &on, |spec| {
+                spec.with_open_narrowing(spargen::Narrowing::Exact)
+            }),
+            ("--no-open-unions", &on, |spec| {
+                spec.with_open_unions(spargen::UnionTags::Closed)
+            }),
+            ("--no-verbatim-docs", &on, |spec| {
+                spec.with_verbatim_docs(spargen::CarriedDocs::Rewritten)
+            }),
+            ("--carve", &off, |spec| {
+                spec.with_carve(spargen::Carve::Auto)
+            }),
+            ("--uuid", &off, |spec| {
+                spec.with_uuid(spargen::UuidMapping::Uuid)
+            }),
+            ("--open-narrowing", &off, |spec| {
+                spec.with_open_narrowing(spargen::Narrowing::Open)
+            }),
+            ("--open-unions", &off, |spec| {
+                spec.with_open_unions(spargen::UnionTags::Open)
+            }),
+            ("--verbatim-docs", &off, |spec| {
+                spec.with_verbatim_docs(spargen::CarriedDocs::Verbatim)
+            }),
         ];
         for (flag, dir, moved) in rows {
             let resolved = resolved(dir, &[flag]);
@@ -302,12 +347,12 @@ mod tests {
         let file = Spec::new(dir.join("openapi.yaml"))
             .config_file(dir.join("spargen.toml"))
             .unwrap();
-        assert_eq!(file.datetime_backend(), DateTimeBackend::Jiff);
+        assert_eq!(file.datetime(), DateTimeBackend::Jiff);
         assert_eq!(resolved(&dir, &[]), file);
         for &backend in DateTimeBackend::ALL {
             assert_eq!(
                 resolved(&dir, &["--datetime", backend.as_str()]),
-                file.clone().datetime(backend),
+                file.clone().with_datetime(backend),
                 "{backend}"
             );
         }

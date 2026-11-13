@@ -77,7 +77,10 @@ mod test_support;
 use std::str::FromStr;
 
 pub use compat::{ComponentKind, KeepRule, Omit, OmitMethod, OmitRule, UnknownOmitToken};
-pub use config::{Build, CargoIntegration, ConfigError, Spec};
+pub use config::{
+    Build, CargoIntegration, CarriedDocs, Carve, ConfigError, Narrowing, Spec, TestingModule,
+    UnionTags, UuidMapping,
+};
 pub use diag::{
     Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, OutcomeClaim, Severity, Span, UnknownCode,
 };

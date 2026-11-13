@@ -29,6 +29,112 @@ use crate::ir::DateTimeBackend;
 /// The default cap on diagnostics collected before batching stops.
 const DEFAULT_BATCH_CAP: usize = 100;
 
+/// Implement the two crate-private conversions between a two-state switch enum and the `bool` a
+/// `spargen.toml` key and the pipeline's options carry: `on` is the variant `true` selects.
+macro_rules! switch {
+    ($name:ident, off = $off:ident, on = $on:ident) => {
+        impl $name {
+            /// The variant a `spargen.toml` boolean selects: `true` is the non-default one.
+            pub(crate) fn from_on(on: bool) -> Self {
+                if on {
+                    Self::$on
+                } else {
+                    Self::$off
+                }
+            }
+
+            /// Whether this is the variant a `spargen.toml` `true` selects.
+            pub(crate) fn is_on(self) -> bool {
+                self == Self::$on
+            }
+        }
+    };
+}
+
+/// What `format: uuid` maps to, set with [`Spec::with_uuid`] and read with [`Spec::uuid`]; the
+/// `uuid` key of `spargen.toml`, where `true` is [`Uuid`](Self::Uuid).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum UuidMapping {
+    /// `uuid::Uuid`, which the dependency audit then requires.
+    #[default]
+    Uuid,
+    /// `String`: a deliberate, documented loss of typing that also drops `uuid` from the
+    /// dependencies generated output requires.
+    String,
+}
+switch!(UuidMapping, off = String, on = Uuid);
+
+/// Whether a rejection fails generation or is carved away, set with [`Spec::with_carve`] and read
+/// with [`Spec::carve`]; the `carve` key of `spargen.toml`, where `true` is [`Auto`](Self::Auto).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Carve {
+    /// A rejection fails generation.
+    #[default]
+    Off,
+    /// Auto-carve: iteratively omit the minimal enclosing omittable construct for each rejection
+    /// and generate the rest, reporting every carved construct as `W009`.
+    Auto,
+}
+switch!(Carve, off = Off, on = Auto);
+
+/// How a string `enum`/`const` narrowing a plain `string` in a response body's own schema lowers,
+/// set with [`Spec::with_open_narrowing`] and read with [`Spec::open_narrowing`]; the
+/// `open_narrowing` key of `spargen.toml`, where `true` is [`Open`](Self::Open).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Narrowing {
+    /// A closed enum: a value the description does not list is a decode failure.
+    #[default]
+    Exact,
+    /// An open enum: one more variant holds any other string.
+    Open,
+}
+switch!(Narrowing, off = Exact, on = Open);
+
+/// Whether a discriminated union takes a tag value it does not list, set with
+/// [`Spec::with_open_unions`] and read with [`Spec::open_unions`]; the `open_unions` key of
+/// `spargen.toml`, where `true` is [`Open`](Self::Open).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum UnionTags {
+    /// An unlisted tag value is a decode failure.
+    #[default]
+    Closed,
+    /// An unlisted tag value decodes into the union's `Unknown { tag, value }` variant.
+    Open,
+}
+switch!(UnionTags, off = Closed, on = Open);
+
+/// How the spec's prose reaches rustdoc, set with [`Spec::with_verbatim_docs`] and read with
+/// [`Spec::verbatim_docs`]; the `verbatim_docs` key of `spargen.toml`, where `true` is
+/// [`Verbatim`](Self::Verbatim).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CarriedDocs {
+    /// Rewritten so rustdoc has nothing to report from wherever the module is `include!`d.
+    #[default]
+    Rewritten,
+    /// Carried exactly as written.
+    Verbatim,
+}
+switch!(CarriedDocs, off = Rewritten, on = Verbatim);
+
+/// Whether the generated module carries a `testing` module, set with [`Spec::with_testing`] and
+/// read with [`Spec::testing`]; the `testing` key of `spargen.toml`, where `true` is
+/// [`Emitted`](Self::Emitted).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TestingModule {
+    /// No `testing` module.
+    #[default]
+    Omitted,
+    /// A `testing` module beside the client, holding the typed `testing::MockBackend`.
+    Emitted,
+}
+switch!(TestingModule, off = Omitted, on = Emitted);
+
 /// What to generate: the spec to read plus every knob that can change the generated API.
 ///
 /// Two `Spec`s that compare equal produce byte-identical output for a given spargen version *and
@@ -36,23 +142,34 @@ const DEFAULT_BATCH_CAP: usize = 100;
 /// the paths of the config files applied to it; it cannot see the bytes at those paths, which the
 /// build cache fingerprints separately.
 ///
+/// Each knob is read by a getter named for it ([`uuid`](Self::uuid),
+/// [`batch_cap`](Self::batch_cap), …) and set by a `with_` setter of the same name
+/// ([`with_uuid`](Self::with_uuid), [`with_batch_cap`](Self::with_batch_cap), …), which replaces
+/// the value; [`omit`](Self::omit), [`omit_rule`](Self::omit_rule),
+/// [`keep_operation`](Self::keep_operation) and [`bind_header`](Self::bind_header) append to a
+/// list instead, which its own getter reads back. Every setter returns the spec by value, which
+/// `#[must_use]` holds a caller to using.
+///
 /// ```no_run
-/// let spec = spargen::Spec::new("api/openapi.yaml").uuid(false);
+/// use spargen::UuidMapping;
+///
+/// let spec = spargen::Spec::new("api/openapi.yaml").with_uuid(UuidMapping::String);
 /// let report = spargen::check(&spec);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "a `Spec` does nothing until it is passed to an entry point such as `check` or built into a `Build`"]
 pub struct Spec {
     pub(crate) path: Utf8PathBuf,
-    pub(crate) uuid: bool,
+    pub(crate) uuid: UuidMapping,
     pub(crate) datetime: DateTimeBackend,
     pub(crate) omit: Omit,
     pub(crate) error_body_cap: usize,
     pub(crate) batch_cap: usize,
-    pub(crate) carve: bool,
-    pub(crate) open_narrowing: bool,
-    pub(crate) open_unions: bool,
-    pub(crate) verbatim_docs: bool,
-    pub(crate) testing: bool,
+    pub(crate) carve: Carve,
+    pub(crate) open_narrowing: Narrowing,
+    pub(crate) open_unions: UnionTags,
+    pub(crate) verbatim_docs: CarriedDocs,
+    pub(crate) testing: TestingModule,
     /// The header names [`Spec::bind_header`] bound, in the order bound, no two equal in any
     /// letter case.
     pub(crate) bind_headers: Vec<String>,
@@ -63,23 +180,25 @@ pub struct Spec {
 }
 
 impl Spec {
-    /// A spec with defaults: `uuid` on, dates mapped through the `time` crate
-    /// ([`DateTimeBackend::Time`]), a 64 KiB error-body cap, a 100-diagnostic
-    /// batch, no omissions, no carving, no open narrowing, no open unions, carried docs
-    /// rewritten for rustdoc rather than verbatim, no `testing` module, and no bound headers.
+    /// A spec with defaults: `format: uuid` mapped to `uuid::Uuid` ([`UuidMapping::Uuid`]), dates
+    /// mapped through the `time` crate ([`DateTimeBackend::Time`]), a 64 KiB error-body cap, a
+    /// 100-diagnostic batch, no omissions, no carving ([`Carve::Off`]), exact narrowing
+    /// ([`Narrowing::Exact`]), closed unions ([`UnionTags::Closed`]), carried docs rewritten for
+    /// rustdoc ([`CarriedDocs::Rewritten`]), no `testing` module ([`TestingModule::Omitted`]), and
+    /// no bound headers.
     pub fn new(path: impl Into<Utf8PathBuf>) -> Self {
         Self {
             path: path.into(),
-            uuid: true,
+            uuid: UuidMapping::Uuid,
             datetime: DateTimeBackend::Time,
             omit: Omit::default(),
             error_body_cap: DEFAULT_ERROR_BODY_CAP,
             batch_cap: DEFAULT_BATCH_CAP,
-            carve: false,
-            open_narrowing: false,
-            open_unions: false,
-            verbatim_docs: false,
-            testing: false,
+            carve: Carve::Off,
+            open_narrowing: Narrowing::Exact,
+            open_unions: UnionTags::Closed,
+            verbatim_docs: CarriedDocs::Rewritten,
+            testing: TestingModule::Omitted,
             bind_headers: Vec::new(),
             config_files: Vec::new(),
         }
@@ -90,13 +209,14 @@ impl Spec {
         &self.path
     }
 
-    /// Whether `format: uuid` maps to `uuid::Uuid`, as [`uuid`](Self::uuid) set it.
-    pub fn uuid_enabled(&self) -> bool {
+    /// What `format: uuid` maps to, as [`with_uuid`](Self::with_uuid) set it.
+    pub fn uuid(&self) -> UuidMapping {
         self.uuid
     }
 
-    /// The crate `format: date-time`/`date` map to, as [`datetime`](Self::datetime) set it.
-    pub fn datetime_backend(&self) -> DateTimeBackend {
+    /// The crate `format: date-time`/`date` map to, as [`with_datetime`](Self::with_datetime) set
+    /// it.
+    pub fn datetime(&self) -> DateTimeBackend {
         self.datetime
     }
 
@@ -107,43 +227,44 @@ impl Spec {
         &self.omit
     }
 
-    /// The cap on retained error-body bytes, as [`error_body_cap`](Self::error_body_cap) set it.
-    pub fn error_body_cap_bytes(&self) -> usize {
+    /// The cap on retained error-body bytes, as [`with_error_body_cap`](Self::with_error_body_cap)
+    /// set it.
+    pub fn error_body_cap(&self) -> usize {
         self.error_body_cap
     }
 
     /// The cap on diagnostics collected before batching stops, as
-    /// [`batch_cap`](Self::batch_cap) set it.
-    pub fn batch_cap_count(&self) -> usize {
+    /// [`with_batch_cap`](Self::with_batch_cap) set it.
+    pub fn batch_cap(&self) -> usize {
         self.batch_cap
     }
 
-    /// Whether auto-carve is on, as [`carve`](Self::carve) set it.
-    pub fn carve_enabled(&self) -> bool {
+    /// Whether a rejection is carved away, as [`with_carve`](Self::with_carve) set it.
+    pub fn carve(&self) -> Carve {
         self.carve
     }
 
-    /// Whether a narrowing string `enum`/`const` lowers as an open set, as
-    /// [`open_narrowing`](Self::open_narrowing) set it.
-    pub fn open_narrowing_enabled(&self) -> bool {
+    /// How a narrowing string `enum`/`const` lowers, as
+    /// [`with_open_narrowing`](Self::with_open_narrowing) set it.
+    pub fn open_narrowing(&self) -> Narrowing {
         self.open_narrowing
     }
 
-    /// Whether a discriminated union decodes a tag value it does not list into its `Unknown`
-    /// variant, as [`open_unions`](Self::open_unions) set it.
-    pub fn open_unions_enabled(&self) -> bool {
+    /// Whether a discriminated union takes a tag value it does not list, as
+    /// [`with_open_unions`](Self::with_open_unions) set it.
+    pub fn open_unions(&self) -> UnionTags {
         self.open_unions
     }
 
-    /// Whether the spec's prose is carried into rustdoc as written, as
-    /// [`verbatim_docs`](Self::verbatim_docs) set it.
-    pub fn verbatim_docs_enabled(&self) -> bool {
+    /// How the spec's prose reaches rustdoc, as [`with_verbatim_docs`](Self::with_verbatim_docs)
+    /// set it.
+    pub fn verbatim_docs(&self) -> CarriedDocs {
         self.verbatim_docs
     }
 
-    /// Whether the generated module carries its `testing` module, as [`testing`](Self::testing)
-    /// set it.
-    pub fn testing_enabled(&self) -> bool {
+    /// Whether the generated module carries its `testing` module, as
+    /// [`with_testing`](Self::with_testing) set it.
+    pub fn testing(&self) -> TestingModule {
         self.testing
     }
 
@@ -158,11 +279,11 @@ impl Spec {
         &self.config_files
     }
 
-    /// Map `format: uuid` to `uuid::Uuid` (default `true`). Turning this off falls back to
-    /// `String` — a deliberate, documented loss of typing that also drops `uuid` from the
-    /// dependencies generated output requires.
-    pub fn uuid(mut self, enabled: bool) -> Self {
-        self.uuid = enabled;
+    /// Choose what `format: uuid` maps to (default [`UuidMapping::Uuid`], `uuid::Uuid`).
+    /// [`UuidMapping::String`] falls back to `String` — a deliberate, documented loss of typing
+    /// that also drops `uuid` from the dependencies generated output requires.
+    pub fn with_uuid(mut self, mapping: UuidMapping) -> Self {
+        self.uuid = mapping;
         self
     }
 
@@ -176,9 +297,9 @@ impl Spec {
     /// ```no_run
     /// use spargen::DateTimeBackend;
     ///
-    /// let spec = spargen::Spec::new("api/openapi.yaml").datetime(DateTimeBackend::Jiff);
+    /// let spec = spargen::Spec::new("api/openapi.yaml").with_datetime(DateTimeBackend::Jiff);
     /// ```
-    pub fn datetime(mut self, backend: DateTimeBackend) -> Self {
+    pub fn with_datetime(mut self, backend: DateTimeBackend) -> Self {
         self.datetime = backend;
         self
     }
@@ -246,27 +367,28 @@ impl Spec {
     /// deserialization needs the whole body, so it is always read whole. See
     /// `ClientConfig::max_error_body` in the emitted runtime for the full disposition, including
     /// the one path that is not capped at all.
-    pub fn error_body_cap(mut self, bytes: usize) -> Self {
+    pub fn with_error_body_cap(mut self, bytes: usize) -> Self {
         self.error_body_cap = bytes;
         self
     }
 
     /// Cap the diagnostics collected before batching stops (default 100).
-    pub fn batch_cap(mut self, count: usize) -> Self {
+    pub fn with_batch_cap(mut self, count: usize) -> Self {
         self.batch_cap = count;
         self
     }
 
-    /// Auto-carve: instead of failing on rejections, iteratively omit the minimal enclosing
+    /// Choose whether a rejection fails generation (default [`Carve::Off`]). With
+    /// [`Carve::Auto`], instead of failing on rejections, iteratively omit the minimal enclosing
     /// omittable construct for each rejection and generate the rest. Every carved construct is
     /// reported via `W009`; residual, un-carvable rejections are reported honestly.
-    pub fn carve(mut self, enabled: bool) -> Self {
-        self.carve = enabled;
+    pub fn with_carve(mut self, carve: Carve) -> Self {
+        self.carve = carve;
         self
     }
 
-    /// Lower a string `enum`/`const` that narrows a plain `string` as an **open** set (default
-    /// `false`), inside a response body's own schema.
+    /// With [`Narrowing::Open`], lower a string `enum`/`const` that narrows a plain `string` as an
+    /// **open** set (default [`Narrowing::Exact`]), inside a response body's own schema.
     ///
     /// The construct is a property that one `allOf` member (or the `$ref` it sits beside) declares
     /// as a plain `string` and another narrows with `enum`/`const` — the RFC 9457 shape
@@ -283,13 +405,14 @@ impl Spec {
     /// its variants apart by what each one refuses, so opening a set there could make two variants
     /// accept the same value. A narrowing whose value set is itself a `$ref` target opens a copy
     /// and leaves the target closed. Request bodies and parameters are not affected.
-    pub fn open_narrowing(mut self, enabled: bool) -> Self {
-        self.open_narrowing = enabled;
+    pub fn with_open_narrowing(mut self, narrowing: Narrowing) -> Self {
+        self.open_narrowing = narrowing;
         self
     }
 
-    /// Give every discriminated union one more variant, `Unknown { tag, value }`, holding a
-    /// payload whose discriminator value the union does not list (default `false`).
+    /// With [`UnionTags::Open`], give every discriminated union one more variant,
+    /// `Unknown { tag, value }`, holding a payload whose discriminator value the union does not
+    /// list (default [`UnionTags::Closed`]).
     ///
     /// By default a discriminated union is closed: a tag value that selects none of its variants
     /// is a decode failure (`Error::Decode`), the same as a malformed payload. An API that
@@ -310,13 +433,13 @@ impl Spec {
     /// reached deeper inside such a variant, such as through a property, is not held back that
     /// way: it makes that variant accept more, so a `oneOf` payload another variant also matches
     /// can fail to decode where it decoded with this option off.
-    pub fn open_unions(mut self, enabled: bool) -> Self {
-        self.open_unions = enabled;
+    pub fn with_open_unions(mut self, tags: UnionTags) -> Self {
+        self.open_unions = tags;
         self
     }
 
-    /// Carry the spec's prose — `summary`, `description` and `title` — into rustdoc exactly as
-    /// written (default `false`).
+    /// With [`CarriedDocs::Verbatim`], carry the spec's prose — `summary`, `description` and
+    /// `title` — into rustdoc exactly as written (default [`CarriedDocs::Rewritten`]).
     ///
     /// By default that prose is rewritten so rustdoc has nothing to report from wherever the
     /// module is `include!`d, without changing what it says. A server framework that publishes its
@@ -334,13 +457,14 @@ impl Spec {
     /// `include!` site answers for `rustdoc::broken_intra_doc_links`, `rustdoc::bare_urls` and
     /// `rustdoc::invalid_html_tags`, and its `cargo test --doc` for the prose's untagged code
     /// blocks.
-    pub fn verbatim_docs(mut self, enabled: bool) -> Self {
-        self.verbatim_docs = enabled;
+    pub fn with_verbatim_docs(mut self, docs: CarriedDocs) -> Self {
+        self.verbatim_docs = docs;
         self
     }
 
-    /// Emit a `testing` module beside the client (default `false`): a typed test double,
-    /// `testing::MockBackend`, to build a client on with `Client::with_backend`.
+    /// With [`TestingModule::Emitted`], emit a `testing` module beside the client (default
+    /// [`TestingModule::Omitted`]): a typed test double, `testing::MockBackend`, to build a client
+    /// on with `Client::with_backend`.
     ///
     /// The mock routes each request by the `ops::Operation` its operation method attaches, never
     /// by path, to the handler registered with that operation's `on_{method}`; the handler reads
@@ -352,8 +476,8 @@ impl Spec {
     ///
     /// The module is compiled wherever the generated module is, so a build that never names it
     /// still compiles it.
-    pub fn testing(mut self, enabled: bool) -> Self {
-        self.testing = enabled;
+    pub fn with_testing(mut self, module: TestingModule) -> Self {
+        self.testing = module;
         self
     }
 
@@ -462,13 +586,13 @@ impl Spec {
             )));
         }
         if let Some(value) = file.uuid {
-            self.uuid = value;
+            self.uuid = UuidMapping::from_on(value);
         }
         if let Some(value) = file.datetime {
             self.datetime = value;
         }
         if let Some(value) = file.carve {
-            self.carve = value;
+            self.carve = Carve::from_on(value);
         }
         if let Some(value) = file.batch_cap {
             self.batch_cap = value;
@@ -477,16 +601,16 @@ impl Spec {
             self.error_body_cap = value;
         }
         if let Some(value) = file.open_narrowing {
-            self.open_narrowing = value;
+            self.open_narrowing = Narrowing::from_on(value);
         }
         if let Some(value) = file.open_unions {
-            self.open_unions = value;
+            self.open_unions = UnionTags::from_on(value);
         }
         if let Some(value) = file.verbatim_docs {
-            self.verbatim_docs = value;
+            self.verbatim_docs = CarriedDocs::from_on(value);
         }
         if let Some(value) = file.testing {
-            self.testing = value;
+            self.testing = TestingModule::from_on(value);
         }
         for (index, entry) in file.omit.iter().enumerate() {
             let rule = entry.to_rule().map_err(|message| {
@@ -544,7 +668,11 @@ pub enum CargoIntegration {
 
 /// Where to generate: a [`Spec`] plus the output path and Cargo integration policy. The input to
 /// [`generate`](crate::generate), whose doc shows the `build.rs` call.
+///
+/// Its knobs follow [`Spec`]'s scheme: a getter named for the knob ([`cargo`](Self::cargo)) and a
+/// `with_` setter ([`with_cargo`](Self::with_cargo)).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "a `Build` does nothing until it is passed to `generate`"]
 pub struct Build {
     pub(crate) spec: Spec,
     pub(crate) output: Utf8PathBuf,
@@ -561,8 +689,8 @@ impl Build {
         }
     }
 
-    /// Choose how this build interacts with Cargo.
-    pub fn cargo(mut self, integration: CargoIntegration) -> Self {
+    /// Choose how this build interacts with Cargo (default [`CargoIntegration::Auto`]).
+    pub fn with_cargo(mut self, integration: CargoIntegration) -> Self {
         self.cargo = integration;
         self
     }
@@ -577,8 +705,8 @@ impl Build {
         &self.output
     }
 
-    /// How this build interacts with Cargo, as [`cargo`](Self::cargo) set it.
-    pub fn cargo_integration(&self) -> CargoIntegration {
+    /// How this build interacts with Cargo, as [`with_cargo`](Self::with_cargo) set it.
+    pub fn cargo(&self) -> CargoIntegration {
         self.cargo
     }
 }
@@ -763,15 +891,15 @@ mod tests {
     fn defaults_are_pinned() {
         // These are a published contract, so a changed default fails a test rather than only a doc.
         let spec = Spec::new("openapi.yaml");
-        assert!(spec.uuid);
+        assert_eq!(spec.uuid, UuidMapping::Uuid);
         assert_eq!(spec.datetime, DateTimeBackend::Time);
-        assert!(!spec.carve);
+        assert_eq!(spec.carve, Carve::Off);
         assert_eq!(spec.batch_cap, 100);
         assert_eq!(spec.error_body_cap, 64 * 1024);
-        assert!(!spec.open_narrowing);
-        assert!(!spec.open_unions);
-        assert!(!spec.verbatim_docs);
-        assert!(!spec.testing);
+        assert_eq!(spec.open_narrowing, Narrowing::Exact);
+        assert_eq!(spec.open_unions, UnionTags::Closed);
+        assert_eq!(spec.verbatim_docs, CarriedDocs::Rewritten);
+        assert_eq!(spec.testing, TestingModule::Omitted);
         assert!(spec.bind_headers.is_empty());
         assert!(spec.omit.is_empty());
         assert_eq!(Build::new(spec, "out.rs").cargo, CargoIntegration::Auto);
@@ -812,15 +940,15 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(!spec.uuid);
+        assert_eq!(spec.uuid, UuidMapping::String);
         assert_eq!(spec.datetime, DateTimeBackend::Jiff);
-        assert!(spec.carve);
+        assert_eq!(spec.carve, Carve::Auto);
         assert_eq!(spec.batch_cap, 7);
         assert_eq!(spec.error_body_cap, 11);
-        assert!(spec.open_narrowing);
-        assert!(spec.open_unions);
-        assert!(spec.verbatim_docs);
-        assert!(spec.testing);
+        assert_eq!(spec.open_narrowing, Narrowing::Open);
+        assert_eq!(spec.open_unions, UnionTags::Open);
+        assert_eq!(spec.verbatim_docs, CarriedDocs::Verbatim);
+        assert_eq!(spec.testing, TestingModule::Emitted);
     }
 
     /// The removed `time` switch is refused, whatever its value, with an error naming the
@@ -848,8 +976,10 @@ mod tests {
 
     #[test]
     fn setters_after_the_config_file_win() {
-        let spec = apply("carve = true\nbatch_cap = 7\n").unwrap().carve(false);
-        assert!(!spec.carve);
+        let spec = apply("carve = true\nbatch_cap = 7\n")
+            .unwrap()
+            .with_carve(Carve::Off);
+        assert_eq!(spec.carve, Carve::Off);
         assert_eq!(spec.batch_cap, 7, "untouched keys survive");
     }
 

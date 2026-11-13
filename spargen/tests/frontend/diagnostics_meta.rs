@@ -597,12 +597,12 @@ fn a_report_that_hit_the_batch_cap_says_it_is_truncated() {
     std::fs::write(&path, &spec).unwrap();
     let spec_path = Utf8PathBuf::from_path_buf(path).unwrap();
 
-    let uncapped = run_check(&Spec::new(spec_path.clone()).batch_cap(100));
+    let uncapped = run_check(&Spec::new(spec_path.clone()).with_batch_cap(100));
     assert!(!uncapped.truncated(), "{uncapped:#?}");
     let all = uncapped.diagnostics().len();
     assert!(all > 3, "need more than the cap to prove truncation: {all}");
 
-    let capped = run_check(&Spec::new(spec_path).batch_cap(3));
+    let capped = run_check(&Spec::new(spec_path).with_batch_cap(3));
     assert!(capped.truncated(), "{capped:#?}");
     assert_eq!(capped.diagnostics().len(), 3, "{capped:#?}");
     assert!(

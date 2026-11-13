@@ -95,7 +95,7 @@ a `keep { get "/v1/sync"; }` block. Each adds to the keep rules the file already
 
 ## Auto-carve
 
-`Spec::carve(true)` (or the macro's `carve` argument) turns a spec that would **reject**
+`Spec::with_carve(Carve::Auto)` (or the macro's `carve` argument) turns a spec that would **reject**
 into a generate-what-you-can outcome. Instead of failing on rejections, spargen:
 
 1. runs the frontend audit;
@@ -224,5 +224,5 @@ the CLI. Setters called after it still win, so build code remains authoritative:
 ```rust
 let spec = spargen::Spec::new("api/openapi.yaml")
     .discover_config_file()?
-    .carve(false);   // overrides the file
+    .with_carve(spargen::Carve::Off);   // overrides the file
 ```
