@@ -4543,6 +4543,10 @@ mod support {
         /// collector, reads the rest of it into one `Bytes` within a limit the caller names.
         /// [`Self::into_body`] hands the body over as an [`HttpBody`], an `http_body::Body`, for a reader
         /// of the caller's own. Dropping it abandons the rest of the body.
+        ///
+        /// On `wasm32` too, `ReqwestBackend`'s `fetch` response is read chunk by chunk as the browser
+        /// delivers it, so a limit stops the read at the chunk that crosses it rather than after the
+        /// whole body is in memory.
         pub struct ByteStream {
             body: HttpBody,
             status: StatusCode,
@@ -4595,7 +4599,8 @@ mod support {
             }
         }
         /// Wrap a raw binary success response as a [`ByteStream`] beside its status and headers, reading
-        /// none of its body: the success branch of a binary operation's `_stream` twin.
+        /// none of its body: the success branch of a binary operation's `_stream` twin, which hands it the
+        /// response with its body read as it arrives (the `chunked` module's `read_as_it_arrives`).
         pub fn stream_success_bytes(
             response: http::Response<HttpBody>,
         ) -> ResponseValue<ByteStream> {
@@ -5272,7 +5277,7 @@ mod support {
             }
             /// The `fetch` response a body reqwest's `fetch` backend received still holds, before anything
             /// has read it; any other body comes back unchanged. The `allow` is for a build without the
-            /// `stream` module, its only caller.
+            /// `chunked` module, its only caller.
             #[cfg(target_arch = "wasm32")]
             #[allow(dead_code)]
             pub(crate) fn into_fetch_response(self) -> Result<reqwest::Response, Self> {
@@ -5443,9 +5448,10 @@ mod support {
         }
         /// A response body reqwest's `fetch` backend reads whole, its failure classified by
         /// [`TransportError::from_reqwest_body`]. Until it is first polled it holds the response itself,
-        /// which the `stream` module takes back to read chunk by chunk as the browser delivers them
-        /// ([`HttpBody::into_fetch_response`]), since only an API with a streaming response carries the
-        /// dependencies that read needs.
+        /// which the `chunked` module takes back to read chunk by chunk as the browser delivers them
+        /// ([`HttpBody::into_fetch_response`]) for an `EventStream` or a binary `_stream` twin's
+        /// `ByteStream`, since only an API with one of those carries the dependencies that read needs.
+        /// Every other reader of the body, a buffered method's decoder included, reads it whole.
         #[cfg(target_arch = "wasm32")]
         enum FetchBody {
             /// Not read yet.
@@ -5533,8 +5539,8 @@ mod support {
             Ok(request)
         }
         /// A response reqwest received, as the seam carries it. Off `wasm32` the body is reqwest's own,
-        /// read as it arrives; on `wasm32` it is the `fetch` response's, read whole unless `EventStream`
-        /// takes it back to stream it. One function for both targets, with the target-specific steps
+        /// read as it arrives; on `wasm32` it is the `fetch` response's, read whole unless an
+        /// `EventStream` or a `ByteStream` takes it back to stream it. One function for both targets, with the target-specific steps
         /// `cfg`-gated inside it, so a native test reaches it and no mutation of it survives by being
         /// compiled out.
         pub(crate) fn response_from_reqwest(
@@ -5647,15 +5653,62 @@ mod support {
         #[cfg(target_arch = "wasm32")]
         impl<T: ?Sized> MaybeSync for T {}
     }
+    mod chunked {
+        //! A response body read as it arrives, on every target. Off `wasm32` that is how every backend
+        //! body is read already. On `wasm32`, `ReqwestBackend` hands a `fetch` response over still unread,
+        //! and its own body reads it whole; this module reads it chunk by chunk instead, as the browser
+        //! delivers it, through reqwest's `stream` feature and `futures-core`. An `EventStream` reads its
+        //! body through it, and so does a binary operation's `_stream` twin, whose `ByteStream` would
+        //! otherwise hold the whole body before its first chunk.
+        #[cfg(target_arch = "wasm32")]
+        use std::pin::Pin;
+        #[cfg(target_arch = "wasm32")]
+        use std::task::{Context, Poll};
+        #[cfg(target_arch = "wasm32")]
+        use bytes::Bytes;
+        #[cfg(target_arch = "wasm32")]
+        use futures_core::Stream;
+        use super::HttpBody;
+        /// `body`, read as it arrives. Off `wasm32` that is the body as the backend delivered it. On
+        /// `wasm32`, a `fetch` response `ReqwestBackend` received, still unread, is read chunk by chunk as
+        /// the browser delivers it; any other body comes back unchanged.
+        pub fn read_as_it_arrives(body: HttpBody) -> HttpBody {
+            #[cfg(target_arch = "wasm32")]
+            return match body.into_fetch_response() {
+                Ok(response) => {
+                    HttpBody::wrap(FetchChunks(Box::pin(response.bytes_stream())))
+                }
+                Err(body) => body,
+            };
+            #[cfg(not(target_arch = "wasm32"))] body
+        }
+        /// A `fetch` response body read chunk by chunk. A failed read is yielded as reqwest reported it,
+        /// which `HttpBody::wrap` reads as an interruption whatever its kind.
+        #[cfg(target_arch = "wasm32")]
+        struct FetchChunks(Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>);
+        #[cfg(target_arch = "wasm32")]
+        impl http_body::Body for FetchChunks {
+            type Data = Bytes;
+            type Error = reqwest::Error;
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<http_body::Frame<Bytes>, reqwest::Error>>> {
+                self.0
+                    .as_mut()
+                    .poll_next(cx)
+                    .map(|chunk| chunk.map(|chunk| chunk.map(http_body::Frame::data)))
+            }
+        }
+    }
     mod stream {
         //! Typed streaming for response bodies delivered as Server-Sent Events (`text/event-stream`),
         //! newline-delimited JSON (`application/x-ndjson`), or RFC 7464 JSON Text Sequences
         //! (`application/json-seq`); [`Framing`] names each mode. A streaming operation returns an
         //! [`EventStream<T>`], a standard [`futures_core::Stream`] with a dependency-free inherent
         //! `next().await` convenience method. It reads the response's [`HttpBody`] chunk by chunk as the
-        //! backend delivers it: `ReqwestBackend` delivers chunks incrementally on native targets; on
-        //! `wasm32`, reqwest's fetch implementation may buffer the body internally, and the stream API and
-        //! framing are the same. Dropping `EventStream` drops that body and cancels the transfer.
+        //! backend delivers it, on `wasm32` too, where a `fetch` response is read as the browser delivers
+        //! it (the `chunked` module). Dropping `EventStream` drops that body and cancels the transfer.
         //!
         //! Framing is a pure function ([`next_frame`]) over an owned [`FrameBuffer`], with no network IO
         //! and no async runtime. The buffer remembers how far the framer has already searched, so each
@@ -5671,6 +5724,7 @@ mod support {
         use reqwest::header::HeaderMap;
         use reqwest::StatusCode;
         use serde::de::DeserializeOwned;
+        use super::chunked::read_as_it_arrives;
         use super::dispatch::{cap_body, send_on, unexpected_status_capped};
         use super::transport::try_clone_request;
         use super::wasm::BoxFuture;
@@ -5799,7 +5853,7 @@ mod support {
                 Self {
                     status: parts.status,
                     headers: parts.headers,
-                    state: StreamState::Body(streamed(body)),
+                    state: StreamState::Body(read_as_it_arrives(body)),
                     buffer: FrameBuffer::default(),
                     max_frame: config.max_stream_frame,
                     max_error_body: config.max_error_body,
@@ -6010,7 +6064,7 @@ mod support {
                                     this.status = parts.status;
                                     this.headers = parts.headers;
                                     this.bom_pending = is_sse(this.framing);
-                                    this.state = StreamState::Body(streamed(body));
+                                    this.state = StreamState::Body(read_as_it_arrives(body));
                                 }
                                 Poll::Ready(Err(error)) => {
                                     if let Some(error) = this
@@ -6113,39 +6167,6 @@ mod support {
                         }
                     }),
                 )
-            }
-        }
-        /// The body a stream reads its items from. Off `wasm32` that is the response body as the backend
-        /// delivered it. On `wasm32`, a `fetch` response `ReqwestBackend` received, still unread, is read
-        /// chunk by chunk as the browser delivers it, through reqwest's `stream` feature, which an API
-        /// with a streaming response requires; `ReqwestBackend` alone would read it whole, which for an
-        /// event stream that never ends would never yield an item.
-        fn streamed(body: HttpBody) -> HttpBody {
-            #[cfg(target_arch = "wasm32")]
-            return match body.into_fetch_response() {
-                Ok(response) => {
-                    HttpBody::wrap(FetchChunks(Box::pin(response.bytes_stream())))
-                }
-                Err(body) => body,
-            };
-            #[cfg(not(target_arch = "wasm32"))] body
-        }
-        /// A `fetch` response body read chunk by chunk. A failed read is yielded as reqwest reported it,
-        /// which the stream reads as an interruption whatever its kind.
-        #[cfg(target_arch = "wasm32")]
-        struct FetchChunks(Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>);
-        #[cfg(target_arch = "wasm32")]
-        impl http_body::Body for FetchChunks {
-            type Data = Bytes;
-            type Error = reqwest::Error;
-            fn poll_frame(
-                mut self: Pin<&mut Self>,
-                cx: &mut Context<'_>,
-            ) -> Poll<Option<Result<http_body::Frame<Bytes>, reqwest::Error>>> {
-                self.0
-                    .as_mut()
-                    .poll_next(cx)
-                    .map(|chunk| chunk.map(|chunk| chunk.map(http_body::Frame::data)))
             }
         }
         /// The outcome of attempting to frame one item out of the buffer.
@@ -6812,6 +6833,7 @@ mod support {
         TotalTimeout,
     };
     pub use wasm::{MaybeSend, MaybeSync};
+    pub use chunked::read_as_it_arrives;
     pub use stream::{
         EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait,
         StreamError,
@@ -16649,7 +16671,7 @@ Response `409`: Conflict*/
         support::Error<DownloadRawError>,
     > {
         if response.status().is_success() {
-            Ok(support::stream_success_bytes(response))
+            Ok(support::stream_success_bytes(response.map(support::read_as_it_arrives)))
         } else {
             Err(
                 support::unexpected_status::<DownloadRawError>(&self.core, response)
@@ -16779,7 +16801,7 @@ Response `409`: Conflict*/
         support::Error<PutRangedError>,
     > {
         if response.status().is_success() {
-            Ok(support::stream_success_bytes(response))
+            Ok(support::stream_success_bytes(response.map(support::read_as_it_arrives)))
         } else {
             Err(support::unexpected_status::<PutRangedError>(&self.core, response).await)
         }
@@ -16927,7 +16949,7 @@ Response `409`: Conflict*/
         support::Error<GetArtworkError>,
     > {
         if response.status().is_success() {
-            Ok(support::stream_success_bytes(response))
+            Ok(support::stream_success_bytes(response.map(support::read_as_it_arrives)))
         } else {
             Err(
                 support::unexpected_status::<GetArtworkError>(&self.core, response).await,
