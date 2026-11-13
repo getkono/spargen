@@ -314,9 +314,9 @@ impl Spec {
     ///
     /// With this on, the prose is left as the spec wrote it (a fence it leaves open still closes
     /// before the text spargen adds after it, such as an operation's response list), and the
-    /// `include!` site answers for
-    /// `rustdoc::broken_intra_doc_links`, `rustdoc::bare_urls` and `rustdoc::invalid_html_tags`,
-    /// and its `cargo test --doc` for the prose's untagged code blocks.
+    /// `include!` site answers for `rustdoc::broken_intra_doc_links`, `rustdoc::bare_urls` and
+    /// `rustdoc::invalid_html_tags`, and its `cargo test --doc` for the prose's untagged code
+    /// blocks.
     pub fn verbatim_docs(mut self, enabled: bool) -> Self {
         self.verbatim_docs = enabled;
         self
