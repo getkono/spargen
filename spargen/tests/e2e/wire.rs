@@ -949,8 +949,9 @@ fn octet_stream_still_leaves_accept_to_the_http_stack() {
 }
 
 /// An optional nullable JSON `content` parameter has three states on the wire (#996): absent, the
-/// JSON `null`, and a value. Its `…Params` field is `Option<Option<T>>`, so `Some(None)` must
-/// reach the server as the text `null` in every location that carries one, not as an omission.
+/// JSON `null`, and a value. Its `…Params` field is `Nullable<T>`, so `Nullable::Null` (the setter's
+/// `None`) must reach the server as the text `null` in every location that carries one, not as an
+/// omission.
 #[test]
 fn an_optional_nullable_json_content_parameter_sends_an_explicit_null() {
     let temp = tempfile::tempdir().unwrap();
@@ -1029,6 +1030,10 @@ fn absent_null_and_a_value_are_three_requests() {
     assert!(value.starts_with("get /items?filter=7 http/1.1"), "{value}");
     assert_eq!(header(&value, "x-tag"), ["\"a\""], "{value}");
     assert_eq!(header(&value, "cookie"), ["session=3"], "{value}");
+
+    // A bare value converts as `Some` of it does.
+    let bare = request_head(nulls_client::ListItemsParams::default().filter(7));
+    assert!(bare.starts_with("get /items?filter=7 http/1.1"), "{bare}");
 }
 "##,
     );
@@ -1040,6 +1045,102 @@ fn absent_null_and_a_value_are_three_requests() {
     assert!(
         status.success(),
         "the explicit-null wire round-trip must pass"
+    );
+}
+
+/// An optional nullable model member has three states on the wire: absent, the JSON `null`, and a
+/// value. Its field is a `Nullable<T>`, so a PATCH body can clear one member (`{"nickname":null}`)
+/// while leaving another off, and decoding tells a missing member from an explicit `null`.
+#[test]
+fn an_optional_nullable_model_member_sends_and_decodes_absent_null_and_a_value() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r##"
+openapi: 3.1.0
+info: { title: Patches, version: 1.0.0 }
+paths:
+  /pet:
+    patch:
+      operationId: patchPet
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/PetPatch' } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/PetPatch' } }
+components:
+  schemas:
+    PetPatch:
+      type: object
+      properties:
+        nickname: { type: [string, 'null'] }
+        age: { type: [integer, 'null'] }
+"##,
+    );
+    let out = temp.path().join("client");
+    let report = generate_fixture_crate(&spec, &out, "patches_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+
+    write_fixture_test(
+        &out,
+        "patches",
+        r##"#![cfg(feature = "blocking")]
+
+mod common;
+
+use patches_client::types::PetPatch;
+use patches_client::Nullable;
+
+#[test]
+fn a_patch_clears_one_member_and_leaves_another_off() {
+    let (base, server) = common::serve(vec![
+        common::response("200 OK", &[("Content-Type", "application/json")], br#"{"nickname":null}"#),
+        common::response(
+            "200 OK",
+            &[("Content-Type", "application/json")],
+            br#"{"nickname":"Rex","age":null}"#,
+        ),
+    ]);
+    let client = patches_client::BlockingClient::new(&base).unwrap();
+
+    let clear = PetPatch::new().with_nickname(None);
+    assert_eq!(clear.nickname, Nullable::Null);
+    assert_eq!(clear.age, Nullable::Absent);
+    let cleared = client.patch_pet(&clear).expect("the clearing patch round-trips");
+    let decoded = cleared.into_inner();
+    assert_eq!(decoded.nickname, Nullable::Null);
+    assert_eq!(decoded.age, Nullable::Absent);
+
+    let set = PetPatch::default().with_nickname("Rex".to_owned()).with_age(Some(3));
+    let renamed = client.patch_pet(&set).expect("the setting patch round-trips");
+    let decoded = renamed.into_inner();
+    assert_eq!(decoded.nickname, Nullable::Value("Rex".to_owned()));
+    assert_eq!(decoded.age, Nullable::Null);
+
+    let requests = server.join().unwrap();
+    let bodies: Vec<String> = requests
+        .iter()
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .collect();
+    assert_eq!(bodies, [r#"{"nickname":null}"#, r#"{"nickname":"Rex","age":3}"#]);
+    assert!(requests[0].line().starts_with("PATCH /pet "), "{}", requests[0].line());
+}
+"##,
+    );
+
+    let status = fixture_cargo(&out)
+        .args(["test", "--features", "blocking", "--test", "patches"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the optional nullable member wire round-trip must pass"
     );
 }
 

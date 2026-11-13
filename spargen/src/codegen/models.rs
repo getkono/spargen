@@ -438,26 +438,29 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names) -> TokenStrea
         .unwrap_or_else(|| field.name.wire.clone());
     let ty = field_ty_tokens(field, names);
     // An optional field always deserializes an absent value; when the spec gives a representable
-    // scalar default, point serde at a generated provider so the default fills in rather than
-    // `None`. Otherwise fall back to `Option::default()` (`None`).
+    // scalar default, point serde at a generated provider so the default fills in rather than the
+    // absent state. Otherwise fall back to the type's `Default`: `None` for an `Option`, and
+    // `Nullable::Absent` for a nullable member. Either way the absent state is skipped on the wire.
+    let skip = if field.ty.nullable {
+        NULLABLE_IS_ABSENT
+    } else {
+        "Option::is_none"
+    };
     let serde_default = if field.required {
         quote! {}
-    } else if field
-        .default
-        .as_ref()
-        .is_some_and(|default| default.applied.is_some())
-    {
+    } else if applies_default(field) {
         let provider = default_provider_ident(id, ident).to_string();
-        quote! { default = #provider, skip_serializing_if = "Option::is_none", }
+        quote! { default = #provider, skip_serializing_if = #skip, }
     } else {
-        quote! { default, skip_serializing_if = "Option::is_none", }
+        quote! { default, skip_serializing_if = #skip, }
     };
     // The `Option` wrapping an optional non-nullable field stands for absence only, yet serde's
     // `Option<T>` maps a JSON `null` to `None` without ever calling `T::deserialize`, so
     // `{"x": null}` would decode as absent (and re-serialise as `{}`) although the schema admits no
     // `null` there. Route every *present* value, `null` included, to `T`'s own deserializer, which
     // rejects it wherever `T` does (an uninhabited `T` rejects every value); an absent field still
-    // takes `default`. A nullable one keeps plain `Option`, since there `null` is an admitted value.
+    // takes `default`. A nullable one is a `Nullable`, whose own decode reads `null` as `Null`, an
+    // admitted value there.
     let decode_present = (!field.required && !field.ty.nullable).then(|| {
         let path = DECODE_PRESENT;
         quote! { deserialize_with = #path, }
@@ -488,19 +491,43 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names) -> TokenStrea
     }
 }
 
-/// A struct field's declared Rust type. `ty_tokens` already wraps a nullable type in `Option`
-/// (`"null"` in the type array), so only an *optional* non-nullable field needs the extra `Option`
-/// here — wrapping a nullable field again would yield `Option<Option<T>>`. A required nullable
-/// field stays a single `Option<T>` (present but may be `null`); an optional field of either kind
-/// is a single `Option<T>`.
+/// A struct field's declared Rust type. A required field is the type `ty_tokens` names, which
+/// wraps a nullable one (`"null"` in the type array) in `Option`: present, but maybe `null`. An
+/// optional non-nullable field is `Option<T>`, its `None` the absent member. An optional nullable
+/// field has three wire states (absent, `null`, a value), so it is `support::Nullable<T>` over the
+/// non-nullable type.
 fn field_ty_tokens(field: &Field, names: &Names) -> TokenStream {
-    let ty = ty_tokens(field.ty, names, false);
-    if !field.required && !field.ty.nullable {
-        quote! { Option<#ty> }
+    if field.required {
+        ty_tokens(field.ty, names, false)
+    } else if field.ty.nullable {
+        nullable_tokens(non_null_ty_tokens(field.ty, names))
     } else {
-        ty
+        let ty = ty_tokens(field.ty, names, false);
+        quote! { Option<#ty> }
     }
 }
+
+/// The type `ty` names inside `types` with its nullability dropped: the `T` an optional member's
+/// setter takes, and the payload of a `Nullable` field.
+fn non_null_ty_tokens(ty: Ty, names: &Names) -> TokenStream {
+    ty_tokens(
+        Ty {
+            nullable: false,
+            ..ty
+        },
+        names,
+        false,
+    )
+}
+
+/// `support::Nullable<inner>`, spelled from inside `types`.
+fn nullable_tokens(inner: TokenStream) -> TokenStream {
+    quote! { super::support::Nullable<#inner> }
+}
+
+/// The `skip_serializing_if` path of an optional nullable field: an absent member is left off the
+/// wire, while an explicit `null` is written.
+const NULLABLE_IS_ABSENT: &str = "super::support::Nullable::is_absent";
 
 /// What [`emit_struct_constructors`] adds to an object struct: `Default` for its derive list, when
 /// the derive builds what `new` does, and the items following the struct.
@@ -521,15 +548,16 @@ fn applies_default(field: &Field) -> bool {
 
 /// The inherent `impl` of object struct `id`: `new`, taking every required member by value in
 /// declaration order and setting every optional member as decoding an absent one does (its schema
-/// `default` where decoding applies one, else `None`, and the overflow map empty), then one
-/// consuming `with_<field>` setter per optional member and for the overflow map, in field order. A
-/// setter takes the value the field's single `Option` wraps, the bare `T` whether or not the
-/// member is nullable, and stores `Some` of it; the overflow map's takes the whole map. By value,
-/// as the `…Params` setters take theirs, so inference stays trivial for every field type.
+/// `default` where decoding applies one, else `None` or `Nullable::Absent`, and the overflow map
+/// empty), then one consuming `with_<field>` setter per optional member and for the overflow map,
+/// in field order. A non-nullable member's setter takes the bare `T` by value, as the `…Params`
+/// setters take theirs, and stores `Some` of it. A nullable member's takes
+/// `impl Into<Nullable<T>>`, so `value`, `Some(value)` and `None` (an explicit `null`) all fit,
+/// and stores what it converts to. The overflow map's takes the whole map.
 ///
 /// So `new` with the required members equals what decoding an object of just those members
 /// yields. With no required member, `Default` is `new()`: derived when every optional member is
-/// `None` there, and otherwise an `impl` calling `new`. Setter names are `with_` before the field
+/// absent there, and otherwise an `impl` calling `new`. Setter names are `with_` before the field
 /// identifier unraw, so they are distinct exactly when the identifiers are, which allocation makes
 /// them within one struct.
 fn emit_struct_constructors(
@@ -562,6 +590,8 @@ fn emit_struct_constructors(
             // would shadow the bare name.
             let provider = default_provider_ident(id, field_ident);
             quote! { #field_ident: self::#provider(), }
+        } else if field.ty.nullable {
+            quote! { #field_ident: super::support::Nullable::Absent, }
         } else {
             quote! { #field_ident: None, }
         }
@@ -573,21 +603,30 @@ fn emit_struct_constructors(
         .map(|field| {
             let field_ident = field_ident(field);
             let setter = format_ident!("with_{}", field_ident.unraw());
-            let inner = ty_tokens(
-                Ty {
-                    nullable: false,
-                    ..field.ty
-                },
-                names,
-                false,
-            );
-            let doc = format!("Set the `{}` member.", field.name.wire);
-            quote! {
-                #[doc = #doc]
-                #[must_use]
-                pub fn #setter(mut self, value: #inner) -> Self {
-                    self.#field_ident = Some(value);
-                    self
+            let inner = non_null_ty_tokens(field.ty, names);
+            if field.ty.nullable {
+                let doc = format!(
+                    "Set the `{}` member: a value, or `None` for an explicit `null`.",
+                    field.name.wire
+                );
+                let nullable = nullable_tokens(inner);
+                quote! {
+                    #[doc = #doc]
+                    #[must_use]
+                    pub fn #setter(mut self, value: impl Into<#nullable>) -> Self {
+                        self.#field_ident = value.into();
+                        self
+                    }
+                }
+            } else {
+                let doc = format!("Set the `{}` member.", field.name.wire);
+                quote! {
+                    #[doc = #doc]
+                    #[must_use]
+                    pub fn #setter(mut self, value: #inner) -> Self {
+                        self.#field_ident = Some(value);
+                        self
+                    }
                 }
             }
         })
@@ -681,7 +720,8 @@ fn default_provider_ident(
 }
 
 /// Emit a field's serde default-provider function, when its `default` is a representable scalar
-/// wired through serde. The function returns `Option<T>` matching the (optional) field's Rust type.
+/// wired through serde. The function returns `Option<T>` matching the (optional) field's Rust type:
+/// lowering applies a default only to a non-nullable member.
 fn emit_default_provider(
     id: crate::ir::TypeId,
     field: &Field,

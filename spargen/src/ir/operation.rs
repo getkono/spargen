@@ -197,12 +197,12 @@ impl Parameter {
     }
 
     /// Whether this optional parameter's value can be an explicit `null` distinct from absence,
-    /// so its `…Params` field is `Option<Option<T>>`: `None` omits it, `Some(None)` sends `null`.
+    /// so its `…Params` field is a `support::Nullable<T>`: `Absent` omits it, `Null` sends `null`.
     ///
     /// Only an optional, nullable `content: application/json` parameter qualifies. Its codec
-    /// renders `None` as the text `null`, which a server tells apart from an absent parameter. A
+    /// renders `Null` as the text `null`, which a server tells apart from an absent parameter. A
     /// schema-styled (`style`/`explode`) serialization and a `text/*` one have no token for `null`,
-    /// so a nested `Option` there would ask the caller for a distinction the wire cannot carry.
+    /// so a `Nullable` there would ask the caller for a distinction the wire cannot carry.
     pub(crate) fn sends_explicit_null(&self) -> bool {
         !self.required
             && self.ty.nullable

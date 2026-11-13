@@ -8409,19 +8409,28 @@ pub mod types {
     }
     #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct NullOnlyProperty {
-        #[serde(rename = "x", default, skip_serializing_if = "Option::is_none")]
-        pub x: Option<NullOnlyPropertyX>,
+        #[serde(
+            rename = "x",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub x: super::support::Nullable<NullOnlyPropertyX>,
     }
     impl NullOnlyProperty {
         ///A `NullOnlyProperty` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         pub fn new() -> Self {
-            Self { x: None }
+            Self {
+                x: super::support::Nullable::Absent,
+            }
         }
-        ///Set the `x` member.
+        ///Set the `x` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_x(mut self, value: NullOnlyPropertyX) -> Self {
-            self.x = Some(value);
+        pub fn with_x(
+            mut self,
+            value: impl Into<super::support::Nullable<NullOnlyPropertyX>>,
+        ) -> Self {
+            self.x = value.into();
             self
         }
     }
@@ -8517,8 +8526,12 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub anything: Option<OptionalFieldsAnything>,
-        #[serde(rename = "maybe", default, skip_serializing_if = "Option::is_none")]
-        pub maybe: Option<OptionalFieldsMaybe>,
+        #[serde(
+            rename = "maybe",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub maybe: super::support::Nullable<OptionalFieldsMaybe>,
     }
     impl OptionalFields {
         ///A `OptionalFields` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
@@ -8534,7 +8547,7 @@ pub mod types {
                 choice: None,
                 colour: self::default_79_colour(),
                 anything: None,
-                maybe: None,
+                maybe: super::support::Nullable::Absent,
             }
         }
         ///Set the `name` member.
@@ -8591,10 +8604,13 @@ pub mod types {
             self.anything = Some(value);
             self
         }
-        ///Set the `maybe` member.
+        ///Set the `maybe` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_maybe(mut self, value: OptionalFieldsMaybe) -> Self {
-            self.maybe = Some(value);
+        pub fn with_maybe(
+            mut self,
+            value: impl Into<super::support::Nullable<OptionalFieldsMaybe>>,
+        ) -> Self {
+            self.maybe = value.into();
             self
         }
     }
@@ -9308,8 +9324,12 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub alias_node: Option<AliasNode>,
-        #[serde(rename = "priority", default, skip_serializing_if = "Option::is_none")]
-        pub priority: Option<Priority>,
+        #[serde(
+            rename = "priority",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub priority: super::support::Nullable<Priority>,
         #[serde(
             rename = "pet",
             default,
@@ -9331,8 +9351,12 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub alias: Option<StringOrList>,
-        #[serde(rename = "notes", default, skip_serializing_if = "Option::is_none")]
-        pub notes: Option<StringListOrNull>,
+        #[serde(
+            rename = "notes",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub notes: super::support::Nullable<StringListOrNull>,
         #[serde(
             rename = "refined",
             default,
@@ -9389,11 +9413,11 @@ pub mod types {
                 category: None,
                 dict: None,
                 alias_node: None,
-                priority: None,
+                priority: super::support::Nullable::Absent,
                 pet: None,
                 animal: None,
                 alias: None,
-                notes: None,
+                notes: super::support::Nullable::Absent,
                 refined: None,
                 any_string: None,
                 any_number: None,
@@ -9438,10 +9462,13 @@ pub mod types {
             self.alias_node = Some(value);
             self
         }
-        ///Set the `priority` member.
+        ///Set the `priority` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_priority(mut self, value: Priority) -> Self {
-            self.priority = Some(value);
+        pub fn with_priority(
+            mut self,
+            value: impl Into<super::support::Nullable<Priority>>,
+        ) -> Self {
+            self.priority = value.into();
             self
         }
         ///Set the `pet` member.
@@ -9462,10 +9489,13 @@ pub mod types {
             self.alias = Some(value);
             self
         }
-        ///Set the `notes` member.
+        ///Set the `notes` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_notes(mut self, value: StringListOrNull) -> Self {
-            self.notes = Some(value);
+        pub fn with_notes(
+            mut self,
+            value: impl Into<super::support::Nullable<StringListOrNull>>,
+        ) -> Self {
+            self.notes = value.into();
             self
         }
         ///Set the `refined` member.
@@ -9629,19 +9659,29 @@ pub mod types {
     pub struct AliasNode {
         #[serde(rename = "value")]
         pub value: AliasNodeValue,
-        #[serde(rename = "parent", default, skip_serializing_if = "Option::is_none")]
-        pub parent: Option<Box<AliasNode>>,
+        #[serde(
+            rename = "parent",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub parent: super::support::Nullable<Box<AliasNode>>,
     }
     impl AliasNode {
         ///A `AliasNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
         pub fn new(value: AliasNodeValue) -> Self {
-            Self { value, parent: None }
+            Self {
+                value,
+                parent: super::support::Nullable::Absent,
+            }
         }
-        ///Set the `parent` member.
+        ///Set the `parent` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_parent(mut self, value: Box<AliasNode>) -> Self {
-            self.parent = Some(value);
+        pub fn with_parent(
+            mut self,
+            value: impl Into<super::support::Nullable<Box<AliasNode>>>,
+        ) -> Self {
+            self.parent = value.into();
             self
         }
     }
@@ -10135,19 +10175,29 @@ pub mod types {
     pub struct MaybeAliasNode {
         #[serde(rename = "value")]
         pub value: AliasNodeValue,
-        #[serde(rename = "parent", default, skip_serializing_if = "Option::is_none")]
-        pub parent: Option<Box<AliasNode>>,
+        #[serde(
+            rename = "parent",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub parent: super::support::Nullable<Box<AliasNode>>,
     }
     impl MaybeAliasNode {
         ///A `MaybeAliasNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
         pub fn new(value: AliasNodeValue) -> Self {
-            Self { value, parent: None }
+            Self {
+                value,
+                parent: super::support::Nullable::Absent,
+            }
         }
-        ///Set the `parent` member.
+        ///Set the `parent` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_parent(mut self, value: Box<AliasNode>) -> Self {
-            self.parent = Some(value);
+        pub fn with_parent(
+            mut self,
+            value: impl Into<super::support::Nullable<Box<AliasNode>>>,
+        ) -> Self {
+            self.parent = value.into();
             self
         }
     }
@@ -10799,19 +10849,29 @@ pub mod types {
     pub struct PostNullablePartsBody {
         #[serde(rename = "file")]
         pub file: Option<PostNullablePartsBodyFile>,
-        #[serde(rename = "thumb", default, skip_serializing_if = "Option::is_none")]
-        pub thumb: Option<PostNullablePartsBodyThumb>,
+        #[serde(
+            rename = "thumb",
+            default,
+            skip_serializing_if = "super::support::Nullable::is_absent",
+        )]
+        pub thumb: super::support::Nullable<PostNullablePartsBodyThumb>,
     }
     impl PostNullablePartsBody {
         ///A `PostNullablePartsBody` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
         pub fn new(file: Option<PostNullablePartsBodyFile>) -> Self {
-            Self { file, thumb: None }
+            Self {
+                file,
+                thumb: super::support::Nullable::Absent,
+            }
         }
-        ///Set the `thumb` member.
+        ///Set the `thumb` member: a value, or `None` for an explicit `null`.
         #[must_use]
-        pub fn with_thumb(mut self, value: PostNullablePartsBodyThumb) -> Self {
-            self.thumb = Some(value);
+        pub fn with_thumb(
+            mut self,
+            value: impl Into<super::support::Nullable<PostNullablePartsBodyThumb>>,
+        ) -> Self {
+            self.thumb = value.into();
             self
         }
     }
@@ -16838,7 +16898,7 @@ Response `409`: Conflict*/
                 .map_err(support::Error::widen)?;
             form = form.part("file", part);
         }
-        if let Some(value) = &body.thumb {
+        if let support::Nullable::Value(value) = &body.thumb {
             let mut part = support::MultipartPart::bytes(value.to_vec());
             part = part
                 .mime_str("application/octet-stream")

@@ -66,6 +66,14 @@ use.
   optional member, and per typed `additionalProperties` map, sets the rest, so a new optional
   member leaves code built that way compiling. A struct with no required member implements
   `Default` as `new()`.
+- A member that is both optional and nullable has three wire states, so it is a
+  `Nullable<T>` (re-exported at the root): `Nullable::Absent` leaves it off the wire and is what a
+  missing member decodes as, `Nullable::Null` writes and reads an explicit `null`, and
+  `Nullable::Value(v)` holds a value. Its `with_<member>` setter takes `impl Into<Nullable<T>>`,
+  so `with_nickname("Rex".to_owned())` sets a value and `with_nickname(None)` sends the `null`
+  that clears it in a PATCH. An optional JSON `content` parameter whose schema is nullable is a
+  `Nullable<T>` field of its `…Params` struct the same way. A required nullable member is
+  `Option<T>`, and an optional non-nullable one is `Option<T>` whose `None` is absence.
 - `Client::with_credential(scheme, credential)` registers static secrets (via
   [`secrecy`](https://docs.rs/secrecy)) or async token providers; operation `security`
   requirements pick the first satisfiable alternative and attach bearer/basic/apiKey credentials.

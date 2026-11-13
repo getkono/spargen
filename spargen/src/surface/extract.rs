@@ -37,13 +37,12 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             url_args.push(UrlArgSurface::Optional);
         }
         for param in &operation.params {
-            // A param that sends an explicit `null` is set through `Option<Option<T>>`, so the
-            // same nullable type behind another serialization is a different surface.
-            let ty = canon_ty(param.ty, api, names);
+            // A param that sends an explicit `null` is set through `Nullable<T>`, so the same
+            // nullable type behind another serialization is a different surface.
             let ty = if param.sends_explicit_null() {
-                format!("Option<{ty}>")
+                nullable_canon_ty(param.ty, api, names)
             } else {
-                ty
+                canon_ty(param.ty, api, names)
             };
             params.insert(
                 (param.name.clone(), param.location.as_openapi_in()),
@@ -112,10 +111,17 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                         .expect("field name allocated")
                         .as_str()
                         .to_owned();
+                    // An optional nullable field is a `Nullable<T>`, where a required one is the
+                    // `Option<T>` `canon_ty` renders.
+                    let ty = if !field.required && field.ty.nullable {
+                        nullable_canon_ty(field.ty, api, names)
+                    } else {
+                        canon_ty(field.ty, api, names)
+                    };
                     fields.insert(
                         field_name,
                         MemberSurface {
-                            ty: canon_ty(field.ty, api, names),
+                            ty,
                             required: field.required,
                         },
                     );
@@ -270,6 +276,20 @@ fn response_headers(
         structs.insert(status.display_label(), HeadersSurface { name, fields });
     }
     structs
+}
+
+/// Render a nullable [`Ty`] that a member carries as `Nullable<T>` (an optional nullable field, or a
+/// parameter that sends an explicit `null`): the [`canon_ty`] of its non-nullable type, wrapped.
+fn nullable_canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
+    let inner = canon_ty(
+        Ty {
+            nullable: false,
+            ..ty
+        },
+        api,
+        names,
+    );
+    format!("Nullable<{inner}>")
 }
 
 /// Render a [`Ty`] to its stable structural string (see the module docs). Nominal types render by
