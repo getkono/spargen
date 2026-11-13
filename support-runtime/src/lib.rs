@@ -58,6 +58,8 @@ mod dispatch;
 mod error;
 mod header;
 mod middleware;
+// The tri-state of an optional, nullable member; it needs nothing beyond `serde`.
+mod nullable;
 mod paginate;
 mod parameter;
 mod request;
@@ -107,6 +109,7 @@ pub use error::{
 };
 pub use header::{parse_header, require_header, HeaderError, HeaderShape};
 pub use middleware::{Middleware, MiddlewareBackend, Next};
+pub use nullable::Nullable;
 pub use paginate::{next_link, LinkPaginator};
 pub use parameter::{
     encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body,

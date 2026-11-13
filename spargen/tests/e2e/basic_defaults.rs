@@ -135,10 +135,13 @@ fn an_uninhabited_optional_field_admits_only_absence() {
 
 #[test]
 fn a_nullable_uninhabited_field_still_admits_null() {
-    // `null` is the one value a nullable `false` schema admits, so there the `Option` is the type.
+    // `null` is the one value a nullable `false` schema admits, so there the `Nullable` is the type:
+    // an explicit `null` decodes as `Null`, and absence as `Absent`.
     let present: basic_client::types::NullOnlyProperty =
         serde_json::from_str(r#"{"x": null}"#).unwrap();
-    assert!(present.x.is_none());
+    assert!(present.x.is_null());
+    let absent: basic_client::types::NullOnlyProperty = serde_json::from_str("{}").unwrap();
+    assert!(absent.x.is_absent());
     assert_refuses::<basic_client::types::NullOnlyProperty>(r#"{"x": 1}"#, "NullOnlyProperty");
 }
 
@@ -173,9 +176,14 @@ fn an_optional_non_nullable_field_rejects_a_present_null() {
         serde_json::to_value(&untyped).unwrap(),
         serde_json::json!({"anything": null, "colour": "red"})
     );
-    // A nullable optional property is where `null` and absence both mean `None`.
+    // A nullable optional property keeps `null` and absence apart, on decode and on the wire.
     let nullable: OptionalFields = serde_json::from_str(r#"{"maybe": null}"#).unwrap();
-    assert!(nullable.maybe.is_none());
+    assert_eq!(nullable.maybe, basic_client::Nullable::Null);
+    assert_eq!(
+        serde_json::to_value(&nullable).unwrap(),
+        serde_json::json!({"maybe": null, "colour": "red"})
+    );
+    assert_eq!(absent.maybe, basic_client::Nullable::Absent);
 }
 
 #[test]
@@ -190,20 +198,24 @@ fn pattern_properties_capture_into_typed_overflow_map() {
 }
 
 #[test]
-fn null_mixed_enum_field_is_option_of_enum() {
-    // The null-mixed `Priority` enum lowered to a real Rust enum used behind `Option`: an absent
-    // field and an explicit `null` both deserialize to `None`; a string value to the variant.
+fn null_mixed_enum_field_is_nullable_of_enum() {
+    // The null-mixed `Priority` enum lowered to a real Rust enum used behind `Nullable`, the field
+    // being optional: an absent field deserializes to `Absent`, an explicit `null` to `Null`, and a
+    // string value to the variant.
     let absent: basic_client::types::User =
         serde_json::from_str(r#"{"id": "u", "name": "n"}"#).unwrap();
-    assert_eq!(absent.priority, None);
+    assert_eq!(absent.priority, basic_client::Nullable::Absent);
 
     let explicit_null: basic_client::types::User =
         serde_json::from_str(r#"{"id": "u", "name": "n", "priority": null}"#).unwrap();
-    assert_eq!(explicit_null.priority, None);
+    assert_eq!(explicit_null.priority, basic_client::Nullable::Null);
 
     let set: basic_client::types::User =
         serde_json::from_str(r#"{"id": "u", "name": "n", "priority": "high"}"#).unwrap();
-    assert_eq!(set.priority, Some(basic_client::types::Priority::High));
+    assert_eq!(
+        set.priority,
+        basic_client::Nullable::Value(basic_client::types::Priority::High)
+    );
 }
 
 #[test]
@@ -454,13 +466,13 @@ fn an_inline_member_is_selected_by_the_tag_value_it_pins() {
 }
 
 #[test]
-fn nullable_variant_union_resolves_null_at_option() {
-    // A `null` payload resolves at the outer `Option` (variant nullability hoisted to the union),
-    // and non-null string/array content routes to the right disjoint variant and re-serializes as a
-    // bare value.
+fn nullable_variant_union_resolves_null_at_the_field() {
+    // A `null` payload resolves at the field's `Nullable` (variant nullability hoisted to the
+    // union, and the field optional), and non-null string/array content routes to the right
+    // disjoint variant and re-serializes as a bare value.
     let null: basic_client::types::User =
         serde_json::from_str(r#"{"id": "u", "name": "n", "notes": null}"#).unwrap();
-    assert!(null.notes.is_none());
+    assert!(null.notes.is_null());
 
     let text: basic_client::types::User =
         serde_json::from_str(r#"{"id": "u", "name": "n", "notes": "hi"}"#).unwrap();

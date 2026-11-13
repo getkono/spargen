@@ -15,7 +15,7 @@ expression: surface
 pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
     Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
-    LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next,
+    LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next, Nullable,
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
     RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
     RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
@@ -45,7 +45,7 @@ pub use __spargen_blocking::*;
 pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
     Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
-    LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next,
+    LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next, Nullable,
     ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
     RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
     RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
