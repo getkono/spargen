@@ -446,7 +446,7 @@ fn a_self_link_ends_the_chain_as_a_pagination_cycle() {
             let Error::PaginationCycle { url } = error else {
                 unreachable!()
             };
-            assert_eq!(url.as_str(), "https://x/items?page=1#top");
+            assert_eq!(url.as_str(), "https://x/items#top");
         }
         other => panic!("expected a PaginationCycle error, got {other:?}"),
     }
@@ -473,7 +473,7 @@ fn a_link_back_to_an_earlier_page_ends_the_chain_as_a_pagination_cycle() {
     assert_eq!(second.into_inner(), vec![2]);
     match poll_ready(pager.next_page()) {
         Some(Err(Error::PaginationCycle { url })) => {
-            assert_eq!(url.as_str(), "https://x/items?page=1");
+            assert_eq!(url.as_str(), "https://x/items");
         }
         other => panic!("expected a PaginationCycle error, got {other:?}"),
     }
@@ -483,6 +483,43 @@ fn a_link_back_to_an_earlier_page_ends_the_chain_as_a_pagination_cycle() {
         backend.urls(),
         ["https://x/items?page=1", "https://x/items?page=2"]
     );
+}
+
+/// A cycle whose revisited URL carries a key in its query and a password in its userinfo ends
+/// the chain with an error naming the page by its path alone, so neither credential reaches a
+/// log line through `{error}` or `{error:?}`.
+#[test]
+fn a_pagination_cycle_keeps_neither_query_nor_userinfo() {
+    let (mut pager, backend) = paginator::<Vec<i64>>(
+        [page(
+            200,
+            "[1]",
+            Some(r#"<https://u:pw@x/items?key=secret>; rel="next""#),
+        )],
+        "https://u:pw@x/items?key=secret",
+    );
+    let first = poll_ready(pager.next_page()).unwrap().unwrap();
+    assert_eq!(first.into_inner(), vec![1]);
+    match poll_ready(pager.next_page()) {
+        Some(Err(error @ Error::PaginationCycle { .. })) => {
+            let rendered = error.to_string();
+            assert_eq!(
+                rendered,
+                "pagination cycle: the next link revisits https://x/items"
+            );
+            let debug = format!("{error:?}");
+            for secret in ["secret", "pw"] {
+                assert!(!debug.contains(secret), "{debug}");
+            }
+            let Error::PaginationCycle { url } = error else {
+                unreachable!()
+            };
+            assert_eq!(url.as_str(), "https://x/items");
+        }
+        other => panic!("expected a PaginationCycle error, got {other:?}"),
+    }
+    // The userinfo rides as an `Authorization` header, not in the request URL.
+    assert_eq!(backend.urls(), ["https://x/items?key=secret"]);
 }
 
 /// A `next` link to another host, an `https` page linking to `http`, and a link to another port
