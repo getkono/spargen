@@ -114,11 +114,13 @@ pub use paginate::{next_link, LinkPaginator};
 pub use parameter::{
     encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body,
     serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter,
-    FormMode, FormProperty, FormStyle, PercentEncoding,
+    FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding,
 };
 pub use request::{MultipartForm, MultipartPart, RequestBuilder};
 pub use response::{stream_success_bytes, ByteStream, ResponseValue};
-pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
+pub use retry::{
+    exponential_backoff, full_jitter, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+};
 #[cfg(feature = "stream")]
 pub use stream::{
     EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
