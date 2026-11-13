@@ -222,6 +222,11 @@ fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
         // The body came from the reusable `components.mediaTypes` entry, typed as `Query`.
         assert!(request.contains(r#"{"term":"drop"}"#), "{request}");
 
+        // Either branch writes back the tag it was decoded with: the `defaultMapping` branch is
+        // selected by every value no mapped branch claims, so it keeps an unrecognized one.
+        let written = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(written["outcome"], tag, "{written}");
+
         match outcome {
             // An unmapped discriminator value decodes into the `defaultMapping` branch rather
             // than failing, which is the whole point of the 3.2 field.
@@ -235,6 +240,34 @@ fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
             }
         }
     }
+
+    // A tag that would route the payload to the other branch is refused, never written (#1344).
+    let purged = oas32_client::types::CacheOutcome::CachePurged(Box::new(
+        oas32_client::types::CachePurged { outcome: "something-else".to_owned(), entries: 7 },
+    ));
+    let error = serde_json::to_value(&purged).unwrap_err().to_string();
+    assert!(error.contains("\"something-else\""), "{error}");
+    let unknown = oas32_client::types::CacheOutcome::CacheUnknown(Box::new(
+        oas32_client::types::CacheUnknown {
+            detail: "not recognized".to_owned(),
+            outcome: oas32_client::Nullable::Value("purged".to_owned()),
+        },
+    ));
+    let error = serde_json::to_value(&unknown).unwrap_err().to_string();
+    assert!(error.contains("CacheOutcome::CacheUnknown"), "{error}");
+
+    // A `null` tag is no tag to the decoder, which routes it to the `defaultMapping` branch, so
+    // that branch writes it back.
+    let unknown = oas32_client::types::CacheOutcome::CacheUnknown(Box::new(
+        oas32_client::types::CacheUnknown {
+            detail: "not recognized".to_owned(),
+            outcome: oas32_client::Nullable::Null,
+        },
+    ));
+    let written = serde_json::to_value(&unknown).expect("a null tag selects the fallback");
+    assert_eq!(written["outcome"], serde_json::Value::Null, "{written}");
+    let back: oas32_client::types::CacheOutcome = serde_json::from_value(written).unwrap();
+    assert_eq!(back, unknown);
 }
 "##,
     );

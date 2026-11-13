@@ -66,9 +66,10 @@ pub(crate) struct RequestBody {
     pub(crate) media: MediaType,
     /// The selected content type essence, preserved for the emitted `Content-Type` header.
     pub(crate) content_type: String,
-    /// The body's type, or `None` for a non-octet-stream body declared without a schema, or for
-    /// a body whose declared schema failed to lower. An octet-stream body lowers to a non-nullable
-    /// `bytes::Bytes`, which [`check_invariants`](super::check_invariants) holds it to.
+    /// The body's type. Lowering types every body it keeps, one declared without a schema as any
+    /// value its media carries, and [`check_invariants`](super::check_invariants) reports a
+    /// `None` here. An octet-stream body lowers to a non-nullable `bytes::Bytes`, which
+    /// `check_invariants` also holds it to.
     pub(crate) ty: Option<Ty>,
     /// Whether the body is `required`. A required body is a plain argument; an optional one is
     /// passed as `Option<&T>` and omitted from the request when absent.

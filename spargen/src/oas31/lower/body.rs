@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{
-    BytesEncoding, Docs, MediaType, RequestBody, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+    BytesEncoding, Docs, MediaType, Prim, RequestBody, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
 };
 use crate::oas31::media::{
     classify_media_range, media_essence, media_essence_is_suffix_range, media_object_is_opaque,
@@ -59,7 +59,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// ([`Self::resolve_media_object`], [`lower_media_type`]), by one of the request-body gates
     /// here (each an `E009`: a media range, streaming media, a non-object form or multipart body,
     /// a raw body whose schema is not raw content or admits `null`), or by its encoding
-    /// ([`Self::lower_body_encoding`]). An `itemSchema` on the entry is inert (`W010`).
+    /// ([`Self::lower_body_encoding`]). An `itemSchema` on the entry is inert (`W010`). An entry
+    /// with no `schema` takes any value its media carries ([`Self::schemaless_request_body`]),
+    /// so every body this returns has a type.
     fn lower_chosen_request_body(
         &mut self,
         body: &RequestBodyObject,
@@ -128,16 +130,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .map(|ty| self.raw_body_bytes(ty, hint, &body.provenance, mark));
         if let Some(schema) = object.schema.as_ref() {
             self.warn_structural_default_ref(schema, "a request body schema");
+            // A declared schema that failed to lower has already reported why; the body is
+            // refused with it rather than kept untyped, so no method silently sends nothing.
+            ty?;
         }
+        let ty = ty.or_else(|| self.schemaless_request_body(media, hint, &body.provenance));
         // A `multipart/form-data` body is emitted as a runtime `MultipartForm` whose parts are the
         // fields of an object schema. A concrete non-object type (or a multipart body with no schema
         // at all) has no fields to enumerate as parts, so it stays unsupported (`E009`, narrowed)
-        // rather than silently degrade. A schema that *failed* to lower for its own reason (`ty` is
-        // `None` though a schema was declared) has already emitted that diagnostic — don't pile a
-        // misleading "must be an object" E009 on top of it.
-        if media == MediaType::Multipart
-            && self.form_body_is_not_object(ty, object.schema.is_some())
-        {
+        // rather than silently degrade.
+        if media == MediaType::Multipart && self.form_body_is_not_object(ty) {
             // E009 case: form-body-not-object
             Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                 .message(
@@ -191,9 +193,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         // A form-urlencoded body is rendered property by property, so it needs properties. Without
         // this gate a non-object body compiled and then failed at runtime inside the form encoder.
-        if media == MediaType::FormUrlEncoded
-            && self.form_body_is_not_object(ty, object.schema.is_some())
-        {
+        if media == MediaType::FormUrlEncoded && self.form_body_is_not_object(ty) {
             // E009 case: form-body-not-object
             Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                 .message(
@@ -353,16 +353,38 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Whether a `multipart/form-data` or form-urlencoded request body lacks the object schema
-    /// whose properties are its parts or fields. `ty` is the lowered body type and `declared`
-    /// whether a schema was written; a declared schema that failed to lower (`ty` is `None`) has
-    /// already reported why, so it answers `false` rather than stacking a second `E009` on it.
-    fn form_body_is_not_object(&self, ty: Option<Ty>, declared: bool) -> bool {
-        let is_struct = matches!(
+    /// whose properties are its parts or fields. `ty` is the lowered body type, `None` only for a
+    /// form body declared with no schema: a declared schema that failed to lower has already
+    /// refused the body, so no second `E009` is stacked on it.
+    fn form_body_is_not_object(&self, ty: Option<Ty>) -> bool {
+        !matches!(
             ty.and_then(|ty| self.graph.get(ty.id)).map(|def| &def.kind),
             Some(TypeKind::Struct(_))
-        );
-        let schema_failed_to_lower = declared && ty.is_none();
-        !is_struct && !schema_failed_to_lower
+        )
+    }
+
+    /// The type a request body declared with no `schema` is sent as: any value its media carries.
+    /// A JSON or XML body takes any value (`serde_json::Value`, as `{}` does there) and a raw text
+    /// body any text (`String`). `None` for the rest: an octet-stream body is typed any octets
+    /// (`bytes::Bytes`) by [`Self::opaque_octets`], a form or multipart body has no properties to
+    /// send and is refused by its own `E009`, and a streaming request body never reaches here.
+    fn schemaless_request_body(
+        &mut self,
+        media: MediaType,
+        hint: &str,
+        provenance: &crate::diag::Provenance,
+    ) -> Option<Ty> {
+        let kind = match media {
+            MediaType::Json | MediaType::Xml => TypeKind::Any,
+            MediaType::Text => TypeKind::Primitive(Prim::String),
+            MediaType::OctetStream
+            | MediaType::FormUrlEncoded
+            | MediaType::Multipart
+            | MediaType::EventStream
+            | MediaType::Ndjson
+            | MediaType::JsonSequence => return None,
+        };
+        Some(self.insert_type(hint, kind, Docs::default(), Some(provenance.clone())))
     }
 }
 
