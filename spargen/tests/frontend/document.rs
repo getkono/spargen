@@ -334,6 +334,99 @@ paths:
     assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
+/// Each operation's `(path template, id)` as the emitted `operations` table lists them, sorted.
+fn operation_table(code: &str) -> Vec<(String, String)> {
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut entries: Vec<(String, String)> = flat
+        .split("= Operation { id: \"")
+        .skip(1)
+        .filter_map(|entry| {
+            let (id, rest) = entry.split_once('"')?;
+            let (_, rest) = rest.split_once("path_template: \"")?;
+            let (path, _) = rest.split_once('"')?;
+            Some((path.to_owned(), id.to_owned()))
+        })
+        .collect();
+    entries.sort();
+    entries
+}
+
+/// A synthesized `operationId` is unique only by construction of the path it is synthesized from,
+/// and casing, separators, empty segments and `by_{param}` all fold distinct templates onto one
+/// spelling (#1343). Two operations whose ids the author never wrote are not a duplicate the author
+/// can fix, so the spec generates: a declared id keeps its spelling, of two synthesized
+/// contenders the one whose pointer sorts first keeps it, and the other takes a suffix seeded
+/// from its own pointer, whichever order the spec lists the paths in.
+#[test]
+fn colliding_synthesized_operation_ids_are_disambiguated_not_rejected() {
+    let get = |path: &str, operation_id: Option<&str>| {
+        let parameters = if path.contains("{id}") {
+            "parameters: [{ name: id, in: path, required: true, schema: { type: string } }], "
+        } else {
+            ""
+        };
+        let operation_id = operation_id.map_or(String::new(), |id| format!("operationId: {id}, "));
+        format!(
+            "  {path}:\n    get: {{ {operation_id}{parameters}responses: {{ '204': {{ description: ok }} }} }}\n"
+        )
+    };
+    let document = |paths: &[String]| {
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths:\n{}",
+            paths.concat()
+        )
+    };
+    // (keeps the spelling, is suffixed, the contested spelling); a declared id keeps it whether
+    // its pointer sorts before (`/accounts`) or after (`/zzz`) the synthesized one's.
+    for ((holder, holder_id), (loser, loser_id), bare) in [
+        (("/users", None), ("/users/", None), "get_users"),
+        (("/a-b", None), ("/a_b", None), "get_a_b"),
+        (("/Users", None), ("/users", None), "get_users"),
+        (
+            ("/users/by_id", None),
+            ("/users/{id}", None),
+            "get_users_by_id",
+        ),
+        (
+            ("/accounts", Some("get_users")),
+            ("/users", None),
+            "get_users",
+        ),
+        (("/zzz", Some("get_users")), ("/users", None), "get_users"),
+    ] {
+        let mut expected = None;
+        for paths in [
+            [get(holder, holder_id), get(loser, loser_id)],
+            [get(loser, loser_id), get(holder, holder_id)],
+        ] {
+            let spec = document(&paths);
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(report.outcome(), Outcome::Rejected, "{spec}\n{report:#?}");
+            let table = operation_table(&code);
+            let id_of = |path: &str| {
+                table
+                    .iter()
+                    .find(|(template, _)| template == path)
+                    .map(|(_, id)| id.as_str())
+            };
+            assert_eq!(id_of(holder), Some(bare), "{spec}\n{table:?}");
+            let suffix = id_of(loser)
+                .and_then(|id| id.strip_prefix(bare))
+                .and_then(|rest| rest.strip_prefix('_'));
+            assert!(
+                suffix.is_some_and(|suffix| suffix.len() == 8
+                    && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())),
+                "{spec}\n{table:?}"
+            );
+            // The same ids whichever order the spec lists the two paths in.
+            match &expected {
+                None => expected = Some(table),
+                Some(expected) => assert_eq!(&table, expected, "{spec}"),
+            }
+        }
+    }
+}
+
 #[test]
 fn oas32_tag_hierarchy_is_validated_and_documented() {
     let valid = r##"
