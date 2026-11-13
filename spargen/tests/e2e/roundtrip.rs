@@ -45,6 +45,13 @@ fn union_and_allof_roundtrip_under_proptest() {
         status.success(),
         "the generated union/allOf types must survive the proptest JSON round-trip"
     );
+    // The union serde these types exercise, the `defaultMapping` trial check among it, lints
+    // clean.
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the round-trip fixture must lint clean");
 }
 
 /// The generated `tests/roundtrip.rs` for [`union_and_allof_roundtrip_under_proptest`]. Hand-written
@@ -284,11 +291,7 @@ fn a_default_mapping_payload_an_untagged_variant_claims_does_not_serialize() {
     let error = error.to_string();
     assert!(error.contains("Ride::RideOther"), "{error}");
     assert!(error.contains("Ride::RideVariant1"), "{error}");
-    for (kind, label) in [
-        (Some("bus"), None),
-        (None, Some("x")),
-        (Some("RideOther"), Some("x")),
-    ] {
+    for (kind, label) in [(Some("bus"), None), (Some("RideOther"), Some("x"))] {
         let ride = types::Ride::RideOther(Box::new(types::RideOther {
             kind: kind.map(str::to_owned),
             label: label.map(str::to_owned),
@@ -298,6 +301,16 @@ fn a_default_mapping_payload_an_untagged_variant_claims_does_not_serialize() {
         let back: types::Ride = serde_json::from_value(written).expect("decodes back");
         assert_eq!(back, ride);
     }
+    // Holding no tag, the variant is written with its own, which routes it back by tag.
+    let untagged = types::Ride::RideOther(Box::new(types::RideOther {
+        kind: None,
+        label: Some("x".to_owned()),
+        note: None,
+    }));
+    let written = serde_json::to_value(&untagged).expect("its own tag is inserted");
+    assert_eq!(written["kind"], "RideOther", "{written}");
+    let back: types::Ride = serde_json::from_value(written).expect("decodes back");
+    assert!(matches!(back, types::Ride::RideOther(_)), "{back:?}");
 }
 
 // A unit string-enum variant refuses the one-key object serde_json would otherwise read as that
