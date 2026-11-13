@@ -16,7 +16,7 @@ body:
         `build.rs` or the macro, nowhere else), and **network access outside
         `spargen lock`**.
 
-        The README's design guarantees and `docs/support-matrix.md` are
+        The design guarantees (`docs/book/src/generated-api.md`) and `docs/support-matrix.md` are
         normative. A request that contradicts them is closed rather than
         argued, so read them before writing.
 
@@ -27,7 +27,7 @@ body:
       options:
         - label: I searched the open and closed issues and this is not a duplicate.
           required: true
-        - label: I read the README's design guarantees and `docs/support-matrix.md`; this contradicts neither.
+        - label: I read the design guarantees and `docs/support-matrix.md`; this contradicts neither.
           required: true
         - label: A human wrote and reviewed this request.
           required: true

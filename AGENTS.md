@@ -1,9 +1,9 @@
 # spargen
 
 A compile-time-correct Rust client generator for OpenAPI 3.1.x and 3.2.x. [`README.md`](README.md)
-carries the product contract; [`docs/support-matrix.md`](docs/support-matrix.md) and
-[`docs/errors.md`](docs/errors.md) are the operational surface — read them before non-trivial
-changes.
+and [`docs/book/src/generated-api.md`](docs/book/src/generated-api.md) carry the product contract;
+[`docs/support-matrix.md`](docs/support-matrix.md) and [`docs/errors.md`](docs/errors.md) are the
+operational surface — read them before non-trivial changes.
 
 ## Workspace
 
@@ -218,7 +218,7 @@ Tests live closest to what they pin; when you touch a subsystem, extend its suit
 | snapshots | `spargen/tests/snapshot.rs` | One per corpus case: the outcome, a sorted diagnostic histogram, and an API surface for small generating cases — deliberately **not** emitted source, which `e2e__basic_spec_module.snap` and `e2e__basic_spec_module_no_features.snap` pin for `BASIC_SPEC` alone, embedded runtime included. Regenerate with `INSTA_UPDATE=always cargo test -p spargen --test e2e basic_spec_module` and review the diff. |
 | generated runtime surface | `spargen/tests/reexport_lists.rs` | The embedded `support` module's `pub use` list equals `support-runtime/src/lib.rs`'s; every root re-export names something `support` re-exports, and no operation error type shadows one; every runtime type a root re-export names is itself nameable at the root (`every_runtime_type_a_root_reexport_names_is_nameable_at_the_root`); the root surface is the golden `snapshots/reexport_lists__root_surface.snap`. |
 | framework round-trip | `spargen/tests/recipes.rs` | The OpenAPI documents utoipa / aide / poem-openapi actually emit. |
-| layering | `spargen/tests/layering/` | `dag.rs`: each `//! layer-deps:` header equals its production `crate::` edges, without cycles, `lib.rs`'s DAG table matches the headers, and every module is in `SUBSYSTEMS`, `FACADE_PLUMBING` or `TEST_SUPPORT`. `runtime_embed.rs`: one trailing `#[cfg(test)]` per runtime source and none in generated output, comments above it naming no undisclosed test-only item, the `src/support/runtime/` symlinks equal to `support-runtime/src`, and the error variant counts. `packaging.rs`: every included file ships, and binary-spawning tests need `cli`. `file_length.rs`: `MAX_FILE_LINES` (1666) and an `OVER_LENGTH_BASELINE` that only shrinks. `docs_taxonomy.rs`: Markdown cites only real error variants, and `README.md` names each. |
+| layering | `spargen/tests/layering/` | `dag.rs`: each `//! layer-deps:` header equals its production `crate::` edges, without cycles, `lib.rs`'s DAG table matches the headers, and every module is in `SUBSYSTEMS`, `FACADE_PLUMBING` or `TEST_SUPPORT`. `runtime_embed.rs`: one trailing `#[cfg(test)]` per runtime source and none in generated output, comments above it naming no undisclosed test-only item, the `src/support/runtime/` symlinks equal to `support-runtime/src`, and the error variant counts. `packaging.rs`: every included file ships, and binary-spawning tests need `cli`. `file_length.rs`: `MAX_FILE_LINES` (1666) and an `OVER_LENGTH_BASELINE` that only shrinks. `docs_taxonomy.rs`: Markdown cites only real error variants, and `docs/book/src/generated-api.md` names each. |
 | docs ↔ repository | `spargen/tests/docs.rs` | Every `spargen`/`spargen-macro` install line in a Markdown file (changelogs excepted) requires the current minor. The ignored `every_link_in_the_built_book_resolves` is the link check `mise run docs` runs after `mdbook build`: an unresolved `{{#include}}` or a relative link or anchor that does not resolve fails, so a standalone `docs/*.md` page links outside `docs/` by repository URL. |
 
 ## Commits

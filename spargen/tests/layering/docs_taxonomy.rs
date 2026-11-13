@@ -10,9 +10,9 @@ use std::path::Path;
 use crate::{enum_variants, read, workspace_root};
 
 /// The documents that describe the error taxonomy to a consumer as a whole, so each must name
-/// every variant of both enums. `README.md` is also `spargen`'s declared `readme`, shipped in
-/// the published crate, and the one account the book's Getting Started page points to.
-const TAXONOMY_DOCUMENTS: [&str; 1] = ["README.md"];
+/// every variant of both enums. The book's Generated API page is the one account the Getting
+/// Started page points to.
+const TAXONOMY_DOCUMENTS: [&str; 1] = ["docs/book/src/generated-api.md"];
 
 /// Documents that cite individual variants without describing the whole taxonomy. They are
 /// held only to citing variants that exist, which every scanned document is; listing them here

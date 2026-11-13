@@ -3,8 +3,9 @@
 These OpenAPI Specification texts are vendored from the Apache-2.0 licensed
 [`OAI/OpenAPI-Specification`](https://github.com/OAI/OpenAPI-Specification)
 repository for implementation reference and auditability. Product scope and
-normative precedence are defined by [`README.md`](../README.md) and the
-operational surface it points at — [`docs/support-matrix.md`](../docs/support-matrix.md)
+normative precedence are defined by [`README.md`](../README.md),
+[`docs/book/src/generated-api.md`](../docs/book/src/generated-api.md), and the
+operational surface they point at — [`docs/support-matrix.md`](../docs/support-matrix.md)
 and [`docs/errors.md`](../docs/errors.md); this file defines which vendored spec
 texts to consult.
 

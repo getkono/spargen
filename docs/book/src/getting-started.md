@@ -192,27 +192,29 @@ Key points of the surface:
   and the `…Params` bundle takes `impl Into<Option<…>>`, so `None`, `Some(params)`, and `params`
   all compile.
 - An object struct is built with `types::Pet::new(..)`, taking its required members, then one
-  `with_<member>(value)` per optional member, and compares with `==`; the README's
-  [Generated surface](https://github.com/getkono/spargen#generated-surface) states what `new`
+  `with_<member>(value)` per optional member, and compares with `==`; the
+  [generated surface](./generated-api.md#generated-surface) states what `new`
   sets and when a struct implements `Default`.
 - `Client::with_credential(scheme, credential)` registers static secrets (via `secrecy`) or async
-  token providers, which operation `security` requirements attach; the README's
-  [Generated surface](https://github.com/getkono/spargen#generated-surface) states how an
+  token providers, which operation `security` requirements attach; the
+  [generated surface](./generated-api.md#generated-surface) states how an
   alternative is selected and how each credential failure is typed.
 - `Client::with_bound_header(name, value)` sets a header every operation declares once on the
   client, where the build bound it with `Spec::bind_header("X-Api-Version")`: no operation takes
   an argument for it, and one that requires it fails before anything is sent, as
   `RequestError::MissingBoundParameter`, while no value is bound.
 - A closed error taxonomy, `Error<E>`, identical across all spargen output; every generated error
-  type is a `std::error::Error`. The README's
-  [Generated surface](https://github.com/getkono/spargen#generated-surface) lists every variant
+  type is a `std::error::Error`. The
+  [generated surface](./generated-api.md#generated-surface) lists every variant
   and the accessors over them; [problem details](./runtime.md#problem-details) and the
   [retry adapter](./runtime.md#retry) build on it.
-- The README's [Generated surface](https://github.com/getkono/spargen#generated-surface) states how
+- The [generated surface](./generated-api.md#generated-surface) states how
   spec documentation metadata and `deprecated` reach rustdoc and `#[deprecated]`.
 
 ## Next steps
 
+- [Generated API & Guarantees](./generated-api.md) — the full generated surface, the design
+  guarantees, and the versioning policy.
 - [CLI Reference](./cli.md) — `check`, `deps`, `lock`, `diff`, and `explain`.
 - [Runtime & Ergonomics](./runtime.md) — retry, middleware, blocking, wasm, pagination, streaming.
 - [Framework Recipes](./recipes.md) — generating from utoipa / aide / poem-openapi output.

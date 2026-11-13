@@ -730,7 +730,7 @@ fn error_dispatch_parse_failure_is_decode() {
 
 // --- error-body cap fixtures -------------------------------------------------------------
 //
-// `max_error_body` is documented as a cap on RETENTION (README, `config.rs`, and
+// `max_error_body` is documented as a cap on RETENTION (`docs/book/src/generated-api.md`, `config.rs`, and
 // `Error::Decode`'s own field docs). These pin all three ways that contract can be broken:
 // retaining a view into an oversized buffer, reading an unbounded body before capping, and
 // the success-decode paths ignoring the cap outright.

@@ -52,8 +52,8 @@ conformance issue in rustls itself belongs to [rustls](https://github.com/rustls
 Where an advisory names a crate that `spargen`'s published dependency graph reaches, `spargen`
 carries a minimum version requirement on the patched release in `spargen/Cargo.toml`, mirrored by
 a `[bans]` entry in [`deny.toml`](deny.toml) that names the advisory, because Cargo ignores a
-dependency's lockfile and a consumer's build would otherwise resolve the crate itself. The README's
-[network fetching note](README.md#what-it-does) describes the one such strictness the test suite
+dependency's lockfile and a consumer's build would otherwise resolve the crate itself. The CLI reference's
+[TLS note](docs/book/src/cli.md#tls) describes the one such strictness the test suite
 pins: `spargen/tests/tls_strictness.rs` fails on a rustls that accepts the non-conformant peer
 RUSTSEC-2026-0285 describes. The supply-chain audit in `.github/workflows/deny.yml` runs daily
 on `master` against the RustSec database: its `deny` job audits the workspace and example

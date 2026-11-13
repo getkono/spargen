@@ -179,6 +179,17 @@ vendored copy the earlier run wrote, so `check` and builds keep resolving it off
 run did not refresh stays until a `spargen lock` in which every fetch succeeds rewrites the lock
 from scratch.
 
+### TLS
+
+`spargen lock` fetches over reqwest's rustls stack with rustls's defaults and the bundled Mozilla
+roots, and spargen holds no TLS position of its own: it interoperates with exactly the peers that
+rustls release accepts, and refuses the rest as `E025` with rustls's reason. Protocol conformance
+is rustls's, so a rustls upgrade may refuse a non-conformant server that an older one accepted.
+The one behaviour pinned here is the strictness an advisory named:
+[`spargen/tests/tls_strictness.rs`](https://github.com/getkono/spargen/blob/master/spargen/tests/tls_strictness.rs)
+drives a deliberately non-conformant peer (RUSTSEC-2026-0285) and fails on a rustls that accepts
+it again.
+
 ## `spargen explain`
 
 Show the extended documentation behind a stable diagnostic code.

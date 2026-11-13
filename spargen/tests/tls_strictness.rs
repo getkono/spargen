@@ -17,7 +17,7 @@
 //! is well-formed: the only thing the rejected scenario adds is the joined message.
 //!
 //! What this pins is the one strictness change an advisory has named. It is not a conformance
-//! suite: spargen delegates TLS conformance to rustls, and the README states that position.
+//! suite: spargen delegates TLS conformance to rustls, and the CLI reference states that position.
 
 #![cfg(feature = "remote-fetch")]
 

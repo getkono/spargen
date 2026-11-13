@@ -5,6 +5,7 @@
 # User Guide
 
 - [Getting Started](./getting-started.md)
+- [Generated API & Guarantees](./generated-api.md)
 - [CLI Reference](./cli.md)
 - [Runtime & Ergonomics](./runtime.md)
 
