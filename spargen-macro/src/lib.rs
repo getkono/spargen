@@ -245,7 +245,17 @@ fn spec_for(args: &Args, consumer: &Consumer) -> syn::Result<spargen::Spec> {
     let spec_path = consumer.resolve_spec_path(&args.spec.value());
     let discovered = match spargen::Spec::new(spec_path).discover_config_file() {
         Ok(spec) => spec,
-        Err(error) => return Err(syn::Error::new(args.spec.span(), error.to_string())),
+        Err(error) => {
+            // `Display` leaves a read failure's I/O error to `source`, so the chain is written
+            // out here, as the CLI writes it.
+            let mut message = error.to_string();
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                message.push_str(&format!(": {cause}"));
+                source = cause.source();
+            }
+            return Err(syn::Error::new(args.spec.span(), message));
+        }
     };
     Ok(config(args, discovered))
 }

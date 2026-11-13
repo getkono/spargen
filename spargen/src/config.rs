@@ -525,9 +525,11 @@ impl Spec {
     /// sets the file's keys again but appends neither its rules nor a second record of the path.
     pub fn config_file(self, path: impl AsRef<Utf8Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path.as_std_path()).map_err(|error| {
-            ConfigError::new(format!("cannot read config file `{path}`: {error}"))
-        })?;
+        let text =
+            std::fs::read_to_string(path.as_std_path()).map_err(|source| ConfigError::Read {
+                path: path.to_path_buf(),
+                source,
+            })?;
         let applied = self.config_files.iter().any(|applied| applied == path);
         let mut spec = self.apply_config(&text, path, !applied)?;
         if !applied {
@@ -566,24 +568,29 @@ impl Spec {
         path: &Utf8Path,
         append_rules: bool,
     ) -> Result<Self, ConfigError> {
-        let file = toml::from_str::<FileConfig>(text)
-            .map_err(|error| ConfigError::new(format!("invalid config file `{path}`: {error}")))?;
+        let parse = |message: String| ConfigError::Parse {
+            path: path.to_path_buf(),
+            message,
+        };
+        let file = toml::from_str::<FileConfig>(text).map_err(|error| parse(error.to_string()))?;
         if file.features.is_some() {
             // `deny_unknown_fields` alone would say "unknown field `features`", which does not
             // tell the author of a file that still carries the table where its keys belong.
-            return Err(ConfigError::new(format!(
-                "invalid config file `{path}`: the `[features]` table was removed; \
-                 move its keys (`carve`, `batch_cap`, …) to the top level of the file"
-            )));
+            return Err(parse(
+                "the `[features]` table was removed; move its keys (`carve`, `batch_cap`, …) to \
+                 the top level of the file"
+                    .to_owned(),
+            ));
         }
         if file.time.is_some() {
             // The removed boolean's two values each have one spelling under its replacement, so
             // the error states them rather than `deny_unknown_fields`' bare "unknown field".
-            return Err(ConfigError::new(format!(
-                "invalid config file `{path}`: the `time` key was replaced by `datetime`; write \
-                 `datetime = \"time\"` for `time = true` or `datetime = \"string\"` for \
-                 `time = false` (or `datetime = \"jiff\"` or `\"chrono\"`)"
-            )));
+            return Err(parse(
+                "the `time` key was replaced by `datetime`; write `datetime = \"time\"` for \
+                 `time = true` or `datetime = \"string\"` for `time = false` (or \
+                 `datetime = \"jiff\"` or `\"chrono\"`)"
+                    .to_owned(),
+            ));
         }
         if let Some(value) = file.uuid {
             self.uuid = UuidMapping::from_on(value);
@@ -613,22 +620,24 @@ impl Spec {
             self.testing = TestingModule::from_on(value);
         }
         for (index, entry) in file.omit.iter().enumerate() {
-            let rule = entry.to_rule().map_err(|message| {
-                ConfigError::new(format!(
-                    "invalid config file `{path}`: omit rule #{}: {message}",
-                    index + 1
-                ))
-            })?;
+            let rule = entry
+                .to_rule()
+                .map_err(|message| ConfigError::InvalidOmitRule {
+                    path: path.to_path_buf(),
+                    index,
+                    message,
+                })?;
             if append_rules {
                 self.omit.rules.push(rule);
             }
         }
         for (index, entry) in file.keep.iter().enumerate() {
             let method = entry.method.parse().map_err(|error: UnknownOmitToken| {
-                ConfigError::new(format!(
-                    "invalid config file `{path}`: keep rule #{}: {error}",
-                    index + 1
-                ))
+                ConfigError::InvalidKeepRule {
+                    path: path.to_path_buf(),
+                    index,
+                    message: error.to_string(),
+                }
             })?;
             if append_rules {
                 self.omit
@@ -711,35 +720,122 @@ impl Build {
     }
 }
 
-/// A clear, user-facing config-file error. Rendered by the CLI as a usage error — never a panic.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfigError {
-    message: String,
+/// A clear, user-facing configuration error, by kind. Rendered by the CLI as a usage error — never
+/// a panic.
+///
+/// [`Display`](std::fmt::Display) writes one line naming the file and what is wrong with it; the
+/// I/O error behind [`Read`](Self::Read) is its [`source`](std::error::Error::source), which
+/// `Display` leaves out, so a reporter that walks the chain writes it once.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ConfigError {
+    /// The config file could not be read.
+    #[non_exhaustive]
+    Read {
+        /// The config file, as given.
+        path: Utf8PathBuf,
+        /// Why reading it failed; also [`source`](std::error::Error::source).
+        source: std::io::Error,
+    },
+    /// The file's text is not a `spargen.toml`: malformed TOML, an unknown or mistyped key, or a
+    /// removed key, whose message names its replacement.
+    #[non_exhaustive]
+    Parse {
+        /// The config file, as given.
+        path: Utf8PathBuf,
+        /// What is wrong with the text.
+        message: String,
+    },
+    /// An `[[omit]]` entry that is no rule: a missing or foreign key, or an unknown token.
+    #[non_exhaustive]
+    InvalidOmitRule {
+        /// The config file, as given.
+        path: Utf8PathBuf,
+        /// The entry's 0-based position among the file's `[[omit]]` entries; `Display` writes it
+        /// 1-based, as `omit rule #1` for the first.
+        index: usize,
+        /// What is wrong with the entry.
+        message: String,
+    },
+    /// A `[[keep]]` entry with a method the parser does not know.
+    #[non_exhaustive]
+    InvalidKeepRule {
+        /// The config file, as given.
+        path: Utf8PathBuf,
+        /// The entry's 0-based position among the file's `[[keep]]` entries; `Display` writes it
+        /// 1-based, as `keep rule #1` for the first.
+        index: usize,
+        /// What is wrong with the entry.
+        message: String,
+    },
+    /// A front end's own flag-syntax error, made with [`flag`](Self::flag).
+    #[non_exhaustive]
+    Flag {
+        /// The message `Display` writes.
+        message: String,
+    },
 }
 
 impl ConfigError {
-    /// A config error with a caller-supplied message. Public so a front end (the CLI, a build
-    /// script wrapper) can report *its* own flag-syntax errors through the same type the library
-    /// returns, rather than inventing a parallel one.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
+    /// A [`Flag`](Self::Flag) error with a caller-supplied message. Public so a front end (the
+    /// CLI, a build script wrapper) can report *its* own flag-syntax errors through the same type
+    /// the library returns, rather than inventing a parallel one.
+    pub fn flag(message: impl Into<String>) -> Self {
+        Self::Flag {
             message: message.into(),
         }
     }
 
-    /// The message [`Display`](std::fmt::Display) writes.
-    pub fn message(&self) -> &str {
-        &self.message
+    /// The config file the error is about, or `None` for a [`Flag`](Self::Flag) error.
+    pub fn path(&self) -> Option<&Utf8Path> {
+        match self {
+            Self::Read { path, .. }
+            | Self::Parse { path, .. }
+            | Self::InvalidOmitRule { path, .. }
+            | Self::InvalidKeepRule { path, .. } => Some(path),
+            Self::Flag { .. } => None,
+        }
     }
 }
 
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
+        match self {
+            Self::Read { path, .. } => write!(formatter, "cannot read config file `{path}`"),
+            Self::Parse { path, message } => {
+                write!(formatter, "invalid config file `{path}`: {message}")
+            }
+            Self::InvalidOmitRule {
+                path,
+                index,
+                message,
+            } => write!(
+                formatter,
+                "invalid config file `{path}`: omit rule #{}: {message}",
+                index + 1
+            ),
+            Self::InvalidKeepRule {
+                path,
+                index,
+                message,
+            } => write!(
+                formatter,
+                "invalid config file `{path}`: keep rule #{}: {message}",
+                index + 1
+            ),
+            Self::Flag { message } => formatter.write_str(message),
+        }
     }
 }
 
-impl std::error::Error for ConfigError {}
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 // --- TOML DTOs ---------------------------------------------------------------------------------
 
@@ -875,16 +971,56 @@ mod tests {
         Spec::new("openapi.yaml").apply_config(text, Utf8Path::new("spargen.toml"), true)
     }
 
-    /// Two config errors are equal exactly when their messages are, and a clone keeps the message
-    /// its `Display` writes.
+    /// Each kind of config error is told apart by its variant, names its file through `path`, and
+    /// only `Read` has a `source`, which its `Display` leaves out.
     #[test]
-    fn config_errors_compare_and_clone_by_message() {
-        let error = ConfigError::new("bad flag");
-        assert_eq!(error.clone(), error);
-        assert_eq!(error.clone().to_string(), "bad flag");
-        assert_eq!(error.message(), "bad flag");
-        assert_eq!(error, ConfigError::new("bad flag"));
-        assert_ne!(error, ConfigError::new("another flag"));
+    fn each_config_error_kind_is_typed_and_only_a_read_failure_has_a_source() {
+        use std::error::Error as _;
+
+        let file = Utf8Path::new("spargen.toml");
+        let flag = ConfigError::flag("bad flag");
+        assert!(matches!(&flag, ConfigError::Flag { message } if message == "bad flag"));
+        assert_eq!(flag.to_string(), "bad flag");
+        assert_eq!(flag.path(), None);
+        assert!(flag.source().is_none());
+
+        let missing = Spec::new("openapi.yaml")
+            .config_file("/nonexistent/spargen-1328/spargen.toml")
+            .unwrap_err();
+        let ConfigError::Read { path, source } = &missing else {
+            panic!("a missing file is a read error: {missing:?}");
+        };
+        assert_eq!(path, "/nonexistent/spargen-1328/spargen.toml");
+        assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            missing.to_string(),
+            "cannot read config file `/nonexistent/spargen-1328/spargen.toml`"
+        );
+        assert_eq!(
+            missing.source().map(ToString::to_string),
+            Some(source.to_string())
+        );
+
+        let parse = apply("carve = 1\n").unwrap_err();
+        assert!(matches!(parse, ConfigError::Parse { .. }), "{parse:?}");
+        let omit = apply("[[omit]]\n[[omit]]\npath = \"/x\"\nfile = \"y\"\n").unwrap_err();
+        assert!(
+            matches!(omit, ConfigError::InvalidOmitRule { index: 0, .. }),
+            "{omit:?}"
+        );
+        let keep = apply(
+            "[[keep]]\nmethod = \"get\"\npath = \"/a\"\n[[keep]]\nmethod = \"x\"\npath = \"/b\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(keep, ConfigError::InvalidKeepRule { index: 1, .. }),
+            "{keep:?}"
+        );
+        for error in [&parse, &omit, &keep] {
+            assert_eq!(error.path(), Some(file));
+            assert!(error.source().is_none(), "{error:?}");
+        }
+        assert!(keep.to_string().contains("keep rule #2: "), "{keep}");
     }
 
     #[test]
@@ -921,7 +1057,7 @@ mod tests {
         assert_eq!(spec.bound_headers(), ["X-Api-Version", "X-Tenant"]);
 
         let error = apply("bind_headers = \"X-Tenant\"\n").unwrap_err();
-        assert!(error.message().contains("bind_headers"), "{error}");
+        assert!(error.to_string().contains("bind_headers"), "{error}");
     }
 
     #[test]
@@ -959,17 +1095,17 @@ mod tests {
             let error = apply(text).unwrap_err();
             assert!(
                 error
-                    .message()
+                    .to_string()
                     .contains("the `time` key was replaced by `datetime`")
                     && error
-                        .message()
+                        .to_string()
                         .contains("`datetime = \"string\"` for `time = false`"),
                 "{error}"
             );
         }
         let error = apply("datetime = \"Jiff\"\n").unwrap_err();
         assert!(
-            error.message().contains("unknown variant `Jiff`"),
+            error.to_string().contains("unknown variant `Jiff`"),
             "{error}"
         );
     }

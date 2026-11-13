@@ -181,7 +181,7 @@ fn parse_component_kind(kind: &str) -> Result<ComponentKind, ConfigError> {
 }
 
 fn error(message: String) -> ConfigError {
-    ConfigError::new(message)
+    ConfigError::flag(message)
 }
 
 #[cfg(test)]
