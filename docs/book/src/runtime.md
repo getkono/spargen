@@ -288,7 +288,11 @@ states the ordering and lifetime contracts.
 OpenAPI declares no machine-readable pagination, so the runtime ships a generic helper a caller
 drives explicitly: `client.core().paginate_links::<T>(first_url)` returns a `LinkPaginator<T>`
 that follows `Link: <url>; rel="next"` headers one `next_page().await` at a time, issuing a plain
-`GET` that attaches no per-operation credentials. Cursor and offset schemes are a loop over the
+`GET` that attaches no per-operation credentials. It follows a link only within the origin
+(scheme, host and port) of the first page it fetched: a link to another host or port, or from
+`https` down to `http`, ends the chain with `Error::PaginationOriginChanged` and sends nothing
+there, so headers the injected client attaches to every request never leave that origin. Cursor
+and offset schemes are a loop over the
 generated operation. The [`paginate` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/paginate.rs)
 shows both, and how to authenticate follow-up pages.
 

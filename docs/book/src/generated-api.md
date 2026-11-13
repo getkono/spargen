@@ -94,7 +94,9 @@ use.
   on the one path the emitted `ClientConfig::max_error_body` doc names), interrupted body
   (`Error::InterruptedBody`: the connection dropped partway through a streamed response
   body, or on native targets any other response body, and transient), pagination cycle (`Error::PaginationCycle`: a `LinkPaginator`
-  `next` link back to a page it already fetched), oversized body (`Error::BodyTooLarge`: a
+  `next` link back to a page it already fetched), pagination origin change
+  (`Error::PaginationOriginChanged`: a `LinkPaginator` `next` link to another scheme, host or port
+  than its first page's, refused unsent), oversized body (`Error::BodyTooLarge`: a
   non-streaming response body past the `max_body` or `max_success_body` limit the call was made
   under, or a raw binary one past the 64 MiB `ClientConfig::DEFAULT_MAX_BINARY_BODY` where neither
   is set, or a `ByteStream` past the limit its `collect_bounded` was given, refused unread from its

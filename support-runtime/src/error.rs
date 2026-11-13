@@ -8,7 +8,7 @@ use crate::{AuthError, ResponseValue};
 /// The closed error taxonomy shared by every spargen-generated client. `E` is the
 /// operation's typed error body (an enum when several error statuses are documented).
 ///
-/// Eleven variants are constructed: classes #1 to #9, #11 and #12. Taxonomy class #10, cancellation, is a
+/// Twelve variants are constructed: classes #1 to #9, and #11 to #13. Taxonomy class #10, cancellation, is a
 /// documented drop-safety guarantee rather than a variant: dropping a returned future is safe and
 /// side-effect-free beyond standard HTTP semantics. The enum implements [`std::error::Error`], whose `source()` reaches
 /// each retained cause, and `Debug` never leaks secrets.
@@ -96,6 +96,18 @@ pub enum Error<E> {
         /// The status of the response whose body exceeded it.
         status: StatusCode,
     },
+    /// #13 — a `LinkPaginator` page's `rel="next"` link named a URL whose scheme, host or port
+    /// differs from the first page the paginator fetched: another host, another port, or an
+    /// `https` chain dropping to `http`. Following it would send whatever the injected client
+    /// attaches to every request (a default `Authorization` header, say) to that origin. Every
+    /// page before it was yielded; nothing was sent for `to`. Not transient: the same link is
+    /// refused again.
+    PaginationOriginChanged {
+        /// The first page the paginator fetched, whose origin every later page must share.
+        from: url::Url,
+        /// The refused URL the `next` link resolved to.
+        to: url::Url,
+    },
 }
 
 impl<E> Error<E> {
@@ -147,6 +159,7 @@ impl<E> Error<E> {
             | Error::Protocol(_)
             | Error::Redirect(_)
             | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. }
             | Error::BodyTooLarge { .. } => false,
         }
     }
@@ -169,7 +182,8 @@ impl<E> Error<E> {
             | Error::Protocol(_)
             | Error::Redirect(_)
             | Error::InterruptedBody(_)
-            | Error::PaginationCycle { .. } => None,
+            | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. } => None,
         }
     }
 
@@ -191,6 +205,7 @@ impl<E> Error<E> {
             | Error::Redirect(_)
             | Error::InterruptedBody(_)
             | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. }
             | Error::BodyTooLarge { .. } => None,
         }
     }
@@ -241,6 +256,9 @@ impl Error<std::convert::Infallible> {
             },
             Error::InterruptedBody(e) => Error::InterruptedBody(e),
             Error::PaginationCycle { url } => Error::PaginationCycle { url },
+            Error::PaginationOriginChanged { from, to } => {
+                Error::PaginationOriginChanged { from, to }
+            }
             Error::BodyTooLarge { limit, status } => Error::BodyTooLarge { limit, status },
         }
     }
@@ -299,6 +317,7 @@ impl<E: ApiErrorBody> Error<E> {
             | Error::Decode { .. }
             | Error::InterruptedBody(_)
             | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. }
             | Error::BodyTooLarge { .. } => None,
         }
     }
@@ -319,6 +338,7 @@ impl<E: ApiErrorBody> Error<E> {
             | Error::Decode { .. }
             | Error::InterruptedBody(_)
             | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. }
             | Error::BodyTooLarge { .. } => None,
         }
     }
@@ -451,6 +471,7 @@ impl<E: ApiErrorProblem> Error<E> {
             | Error::Redirect(_)
             | Error::InterruptedBody(_)
             | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. }
             | Error::BodyTooLarge { .. } => None,
         }
     }
@@ -479,6 +500,13 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
             Error::PaginationCycle { url } => {
                 write!(f, "pagination cycle: the next link revisits {url}")
             }
+            // Origins only: the first page's URL is the caller's, and its query may hold a key.
+            Error::PaginationOriginChanged { from, to } => write!(
+                f,
+                "pagination origin changed: the next link leaves {} for {}",
+                from.origin().ascii_serialization(),
+                to.origin().ascii_serialization()
+            ),
             Error::BodyTooLarge { limit, status } => {
                 write!(f, "response body ({status}) exceeds its {limit}-byte limit")
             }
@@ -512,6 +540,7 @@ impl<E: std::error::Error + 'static> std::error::Error for Error<E> {
             | Error::UnexpectedStatus { .. }
             | Error::Decode { .. }
             | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. }
             | Error::BodyTooLarge { .. } => None,
         }
     }

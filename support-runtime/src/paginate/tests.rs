@@ -485,6 +485,110 @@ fn a_link_back_to_an_earlier_page_ends_the_chain_as_a_pagination_cycle() {
     );
 }
 
+/// A `next` link to another host, an `https` page linking to `http`, and a link to another port
+/// each end the chain as `PaginationOriginChanged` once the page carrying the link is yielded,
+/// without sending anything to the refused URL. The error names both URLs, and its `Display`
+/// shows their origins alone, so the first page's query never reaches a log line through it.
+#[test]
+fn a_next_link_to_another_origin_ends_the_chain_without_a_request() {
+    for (link, origin) in [
+        ("https://evil.example/items?page=2", "https://evil.example"),
+        ("http://x/items?page=2", "http://x"),
+        ("https://x:8443/items?page=2", "https://x:8443"),
+    ] {
+        let (mut pager, backend) = paginator::<Vec<i64>>(
+            [page(200, "[1]", Some(&format!("<{link}>; rel=\"next\"")))],
+            "https://x/items?page=1&key=secret",
+        );
+        let first = poll_ready(pager.next_page()).unwrap().unwrap();
+        assert_eq!(first.into_inner(), vec![1], "{link}");
+        assert!(pager.has_next(), "the refusal is still reported for {link}");
+        match poll_ready(pager.next_page()) {
+            Some(Err(error @ Error::PaginationOriginChanged { .. })) => {
+                assert!(!error.is_transient(), "{error}");
+                assert!(error.status().is_none(), "{error}");
+                let rendered = error.to_string();
+                assert_eq!(
+                    rendered,
+                    format!(
+                        "pagination origin changed: the next link leaves https://x for {origin}"
+                    )
+                );
+                assert!(!rendered.contains("secret"), "{rendered}");
+                let Error::PaginationOriginChanged { from, to } = error else {
+                    unreachable!()
+                };
+                assert_eq!(from.as_str(), "https://x/items?page=1&key=secret");
+                assert_eq!(to.as_str(), link);
+            }
+            other => panic!("expected PaginationOriginChanged for {link}, got {other:?}"),
+        }
+        assert!(!pager.has_next(), "{link}");
+        assert!(poll_ready(pager.next_page()).is_none(), "{link}");
+        assert_eq!(
+            backend.urls(),
+            ["https://x/items?page=1&key=secret"],
+            "{link} was requested"
+        );
+    }
+}
+
+/// The origin is compared as the URL parser normalises it: a host in another case and the
+/// scheme's default port spelled out name the first page's origin, so the link is followed.
+#[test]
+fn a_next_link_spelling_the_same_origin_differently_is_followed() {
+    let (mut pager, backend) = paginator::<Vec<i64>>(
+        [
+            page(
+                200,
+                "[1]",
+                Some(r#"<HTTPS://X:443/items?page=2>; rel="next""#),
+            ),
+            page(200, "[2]", None),
+        ],
+        "https://x/items?page=1",
+    );
+    assert_eq!(
+        poll_ready(pager.next_page()).unwrap().unwrap().into_inner(),
+        vec![1]
+    );
+    assert_eq!(
+        poll_ready(pager.next_page()).unwrap().unwrap().into_inner(),
+        vec![2]
+    );
+    assert!(poll_ready(pager.next_page()).is_none());
+    assert_eq!(
+        backend.urls(),
+        ["https://x/items?page=1", "https://x/items?page=2"]
+    );
+}
+
+/// A paginator seeded from headers has no first page URL of its own: the first URL it fetches,
+/// the seeded link, fixes the origin, and a later link leaving it is refused.
+#[test]
+fn a_header_seeded_paginator_holds_the_origin_of_its_first_fetch() {
+    let backend = SequenceBackend::new([page(
+        200,
+        "[2]",
+        Some(r#"<https://elsewhere.example/3>; rel="next""#),
+    )]);
+    let core = ClientCore::with_backend(backend.clone(), "https://x").unwrap();
+    let mut pager: LinkPaginator<Vec<i64>> =
+        LinkPaginator::from_headers(core, &link_headers(&[r#"<https://x/2>; rel="next""#]));
+    assert_eq!(
+        poll_ready(pager.next_page()).unwrap().unwrap().into_inner(),
+        vec![2]
+    );
+    match poll_ready(pager.next_page()) {
+        Some(Err(Error::PaginationOriginChanged { from, to })) => {
+            assert_eq!(from.as_str(), "https://x/2");
+            assert_eq!(to.as_str(), "https://elsewhere.example/3");
+        }
+        other => panic!("expected PaginationOriginChanged, got {other:?}"),
+    }
+    assert_eq!(backend.urls(), ["https://x/2"]);
+}
+
 /// A paginator seeded with no next link answers `None` on its first pull without building or
 /// sending a request.
 #[test]
