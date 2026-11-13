@@ -52,7 +52,7 @@ macro_rules! rfc3339_text {
     ($name:ident, $what:literal) => {
         impl fmt::Display for $name {
             /// The RFC 3339 rendering, the same bytes `Serialize` writes, so a `multipart/form-data`
-            /// text part or `text/plain` body (rendered through `Display`) carries the encoding a
+            /// text part (rendered through `Display`) carries the encoding a
             /// JSON body does. A value RFC 3339 cannot express (a year before 0, or an offset with
             /// seconds or of a day or more) falls back to `jiff`'s own rendering rather than
             /// failing, because a failing `Display` panics through `to_string()`; `Serialize` still

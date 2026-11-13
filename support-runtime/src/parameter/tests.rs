@@ -1103,3 +1103,28 @@ fn join_scalars_and_object_flat_grow_one_buffer_when_items_need_escaping() {
     assert!(joined_info.count_total <= 2, "{joined_info:?}");
     assert!(flat_info.count_total <= 2, "{flat_info:?}");
 }
+
+/// A parameter failure reaches the caller as `RequestError::Other`, whose source downcasts to the
+/// `ParameterError` the root re-exports.
+#[test]
+fn a_parameter_failure_downcasts_from_the_request_error() {
+    use std::error::Error as _;
+
+    let error = serialize_deep_object("filter", &"scalar", F).unwrap_err();
+    let error = crate::Error::<()>::request_construction(error);
+    let crate::Error::RequestConstruction(request) = &error else {
+        panic!("expected a request-construction error, got {error:?}");
+    };
+    assert!(
+        matches!(request, crate::RequestError::Other(_)),
+        "{request:?}"
+    );
+    let cause = request.source().expect("`Other` carries its cause");
+    assert!(
+        matches!(
+            cause.downcast_ref::<crate::ParameterError>(),
+            Some(crate::ParameterError::ExpectedObject)
+        ),
+        "{cause:?}"
+    );
+}

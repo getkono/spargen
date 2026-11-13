@@ -850,7 +850,7 @@ fn hint() -> impl proptest::strategy::Strategy<Value = String> {
         3 => "[a-cA-C][-_ ]?[a-cA-C]",
         1 => proptest::sample::select(vec![
             "", "type", "self", "Self", "super", "crate", "String", "Box", "Option", "Vec",
-            "Default", "default", "Into", "new", "core", "inner", "with_credential", "params",
+            "Default", "default", "Into", "new", "clone", "core", "inner", "with_credential", "params",
             "body", "path", "query", "url", "request", "cookies", "replay", "additional", "other",
             "Other", "unknown", "Unknown", "err", "1a", "-", "requestOperation", "getV2", "get_v_2",
             "a_l_l",
@@ -1024,7 +1024,10 @@ fn synthetic_api(
                                 untagged: None,
                             }
                         } else {
-                            VariantDispatch::Trial { priority: 0 }
+                            VariantDispatch::Trial {
+                                priority: 0,
+                                category: None,
+                            }
                         },
                     })
                     .collect(),
@@ -1194,7 +1197,7 @@ proptest::proptest! {
                 .chain(records.iter().filter_map(|record| record.byte_stream.as_ref()).flat_map(
                     |stream| [&stream.twin, &stream.request_builder, &stream.decoder],
                 )),
-            super::CLIENT_METHODS,
+            &[super::CLIENT_METHODS, super::CLIENT_TRAIT_METHODS].concat(),
         )?;
         let enum_successes = api
             .operations
@@ -1333,7 +1336,11 @@ proptest::proptest! {
                 .zip(idents)
                 .filter(|(parameter, _)| !parameter.required)
                 .map(|(_, ident)| ident);
-            assert_scope(&format!("params fields of {}", operation.id.0), fields, &[])?;
+            assert_scope(
+                &format!("params fields of {}", operation.id.0),
+                fields,
+                super::PARAMS_METHODS,
+            )?;
             for (status, response) in &operation.responses.by_status {
                 if response.headers.is_empty() {
                     continue;
@@ -1356,7 +1363,11 @@ proptest::proptest! {
                 .variables
                 .keys()
                 .map(|name| &names.server_variable_fields[&(index, name.clone())]);
-            assert_scope(&format!("variables of server {index}"), fields, &[])?;
+            assert_scope(
+                &format!("variables of server {index}"),
+                fields,
+                super::SERVER_METHODS,
+            )?;
             for (name, variable) in &server.variables {
                 let variants = variable.enum_values.iter().map(|value| {
                     &names.server_variable_variants[&(index, name.clone(), value.clone())]

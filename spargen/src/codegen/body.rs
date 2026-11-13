@@ -6,7 +6,7 @@ use quote::quote;
 use crate::ir::{Api, MediaType, Operation, Ty, TypeKind};
 use crate::name::{Names, OperationBindings};
 
-use super::params::{delimiter_tokens, query_encoding_tokens};
+use super::params::{delimiter_tokens, encoding_variant_tokens, query_encoding_tokens};
 
 /// The statements that encode the operation's request body onto the request and set its
 /// `Content-Type`, by the body's media type; empty when the operation sends no typed body.
@@ -32,10 +32,11 @@ pub(super) fn body_send_tokens(
         let content_type = &body.content_type;
         let encoding = &body.encoding;
         // A raw byte body (`bytes::Bytes`, from `format: binary` / `contentEncoding: base64`) is sent
-        // as-is regardless of the declared media — `Bytes` is not `Display`, so it can never go
-        // through `.to_string()`. This must be checked before the media match so a `text/plain` (or
-        // any) media over a `Bytes` schema does not miscompile. This one raw-bytes send is shared
-        // with the octet-stream arm below, so no path sends raw bytes without `Content-Type`.
+        // as-is regardless of the declared media — its serde form is a sequence of numbers, which
+        // the text arm's scalar renderer refuses. This must be checked before the media match so a
+        // `text/plain` (or any) media over a `Bytes` schema sends its octets. This one raw-bytes
+        // send is shared with the octet-stream arm below, so no path sends raw bytes without
+        // `Content-Type`.
         // A raw binary body arrives as anything `Into<HttpBody>` (`Api::sends_binary_body`) and
         // moves into the request without a copy, or is streamed; a base64 newtype is cloned.
         let raw_bytes_send = if api.sends_binary_body(operation) {
@@ -122,11 +123,19 @@ pub(super) fn body_send_tokens(
                             .body(#body_binding);
                     }
                 }
-                MediaType::Text => quote! {
-                    #request_binding = #request_binding
-                        .header(reqwest::header::CONTENT_TYPE, #content_type)
-                        .body(#body_binding.to_string());
-                },
+                // The bare text of the scalar the body holds (lowering admits only a scalar under
+                // raw text), rendered as a text `content` parameter is: a string unquoted, a number
+                // or boolean as its JSON spelling, which `decode_text_body` reads back.
+                MediaType::Text => {
+                    let passthrough = encoding_variant_tokens("Passthrough");
+                    quote! {
+                        let #body_binding = support::serialize_simple(#body_binding, false, #passthrough)
+                            .map_err(support::Error::request_construction)?;
+                        #request_binding = #request_binding
+                            .header(reqwest::header::CONTENT_TYPE, #content_type)
+                            .body(#body_binding);
+                    }
+                }
                 // An octet-stream request body is a non-nullable `Bytes` (see
                 // `ir::check_invariants`), so the `Bytes` branch above takes it and this arm is
                 // never reached. It sends the same tokens, so even a looser gate cannot drop the

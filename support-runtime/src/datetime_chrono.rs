@@ -69,7 +69,7 @@ macro_rules! transparent_newtype {
 
         impl fmt::Display for $name {
             /// The RFC 3339 rendering, the same bytes `Serialize` writes, so a `multipart/form-data`
-            /// text part or `text/plain` body (rendered through `Display`) carries the encoding a
+            /// text part (rendered through `Display`) carries the encoding a
             /// JSON body does. A value RFC 3339 cannot express (a year outside `0..=9999`, or an
             /// offset with seconds) falls back to `chrono`'s own rendering rather than failing,
             /// because a failing `Display` panics through `to_string()`; `Serialize` still refuses
