@@ -389,7 +389,7 @@ the macro's `datetime = "…"`.
 | Backend | `DateTime` wraps | `Date` wraps | Requires |
 | --- | --- | --- | --- |
 | `time` (default) | `time::OffsetDateTime` | `time::Date` | `time` with `formatting` and `parsing` |
-| `jiff` | `jiff::Timestamp` | `jiff::civil::Date` | `jiff` |
+| `jiff` | `jiff::civil::DateTime` and `jiff::tz::Offset` | `jiff::civil::Date` | `jiff` |
 | `chrono` | `chrono::DateTime<chrono::FixedOffset>` | `chrono::NaiveDate` | `chrono` |
 | `string` | — (`String`) | — (`String`) | nothing |
 
@@ -403,9 +403,22 @@ backend's `serde` feature is needed (only `time`'s `formatting` and `parsing`); 
 convert with `From` from the inner type, and parse with `FromStr`, failing with `DateParseError`,
 which the generated root re-exports beside them. The `jiff` and `chrono` newtypes share the
 [`rfc3339` codec](https://github.com/getkono/spargen/blob/master/support-runtime/src/rfc3339.rs),
-which states the grammar they accept and write. `jiff::Timestamp` has no offset, so the `jiff`
-backend normalizes a decoded `date-time` to UTC and always writes `Z`; `time` and `chrono` keep
-the offset the value was written with. The
+which states the grammar they accept and write.
+
+That grammar is the specification's, not any crate's: OpenAPI's `format: date-time` is JSON
+Schema's, which is RFC 3339 §5.6's `date-time`. Its year is four digits, so every year from `0000`
+to `9999` decodes, at any offset; the separator between date and time is `T` or `t` (so the `time`
+backend refuses the space `time` itself would read); and a leap second (`:60`) is read only in the
+minute that is 23:59 UTC on a month's last day, as the last nanosecond of that minute. Every backend
+keeps the offset a value was written with and writes it back at that offset. A `chrono` value holding
+a leap second anywhere else is written as the last nanosecond of its second, since no backend reads
+`:60` there.
+
+`jiff::Timestamp` ends at `9999-12-30T22:00:00.999999999Z`, short of the last instants RFC 3339
+writes, so the `jiff` backend's `DateTime` holds the civil date-time and its offset instead of
+dereferencing to one `jiff` value: `datetime()` and `offset()` read the parts, `From` converts a
+`jiff::Timestamp` (at UTC), and `to_timestamp()` (or `TryFrom`) gives the instant, failing past
+that range. Equality, ordering and hashing compare instants under every backend. The
 [`datetime` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/datetime.rs)
 sets out why `time`'s own representation is not RFC 3339.
 

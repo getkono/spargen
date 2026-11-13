@@ -1,19 +1,23 @@
 //! The RFC 3339 codec the `jiff` and `chrono` date-time backends share.
 //!
-//! `format: date-time` is an RFC 3339 `date-time` and `format: date` an RFC 3339 `full-date`. The
-//! `time` backend (`datetime.rs`) delegates to `time`'s own RFC 3339 support; the other backends
-//! read and write the text here instead, so their wire form is one grammar whichever crate holds
-//! the value, rather than each crate's own notion of what a timestamp string may look like. A
-//! backend converts between these fields and its own types, and the calendar (the number of days
-//! in a month) is checked by that conversion.
+//! `format: date-time` is JSON Schema's `date-time`, which is RFC 3339 §5.6's `date-time`, and
+//! `format: date` its `full-date`. The `time` backend (`datetime.rs`) delegates to `time`'s own
+//! RFC 3339 support, refusing the separators it alone admits; the other backends read and write
+//! the text here instead, so their wire form is one grammar whichever crate holds the value, rather
+//! than each crate's own notion of what a timestamp string may look like. A backend converts
+//! between these fields and its own types, and the calendar (the number of days in a month) is
+//! checked by that conversion.
 //!
-//! The grammar accepted is RFC 3339's `date-time`: `YYYY-MM-DD`, `T` (or `t`), `HH:MM:SS`, an
-//! optional `.` and one or more fraction digits, then `Z` (or `z`) or `±HH:MM`. Fraction digits past
-//! the ninth (below a nanosecond) are dropped. A leap second (`:60`) is accepted only where `time`
-//! accepts it, in the minute that is 23:59 UTC on a month's last day, and reads as the last
-//! nanosecond of that minute (`59.999999999`), as `time` reads it, since neither `jiff` nor
-//! `chrono`'s fixed offset types carry it otherwise. Writing gives `T`, the fraction trimmed of trailing zeros (and
-//! no fraction at all for a whole second), and `Z` for a zero offset.
+//! The grammar accepted is RFC 3339's `date-time`: `YYYY-MM-DD` (`date-fullyear` is four digits, so
+//! every year from `0000` to `9999`), `T` (or `t`), `HH:MM:SS`, an optional `.` and one or more
+//! fraction digits, then `Z` (or `z`) or `±HH:MM`. Fraction digits past the ninth (below a
+//! nanosecond) are dropped. A leap second (`:60`) is accepted only where `time` accepts it, in the
+//! minute that is 23:59 UTC on a month's last day, and reads as the last nanosecond of that minute
+//! (`59.999999999`), as `time` reads it. `chrono` holds a leap second as a nanosecond count past a
+//! second at second 59 of any minute; its backend writes `:60` only in that same minute, and the
+//! last nanosecond of the second elsewhere. Writing gives `T`,
+//! the fraction trimmed of trailing zeros (and no fraction at all for a whole second), and `Z` for
+//! a zero offset.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -217,7 +221,11 @@ fn days_in_month(year: i32, month: u8) -> u8 {
 /// `offset_seconds` east of UTC, is 23:59 UTC on the last day of a month: the only minute a leap
 /// second can end, and the only one `time` accepts `:60` in. An offset is under a day, so 23:59 UTC
 /// falls on the local date or the day before it, never the day after.
-fn is_leap_second_minute(date: FullDate, local_minute: u32, offset_seconds: i32) -> bool {
+pub(crate) fn is_leap_second_minute(
+    date: FullDate,
+    local_minute: u32,
+    offset_seconds: i32,
+) -> bool {
     let Ok(local_minute) = i32::try_from(local_minute) else {
         return false;
     };

@@ -45,6 +45,11 @@ fn date_time_rejects_a_non_rfc3339_string() {
     let error = serde_json::from_str::<DateTime>("\"2023-11-14 22:13:20.0 +00:00:00\"");
     assert!(error.is_err(), "{error:?}");
     assert!(serde_json::from_str::<DateTime>("[2023,318,22,13,20,0,0,0,0]").is_err());
+    // `time`'s `Rfc3339` alone reads any separator byte; RFC 3339's ABNF admits only `T` or `t`.
+    for text in ["2023-11-14 22:13:20Z", "2023-11-14_22:13:20Z"] {
+        assert!(text.parse::<DateTime>().is_err(), "{text}");
+    }
+    assert!("2023-11-14t22:13:20Z".parse::<DateTime>().is_ok());
 }
 
 #[test]

@@ -56,6 +56,33 @@ fn date_time_writes_a_leap_second_as_second_sixty() {
     assert_eq!(read.to_string(), "2016-12-31T23:59:59.999999999Z");
 }
 
+/// `chrono` holds a leap nanosecond in any minute, but the codec reads `:60` only in the minute
+/// that is 23:59 UTC on a month's last day: elsewhere the value is written as the last nanosecond
+/// of its second, which reads back, rather than as a `:60` nothing reads.
+#[test]
+fn date_time_writes_a_leap_second_outside_a_leap_minute_as_readable_text() {
+    let leap = chrono::NaiveDate::from_ymd_opt(2024, 3, 5)
+        .unwrap()
+        .and_hms_nano_opt(12, 0, 59, 1_500_000_000)
+        .unwrap();
+    let value = DateTime(offset(0).from_utc_datetime(&leap));
+    assert_eq!(value.to_string(), "2024-03-05T12:00:59.999999999Z");
+    let read: DateTime = value.to_string().parse().unwrap();
+    assert_eq!(read.to_string(), value.to_string());
+
+    // The leap minute itself, written at an offset, keeps its `:60`.
+    let at_offset = DateTime(
+        offset(9 * 3600).from_utc_datetime(
+            &chrono::NaiveDate::from_ymd_opt(2016, 12, 31)
+                .unwrap()
+                .and_hms_nano_opt(23, 59, 59, 1_000_000_000)
+                .unwrap(),
+        ),
+    );
+    assert_eq!(at_offset.to_string(), "2017-01-01T08:59:60+09:00");
+    assert!(at_offset.to_string().parse::<DateTime>().is_ok());
+}
+
 #[test]
 fn date_time_rejects_a_non_rfc3339_string() {
     for json in [

@@ -549,4 +549,86 @@ mod tests {
                 .then(|| Box::pin(std::future::ready(())) as RetryWait<'a>)
         }
     }
+
+    /// The date-time backends against one table. OpenAPI's `format: date-time` is JSON Schema's
+    /// RFC 3339 §5.6 `date-time`: a four-digit year (so all of `0000` to `9999`, at any offset), `T`
+    /// or `t` between date and time, and `:60` only as a leap second. Every backend built here must
+    /// accept exactly the strings marked accepted, write each one back as the same text the others
+    /// write, and read that text again.
+    #[cfg(all(feature = "time", feature = "jiff", feature = "chrono"))]
+    mod date_time_backends {
+        /// Each `date-time` string, and whether RFC 3339 admits it.
+        const CASES: &[(&str, bool)] = &[
+            ("2024-03-05T12:00:00Z", true),
+            ("2024-03-05t12:00:00z", true),
+            ("2024-03-05T12:00:00.5+05:30", true),
+            ("2024-03-05T12:00:00.1234567891234-00:00", true),
+            ("9999-12-31T23:59:59Z", true),
+            ("9999-12-31T23:59:59.999999999Z", true),
+            ("9999-12-31T23:59:59-23:59", true),
+            ("9999-12-31T00:00:00+23:59", true),
+            ("0000-01-01T00:00:00Z", true),
+            ("0000-01-01T00:00:00+23:59", true),
+            ("0000-01-01T00:00:00-23:59", true),
+            // A leap second, in the minute that is 23:59 UTC on a month's last day.
+            ("2016-12-31T23:59:60Z", true),
+            ("2016-12-31T23:59:60.5Z", true),
+            ("2017-01-01T08:59:60+09:00", true),
+            ("2016-12-31T18:29:60-05:30", true),
+            // `:60` in any other minute.
+            ("2024-03-05T12:00:60Z", false),
+            ("2016-12-31T23:58:60Z", false),
+            ("2016-12-30T23:59:60Z", false),
+            // A separator other than `T` or `t`.
+            ("2024-03-05 12:00:00Z", false),
+            ("2024-03-05_12:00:00Z", false),
+            ("2024-03-05x12:00:00Z", false),
+            ("2024-03-0512:00:00Z", false),
+            // Out of range, malformed, or not wholly a `date-time`.
+            ("2023-02-29T00:00:00Z", false),
+            ("2024-13-01T00:00:00Z", false),
+            ("2024-03-05T24:00:00Z", false),
+            ("2024-03-05T12:60:00Z", false),
+            ("2024-03-05T12:00:61Z", false),
+            ("2024-03-05T12:00:00+24:00", false),
+            ("2024-03-05T12:00:00+05:60", false),
+            ("2024-03-05T12:00:00+0530", false),
+            ("2024-03-05T12:00:00", false),
+            ("2024-03-05T12:00:00.Z", false),
+            ("2024-03-05T12:00Z", false),
+            ("+2024-03-05T12:00:00Z", false),
+            ("10000-01-01T00:00:00Z", false),
+            ("2024-03-05T12:00:00Z ", false),
+            ("2024-03-05", false),
+            ("", false),
+        ];
+
+        /// What each backend makes of `text`: `None` where it refuses the string, else the text it
+        /// writes the value back as, after checking it reads that text again to an equal value.
+        fn read<T>(text: &str) -> Option<String>
+        where
+            T: std::str::FromStr + std::fmt::Display + PartialEq + std::fmt::Debug,
+            T::Err: std::fmt::Debug,
+        {
+            let value: T = text.parse().ok()?;
+            let written = value.to_string();
+            let reread: T = written
+                .parse()
+                .unwrap_or_else(|error| panic!("{text}: wrote {written}, unreadable: {error:?}"));
+            assert_eq!(reread, value, "{text}: wrote {written}");
+            Some(written)
+        }
+
+        #[test]
+        fn every_backend_reads_and_writes_the_same_date_time_strings() {
+            for &(text, accepted) in CASES {
+                let time = read::<crate::datetime::DateTime>(text);
+                let jiff = read::<crate::datetime_jiff::DateTime>(text);
+                let chrono = read::<crate::datetime_chrono::DateTime>(text);
+                assert_eq!(time.is_some(), accepted, "time: {text:?}");
+                assert_eq!(jiff, time, "jiff against time: {text:?}");
+                assert_eq!(chrono, time, "chrono against time: {text:?}");
+            }
+        }
+    }
 }
