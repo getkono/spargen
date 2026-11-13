@@ -775,6 +775,92 @@ fn a_failed_fetch_keeps_the_earlier_pins_of_what_it_could_not_refetch() {
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
+/// A failed fetch beside an earlier `spargen.lock` that cannot be read keeps no earlier pin: the
+/// lock written holds only what this run fetched, so the document it could not fetch, and the one
+/// reachable only through it, go unpinned.
+#[test]
+fn a_failed_fetch_beside_an_unreadable_lock_pins_only_what_it_fetched() {
+    let server = MockServer::start(&[
+        ("/schemas/pet.yaml", Reply::Body(PET_YAML)),
+        ("/schemas/tag.yaml", Reply::Body(TAG_YAML)),
+        ("/schemas/owner.yaml", Reply::Body(TAG_YAML)),
+    ]);
+    let pet_url = server.url("/schemas/pet.yaml");
+    let tag_url = server.url("/schemas/tag.yaml");
+    let owner_url = server.url("/schemas/owner.yaml");
+    let (_temp, spec_path) = remote::workspace(&[&pet_url, &owner_url]);
+    let spec = Spec::new(spec_path.clone());
+    spargen::vendor(&spec).unwrap_or_else(|report| panic!("{report:#?}"));
+    let lock_path = spec_path.with_file_name("spargen.lock");
+    std::fs::write(&lock_path, "version = [not a lock\n").unwrap();
+
+    server.route(
+        "/schemas/pet.yaml",
+        Reply::Status("503 Service Unavailable"),
+    );
+    let report = spargen::vendor(&spec).unwrap_err();
+
+    let diagnostics = report.diagnostics();
+    assert_eq!(diagnostics.len(), 1, "{report:#?}");
+    assert_eq!(diagnostics[0].code, Code::RemoteFetchFailed, "{report:#?}");
+    assert!(diagnostics[0].message.contains(&pet_url), "{report:#?}");
+    let lock = std::fs::read_to_string(&lock_path).unwrap();
+    assert!(lock.contains(&format!("url = \"{owner_url}\"\n")), "{lock}");
+    for unpinned in [&pet_url, &tag_url] {
+        assert!(!lock.contains(unpinned.as_str()), "{unpinned}: {lock}");
+    }
+}
+
+/// `spargen lock` through the binary on a partial fetch: it exits `1` with the `E025` on stderr,
+/// and still writes the lock, the unreachable document keeping its earlier pin.
+#[cfg(feature = "cli")]
+#[test]
+fn spargen_lock_exits_one_on_a_partial_fetch_and_still_writes_the_lock() {
+    let server = MockServer::start(&[
+        ("/schemas/pet.yaml", Reply::Body(PET_YAML)),
+        ("/schemas/tag.yaml", Reply::Body(TAG_YAML)),
+        ("/schemas/owner.yaml", Reply::Body(TAG_YAML)),
+    ]);
+    let pet_url = server.url("/schemas/pet.yaml");
+    let owner_url = server.url("/schemas/owner.yaml");
+    let (_temp, spec_path) = remote::workspace(&[&pet_url, &owner_url]);
+    let lock_path = spec_path.with_file_name("spargen.lock");
+    let lock = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_spargen"))
+            .arg("lock")
+            .arg(spec_path.as_str())
+            .output()
+            .unwrap()
+    };
+    let first = lock();
+    assert!(first.status.success(), "{first:?}");
+    let pinned = std::fs::read_to_string(&lock_path).unwrap();
+    // A trailing comment the lock reader skips, so the lock read back after the failed run is
+    // seen to be one that run wrote rather than the file left in place.
+    std::fs::write(&lock_path, format!("{pinned}# from the first run\n")).unwrap();
+
+    server.route(
+        "/schemas/pet.yaml",
+        Reply::Status("503 Service Unavailable"),
+    );
+    let output = lock();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{stdout}\n{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("E025"), "{stderr}");
+    assert!(stderr.contains(&pet_url), "{stderr}");
+    let written = std::fs::read_to_string(&lock_path).unwrap();
+    for url in [&pet_url, &owner_url] {
+        assert!(written.contains(&format!("url = \"{url}\"\n")), "{written}");
+    }
+    assert_eq!(
+        written, pinned,
+        "the run rewrote the lock with every earlier pin"
+    );
+}
+
 /// The same fetch through the installed binary, so `spargen lock`'s own wiring is reached too.
 #[cfg(feature = "cli")]
 #[test]

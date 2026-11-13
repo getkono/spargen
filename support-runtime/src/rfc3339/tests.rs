@@ -153,6 +153,17 @@ fn date_time_writes_the_canonical_form() {
     }
 }
 
+/// `-00:00` reads as offset zero, so it is written back as `Z`, not as the `-00:00` it was read
+/// from.
+#[test]
+fn an_unknown_local_offset_is_written_back_as_z() {
+    let read = parse_date_time("2023-11-14T22:13:20-00:00").unwrap();
+    assert_eq!(
+        format_date_time(read).as_deref(),
+        Some("2023-11-14T22:13:20Z")
+    );
+}
+
 /// RFC 3339 cannot write a year outside `0..=9999` or an offset that is not whole minutes under a
 /// day, so those have no text.
 #[test]
