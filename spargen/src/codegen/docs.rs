@@ -1348,6 +1348,11 @@ mod tests {
                 "- a\n        - b\n\n  ```text\n  [Store]\n  ```",
             ),
             (
+                "a block quote ends the list item's paragraph, so a fence opens on the item after it",
+                "- a\n> q\n        - ```",
+                "- a\n> q\n        - ```text\n          ```",
+            ),
+            (
                 "an unclosed fence on a list item's line is closed at its content column",
                 "1. ~~~json\n   {}",
                 "1. ~~~json\n   {}\n   ~~~",

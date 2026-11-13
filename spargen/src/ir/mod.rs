@@ -1353,6 +1353,11 @@ mod tests {
                 "- a\n        - b\n\n      ```",
                 None,
             ),
+            (
+                "a block quote ends the list item's paragraph, so a fence opens on the item after it",
+                "- a\n> q\n        - ```",
+                Some("          ```"),
+            ),
             ("an empty text", "", None),
         ];
         for (case, text, expected) in rows {
