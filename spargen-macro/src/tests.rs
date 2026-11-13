@@ -521,6 +521,50 @@ paths:
     );
 }
 
+/// A warning that fills `batch_cap` before the rejecting error is emitted gives way to it, so
+/// the message names the error rather than saying only that generation did not succeed (#1345).
+#[test]
+fn an_error_emitted_after_the_cap_is_full_of_warnings_is_rendered() {
+    let scratch = Scratch::new("capped");
+    let spec = scratch.write(
+        "openapi.yaml",
+        r##"openapi: 3.1.0
+info: { title: Capped, version: "1" }
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - { name: q, in: query, schema: { type: string, pattern: "^a" } }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Missing" }
+"##,
+    );
+    let uncapped = spargen::__private::preview(&Spec::new(spec.as_str()));
+    assert_eq!(
+        uncapped.report.diagnostics().first().map(|d| d.severity),
+        Some(spargen::Severity::Warning),
+        "the fixture's warning must be emitted before its error: {:#?}",
+        uncapped.report
+    );
+    let preview = spargen::__private::preview(&Spec::new(spec.as_str()).with_batch_cap(1));
+    assert_eq!(preview.report.outcome(), spargen::Outcome::Rejected);
+    assert!(preview.report.truncated());
+    assert_eq!(
+        failure_message("openapi.yaml", &preview).unwrap(),
+        format!(
+            "spargen could not generate a client from `openapi.yaml`\n\
+                 error[E004]: unresolved schema reference `#/components/schemas/Missing`\n  \
+                 --> {spec}:14:23\n  \
+                 at /paths/~1a/get/responses/200/content/application~1json/schema"
+        )
+    );
+}
+
 /// A preview that produced no client and retained no error says so in place of a diagnostic
 /// list: a rejection whose errors `batch_cap = 0` dropped, and a generated outcome holding no
 /// module.
