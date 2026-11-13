@@ -650,7 +650,7 @@ paths:
     let requirements = |source: &str, uuid: bool| {
         let path = sandbox.root.join("openapi.yaml");
         std::fs::write(&path, source).unwrap();
-        let spec = crate::Spec::new(path).uuid(uuid);
+        let spec = crate::Spec::new(path).with_uuid(crate::UuidMapping::from_on(uuid));
         let mut diagnostics = crate::diag::Diagnostics::default();
         let (api, _) = crate::pipeline::lower_frontend(&spec, &mut diagnostics)
             .unwrap_or_else(|()| panic!("the spec lowers: {:?}", diagnostics.items()));

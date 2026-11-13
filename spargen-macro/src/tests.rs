@@ -149,15 +149,15 @@ fn a_bare_spec_path_sets_no_control() {
 fn every_argument_maps_onto_its_spec_field() {
     let args: Args = syn::parse_str(EVERY_CONTROL).unwrap();
     let mut expected = Spec::new("openapi.yaml")
-        .uuid(false)
-        .datetime(DateTimeBackend::Jiff)
-        .carve(true)
-        .open_narrowing(true)
-        .open_unions(true)
-        .verbatim_docs(true)
-        .testing(true)
-        .error_body_cap(4096)
-        .batch_cap(7);
+        .with_uuid(spargen::UuidMapping::String)
+        .with_datetime(DateTimeBackend::Jiff)
+        .with_carve(spargen::Carve::Auto)
+        .with_open_narrowing(spargen::Narrowing::Open)
+        .with_open_unions(spargen::UnionTags::Open)
+        .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
+        .with_testing(spargen::TestingModule::Emitted)
+        .with_error_body_cap(4096)
+        .with_batch_cap(7);
     for rule in every_omit_rule() {
         expected = expected.omit_rule(rule);
     }
@@ -175,15 +175,15 @@ fn every_argument_maps_onto_its_spec_field() {
 #[test]
 fn an_absent_argument_keeps_the_config_files_value() {
     let discovered = Spec::new("openapi.yaml")
-        .uuid(false)
-        .datetime(DateTimeBackend::Chrono)
-        .carve(true)
-        .open_narrowing(true)
-        .open_unions(true)
-        .verbatim_docs(true)
-        .testing(true)
-        .error_body_cap(1024)
-        .batch_cap(3)
+        .with_uuid(spargen::UuidMapping::String)
+        .with_datetime(DateTimeBackend::Chrono)
+        .with_carve(spargen::Carve::Auto)
+        .with_open_narrowing(spargen::Narrowing::Open)
+        .with_open_unions(spargen::UnionTags::Open)
+        .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
+        .with_testing(spargen::TestingModule::Emitted)
+        .with_error_body_cap(1024)
+        .with_batch_cap(3)
         .omit_rule(OmitRule::path("/from-file"))
         .keep_operation(OmitMethod::Get, "/from-file")
         .bind_header("X-From-File");
@@ -200,7 +200,7 @@ fn an_absent_argument_keeps_the_config_files_value() {
     assert_eq!(
         configured,
         discovered
-            .batch_cap(9)
+            .with_batch_cap(9)
             .omit_rule(OmitRule::path("/from-macro"))
             .keep_operation(OmitMethod::Put, "/from-macro")
             .bind_header("X-From-Macro")
@@ -217,19 +217,19 @@ fn an_absent_argument_keeps_the_config_files_value() {
 #[test]
 fn each_switch_overrides_the_config_file_either_way() {
     let on = Spec::new("openapi.yaml")
-        .uuid(true)
-        .carve(true)
-        .open_narrowing(true)
-        .open_unions(true)
-        .verbatim_docs(true)
-        .testing(true);
+        .with_uuid(spargen::UuidMapping::Uuid)
+        .with_carve(spargen::Carve::Auto)
+        .with_open_narrowing(spargen::Narrowing::Open)
+        .with_open_unions(spargen::UnionTags::Open)
+        .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
+        .with_testing(spargen::TestingModule::Emitted);
     let off = Spec::new("openapi.yaml")
-        .uuid(false)
-        .carve(false)
-        .open_narrowing(false)
-        .open_unions(false)
-        .verbatim_docs(false)
-        .testing(false);
+        .with_uuid(spargen::UuidMapping::String)
+        .with_carve(spargen::Carve::Off)
+        .with_open_narrowing(spargen::Narrowing::Exact)
+        .with_open_unions(spargen::UnionTags::Closed)
+        .with_verbatim_docs(spargen::CarriedDocs::Rewritten)
+        .with_testing(spargen::TestingModule::Omitted);
 
     let turn_off = args(
         r#""openapi.yaml", uuid = false, carve = false, open_narrowing = false, open_unions = false,
@@ -245,14 +245,17 @@ fn each_switch_overrides_the_config_file_either_way() {
         args(r#""openapi.yaml", uuid, carve, open_narrowing, open_unions, verbatim_docs, testing"#);
     assert_eq!(config(&bare, off.clone()), on);
     let negated = args(r#""openapi.yaml", no_uuid"#);
-    assert_eq!(config(&negated, on.clone()), on.uuid(false));
+    assert_eq!(
+        config(&negated, on.clone()),
+        on.with_uuid(spargen::UuidMapping::String)
+    );
 }
 
 /// `datetime = "…"` replaces the config file's backend with any of the four, and leaves it in
 /// place when not given.
 #[test]
 fn the_datetime_argument_overrides_the_config_file() {
-    let discovered = Spec::new("openapi.yaml").datetime(DateTimeBackend::Chrono);
+    let discovered = Spec::new("openapi.yaml").with_datetime(DateTimeBackend::Chrono);
     assert_eq!(
         config(&args(r#""openapi.yaml""#), discovered.clone()),
         discovered
@@ -261,7 +264,7 @@ fn the_datetime_argument_overrides_the_config_file() {
         let given = args(&format!(r#""openapi.yaml", datetime = "{backend}""#));
         assert_eq!(
             config(&given, discovered.clone()),
-            discovered.clone().datetime(backend),
+            discovered.clone().with_datetime(backend),
             "{backend}"
         );
     }
@@ -275,19 +278,19 @@ fn the_datetime_argument_overrides_the_config_file() {
 #[test]
 fn each_switch_reaches_its_own_field_when_the_values_differ() {
     let base = Spec::new("openapi.yaml")
-        .uuid(true)
-        .carve(false)
-        .open_narrowing(true)
-        .open_unions(false)
-        .verbatim_docs(true)
-        .testing(false);
+        .with_uuid(spargen::UuidMapping::Uuid)
+        .with_carve(spargen::Carve::Off)
+        .with_open_narrowing(spargen::Narrowing::Open)
+        .with_open_unions(spargen::UnionTags::Closed)
+        .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
+        .with_testing(spargen::TestingModule::Omitted);
     let expected = Spec::new("openapi.yaml")
-        .uuid(false)
-        .carve(true)
-        .open_narrowing(false)
-        .open_unions(true)
-        .verbatim_docs(false)
-        .testing(true);
+        .with_uuid(spargen::UuidMapping::String)
+        .with_carve(spargen::Carve::Auto)
+        .with_open_narrowing(spargen::Narrowing::Exact)
+        .with_open_unions(spargen::UnionTags::Open)
+        .with_verbatim_docs(spargen::CarriedDocs::Rewritten)
+        .with_testing(spargen::TestingModule::Emitted);
 
     let valued = args(
         r#""openapi.yaml", uuid = false, carve = true, open_narrowing = false, open_unions = true,
@@ -391,7 +394,13 @@ fn the_config_file_beside_the_spec_is_applied_under_the_arguments() {
     let applied = Spec::new(scratch.path("api/openapi.yaml"))
         .config_file(scratch.path("api/spargen.toml"))
         .unwrap();
-    assert_eq!(applied, applied.clone().carve(true).batch_cap(3));
+    assert_eq!(
+        applied,
+        applied
+            .clone()
+            .with_carve(spargen::Carve::Auto)
+            .with_batch_cap(3)
+    );
     let spec = spec_for(&args(r#""api/openapi.yaml""#), &scratch.consumer()).unwrap();
     assert_eq!(spec, applied);
 
@@ -400,7 +409,7 @@ fn the_config_file_beside_the_spec_is_applied_under_the_arguments() {
         &scratch.consumer(),
     )
     .unwrap();
-    assert_eq!(spec, applied.batch_cap(9));
+    assert_eq!(spec, applied.with_batch_cap(9));
 }
 
 #[test]
@@ -522,7 +531,7 @@ fn a_failure_with_no_retained_error_says_generation_did_not_succeed() {
         "openapi.yaml",
         "openapi: 3.0.3\ninfo: { title: Old, version: \"1\" }\npaths: {}\n",
     );
-    let preview = spargen::__private::preview(&Spec::new(rejected.as_str()).batch_cap(0));
+    let preview = spargen::__private::preview(&Spec::new(rejected.as_str()).with_batch_cap(0));
     assert_eq!(preview.report.outcome(), spargen::Outcome::Rejected);
     assert!(
         preview.report.diagnostics().is_empty(),

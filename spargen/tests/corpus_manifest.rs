@@ -88,7 +88,7 @@ fn every_case_meets_its_declared_expectation() {
         let spec = Spec::new(workspace_root().join("corpus").join(&case.path))
             // The big descriptions produce more than the default 100 diagnostics, and a truncated
             // batch can hide the terminal rejection code the manifest names.
-            .batch_cap(usize::MAX);
+            .with_batch_cap(usize::MAX);
         let report = spargen::check(&spec);
         // Every diagnostic's declared claim must be one the run's outcome admits (#413). This
         // checks the declared claim only, not the message prose: a message that states an outcome

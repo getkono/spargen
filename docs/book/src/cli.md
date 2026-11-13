@@ -93,9 +93,9 @@ bind_headers = []       # default none; header parameters bound once on the clie
 ([source](https://github.com/getkono/spargen/blob/master/support-runtime/src/client.rs)) is the
 one statement of what it bounds on each target and which paths it does not cap. `carve` is
 described under [auto-carve](./compatibility.md#auto-carve), `open_narrowing` under
-[problem details](./runtime.md#problem-details), `open_unions` on `Spec::open_unions` (a
+[problem details](./runtime.md#problem-details), `open_unions` on `Spec::with_open_unions` (a
 discriminator value no variant lists decodes into the `Unknown` variant instead of failing; a
-union with a 3.2 `defaultMapping` keeps its fallback), `verbatim_docs` on `Spec::verbatim_docs`
+union with a 3.2 `defaultMapping` keeps its fallback), `verbatim_docs` on `Spec::with_verbatim_docs`
 (by default the spec's `summary`, `description` and `title` text is rewritten so rustdoc has
 nothing to report at the `include!` site: an intra-doc link such as ``[`crate::serve`]`` becomes
 its text, a bare URL is wrapped in `<…>`, and an HTML tag nothing closes has its `<` escaped),

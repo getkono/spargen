@@ -58,7 +58,7 @@ impl Scope {
         if self.used.insert(base.as_str().to_owned()) {
             return base;
         }
-        self.disambiguate(&base, role, provenance)
+        Ident::new(self.disambiguate(base.as_str(), Spelling::Escaped(role), provenance))
     }
 
     /// Allocate a whole batch of identifiers so that the outcome depends on the *set* of requests
@@ -76,19 +76,40 @@ impl Scope {
         requests: &[RankedRequest<'_, K>],
         role: IdentRole,
     ) -> Vec<Ident> {
-        let bases: Vec<Ident> = requests
+        self.place_ranked(requests, Spelling::Escaped(role))
+            .into_iter()
+            .map(Ident::new)
+            .collect()
+    }
+
+    /// As [`Scope::alloc_ranked`], but each hint is its own spelling, neither cased nor escaped,
+    /// and a loser's suffix is appended to the hint as written: for a string that is unique as
+    /// written and is not itself an identifier, an `operationId`. The result is in request order.
+    pub(crate) fn alloc_ranked_verbatim<K: Ord>(
+        &mut self,
+        requests: &[RankedRequest<'_, K>],
+    ) -> Vec<String> {
+        self.place_ranked(requests, Spelling::Verbatim)
+    }
+
+    /// [`Scope::alloc_ranked`]'s two passes, spelling each hint as `spelling` does.
+    fn place_ranked<K: Ord>(
+        &mut self,
+        requests: &[RankedRequest<'_, K>],
+        spelling: Spelling,
+    ) -> Vec<String> {
+        let bases: Vec<String> = requests
             .iter()
-            .map(|request| super::escape(request.hint, role))
+            .map(|request| spelling.spell(request.hint))
             .collect();
         let mut order: Vec<usize> = (0..requests.len()).collect();
         order.sort_by(|&left, &right| {
             bases[left]
-                .as_str()
-                .cmp(bases[right].as_str())
+                .cmp(&bases[right])
                 .then_with(|| requests[left].rank.cmp(&requests[right].rank))
         });
 
-        let mut allocated: Vec<Option<Ident>> = vec![None; requests.len()];
+        let mut allocated: Vec<Option<String>> = vec![None; requests.len()];
         let mut previous: Option<&str> = None;
         for &index in &order {
             let base = bases[index].as_str();
@@ -101,26 +122,53 @@ impl Scope {
         for &index in &order {
             if allocated[index].is_none() {
                 allocated[index] =
-                    Some(self.disambiguate(&bases[index], role, requests[index].provenance));
+                    Some(self.disambiguate(&bases[index], spelling, requests[index].provenance));
             }
         }
         allocated
             .into_iter()
-            .map(|ident| ident.expect("every request is allocated by one of the two passes"))
+            .map(|name| name.expect("every request is allocated by one of the two passes"))
             .collect()
     }
 
     /// The first free pointer-seeded spelling of `base`, which is already taken.
-    fn disambiguate(&mut self, base: &Ident, role: IdentRole, provenance: &JsonPointer) -> Ident {
-        let raw_base = base.unraw();
+    fn disambiguate(&mut self, base: &str, spelling: Spelling, provenance: &JsonPointer) -> String {
+        let stem = spelling.stem(base);
         let suffix = stable_suffix(&suffix_seed(provenance));
-        let mut candidate = super::escape(&format!("{raw_base}_{suffix}"), role);
+        let mut candidate = spelling.spell(&format!("{stem}_{suffix}"));
         let mut counter = 2usize;
-        while !self.used.insert(candidate.as_str().to_owned()) {
-            candidate = super::escape(&format!("{raw_base}_{suffix}_{counter}"), role);
+        while !self.used.insert(candidate.clone()) {
+            candidate = spelling.spell(&format!("{stem}_{suffix}_{counter}"));
             counter += 1;
         }
         candidate
+    }
+}
+
+/// How a [`Scope`] spells a hint: as an identifier in a role, or exactly as written.
+#[derive(Debug, Clone, Copy)]
+enum Spelling {
+    /// Cased and keyword-escaped for the role, as [`super::escape`] spells it.
+    Escaped(IdentRole),
+    /// The hint itself.
+    Verbatim,
+}
+
+impl Spelling {
+    fn spell(self, hint: &str) -> String {
+        match self {
+            Self::Escaped(role) => super::escape(hint, role).as_str().to_owned(),
+            Self::Verbatim => hint.to_owned(),
+        }
+    }
+
+    /// The text a suffix is appended to: an escaped spelling without its `r#` prefix, which the
+    /// suffixed spelling no longer needs, and a verbatim one as it is.
+    fn stem(self, spelled: &str) -> &str {
+        match self {
+            Self::Escaped(_) => spelled.strip_prefix("r#").unwrap_or(spelled),
+            Self::Verbatim => spelled,
+        }
     }
 }
 

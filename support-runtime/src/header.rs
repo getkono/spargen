@@ -27,11 +27,12 @@ use crate::error::write_escaped;
 pub enum HeaderShape {
     /// A single scalar.
     Scalar,
-    /// A comma-separated list.
+    /// A comma-separated list, read by RFC 9110 §5.6.1's list rule: the optional whitespace (SP
+    /// or HTAB) around each element is not part of it, and an empty element is skipped.
     Array,
-    /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set. A pair that is
-    /// incomplete (a trailing key with no value, or an exploded member without `=`) is dropped
-    /// without an error.
+    /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set, split into
+    /// elements as [`HeaderShape::Array`] is. A pair that is incomplete (a trailing key with no
+    /// value, or an exploded member without `=`) is dropped without an error.
     Object,
     /// A `content`-typed header carrying JSON.
     Json,
@@ -112,7 +113,11 @@ pub fn parse_header<T: DeserializeOwned>(
     }
     let mut parts: Vec<&str> = Vec::new();
     for value in values {
-        parts.push(value.to_str().map_err(|_| HeaderError::NotUtf8 { name })?);
+        // A field value is bytes; `HeaderValue::to_str` accepts visible ASCII only, which would
+        // report valid UTF-8 beyond ASCII as not UTF-8.
+        parts.push(
+            std::str::from_utf8(value.as_bytes()).map_err(|_| HeaderError::NotUtf8 { name })?,
+        );
     }
     let raw = || parts.join(",");
     match shape {
@@ -133,7 +138,7 @@ pub fn parse_header<T: DeserializeOwned>(
         HeaderShape::Array => {
             let raw = raw();
             text_then_json(name, |scalars| {
-                Value::Array(raw.split(',').map(|part| scalar(part, scalars)).collect())
+                Value::Array(elements(&raw).map(|part| scalar(part, scalars)).collect())
             })
         }
         HeaderShape::Object => {
@@ -192,13 +197,13 @@ pub fn require_header<T: DeserializeOwned>(
 fn object(raw: &str, explode: bool, scalars: Scalars) -> Value {
     let mut members = serde_json::Map::new();
     if explode {
-        for pair in raw.split(',') {
+        for pair in elements(raw) {
             if let Some((key, value)) = pair.split_once('=') {
                 members.insert(key.to_owned(), scalar(value, scalars));
             }
         }
     } else {
-        let parts: Vec<&str> = raw.split(',').collect();
+        let parts: Vec<&str> = elements(raw).collect();
         for pair in parts.chunks(2) {
             if let [key, value] = pair {
                 members.insert((*key).to_owned(), scalar(value, scalars));
@@ -206,6 +211,14 @@ fn object(raw: &str, explode: bool, scalars: Scalars) -> Value {
         }
     }
     Value::Object(members)
+}
+
+/// The elements of the comma-separated list `raw`, by RFC 9110 §5.6.1: each without the optional
+/// whitespace (SP or HTAB) around it, and an empty one skipped, as a recipient must.
+fn elements(raw: &str) -> impl Iterator<Item = &str> {
+    raw.split(',')
+        .map(|element| element.trim_matches([' ', '\t']))
+        .filter(|element| !element.is_empty())
 }
 
 /// Interpret one header token.

@@ -161,7 +161,7 @@ pub(crate) fn diff_inner(old: &Spec, new: &Spec) -> Result<(DiffReport, DiffSide
 /// caller.
 fn lower_side(spec: &Spec) -> Result<(ir::Api, name::Names, Report), Report> {
     let carved;
-    let spec = if spec.carve {
+    let spec = if spec.carve.is_on() {
         carved = carve_spec(spec)?;
         &carved
     } else {

@@ -259,8 +259,8 @@ fn lower_bundle(
     // `check` runs the full frontend — lowering, IR invariants, and name allocation — so it fires
     // exactly the frontend diagnostics `generate` would, just without emitting code.
     let options = oas31::LowerOptions {
-        open_narrowing: spec.open_narrowing,
-        open_unions: spec.open_unions,
+        open_narrowing: spec.open_narrowing.is_on(),
+        open_unions: spec.open_unions.is_on(),
         bind_headers: &spec.bind_headers,
     };
     let api = oas31::lower(&document, &resolver, diags, options).map_err(|_| ())?;
@@ -304,11 +304,11 @@ fn build_emit_plan(
         api,
         names,
         &codegen::CodegenOptions {
-            feature_uuid: spec.uuid,
+            feature_uuid: spec.uuid.is_on(),
             datetime: spec.datetime,
             error_body_cap: spec.error_body_cap,
-            verbatim_docs: spec.verbatim_docs,
-            testing: spec.testing,
+            verbatim_docs: spec.verbatim_docs.is_on(),
+            testing: spec.testing.is_on(),
         },
     )
     .map_err(|error| emit_pipeline_error(diags, error.to_string()))?;
@@ -334,7 +334,7 @@ fn build_emit_plan(
 /// [`carve_spec`] fixpoint.
 pub(crate) fn run_mode(spec: &Spec, mode: PipelineMode) -> PipelineResult {
     run_on_frontend_stack(|| {
-        if spec.carve {
+        if spec.carve.is_on() {
             run_carve(spec, mode)
         } else {
             run_pipeline(spec, mode)
@@ -399,7 +399,7 @@ pub(crate) fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
     for _ in 0..compat::MAX_CARVE_ROUNDS {
         let probe = Spec {
             omit: omit.clone(),
-            carve: false,
+            carve: crate::Carve::Off,
             ..spec.clone()
         };
         // The probe is the frontend alone — what a `check` run lowers — kept by hand rather than
@@ -417,7 +417,7 @@ pub(crate) fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
             // Converged: the caller runs for real with the carved omit set.
             return Ok(Spec {
                 omit,
-                carve: false,
+                carve: crate::Carve::Off,
                 ..spec.clone()
             });
         }
@@ -444,7 +444,7 @@ pub(crate) fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
     match last_rejection {
         Some(report) => Err(report),
         None => Ok(Spec {
-            carve: false,
+            carve: crate::Carve::Off,
             ..spec.clone()
         }),
     }
@@ -469,7 +469,7 @@ mod tests {
     fn carve_check(dir: &tempfile::TempDir, contents: &str) -> Report {
         let path = dir.path().join("openapi.yaml");
         std::fs::write(&path, contents).unwrap();
-        check(&Spec::new(Utf8PathBuf::from_path_buf(path).unwrap()).carve(true))
+        check(&Spec::new(Utf8PathBuf::from_path_buf(path).unwrap()).with_carve(crate::Carve::Auto))
     }
 
     /// The `(code, pointer)` of every error-severity diagnostic in `report`.

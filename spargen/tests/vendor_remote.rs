@@ -220,8 +220,12 @@ fn vendors_remote_refs_over_http_and_then_resolves_them_without_the_network() {
     // The pinned copies are what generation reads: the remote schemas lower to typed fields, and
     // neither `generate` nor `check` asks the server for anything.
     let out = spec_path.with_file_name("client.rs");
-    let generated =
-        spargen::generate(&spec.clone().build(out.clone()).cargo(CargoIntegration::Off));
+    let generated = spargen::generate(
+        &spec
+            .clone()
+            .build(out.clone())
+            .with_cargo(CargoIntegration::Off),
+    );
     assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
     let code = std::fs::read_to_string(&out).unwrap();
     assert!(code.contains("pub label"), "{code}");
@@ -363,8 +367,12 @@ fn a_redirected_documents_relative_refs_resolve_against_the_url_it_was_retrieved
     );
 
     let out = spec_path.with_file_name("client.rs");
-    let generated =
-        spargen::generate(&spec.clone().build(out.clone()).cargo(CargoIntegration::Off));
+    let generated = spargen::generate(
+        &spec
+            .clone()
+            .build(out.clone())
+            .with_cargo(CargoIntegration::Off),
+    );
     assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
     let code = std::fs::read_to_string(&out).unwrap();
     assert!(code.contains("pub label"), "{code}");
@@ -408,7 +416,7 @@ fn generate_offline(spec_path: &Utf8PathBuf) -> String {
     let generated = spargen::generate(
         &Spec::new(spec_path.clone())
             .build(out.clone())
-            .cargo(CargoIntegration::Off),
+            .with_cargo(CargoIntegration::Off),
     );
     assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
     std::fs::read_to_string(&out).unwrap()

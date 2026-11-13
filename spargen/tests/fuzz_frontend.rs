@@ -806,9 +806,9 @@ fn check_never_panics_on_arbitrary_bytes() {
     deterministic_runner(256)
         .run(&prop::collection::vec(any::<u8>(), 0..1024), |bytes| {
             // Raw bytes: invalid UTF-8, embedded NULs, truncated multibyte, control chars.
-            exercise(&dir, &bytes, "yaml")?;
-            exercise(&dir, &bytes, "json")?;
-            exercise(&dir, &bytes, "txt")?; // extension-sniff fallback path
+            let _ = exercise(&dir, &bytes, "yaml")?;
+            let _ = exercise(&dir, &bytes, "json")?;
+            let _ = exercise(&dir, &bytes, "txt")?; // extension-sniff fallback path
             Ok(())
         })
         .unwrap();
@@ -819,7 +819,7 @@ fn check_never_panics_on_arbitrary_utf8() {
     let dir = TempDir::new().unwrap();
     deterministic_runner(256)
         .run(&any::<String>(), |text| {
-            exercise_both(&dir, &text)?;
+            let _ = exercise_both(&dir, &text)?;
             Ok(())
         })
         .unwrap();
@@ -830,7 +830,7 @@ fn check_never_panics_on_keyword_biased_documents() {
     let dir = TempDir::new().unwrap();
     deterministic_runner(400)
         .run(&arb_value(), |value| {
-            exercise_json_both(&dir, &serde_json::to_string(&value).unwrap())?;
+            let _ = exercise_json_both(&dir, &serde_json::to_string(&value).unwrap())?;
             Ok(())
         })
         .unwrap();
@@ -915,7 +915,7 @@ fn generate_and_hold(cases: u32, documents: impl Strategy<Value = String>) -> (u
             let report = spargen::generate(
                 &Spec::new(spec.clone())
                     .build(out.clone())
-                    .cargo(CargoIntegration::Off),
+                    .with_cargo(CargoIntegration::Off),
             );
             let module = (report.outcome() == Outcome::Generated)
                 .then(|| std::fs::read_to_string(&out).unwrap());
@@ -941,7 +941,7 @@ fn check_never_panics_on_component_root_refs_with_siblings() {
     let dir = TempDir::new().unwrap();
     deterministic_runner(256)
         .run(&arb_ref_sibling_components(), |text| {
-            exercise_json_both(&dir, &text)?;
+            let _ = exercise_json_both(&dir, &text)?;
             Ok(())
         })
         .unwrap();
