@@ -1,0 +1,9 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|method-renamed|GET /blob|stream decoder renamed `decode_get_blob_stream` -> `decode_get_blob_stream_107551ea`
+major|method-renamed|GET /blob|stream request builder renamed `get_blob_stream_request` -> `get_blob_stream_request_107551ea`
+major|method-renamed|GET /blob|stream twin renamed `get_blob_stream` -> `get_blob_stream_107551ea`
+minor|operation-added|GET /blob/stream|new operation
+bump=major

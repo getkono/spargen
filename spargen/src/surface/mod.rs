@@ -102,6 +102,10 @@ struct OpSurface {
     request_builder_name: String,
     /// The generated `decode_{method}` decoder's identifier, which yields as the accessor does.
     decoder_name: String,
+    /// The names of the `{method}_stream` twin and its two companions, present exactly when
+    /// [`Api::streams_binary_success`](crate::ir::Api::streams_binary_success) holds. Each yields
+    /// to an operation that already spells it, as the accessor does.
+    byte_stream: Option<ByteStreamSurface>,
     /// The `{method}_url` accessor's arguments, in declaration order. Their types are those of
     /// `params`, compared there.
     url_args: Vec<UrlArgSurface>,
@@ -120,6 +124,16 @@ struct OpSurface {
     /// The typed response-header structs, keyed by the status they document as the specification
     /// spells it (`200`, `4XX`, `default`). A status documenting no header has no entry.
     response_headers: BTreeMap<String, HeadersSurface>,
+}
+
+/// The generated identifiers of an operation's `{method}_stream` twin and its companions.
+struct ByteStreamSurface {
+    /// The twin itself, `{method}_stream`.
+    twin_name: String,
+    /// The twin's request builder, `{method}_stream_request`.
+    request_builder_name: String,
+    /// The twin's decoder, `decode_{method}_stream`.
+    decoder_name: String,
 }
 
 /// One argument of an operation's `{method}_url` accessor: a required path, query or querystring
@@ -262,8 +276,9 @@ pub enum ChangeKind {
     OperationAdded,
     /// An operation was removed. **Major** — a method the consumer calls disappears.
     OperationRemoved,
-    /// The generated method name for an endpoint changed, or its `{method}_url` accessor's alone
-    /// did. **Major** — the callable renames.
+    /// The generated method name for an endpoint changed, or a companion's alone did: its
+    /// `{method}_url` accessor, request builder or decoder, or its `{method}_stream` twin or the
+    /// twin's request builder or decoder. **Major** — the callable renames.
     MethodRenamed,
     /// An operation's `{method}_url` accessor takes other arguments: a required parameter moved
     /// into or out of the URL, or the optional-parameters bundle started or stopped shaping it.
