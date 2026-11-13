@@ -299,10 +299,10 @@ pub fn diagnostic_differences(generated: &[Diagnostic], checked: &[Diagnostic]) 
 /// match client code rather than a lowered type; a check that must pin a lowered type should match
 /// a declaration (`pub struct X`, `pub type X =`) rather than a bare type name.
 ///
-/// Two generations of the *same* spec already differ as whole files: the header carries the output
-/// path and a per-run `input-sha256`/`content-sha256`. So comparing two generated clients whole
-/// proves nothing about what they lowered to. Comparing from `pub mod types {` onward compares
-/// what the two documents actually lowered to.
+/// Two generations of different documents differ as whole files even where they lower alike: the
+/// header carries the spec's file name and the `input-sha256`/`content-sha256` of its bytes. So
+/// comparing two generated clients whole proves nothing about what they lowered to. Comparing from
+/// `pub mod types {` onward compares what the two documents actually lowered to.
 pub fn types_module(code: &str) -> String {
     code.find("pub mod types {")
         .map_or_else(String::new, |start| code[start..].to_owned())
