@@ -607,14 +607,15 @@ fn a_nullable_alias_between_two_vendored_remote_schemas_generates() {
             "{entry}: {report:#?}"
         );
     }
-    // The alias is the target, optional and boxed — what the direct `{$ref: T}` spelling of the
-    // same construct already produces and what the support matrix promises for it. Named, and
+    // The alias is the target, nullable and boxed (a `Nullable`, the member being optional) — what
+    // the direct `{$ref: T}` spelling of the same construct already produces and what the support
+    // matrix promises for it. Named, and
     // read off `parent`'s own declaration: the embedded runtime supplies an `Option<Box<…>>` of
     // its own to every generated module, so a bare `contains("Option<Box<")` would hold even if
     // this reference had been emitted unboxed.
     assert_eq!(
         field_type(&code, "pub parent").as_deref(),
-        Some("Option<Box<HttpsApiExampleComSchemasNodeYaml>>"),
+        Some("super::support::Nullable<Box<HttpsApiExampleComSchemasNodeYaml>>"),
         "{code}"
     );
     assert!(!code.contains("serde_json::Value>"), "{code}");

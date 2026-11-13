@@ -66,17 +66,28 @@ use.
   optional member, and per typed `additionalProperties` map, sets the rest, so a new optional
   member leaves code built that way compiling. A struct with no required member implements
   `Default` as `new()`.
+- A member that is both optional and nullable has three wire states, so it is a
+  `Nullable<T>` (re-exported at the root): `Nullable::Absent` leaves it off the wire and is what a
+  missing member decodes as, `Nullable::Null` writes and reads an explicit `null`, and
+  `Nullable::Value(v)` holds a value. Its `with_<member>` setter takes `impl Into<Nullable<T>>`,
+  so `with_nickname("Rex".to_owned())` sets a value and `with_nickname(None)` sends the `null`
+  that clears it in a PATCH. An optional JSON `content` parameter whose schema is nullable is a
+  `Nullable<T>` field of its `…Params` struct the same way. A required nullable member is
+  `Option<T>`, and an optional non-nullable one is `Option<T>` whose `None` is absence.
 - `Client::with_credential(scheme, credential)` registers static secrets (via
   [`secrecy`](https://docs.rs/secrecy)) or async token providers; operation `security`
   requirements pick the first satisfiable alternative and attach bearer/basic/apiKey credentials.
   A missing required credential is a request-construction error — typed as
   `RequestError::MissingCredential`, listing for each security alternative the schemes with no
-  registered credential; a credential of a kind its scheme cannot carry as
-  `RequestError::CredentialMismatch`; and a failed token provider as
+  registered credential; a credential of a kind its scheme cannot carry, or a `Credential::Basic`
+  whose username holds `:` (which RFC 7617 §2 forbids), as `RequestError::CredentialMismatch`;
+  and a failed token provider as
   `RequestError::CredentialProvider` — never a silent 401. A failure inside the selected
   alternative never falls through to a later one; `Client::without_credential(scheme)`
   unregisters a scheme, so a client derived with it (`client.clone().without_credential("oauth")`)
-  selects the next fully registered alternative. A `Credential::Refreshable` adds the reactive
+  selects the next fully registered alternative. A request carries one `Authorization` header: a
+  basic or bearer credential replaces the `Basic` one a base URL's `user:pass@` userinfo sets.
+  A `Credential::Refreshable` adds the reactive
   case: when its check reads a failed response as a rejection of the token it carried, the
   runtime asks it for a fresh token and sends the call once more, returning the original response
   when the body cannot be cloned, the refresh fails, or the replay is rejected again.

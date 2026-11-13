@@ -63,15 +63,23 @@ pub(super) fn location_statements(
     };
     let required = at_location(true).map(|(param, ident)| serialize(param, quote! { &#ident }));
     let optional = at_location(false).map(|(param, ident)| {
-        optional_param_guard(&names.bindings, ident, serialize(param, quote! { value }))
+        optional_param_guard(
+            &names.bindings,
+            param,
+            ident,
+            serialize(param, quote! { value }),
+        )
     });
     required.chain(optional).collect()
 }
 
 /// The statement that runs `body` with `value` bound to an optional parameter's value, when the
-/// caller supplied the optional-parameters bundle and set `ident` in it.
+/// caller supplied the optional-parameters bundle and set `ident` in it. A parameter that sends an
+/// explicit `null` binds the whole `&Nullable<T>`, which its JSON codec writes as `null` or the
+/// value, whenever it is not `Absent`; any other binds the `&T` its `Option` holds.
 fn optional_param_guard(
     bindings: &OperationBindings,
+    param: &crate::ir::Parameter,
     ident: &crate::name::Ident,
     body: TokenStream,
 ) -> TokenStream {
@@ -79,10 +87,18 @@ fn optional_param_guard(
         .params
         .as_ref()
         .expect("optional parameters argument allocated");
+    let set = if param.sends_explicit_null() {
+        quote! {
+            .filter(|params| !params.#ident.is_absent())
+            .map(|params| &params.#ident)
+        }
+    } else {
+        quote! { .and_then(|params| params.#ident.as_ref()) }
+    };
     quote! {
         if let Some(value) = #params_binding
             .as_ref()
-            .and_then(|params| params.#ident.as_ref())
+            #set
         {
             #body
         }
@@ -278,13 +294,13 @@ pub(super) fn cookie_param_tokens(
     }
 }
 
-/// The emitted doc of an explicit-null parameter's `Option<Option<T>>` field: which of its three
-/// states sends the JSON `null` and which omits the parameter.
+/// The emitted doc of an explicit-null parameter's `Nullable<T>` field: which of its three states
+/// sends the JSON `null` and which omits the parameter.
 const EXPLICIT_NULL_FIELD_DOC: &str =
-    "`Some(None)` sends the JSON `null`; `None` omits the parameter.";
+    "`Nullable::Null` sends the JSON `null`; `Nullable::Absent` omits the parameter.";
 
-/// The emitted doc of an explicit-null parameter's `Option<T>` setter, the same contract seen from
-/// the setter's argument.
+/// The emitted doc of an explicit-null parameter's setter, the same contract seen from the
+/// setter's argument.
 const EXPLICIT_NULL_SETTER_DOC: &str =
     "`None` sends the JSON `null`; leaving the parameter unset omits it.";
 
@@ -301,17 +317,30 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
         .collect();
     let fields = optional.iter().map(|(param, ident)| {
         let wire = &param.name;
-        // Every struct param is optional, so the field is always an `Option`, and a `None` field
-        // is omitted. `ty_tokens` already wraps a nullable param (`"null"` in its type array) in
-        // `Option`. A nullable JSON `content` param wraps that once more, because its codec sends
-        // `Some(None)` as the text `null` (#996). Any other nullable param keeps the single
-        // `Option`, collapsing absent and `null` to `None`: its serialization has no token for
-        // `null` (see `Parameter::sends_explicit_null`).
-        let ty = if param.ty.nullable && !param.sends_explicit_null() {
-            ty_tokens(param.ty, names, true)
+        // Every struct param is optional, so its unset state is omitted. A nullable JSON
+        // `content` param is a `support::Nullable` over the non-nullable type, because its codec
+        // sends `Null` as the text `null` (#996). Every other param is an `Option`, its `None`
+        // omitted: `ty_tokens` already wraps a nullable one (`"null"` in its type array) in
+        // `Option`, collapsing absent and `null` to `None`, since its serialization has no token
+        // for `null` (see `Parameter::sends_explicit_null`).
+        let (ty, skip) = if param.sends_explicit_null() {
+            let inner = ty_tokens(
+                Ty {
+                    nullable: false,
+                    ..param.ty
+                },
+                names,
+                true,
+            );
+            (
+                quote! { support::Nullable<#inner> },
+                "support::Nullable::is_absent",
+            )
+        } else if param.ty.nullable {
+            (ty_tokens(param.ty, names, true), "Option::is_none")
         } else {
             let inner = ty_tokens(param.ty, names, true);
-            quote! { Option<#inner> }
+            (quote! { Option<#inner> }, "Option::is_none")
         };
         let mut notes: Vec<String> = Vec::new();
         if param.deprecated {
@@ -329,35 +358,44 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
             .map(|note| quote! { #[doc = #note] });
         quote! {
             #(#notes)*
-            #[serde(rename = #wire, skip_serializing_if = "Option::is_none")]
+            #[serde(rename = #wire, skip_serializing_if = #skip)]
             pub #ident: #ty,
         }
     });
-    // Fluent consuming setters, one per optional param, in field order. Each takes the value the
-    // field's outer `Option` wraps, by value, and stores `Some` of it: the bare `T` for a param
-    // whose field is a single `Option<T>`, nullable or not, and `Option<T>` for one that sends an
-    // explicit `null`, where the setter's `None` is that `null`. By value (not `impl Into<T>`)
-    // keeps inference/coherence trivial for every generated field type.
+    // Fluent consuming setters, one per optional param, in field order. One whose field is an
+    // `Option<T>`, nullable or not, takes the bare `T` by value and stores `Some` of it; by value
+    // (not `impl Into<T>`) keeps inference trivial for every generated field type. One that sends
+    // an explicit `null` takes `impl Into<Nullable<T>>`, as a nullable model member's setter does,
+    // so `value`, `Some(value)` and `None` (that `null`) all fit.
     let setters = optional.iter().map(|(param, ident)| {
         let inner = ty_tokens(
             Ty {
-                nullable: param.sends_explicit_null(),
+                nullable: false,
                 ..param.ty
             },
             names,
             true,
         );
         let doc = format!("Set the `{}` parameter.", param.name);
-        let null_doc = param
-            .sends_explicit_null()
-            .then(|| quote! { #[doc = ""] #[doc = #EXPLICIT_NULL_SETTER_DOC] });
-        quote! {
-            #[doc = #doc]
-            #null_doc
-            #[must_use]
-            pub fn #ident(mut self, value: #inner) -> Self {
-                self.#ident = Some(value);
-                self
+        if param.sends_explicit_null() {
+            quote! {
+                #[doc = #doc]
+                #[doc = ""]
+                #[doc = #EXPLICIT_NULL_SETTER_DOC]
+                #[must_use]
+                pub fn #ident(mut self, value: impl Into<support::Nullable<#inner>>) -> Self {
+                    self.#ident = value.into();
+                    self
+                }
+            }
+        } else {
+            quote! {
+                #[doc = #doc]
+                #[must_use]
+                pub fn #ident(mut self, value: #inner) -> Self {
+                    self.#ident = Some(value);
+                    self
+                }
             }
         }
     });

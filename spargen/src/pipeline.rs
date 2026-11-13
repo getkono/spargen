@@ -61,6 +61,8 @@ pub(crate) fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path
                 diagnostics: cached.diagnostics,
                 outcome: Outcome::Cached,
                 truncated: cached.truncated,
+                // Only a generating run is cached, and a generating run emitted no error.
+                error_dropped: false,
             };
             audit(&mut report, &cached.requirements);
             return with_leading(report, cargo_diagnostics);

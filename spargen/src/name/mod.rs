@@ -22,7 +22,7 @@ use casing::{to_pascal_case, to_snake_case};
 pub(crate) use ident::Ident;
 pub(crate) use keyword::{escape, IdentRole};
 use scope::{RankedRequest, Scope};
-pub(crate) use synth::{request_body_hint, synth_operation_id};
+pub(crate) use synth::{assign_operation_ids, request_body_hint, OperationIdRequest};
 
 /// The identifiers allocated for a whole [`Api`]: one record per operation, and one name per type,
 /// field, variant and server item. Codegen looks these names up rather than deriving them; the
@@ -297,6 +297,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "Middleware",
     "MiddlewareBackend",
     "Next",
+    "Nullable",
     "ProblemDetails",
     "ProtocolError",
     "RedirectError",

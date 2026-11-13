@@ -6,7 +6,8 @@ use super::{Code, Diagnostic, FileId, JsonPointer, Span};
 ///
 /// Generation collects all diagnostics rather than stopping at the first error (batch
 /// reporting); the cap bounds memory under pathological inputs. Once the cap is reached, further
-/// diagnostics are dropped and `cap_reached` records that it happened.
+/// warnings are dropped and `cap_reached` records that it happened; a further error evicts the
+/// most recent retained warning instead, so a capped batch keeps its errors up to the cap.
 ///
 /// `cap_reached` is what `Report::truncated` reports, so a run that hits `batch_cap` says so
 /// instead of presenting a partial list as a complete one.
@@ -23,6 +24,9 @@ pub(crate) struct Diagnostics {
     cap: usize,
     error_count: usize,
     cap_reached: bool,
+    /// Whether an error was dropped at the cap rather than retained: only when every retained
+    /// diagnostic is already an error, or the cap is zero.
+    error_dropped: bool,
     /// The path of each file the run loaded, indexed by its [`FileId`]: what names the file a
     /// recorded diagnostic's span lies in.
     files: Vec<Option<String>>,
@@ -42,6 +46,7 @@ impl Diagnostics {
             cap,
             error_count: 0,
             cap_reached: false,
+            error_dropped: false,
             files: Vec::new(),
         }
     }
@@ -60,8 +65,11 @@ impl Diagnostics {
     /// Record a diagnostic.
     ///
     /// A diagnostic identical to one already recorded (same code, pointer, span, message, and
-    /// remedy) is ignored. Past the cap, a diagnostic is dropped and sets the cap-reached flag,
-    /// but an error still counts toward [`Self::has_errors`].
+    /// remedy) is ignored. Past the cap, a warning is dropped and sets the cap-reached flag. An
+    /// error past the cap evicts the most recent retained warning and takes its place; where
+    /// every retained diagnostic is already an error (or the cap is zero), it is dropped, and
+    /// [`Self::into_parts`] reports that an error went unretained. Either way it counts toward
+    /// [`Self::has_errors`].
     ///
     /// A diagnostic with a span and no file is given the path [`Self::register_file`] recorded
     /// for the span's file, when one was.
@@ -76,14 +84,33 @@ impl Diagnostics {
             return;
         }
 
-        if matches!(diagnostic.severity, super::Severity::Error) {
+        let is_error = matches!(diagnostic.severity, super::Severity::Error);
+        if is_error {
             self.error_count += 1;
         }
         if self.items.len() < self.cap {
             self.identities.insert(identity);
             self.items.push(diagnostic);
-        } else {
-            self.cap_reached = true;
+            return;
+        }
+        self.cap_reached = true;
+        if !is_error {
+            return;
+        }
+        // An error makes room by evicting the most recent retained warning, so a run the error
+        // rejects still lists an error however many warnings came before it.
+        let evicted = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item.severity, super::Severity::Warning));
+        match evicted {
+            Some(index) => {
+                let warning = self.items.remove(index);
+                self.identities.remove(&Identity::of(&warning));
+                self.identities.insert(identity);
+                self.items.push(diagnostic);
+            }
+            None => self.error_dropped = true,
         }
     }
 
@@ -104,10 +131,10 @@ impl Diagnostics {
         &self.items
     }
 
-    /// The collected diagnostics, in emission order, and whether the cap was reached and
-    /// diagnostics past it were dropped.
-    pub(crate) fn into_parts(self) -> (Vec<Diagnostic>, bool) {
-        (self.items, self.cap_reached)
+    /// The collected diagnostics, in emission order; whether the cap was reached and
+    /// diagnostics past it were dropped; and whether an error was among the dropped ones.
+    pub(crate) fn into_parts(self) -> (Vec<Diagnostic>, bool, bool) {
+        (self.items, self.cap_reached, self.error_dropped)
     }
 
     /// Collapse to `Ok(value)` when no errors were recorded, else `Err(`[`Aborted`]`)`.
@@ -312,6 +339,72 @@ mod tests {
         assert!(diagnostics.cap_reached());
     }
 
+    /// An error past the cap evicts the most recent retained warning, unindexing it, so the
+    /// batch keeps its errors; with no warning left to evict, the error is dropped and reported
+    /// as such, and a warning past the cap is dropped either way (#1345).
+    #[test]
+    fn an_error_past_the_cap_evicts_the_most_recent_warning() {
+        let warning = |message: &str| {
+            Diagnostic::warning(
+                Code::ServerInitiatedFlowIgnored,
+                Provenance::new(JsonPointer::root(), None),
+            )
+            .message(message)
+            .build()
+        };
+        let mut diagnostics = Diagnostics::new(3);
+        diagnostics.emit(warning("first warning"));
+        diagnostics.emit(warning("second warning"));
+        diagnostics.emit(warning("third warning"));
+        diagnostics.emit(diagnostic("first error"));
+        diagnostics.emit(warning("late warning"));
+        diagnostics.emit(diagnostic("second error"));
+
+        let messages = |diagnostics: &Diagnostics| {
+            diagnostics
+                .items()
+                .iter()
+                .map(|item| item.message.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            messages(&diagnostics),
+            ["first warning", "first error", "second error"]
+        );
+        assert_eq!(diagnostics.identities.len(), 3);
+        assert!(diagnostics.cap_reached());
+
+        // An evicted warning is no longer indexed, so it is not mistaken for a duplicate; past
+        // the cap it is dropped like any other warning.
+        diagnostics.emit(warning("third warning"));
+        assert_eq!(diagnostics.items().len(), 3);
+
+        diagnostics.emit(diagnostic("fourth error"));
+        assert_eq!(
+            messages(&diagnostics),
+            ["first error", "second error", "fourth error"]
+        );
+        assert!(!diagnostics.clone().into_parts().2);
+
+        diagnostics.emit(diagnostic("fifth error"));
+        let (items, truncated, error_dropped) = diagnostics.into_parts();
+        assert_eq!(items.len(), 3);
+        assert!(truncated);
+        assert!(error_dropped);
+    }
+
+    /// A zero cap retains nothing, and an error it drops is reported as dropped.
+    #[test]
+    fn a_zero_cap_reports_a_dropped_error() {
+        let mut diagnostics = Diagnostics::new(0);
+        diagnostics.emit(diagnostic("dropped"));
+        assert!(diagnostics.has_errors());
+        let (items, truncated, error_dropped) = diagnostics.into_parts();
+        assert!(items.is_empty());
+        assert!(truncated);
+        assert!(error_dropped);
+    }
+
     /// A duplicate of any earlier diagnostic in a large batch is found, not only of the latest,
     /// and the index stays the same size as the retained items.
     #[test]
@@ -348,7 +441,7 @@ mod tests {
 
         assert!(diagnostics.cap_reached());
         assert_eq!(diagnostics.items().len(), 1);
-        let (items, truncated) = diagnostics.into_parts();
+        let (items, truncated, _) = diagnostics.into_parts();
         assert!(truncated);
         assert_eq!(
             items

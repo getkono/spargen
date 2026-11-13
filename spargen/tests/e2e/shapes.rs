@@ -548,7 +548,7 @@ fn new_and_setters_build_the_decoded_value() {
 fn new_sets_each_optional_member_as_decoding_an_absent_one_does() {
     let envelope = Envelope::new("e".to_owned(), 1, Some("p".to_owned()));
     assert_eq!(envelope.note, None);
-    assert_eq!(envelope.label, None);
+    assert_eq!(envelope.label, constructors_client::Nullable::Absent);
     assert_eq!(envelope.mode, Some(EnvelopeMode::Fast));
     assert!(envelope.additional.is_empty());
     let decoded: Envelope =
