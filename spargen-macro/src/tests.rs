@@ -1,5 +1,8 @@
-use super::{config, failure_message, spec_for, tracking, Args, Consumer};
-use spargen::{ComponentKind, DateTimeBackend, OmitMethod, OmitRule, Spec};
+use super::{config, failure_message, spec_for, tracking, Args, Consumer, SWITCHES};
+use spargen::{
+    CarriedDocs, Carve, ComponentKind, DateTimeBackend, Narrowing, OmitMethod, OmitRule, Spec,
+    TestingModule, UnionTags, UuidMapping,
+};
 
 fn os(value: &str) -> Option<std::ffi::OsString> {
     Some(value.into())
@@ -111,13 +114,13 @@ fn parses_every_build_configuration_control() {
     let args: Args = syn::parse_str(EVERY_CONTROL).unwrap();
 
     assert_eq!(args.spec.value(), "openapi.yaml");
-    assert_eq!(args.uuid, Some(false));
+    assert_eq!(args.uuid, Some(UuidMapping::String));
     assert_eq!(args.datetime, Some(DateTimeBackend::Jiff));
-    assert_eq!(args.carve, Some(true));
-    assert_eq!(args.open_narrowing, Some(true));
-    assert_eq!(args.open_unions, Some(true));
-    assert_eq!(args.verbatim_docs, Some(true));
-    assert_eq!(args.testing, Some(true));
+    assert_eq!(args.carve, Some(Carve::Auto));
+    assert_eq!(args.open_narrowing, Some(Narrowing::Open));
+    assert_eq!(args.open_unions, Some(UnionTags::Open));
+    assert_eq!(args.verbatim_docs, Some(CarriedDocs::Verbatim));
+    assert_eq!(args.testing, Some(TestingModule::Emitted));
     assert_eq!(args.error_body_cap, Some(4096));
     assert_eq!(args.batch_cap, Some(7));
     assert_eq!(args.omit.rules, every_omit_rule());
@@ -213,7 +216,7 @@ fn an_absent_argument_keeps_the_config_files_value() {
 }
 
 /// Each switch overrides the config file in both directions: its `= bool` form sets either
-/// value, its bare key sets `true`, and `no_uuid` sets `false`.
+/// value, its bare key sets `true`, and its `no_<switch>` form sets `false`.
 #[test]
 fn each_switch_overrides_the_config_file_either_way() {
     let on = Spec::new("openapi.yaml")
@@ -244,11 +247,84 @@ fn each_switch_overrides_the_config_file_either_way() {
     let bare =
         args(r#""openapi.yaml", uuid, carve, open_narrowing, open_unions, verbatim_docs, testing"#);
     assert_eq!(config(&bare, off.clone()), on);
-    let negated = args(r#""openapi.yaml", no_uuid"#);
-    assert_eq!(
-        config(&negated, on.clone()),
-        on.with_uuid(spargen::UuidMapping::String)
+    let negated = args(
+        r#""openapi.yaml", no_uuid, no_carve, no_open_narrowing, no_open_unions,
+           no_verbatim_docs, no_testing"#,
     );
+    assert_eq!(config(&negated, on.clone()), off);
+    for switch in SWITCHES {
+        let one = args(&format!(r#""openapi.yaml", no_{switch}"#));
+        let applied = config(&one, on.clone());
+        assert_ne!(applied, on, "`no_{switch}` changed nothing");
+        assert_eq!(
+            config(
+                &args(&format!(r#""openapi.yaml", {switch} = false"#)),
+                on.clone()
+            ),
+            applied,
+            "`no_{switch}` and `{switch} = false` differ"
+        );
+    }
+}
+
+/// Each `no_<switch>` turns off a switch the `spargen.toml` beside the spec turns on.
+#[test]
+fn each_negated_switch_overrides_a_config_file_that_enables_it() {
+    let scratch = Scratch::new("negated-over-config");
+    scratch.write(
+        "spargen.toml",
+        "uuid = true\ncarve = true\nopen_narrowing = true\nopen_unions = true\n\
+         verbatim_docs = true\ntesting = true\n",
+    );
+    let enabled = spec_for(&args(r#""openapi.yaml""#), &scratch.consumer()).unwrap();
+    assert_eq!(enabled.uuid(), UuidMapping::Uuid);
+    assert_eq!(enabled.carve(), Carve::Auto);
+    assert_eq!(enabled.open_narrowing(), Narrowing::Open);
+    assert_eq!(enabled.open_unions(), UnionTags::Open);
+    assert_eq!(enabled.verbatim_docs(), CarriedDocs::Verbatim);
+    assert_eq!(enabled.testing(), TestingModule::Emitted);
+
+    let negated = spec_for(
+        &args(
+            r#""openapi.yaml", no_uuid, no_carve, no_open_narrowing, no_open_unions,
+               no_verbatim_docs, no_testing"#,
+        ),
+        &scratch.consumer(),
+    )
+    .unwrap();
+    assert_eq!(
+        negated,
+        enabled
+            .with_uuid(UuidMapping::String)
+            .with_carve(Carve::Off)
+            .with_open_narrowing(Narrowing::Exact)
+            .with_open_unions(UnionTags::Closed)
+            .with_verbatim_docs(CarriedDocs::Rewritten)
+            .with_testing(TestingModule::Omitted)
+    );
+}
+
+/// A switch given in both spellings, in either order and with any value, is an error naming it,
+/// and a `no_<switch>` takes no value.
+#[test]
+fn both_spellings_of_a_switch_together_are_an_error() {
+    for switch in SWITCHES {
+        let repeated = format!(
+            "`{switch}` given more than once (as `{switch}`, `{switch} = …` or `no_{switch}`)"
+        );
+        for source in [
+            format!(r#""a.yaml", {switch}, no_{switch}"#),
+            format!(r#""a.yaml", no_{switch}, {switch}"#),
+            format!(r#""a.yaml", {switch} = false, no_{switch}"#),
+            format!(r#""a.yaml", no_{switch}, no_{switch}"#),
+        ] {
+            assert_eq!(parse_error(&source), repeated, "{source}");
+        }
+        assert_eq!(
+            parse_error(&format!(r#""a.yaml", no_{switch} = false"#)),
+            format!("`no_{switch}` takes no value; write `{switch} = true` or `{switch} = false`")
+        );
+    }
 }
 
 /// `datetime = "…"` replaces the config file's backend with any of the four, and leaves it in
@@ -633,6 +709,44 @@ fn tracking_includes_the_spec_its_refs_the_manifest_the_lock_and_the_config() {
     );
 }
 
+/// An `omit { file("…") { … } }` path is relative to the spec's directory, as a `$ref` is, not to
+/// the crate's `Cargo.toml` the spec path itself is relative to.
+#[test]
+fn an_omit_file_path_is_relative_to_the_spec() {
+    let scratch = Scratch::new("omit-file-base");
+    let spec = scratch.write("api/openapi.yaml", SPLIT_SPEC);
+    scratch.write("api/schemas.yaml", SPLIT_SCHEMAS);
+    let (requirements, _) = spargen::requirements(&Spec::new(spec)).unwrap();
+    let manifest = scratch.write(
+        "Cargo.toml",
+        &format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+                 [workspace]\n\n{}",
+            requirements.manifest_block()
+        ),
+    );
+    let preview = |source: &str| {
+        let configured = spec_for(&args(source), &scratch.consumer()).unwrap();
+        let preview = spargen::__private::preview_for_macro(&configured, &manifest);
+        assert_eq!(
+            failure_message("api/openapi.yaml", &preview),
+            None,
+            "{source}"
+        );
+        preview.contents.unwrap()
+    };
+
+    // `Pet`'s one property is the pointer omitted, so the struct is empty exactly when the rule
+    // found its file.
+    let emptied = "pub struct Pet {}";
+    assert!(!preview(r#""api/openapi.yaml""#).contains(emptied));
+    let omitted = preview(
+        r#""api/openapi.yaml",
+           omit { file("schemas.yaml") { pointers { "/Pet/properties/name"; } } }"#,
+    );
+    assert!(omitted.contains(emptied), "{omitted}");
+}
+
 #[test]
 fn every_argument_parse_error_names_what_was_wrong() {
     let cases: &[(&str, &str)] = &[
@@ -654,9 +768,17 @@ fn every_argument_parse_error_names_what_was_wrong() {
         (r#"42"#, "expected identifier"),
         (
             r#""a.yaml", uuids"#,
-            "unknown argument `uuids`; expected a spec path or one of: uuid, no_uuid, datetime, \
-                 carve, open_narrowing, open_unions, verbatim_docs, testing, error_body_cap, \
-                 batch_cap, omit, keep, bind_header",
+            "unknown argument `uuids`; expected a spec path, a switch (uuid, carve, \
+                 open_narrowing, open_unions, verbatim_docs, testing, each also as \
+                 `no_<switch>`), or one of: datetime, error_body_cap, batch_cap, omit, keep, \
+                 bind_header",
+        ),
+        (
+            r#""a.yaml", no_datetime"#,
+            "unknown argument `no_datetime`; expected a spec path, a switch (uuid, carve, \
+                 open_narrowing, open_unions, verbatim_docs, testing, each also as \
+                 `no_<switch>`), or one of: datetime, error_body_cap, batch_cap, omit, keep, \
+                 bind_header",
         ),
         (r#""a.yaml", uuid = 1"#, "expected boolean literal"),
         (r#""a.yaml", carve = "yes""#, "expected boolean literal"),
@@ -671,7 +793,7 @@ fn every_argument_parse_error_names_what_was_wrong() {
         (r#""a.yaml", datetime = jiff"#, "expected string literal"),
         (
             r#""a.yaml", no_uuid, uuid = true"#,
-            "`uuid` given more than once",
+            "`uuid` given more than once (as `uuid`, `uuid = …` or `no_uuid`)",
         ),
         (
             r#""a.yaml", datetime = "jiff", datetime = "time""#,
@@ -679,23 +801,26 @@ fn every_argument_parse_error_names_what_was_wrong() {
         ),
         (
             r#""a.yaml", carve, carve = false"#,
-            "`carve` given more than once",
+            "`carve` given more than once (as `carve`, `carve = …` or `no_carve`)",
         ),
         (
             r#""a.yaml", open_narrowing = true, open_narrowing"#,
-            "`open_narrowing` given more than once",
+            "`open_narrowing` given more than once (as `open_narrowing`, `open_narrowing = …` or \
+                 `no_open_narrowing`)",
         ),
         (
             r#""a.yaml", open_unions, open_unions = false"#,
-            "`open_unions` given more than once",
+            "`open_unions` given more than once (as `open_unions`, `open_unions = …` or \
+                 `no_open_unions`)",
         ),
         (
             r#""a.yaml", verbatim_docs, verbatim_docs = false"#,
-            "`verbatim_docs` given more than once",
+            "`verbatim_docs` given more than once (as `verbatim_docs`, `verbatim_docs = …` or \
+                 `no_verbatim_docs`)",
         ),
         (
             r#""a.yaml", testing, testing = false"#,
-            "`testing` given more than once",
+            "`testing` given more than once (as `testing`, `testing = …` or `no_testing`)",
         ),
         (r#""a.yaml" no_uuid"#, "expected `,`"),
         (

@@ -80,7 +80,7 @@ parsing paths.
 
 ### Testing with a mock backend
 
-`Spec::with_testing(TestingModule::Emitted)` (`testing = true` in `spargen.toml`, or the macro's `testing` switch) emits a
+`Spec::with_testing(TestingModule::Emitted)` (`testing = true` in `spargen.toml`, or the macro's `testing` switch, which `no_testing` turns off) emits a
 `testing` module beside the client. Its `MockBackend` is a backend to build the client on, with one
 typed registration per operation, so a test fakes the API by operation rather than by path:
 
