@@ -252,8 +252,10 @@ impl TypeGraph {
 
     /// Whether two references decode exactly the same JSON values: [`same_generated_type`], or two
     /// nominal definitions that are distinct Rust items of one structure (#492). Two structs match
-    /// when they declare the same wire names with the same `required` flags and XML hints, each
-    /// field's type matches by this same test, and their `additionalProperties` policies match;
+    /// when they declare the same wire names, each either decoded as optional or not
+    /// ([`Field::decodes_optional`], which `required` and `readOnly`/`writeOnly` decide), with the
+    /// same XML hints, each field's type matches by this same test, and their
+    /// `additionalProperties` policies match;
     /// two string enums match when they list the same value set and agree on whether they are
     /// open; two `Never` definitions match, since neither decodes any value (#643), so arrays of
     /// two such items both decode only `[]`; two base64 bytes newtypes match, since both decode
@@ -262,9 +264,10 @@ impl TypeGraph {
     /// [`same_generated_type`]: `true` means no value tells the two apart, which is what a `oneOf`'s
     /// exactly-one rule needs, but not that they are one Rust type, so a caller that needs one type
     /// (a response body's) asks [`same_generated_type`] instead. Annotations a decode never reads
-    /// — docs, `deprecated`, `readOnly`/`writeOnly`, a field's `default` — are not compared.
+    /// — docs, `deprecated`, a field's `default` — are not compared.
     ///
     /// [`same_generated_type`]: Self::same_generated_type
+    /// [`Field::decodes_optional`]: crate::ir::Field::decodes_optional
     pub(crate) fn same_decoded_values(&self, a: Ty, b: Ty) -> bool {
         self.same_generated_type_guarded(a, b, true, &mut Vec::new())
     }
@@ -361,9 +364,9 @@ impl TypeGraph {
     }
 
     /// Whether two structs decode the same values, for
-    /// [`same_decoded_values`](Self::same_decoded_values): the same wire names, each with the same
-    /// `required` flag, XML hints, and a field type that decodes the same values, and matching
-    /// `additionalProperties` policies. Field order is not compared; a decode reads by name.
+    /// [`same_decoded_values`](Self::same_decoded_values): the same wire names, each decoded as
+    /// optional or not alike, with the same XML hints, and a field type that decodes the same
+    /// values, and matching `additionalProperties` policies. Field order is not compared; a decode reads by name.
     fn same_struct_shape(
         &self,
         x: &Struct,
@@ -383,9 +386,7 @@ impl TypeGraph {
             && x.fields.iter().all(|field| {
                 y.fields.iter().any(|other| {
                     other.name == field.name
-                        && other.required == field.required
-                        && other.read_only == field.read_only
-                        && other.write_only == field.write_only
+                        && other.decodes_optional() == field.decodes_optional()
                         && other.xml.name == field.xml.name
                         && other.xml.attribute == field.xml.attribute
                         && other.xml.unsupported == field.xml.unsupported
@@ -542,5 +543,54 @@ mod tests {
         assert!(!graph.same_decoded_values(first, string));
         assert!(!graph.same_generated_type(first, second));
         assert!(!graph.same_generated_type(first_array, second_array));
+    }
+
+    /// A `required` `readOnly` or `writeOnly` member decodes as absent when missing (#1326), so a
+    /// struct requiring it decodes the values one leaving it optional does, and not those of one
+    /// requiring it plainly.
+    #[test]
+    fn a_relaxed_required_member_decodes_as_an_optional_one_does() {
+        use crate::ir::{AdditionalProps, Field, PropertyName, Struct, Ty, TypeKind};
+        let mut graph = crate::ir::TypeGraph::default();
+        let id = graph.insert(primitive("S"));
+        let id = Ty {
+            id,
+            nullable: false,
+            boxed: false,
+        };
+        let mut object = |required: bool, read_only: bool, write_only: bool| {
+            let mut def = primitive("O");
+            def.kind = TypeKind::Struct(Struct {
+                fields: vec![Field {
+                    name: PropertyName {
+                        wire: "id".to_owned(),
+                    },
+                    ty: id,
+                    required,
+                    deprecated: false,
+                    read_only,
+                    write_only,
+                    default: None,
+                    xml: Default::default(),
+                    undeclared: false,
+                }],
+                additional: AdditionalProps::Allow,
+            });
+            Ty {
+                id: graph.insert(def),
+                nullable: false,
+                boxed: false,
+            }
+        };
+        let optional = object(false, false, false);
+        let required = object(true, false, false);
+        let required_read_only = object(true, true, false);
+        let required_write_only = object(true, false, true);
+        let optional_read_only = object(false, true, false);
+        assert!(graph.same_decoded_values(required_read_only, optional));
+        assert!(graph.same_decoded_values(required_write_only, optional));
+        assert!(graph.same_decoded_values(optional_read_only, optional));
+        assert!(!graph.same_decoded_values(required_read_only, required));
+        assert!(!graph.same_decoded_values(required_write_only, required));
     }
 }

@@ -567,11 +567,11 @@ fn applies_default(field: &Field) -> bool {
 ///
 /// So `new` with the constructed members equals what decoding an object of just those members
 /// yields. With no constructed member, `Default` is `new()`: derived when every other member is
-/// absent there, and otherwise an `impl` calling `new`.
-///
-/// [constructed]: Field::constructed Setter names are `with_` before the field
+/// absent there, and otherwise an `impl` calling `new`. Setter names are `with_` before the field
 /// identifier unraw, so they are distinct exactly when the identifiers are, which allocation makes
 /// them within one struct.
+///
+/// [constructed]: Field::constructed
 fn emit_struct_constructors(
     id: crate::ir::TypeId,
     object: &crate::ir::Struct,
