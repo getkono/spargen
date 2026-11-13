@@ -36,7 +36,7 @@ pub fn generate_text(contents: &str, configure: impl FnOnce(Spec) -> Spec) -> St
 pub fn generate_to_string(spec: Spec) -> (Report, Option<String>) {
     let temp = tempfile::tempdir().unwrap();
     let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
-    let report = spargen::generate(&spec.build(out.clone()).cargo(CargoIntegration::Off));
+    let report = spargen::generate(&spec.build(out.clone()).with_cargo(CargoIntegration::Off));
     let text = match std::fs::read_to_string(&out) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == ErrorKind::NotFound => None,

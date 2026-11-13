@@ -80,7 +80,7 @@ parsing paths.
 
 ### Testing with a mock backend
 
-`Spec::testing(true)` (`testing = true` in `spargen.toml`, or the macro's `testing` switch) emits a
+`Spec::with_testing(TestingModule::Emitted)` (`testing = true` in `spargen.toml`, or the macro's `testing` switch) emits a
 `testing` module beside the client. Its `MockBackend` is a backend to build the client on, with one
 typed registration per operation, so a test fakes the API by operation rather than by path:
 
@@ -261,7 +261,7 @@ A standard member carried with another type than the RFC gives it is in neither 
 
 A description that narrows the problem `type` per status (`allOf: [$ref: Problem, {properties:
 {type: {const: …}}}]`) makes an unlisted `type` a decode failure by default, so it reaches the raw
-path above. The opt-in `open_narrowing` (`Spec::open_narrowing(true)`, `open_narrowing = true` in
+path above. The opt-in `open_narrowing` (`Spec::with_open_narrowing(Narrowing::Open)`, `open_narrowing = true` in
 `spargen.toml`, `--open-narrowing`, or `open_narrowing` in `generate_api!`) lowers that narrowing,
 in a response body's own schema, to an open enum instead: each listed value keeps its variant, one
 more (`Other(String)`, renamed when a listed value takes that name) holds any other string, and
@@ -388,10 +388,10 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 
 ### `uuid` and dates
 
-`format: uuid` maps to the `uuid` crate, as an opt-out mapping: call `Spec::uuid(false)` (or use the
+`format: uuid` maps to the `uuid` crate, as an opt-out mapping: call `Spec::with_uuid(UuidMapping::String)` (or use the
 macro's `no_uuid`, or `uuid = false` in `spargen.toml`) to fall back to `String`.
 
-`format: date-time` / `date` map to the crate the date-time backend names: `Spec::datetime`
+`format: date-time` / `date` map to the crate the date-time backend names: `Spec::with_datetime`
 (`spargen::DateTimeBackend`), `datetime = "…"` in `spargen.toml`, `--datetime …` on the CLI, or
 the macro's `datetime = "…"`.
 

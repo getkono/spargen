@@ -202,7 +202,7 @@ referenced a carved schema) and stays deterministic.
 ```rust
 let out_dir = std::env::var("OUT_DIR").unwrap();
 let build = spargen::Spec::new("openapi.json")
-    .carve(true)
+    .with_carve(spargen::Carve::Auto)
     .build(format!("{out_dir}/api.rs"));
 // `Generated` on a cold build, `Cached` on a warm one — `expect_success` accepts both.
 spargen::generate(&build).expect_success();

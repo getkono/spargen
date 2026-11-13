@@ -47,15 +47,15 @@ fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[
     append(&mut hasher, version.as_bytes());
     append(&mut hasher, build.as_bytes());
     append(&mut hasher, spec.path.as_str().as_bytes());
-    append(&mut hasher, &[u8::from(spec.uuid)]);
+    append(&mut hasher, &[u8::from(spec.uuid.is_on())]);
     append(&mut hasher, &[datetime_byte(spec.datetime)]);
     append(&mut hasher, &(spec.error_body_cap as u64).to_be_bytes());
     append(&mut hasher, &(spec.batch_cap as u64).to_be_bytes());
-    append(&mut hasher, &[u8::from(spec.carve)]);
-    append(&mut hasher, &[u8::from(spec.open_narrowing)]);
-    append(&mut hasher, &[u8::from(spec.open_unions)]);
-    append(&mut hasher, &[u8::from(spec.verbatim_docs)]);
-    append(&mut hasher, &[u8::from(spec.testing)]);
+    append(&mut hasher, &[u8::from(spec.carve.is_on())]);
+    append(&mut hasher, &[u8::from(spec.open_narrowing.is_on())]);
+    append(&mut hasher, &[u8::from(spec.open_unions.is_on())]);
+    append(&mut hasher, &[u8::from(spec.verbatim_docs.is_on())]);
+    append(&mut hasher, &[u8::from(spec.testing.is_on())]);
     // The omit profile's one canonical encoding, the same bytes its provenance-header
     // fingerprint hashes, so the two cannot drift apart.
     append(&mut hasher, &spec.omit.canonical_encoding());
@@ -450,7 +450,7 @@ components:
             .build(Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap())
             // Not a build script: the cargo integration has nothing to integrate with, and
             // saying so keeps these reports free of `W013`.
-            .cargo(CargoIntegration::Off);
+            .with_cargo(CargoIntegration::Off);
         (temp, build)
     }
 
@@ -583,7 +583,7 @@ components:
         assert_eq!(lock_changed.paths.len(), 3);
 
         let mut configured = config;
-        configured.spec = configured.spec.clone().error_body_cap(1);
+        configured.spec = configured.spec.clone().with_error_body_cap(1);
         let config_changed = InputSnapshot::load(&configured.spec).unwrap();
         assert_ne!(lock_changed.digest, config_changed.digest);
     }
@@ -798,16 +798,16 @@ components:
     fn the_input_fingerprint_is_the_digest_of_the_framed_input_buffer() {
         let spec = Spec {
             path: Utf8PathBuf::from("/work/openapi.yaml"),
-            uuid: true,
+            uuid: crate::UuidMapping::Uuid,
             datetime: DateTimeBackend::String,
             omit: crate::Omit::default(),
             error_body_cap: 4096,
             batch_cap: 64,
-            carve: true,
-            open_narrowing: false,
-            open_unions: true,
-            verbatim_docs: false,
-            testing: true,
+            carve: crate::Carve::Auto,
+            open_narrowing: crate::Narrowing::Exact,
+            open_unions: crate::UnionTags::Open,
+            verbatim_docs: crate::CarriedDocs::Rewritten,
+            testing: crate::TestingModule::Emitted,
             bind_headers: vec!["X-Api-Version".to_owned()],
             config_files: Vec::new(),
         };
@@ -880,7 +880,7 @@ components:
         .unwrap();
         let config = Spec::new(Utf8PathBuf::from_path_buf(root).unwrap())
             .build(Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap())
-            .cargo(CargoIntegration::Off);
+            .with_cargo(CargoIntegration::Off);
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
         let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
@@ -936,9 +936,9 @@ components:
         )
         .unwrap();
         let config = Spec::new(Utf8PathBuf::from_path_buf(root).unwrap())
-            .batch_cap(1)
+            .with_batch_cap(1)
             .build(Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap())
-            .cargo(CargoIntegration::Off);
+            .with_cargo(CargoIntegration::Off);
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
         let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
@@ -1015,7 +1015,7 @@ components:
             (
                 "uuid",
                 Spec {
-                    uuid: !uuid,
+                    uuid: crate::UuidMapping::from_on(!uuid.is_on()),
                     ..base.clone()
                 },
             ),
@@ -1043,35 +1043,35 @@ components:
             (
                 "carve",
                 Spec {
-                    carve: !carve,
+                    carve: crate::Carve::from_on(!carve.is_on()),
                     ..base.clone()
                 },
             ),
             (
                 "open_narrowing",
                 Spec {
-                    open_narrowing: !open_narrowing,
+                    open_narrowing: crate::Narrowing::from_on(!open_narrowing.is_on()),
                     ..base.clone()
                 },
             ),
             (
                 "open_unions",
                 Spec {
-                    open_unions: !open_unions,
+                    open_unions: crate::UnionTags::from_on(!open_unions.is_on()),
                     ..base.clone()
                 },
             ),
             (
                 "verbatim_docs",
                 Spec {
-                    verbatim_docs: !verbatim_docs,
+                    verbatim_docs: crate::CarriedDocs::from_on(!verbatim_docs.is_on()),
                     ..base.clone()
                 },
             ),
             (
                 "testing",
                 Spec {
-                    testing: !testing,
+                    testing: crate::TestingModule::from_on(!testing.is_on()),
                     ..base.clone()
                 },
             ),

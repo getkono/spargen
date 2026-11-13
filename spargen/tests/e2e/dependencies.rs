@@ -47,7 +47,7 @@ fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
         &spec
             .clone()
             .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
-            .cargo(CargoIntegration::Off),
+            .with_cargo(CargoIntegration::Off),
     );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
@@ -101,7 +101,7 @@ paths:
         &spec
             .clone()
             .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
-            .cargo(CargoIntegration::Off),
+            .with_cargo(CargoIntegration::Off),
     );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();

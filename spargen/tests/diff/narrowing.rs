@@ -35,7 +35,7 @@ fn narrowed_problem(values: &str) -> String {
 /// that takes its name moves it, which is a rename a consumer's `match` sees.
 #[test]
 fn an_open_enums_catch_all_is_a_variant_of_its_surface() {
-    let open = |spec: Spec| spec.open_narrowing(true);
+    let open = |spec: Spec| spec.with_open_narrowing(spargen::Narrowing::Open);
 
     // A new listed value is the additive rule's variant, as on a closed enum.
     let added = diff_configured(
@@ -185,7 +185,7 @@ fn major_changes(report: &DiffReport) -> Vec<(ChangeKind, String)> {
 /// member types (#924), so moving a member renames no type of the output.
 #[test]
 fn open_narrowing_meets_the_same_set_in_every_member_order() {
-    let open = |spec: Spec| spec.open_narrowing(true);
+    let open = |spec: Spec| spec.with_open_narrowing(spargen::Narrowing::Open);
     let string = "{ type: string }";
     let x = "{ const: x }";
     let listed = "{ $ref: '#/components/schemas/Listed' }";
@@ -331,7 +331,7 @@ fn open_narrowing_never_opens_a_set_narrowed_against_a_formatted_string() {
 /// adds no type: it only opens the types the option-off output already has.
 #[test]
 fn open_narrowing_adds_no_type_the_output_does_not_use() {
-    let open = |spec: Spec| spec.open_narrowing(true);
+    let open = |spec: Spec| spec.with_open_narrowing(spargen::Narrowing::Open);
     let string = "{ type: string }";
     let x = "{ const: x }";
     let listed = "{ $ref: '#/components/schemas/Listed' }";
@@ -460,7 +460,7 @@ fn an_object_all_of_emits_no_meet_a_later_member_superseded() {
     let object = |property: &str, ty: &str| {
         format!("{{ type: object, required: [{property}], properties: {{ {property}: {ty} }} }}")
     };
-    let open = |spec: Spec| spec.open_narrowing(true);
+    let open = |spec: Spec| spec.with_open_narrowing(spargen::Narrowing::Open);
     let types = [
         "{ type: string }",
         "{ $ref: '#/components/schemas/Listed' }",

@@ -251,7 +251,7 @@ fn a_description_without_operations_passes_the_strict_consumer() {
 fn verbatim_docs_leaves_the_links_for_rustdoc_to_report() {
     let temp = tempfile::tempdir().unwrap();
     let out = strict_fixture(temp.path(), "verbatim_docs_client", |spec| {
-        spec.verbatim_docs(true)
+        spec.with_verbatim_docs(spargen::CarriedDocs::Verbatim)
     });
 
     let generated = std::fs::read_to_string(out.join("src/rest_client.rs")).unwrap();
