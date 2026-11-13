@@ -174,8 +174,8 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
         match &self.first {
             Some(first) if !same_origin(first, &url) => {
                 return Some(Err(Error::PaginationOriginChanged {
-                    from: first.clone(),
-                    to: url,
+                    from: without_credentials(first.clone()),
+                    to: without_credentials(url),
                 }));
             }
             Some(_) => {}
@@ -233,6 +233,17 @@ fn same_origin(a: &Url, b: &Url) -> bool {
     a.scheme() == b.scheme()
         && a.host() == b.host()
         && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// `url` without its userinfo and query, the two places a URL carries a credential (an `apiKey`
+/// query parameter, a `user:password@` prefix), so an error holding it prints neither through
+/// `Display` or `Debug`.
+fn without_credentials(mut url: Url) -> Url {
+    url.set_query(None);
+    // Both fail only for a URL with no host, which an `http(s)` page URL always has.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url
 }
 
 /// Extract the `rel="next"` target from a response's `Link` header(s) as an absolute [`Url`], or

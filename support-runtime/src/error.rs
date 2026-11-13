@@ -103,9 +103,10 @@ pub enum Error<E> {
     /// page before it was yielded; nothing was sent for `to`. Not transient: the same link is
     /// refused again.
     PaginationOriginChanged {
-        /// The first page the paginator fetched, whose origin every later page must share.
+        /// The first page the paginator fetched, whose origin every later page must share,
+        /// without its userinfo and query, where a credential would ride.
         from: url::Url,
-        /// The refused URL the `next` link resolved to.
+        /// The refused URL the `next` link resolved to, without its userinfo and query.
         to: url::Url,
     },
 }

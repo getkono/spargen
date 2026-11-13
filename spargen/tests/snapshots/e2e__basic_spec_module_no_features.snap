@@ -1963,9 +1963,10 @@ mod support {
             /// page before it was yielded; nothing was sent for `to`. Not transient: the same link is
             /// refused again.
             PaginationOriginChanged {
-                /// The first page the paginator fetched, whose origin every later page must share.
+                /// The first page the paginator fetched, whose origin every later page must share,
+                /// without its userinfo and query, where a credential would ride.
                 from: url::Url,
-                /// The refused URL the `next` link resolved to.
+                /// The refused URL the `next` link resolved to, without its userinfo and query.
                 to: url::Url,
             },
         }
@@ -4138,8 +4139,8 @@ mod support {
                     Some(first) if !same_origin(first, &url) => {
                         return Some(
                             Err(Error::PaginationOriginChanged {
-                                from: first.clone(),
-                                to: url,
+                                from: without_credentials(first.clone()),
+                                to: without_credentials(url),
                             }),
                         );
                     }
@@ -4192,6 +4193,15 @@ mod support {
         fn same_origin(a: &Url, b: &Url) -> bool {
             a.scheme() == b.scheme() && a.host() == b.host()
                 && a.port_or_known_default() == b.port_or_known_default()
+        }
+        /// `url` without its userinfo and query, the two places a URL carries a credential (an `apiKey`
+        /// query parameter, a `user:password@` prefix), so an error holding it prints neither through
+        /// `Display` or `Debug`.
+        fn without_credentials(mut url: Url) -> Url {
+            url.set_query(None);
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url
         }
         /// Extract the `rel="next"` target from a response's `Link` header(s) as an absolute [`Url`], or
         /// `None` when there is no usable next link. Pure and side-effect-free — the building block callers
