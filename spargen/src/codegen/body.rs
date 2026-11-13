@@ -34,8 +34,9 @@ pub(super) fn body_send_tokens(
         // A raw byte body (`bytes::Bytes`, from `format: binary` / `contentEncoding: base64`) is sent
         // as-is regardless of the declared media — its serde form is a sequence of numbers, which
         // the text arm's scalar renderer refuses. This must be checked before the media match so a
-        // `text/plain` (or any) media over a `Bytes` schema sends its octets. This one raw-bytes send is shared
-        // with the octet-stream arm below, so no path sends raw bytes without `Content-Type`.
+        // `text/plain` (or any) media over a `Bytes` schema sends its octets. This one raw-bytes
+        // send is shared with the octet-stream arm below, so no path sends raw bytes without
+        // `Content-Type`.
         // A raw binary body arrives as anything `Into<HttpBody>` (`Api::sends_binary_body`) and
         // moves into the request without a copy, or is streamed; a base64 newtype is cloned.
         let raw_bytes_send = if api.sends_binary_body(operation) {
