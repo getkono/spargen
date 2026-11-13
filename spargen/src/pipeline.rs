@@ -23,7 +23,7 @@ pub(crate) fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path
 fn generate_rereading(
     build: &Build,
     cache_dir: Option<&Utf8Path>,
-    mut reread: impl FnMut(&Spec) -> Result<cache::InputSnapshot, diag::Diagnostics>,
+    mut reread: impl FnMut(&Spec) -> Result<cache::InputSnapshot, cache::LoadFailure>,
 ) -> Report {
     let spec = &build.spec;
     let cargo = runtime_contract::cargo_environment(build);
