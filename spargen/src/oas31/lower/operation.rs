@@ -7,44 +7,30 @@ use indexmap::IndexMap;
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{
-    BoundHeader, Docs, Method, Operation, OperationId, ParamLoc, PathSegment, SchemeId,
-    SecuritySchemeDef,
+    BoundHeader, Docs, Method, Operation, OperationId, ParamLoc, PathSegment, PathTemplate,
+    SchemeId, SecuritySchemeDef,
 };
-use crate::name::synth_operation_id;
 use crate::oas31::{OperationObject, ParameterObject, PathItem, ResponseObject};
 
 use super::security::lower_security_requirement;
-use super::server::{lower_server_override, parse_path_template};
+use super::server::lower_server_override;
 use super::{append_text, LowerCtx};
 
-/// Lower the `operation` declared under `method` on the path item `item` of the template `path`:
-/// its merged parameters, request body, responses, security requirements, documentation and
-/// server override. Its id joins `operation_ids`, and a duplicate, a malformed parameter set, a
+/// Lower the `operation` declared under `method` on the path item `item` of the template
+/// `path_template`, under the `id` assigned to it: its merged parameters, request body, responses,
+/// security requirements, documentation and server override. A malformed parameter set, a
 /// response it cannot decode where it stands, or a security requirement naming no lowered scheme
 /// in `security_schemes` is reported; the operation is returned regardless, and the pass's
 /// result carries the rejection.
 pub(super) fn lower_operation(
     ctx: &mut LowerCtx<'_, '_>,
-    path: &str,
+    path_template: PathTemplate,
     item: &PathItem,
     method: &Method,
     operation: &OperationObject,
+    id: String,
     security_schemes: &IndexMap<SchemeId, SecuritySchemeDef>,
-    operation_ids: &mut HashSet<String>,
 ) -> Operation {
-    let path_template = parse_path_template(path);
-    let id = operation
-        .operation_id
-        .clone()
-        .unwrap_or_else(|| synth_operation_id(method, &path_template));
-    if !operation_ids.insert(id.clone()) {
-        Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
-            .message(format!(
-                "operationId `{id}` is not unique within the API description"
-            ))
-            .emit(ctx.diags);
-    }
-
     let mut params = Vec::new();
     let mut merged_parameters: IndexMap<(String, String), ParameterObject> = IndexMap::new();
     for parameter in &item.parameters {

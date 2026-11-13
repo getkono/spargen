@@ -37,10 +37,11 @@ mod xml;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use crate::diag::{Aborted, Diagnostics, Provenance};
-use crate::ir::{Api, Info, Ty, TypeGraph, TypeId, TypeKind};
+use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
+use crate::ir::{Api, Info, PathTemplate, Ty, TypeGraph, TypeId, TypeKind};
+use crate::name::{assign_operation_ids, OperationIdRequest};
 
-use super::{Document, Resolver, Schema};
+use super::{Document, PathItem, Resolver, Schema};
 
 use combine::{Gathering, RecordedContribution};
 use cycle::{MemberOrder, MemberOrders, Opening};
@@ -49,7 +50,7 @@ use operation::lower_operation;
 use reference::resolve_path_item;
 use refiner::CategoryMask;
 use security::{lower_security_schemes, resolve_external_security_schemes};
-use server::lower_server;
+use server::{lower_server, parse_path_template};
 use union::HeldUntypedWarning;
 use xml::{gate_xml_field_renames, XmlRecords, XmlSite};
 
@@ -279,21 +280,54 @@ fn lower_pass(
         let _ = ctx.ensure_component(name, None, &document.provenance);
     }
 
+    // Every operation's id is assigned before any is lowered: a declared id wins its spelling over
+    // a synthesized one wherever the spec lists either, so every declared id has to be known
+    // first (#1343).
+    let items: Vec<(PathItem, PathTemplate)> = document
+        .paths
+        .items
+        .iter()
+        .filter_map(|(path, item)| {
+            resolve_path_item(item, resolver, ctx.diags)
+                .map(|item| (item, parse_path_template(path)))
+        })
+        .collect();
+    let id_requests: Vec<OperationIdRequest<'_>> = items
+        .iter()
+        .flat_map(|(item, template)| {
+            item.operations
+                .iter()
+                .map(move |(method, operation)| OperationIdRequest {
+                    declared: operation.operation_id.as_deref(),
+                    method,
+                    path: template,
+                    provenance: &operation.provenance.pointer,
+                })
+        })
+        .collect();
+    let mut ids = assign_operation_ids(&id_requests).into_iter();
     let mut operations = Vec::new();
-    let mut operation_ids = HashSet::new();
-    for (path, item) in &document.paths.items {
-        let Some(item) = resolve_path_item(item, resolver, ctx.diags) else {
-            continue;
-        };
+    let mut declared_ids = HashSet::new();
+    for (item, template) in &items {
         for (method, operation) in &item.operations {
+            let id = ids
+                .next()
+                .expect("every operation was assigned an id in this order");
+            if operation.operation_id.is_some() && !declared_ids.insert(id.clone()) {
+                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                    .message(format!(
+                        "operationId `{id}` is not unique within the API description"
+                    ))
+                    .emit(ctx.diags);
+            }
             operations.push(lower_operation(
                 &mut ctx,
-                path,
-                &item,
+                template.clone(),
+                item,
                 method,
                 operation,
+                id,
                 &security_schemes,
-                &mut operation_ids,
             ));
         }
     }

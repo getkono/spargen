@@ -79,12 +79,15 @@ use.
   requirements pick the first satisfiable alternative and attach bearer/basic/apiKey credentials.
   A missing required credential is a request-construction error — typed as
   `RequestError::MissingCredential`, listing for each security alternative the schemes with no
-  registered credential; a credential of a kind its scheme cannot carry as
-  `RequestError::CredentialMismatch`; and a failed token provider as
+  registered credential; a credential of a kind its scheme cannot carry, or a `Credential::Basic`
+  whose username holds `:` (which RFC 7617 §2 forbids), as `RequestError::CredentialMismatch`;
+  and a failed token provider as
   `RequestError::CredentialProvider` — never a silent 401. A failure inside the selected
   alternative never falls through to a later one; `Client::without_credential(scheme)`
   unregisters a scheme, so a client derived with it (`client.clone().without_credential("oauth")`)
-  selects the next fully registered alternative. A `Credential::Refreshable` adds the reactive
+  selects the next fully registered alternative. A request carries one `Authorization` header: a
+  basic or bearer credential replaces the `Basic` one a base URL's `user:pass@` userinfo sets.
+  A `Credential::Refreshable` adds the reactive
   case: when its check reads a failed response as a rejection of the token it carried, the
   runtime asks it for a fresh token and sends the call once more, returning the original response
   when the body cannot be cloned, the refresh fails, or the replay is rejected again.
