@@ -108,9 +108,18 @@ fn a_json_spelling_of_the_basic_spec_emits_the_same_module() {
     yaml_as_json(&documents[0], &mut json);
     serde_json::from_str::<serde_json::Value>(&json).expect("the conversion is valid JSON");
 
+    // The header names each spec by its file name, the one line the two spellings differ in.
     let from_json = spec_module("openapi.json", &json, |spec| spec);
+    assert!(
+        from_json.contains("\n// source: openapi.json\n"),
+        "{from_json}"
+    );
     assert_eq!(
-        from_json,
+        from_json.replacen(
+            "\n// source: openapi.json\n",
+            "\n// source: openapi.yaml\n",
+            1
+        ),
         basic_spec_module(|spec| spec),
         "the JSON spelling of BASIC_SPEC must emit the YAML spelling's module"
     );

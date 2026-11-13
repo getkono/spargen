@@ -1,14 +1,14 @@
 //! Content-addressed build-script caching: the input fingerprint, the cache record, and the
 //! `cargo:rerun-if-changed` directives over those inputs.
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
 use crate::ir::DateTimeBackend;
 use crate::output::atomic_write;
 use crate::runtime_contract::RuntimeRequirements;
-use crate::source::{sha256_hex, InputBundle, Sha256, LOCK_FILE_NAME};
+use crate::source::{local_identity, sha256_hex, working_dir, InputBundle, Sha256, LOCK_FILE_NAME};
 use crate::{Build, Code, Report, Spec};
 
 const CACHE_FORMAT: u32 = 5;
@@ -41,12 +41,28 @@ impl InputSnapshot {
 /// The input digest of a build of `spec` by spargen `version` (`build` being its build
 /// fingerprint) over `inputs`: every field framed by [`append`] and hashed as it is framed, so the
 /// input bytes are read in place rather than gathered into one buffer first.
+///
+/// No field depends on where the checkout lives or on the OS (#1347): the spec is named by its
+/// file name ([`spec_name`]), and each input by its [`portable_path`] relative to the spec's
+/// directory, the inputs hashed in the order of those names. The machine-local paths stay in
+/// [`InputSnapshot::paths`], which only the `rerun-if-changed` directives read.
 fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[u8])]) -> String {
+    let working_dir = working_dir();
+    let base = local_identity(working_dir.as_deref(), &spec.path)
+        .parent()
+        .map(Utf8Path::to_path_buf)
+        .unwrap_or_default();
+    let mut named: Vec<(String, &[u8])> = inputs
+        .iter()
+        .map(|(path, bytes)| (portable_path(working_dir.as_deref(), &base, path), *bytes))
+        .collect();
+    named.sort_by(|left, right| left.0.cmp(&right.0));
+
     let mut hasher = Sha256::new();
     hasher.update(b"spargen-build-input-v1\0");
     append(&mut hasher, version.as_bytes());
     append(&mut hasher, build.as_bytes());
-    append(&mut hasher, spec.path.as_str().as_bytes());
+    append(&mut hasher, spec_name(&spec.path).as_bytes());
     append(&mut hasher, &[u8::from(spec.uuid.is_on())]);
     append(&mut hasher, &[datetime_byte(spec.datetime)]);
     append(&mut hasher, &(spec.error_body_cap as u64).to_be_bytes());
@@ -64,11 +80,50 @@ fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[
     for name in &spec.bind_headers {
         append(&mut hasher, name.as_bytes());
     }
-    for (path, bytes) in inputs {
-        append(&mut hasher, path.as_str().as_bytes());
+    for (name, bytes) in &named {
+        append(&mut hasher, name.as_bytes());
         append(&mut hasher, bytes);
     }
     hasher.finalize()
+}
+
+/// The name the generated output and its input digest give the spec at `path`: its file name,
+/// which is the same wherever the checkout lives and however the path is spelled.
+pub(crate) fn spec_name(path: &Utf8Path) -> &str {
+    path.file_name().unwrap_or(path.as_str())
+}
+
+/// `path` as the input fingerprint names it: relative to `base` (the spec's directory), `..` for
+/// each segment of `base` past their common prefix, and `/`-separated on every OS. `path` is first
+/// made absolute and normalized lexically, as the bundle identifies a document, so every spelling
+/// of one file names it alike. A path sharing no prefix with `base` (another drive on Windows)
+/// keeps its whole normalized spelling, still `/`-separated.
+fn portable_path(working_dir: Option<&Utf8Path>, base: &Utf8Path, path: &Utf8Path) -> String {
+    let path = local_identity(working_dir, path);
+    let base: Vec<Utf8Component<'_>> = base.components().collect();
+    let path: Vec<Utf8Component<'_>> = path.components().collect();
+    let common = base
+        .iter()
+        .zip(&path)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let segments: Vec<&str> = if common == 0 && !base.is_empty() {
+        path.iter().map(segment).collect()
+    } else {
+        std::iter::repeat_n("..", base.len() - common)
+            .chain(path[common..].iter().map(segment))
+            .collect()
+    };
+    segments.join("/")
+}
+
+/// A path component's spelling between `/` separators: the root directory is the empty segment
+/// that makes the joined path start with `/`.
+fn segment<'a>(component: &Utf8Component<'a>) -> &'a str {
+    match component {
+        Utf8Component::RootDir => "",
+        other => other.as_str(),
+    }
 }
 
 /// The date-time backend's one fingerprint byte. `Time` and `String` keep the bytes the boolean
@@ -794,10 +849,13 @@ components:
     /// The input digest is hashed field by field, and stays the digest of the one framed buffer
     /// the cache format defines: the literal pins it, so an existing cache record and generated
     /// module stay valid, and the buffer spelled out below states the format it is the hash of.
+    /// The spec is framed by its file name and each input by its path relative to the spec's
+    /// directory, the inputs in the order of those names: a config file above the spec's
+    /// directory sorts first by name, though last by its absolute path.
     #[test]
     fn the_input_fingerprint_is_the_digest_of_the_framed_input_buffer() {
         let spec = Spec {
-            path: Utf8PathBuf::from("/work/openapi.yaml"),
+            path: Utf8PathBuf::from("/work/api/openapi.yaml"),
             uuid: crate::UuidMapping::Uuid,
             datetime: DateTimeBackend::String,
             omit: crate::Omit::default(),
@@ -813,12 +871,13 @@ components:
         };
         // A file over a block long, so its bytes cross a block boundary of the hash.
         let schema = "type: string\n".repeat(20);
-        let inputs: [(&Utf8Path, &[u8]); 2] = [
+        let inputs: [(&Utf8Path, &[u8]); 3] = [
             (
-                Utf8Path::new("/work/openapi.yaml"),
+                Utf8Path::new("/work/api/openapi.yaml"),
                 b"openapi: 3.1.0\npaths: {}\n",
             ),
-            (Utf8Path::new("/work/schema.yaml"), schema.as_bytes()),
+            (Utf8Path::new("/work/api/schema.yaml"), schema.as_bytes()),
+            (Utf8Path::new("/work/spargen.toml"), b"batch_cap = 64\n"),
         ];
 
         let mut buffer = b"spargen-build-input-v1\0".to_vec();
@@ -828,7 +887,7 @@ components:
         };
         frame(b"1.2.3");
         frame(b"build");
-        frame(b"/work/openapi.yaml");
+        frame(b"openapi.yaml");
         frame(&[1]);
         frame(&[0]);
         frame(&4096u64.to_be_bytes());
@@ -841,8 +900,11 @@ components:
         frame(&spec.omit.canonical_encoding());
         frame(&1u64.to_be_bytes());
         frame(b"X-Api-Version");
-        for (path, bytes) in inputs {
-            frame(path.as_str().as_bytes());
+        for (name, (_, bytes)) in ["../spargen.toml", "openapi.yaml", "schema.yaml"]
+            .into_iter()
+            .zip([inputs[2], inputs[0], inputs[1]])
+        {
+            frame(name.as_bytes());
             frame(bytes);
         }
 
@@ -850,7 +912,94 @@ components:
         assert_eq!(digest, sha256_hex(&buffer));
         assert_eq!(
             digest,
-            "532c1a5616e7c98f998330fd0cf6930acd4c15df10bd6ebd29b50c47a0a3f8d3"
+            "8ecd1dfb1755bb401d0b0e9105151ba9330a9ddce7cc948776f8e22afe56be23"
+        );
+    }
+
+    /// Each input is named relative to the spec's directory and `/`-separated, whatever the
+    /// spelling of its path: made absolute against the working directory and normalized first, so
+    /// a relative, an absolute and a dotted spelling of one file name it alike (#1347).
+    #[test]
+    fn an_input_is_named_by_its_normalized_path_relative_to_the_spec_directory() {
+        let cwd = Some(Utf8Path::new("/work"));
+        let base = Utf8Path::new("/work/api");
+        for (path, name) in [
+            ("/work/api/openapi.yaml", "openapi.yaml"),
+            ("api/openapi.yaml", "openapi.yaml"),
+            ("/work/api/./schemas/../openapi.yaml", "openapi.yaml"),
+            ("/work/api/schemas/user.yaml", "schemas/user.yaml"),
+            ("api/schemas/user.yaml", "schemas/user.yaml"),
+            ("/work/spargen.toml", "../spargen.toml"),
+            ("/elsewhere/shared.yaml", "../../elsewhere/shared.yaml"),
+        ] {
+            assert_eq!(
+                super::portable_path(cwd, base, Utf8Path::new(path)),
+                name,
+                "{path}"
+            );
+        }
+        // Without a working directory a relative spec's directory stays relative, and an input
+        // spelled the same way is still named from it.
+        assert_eq!(
+            super::portable_path(None, Utf8Path::new("api"), Utf8Path::new("api/a.yaml")),
+            "a.yaml"
+        );
+        assert_eq!(
+            super::portable_path(None, Utf8Path::new(""), Utf8Path::new("a.yaml")),
+            "a.yaml"
+        );
+        // A path sharing no prefix with the spec's directory keeps its whole spelling.
+        assert_eq!(
+            super::portable_path(None, Utf8Path::new("api"), Utf8Path::new("/abs/a.yaml")),
+            "/abs/a.yaml"
+        );
+        assert_eq!(
+            super::spec_name(Utf8Path::new("/work/api/openapi.yaml")),
+            "openapi.yaml"
+        );
+    }
+
+    /// A description and its committed output moved together to another directory, as a fresh
+    /// checkout elsewhere has them, still match: the input digest names no machine-local path, so
+    /// the moved output verifies and its cache record hits (#1347).
+    #[test]
+    fn a_description_moved_with_its_output_is_still_a_cache_hit() {
+        let (temp, config) = fixture();
+        let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
+        let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
+        let snapshot = InputSnapshot::load(&config.spec).unwrap();
+
+        let moved = tempfile::tempdir().unwrap();
+        let moved_root = Utf8Path::from_path(moved.path()).unwrap();
+        for name in ["openapi.yaml", "schema.yaml", "api.rs"] {
+            std::fs::copy(temp.path().join(name), moved_root.join(name)).unwrap();
+        }
+        let relocated = Spec::new(moved_root.join("openapi.yaml"))
+            .build(moved_root.join("api.rs"))
+            .with_cargo(CargoIntegration::Off);
+        let moved_snapshot = InputSnapshot::load(&relocated.spec).unwrap();
+        assert_eq!(moved_snapshot.digest, snapshot.digest);
+        assert_ne!(moved_snapshot.paths, snapshot.paths, "the paths stay local");
+        assert!(
+            verified_output(&relocated.output, &moved_snapshot.digest).is_some(),
+            "the moved output must verify against the moved inputs"
+        );
+
+        // The record is keyed by the output path, a machine-local key only the cache directory
+        // holds; carried along with the build directory, it hits.
+        let moved_cache = Utf8PathBuf::from_path_buf(moved.path().join("cache")).unwrap();
+        std::fs::create_dir_all(&moved_cache).unwrap();
+        std::fs::copy(
+            cache_path(&cache_dir, &config.output),
+            cache_path(&moved_cache, &relocated.output),
+        )
+        .unwrap();
+        let hit = crate::pipeline::generate_with_cache_dir(&relocated, Some(&moved_cache));
+        assert_eq!(hit.outcome(), Outcome::Cached, "{hit:#?}");
+        assert_eq!(
+            std::fs::read(&relocated.output).unwrap(),
+            std::fs::read(&config.output).unwrap()
         );
     }
 
@@ -995,8 +1144,9 @@ components:
         let config = Utf8PathBuf::from_path_buf(temp.path().join("spargen.toml")).unwrap();
         std::fs::write(&config, "# applies nothing\n").unwrap();
 
-        // Byte-identical content at a different path is still a different build input, because
-        // the provenance header records the path.
+        // Byte-identical content under another file name is still a different build input,
+        // because the provenance header records the file name. (The directory it lives in is not:
+        // `a_description_moved_with_its_output_is_still_a_cache_hit`.)
         let moved = temp.path().join("elsewhere.yaml");
         std::fs::copy(path, &moved).unwrap();
         let mut more_omitted = omit.clone();
