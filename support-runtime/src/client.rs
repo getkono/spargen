@@ -71,19 +71,19 @@ pub struct ClientConfig {
     /// response body has been read, before it fails with [`Error::Timeout`] (default `None`: no
     /// total bound, only the connect and read timeouts).
     ///
-    /// It is read each time [`crate::send`] sends a request, so changing it through
+    /// It is read each time the runtime's `send` sends a request, so changing it through
     /// [`ClientCore::config_mut`] applies from the next request on, whichever constructor built
     /// the core, and it is honoured on `wasm32` too. A generated client's `with_timeout` sets it
     /// on the client value it returns, which is how one call gets a deadline of its own. It
     /// travels on the request itself, as a [`crate::TotalTimeout`] extension: a request that
     /// already carries one keeps it, as does one given one by [`RequestOptions::extensions`],
-    /// which [`crate::send`] applies first, [`ReqwestBackend`] enforces it, and so does a caller-supplied
+    /// which `send` applies first, [`ReqwestBackend`] enforces it, and so does a caller-supplied
     /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. Behind
     /// a [`crate::RetryBackend`] it bounds each attempt, not the retried call as a whole. A
     /// streaming response is exempt,
     /// because a stream may rightly stay open indefinitely: an operation returning an
-    /// `EventStream` sends its request with [`crate::send_streaming`], which never applies it, and
-    /// each reconnect resends that same request.
+    /// `EventStream` sends its request with the runtime's `send_streaming`, which never applies
+    /// it, and each reconnect resends that same request.
     pub timeout: Option<Duration>,
     /// Maximum bytes of a success body a non-streaming operation reads before it fails with
     /// [`Error::BodyTooLarge`] (default `None`: a structured success body is read whole, however
@@ -93,7 +93,7 @@ pub struct ClientConfig {
     /// and one that grows past it is abandoned at the chunk that crosses it, which forgoes reuse
     /// of that connection; peak memory is the limit, not what the server chose to send.
     /// [`RequestOptions::max_body`], set per client value with a generated client's
-    /// `with_options`, replaces it. It is read each time [`crate::send`] sends a request, as
+    /// `with_options`, replaces it. It is read each time the runtime's `send` sends a request, as
     /// [`Self::timeout`] is. An operation returning an `EventStream` is exempt: its items are
     /// bounded by [`Self::max_stream_frame`] instead. So is each raw binary body a `_stream` twin
     /// returns as a [`crate::ByteStream`], whose reader picks its own limit; any other success body
@@ -129,7 +129,7 @@ impl Default for ClientConfig {
 /// sets them on the client value it returns, so a call that needs its own derives a client for it
 /// (`client.clone().with_options(options)`) rather than sharing mutable state with other calls.
 ///
-/// They are read each time [`crate::send`] or [`crate::send_streaming`] sends a request, after the
+/// They are read each time the runtime's `send` or `send_streaming` sends a request, after the
 /// request is built and its credentials attached.
 #[derive(Debug, Clone, Default)]
 pub struct RequestOptions {
@@ -163,11 +163,11 @@ pub struct RequestOptions {
 /// The shared core every generated `Client` wraps: the swappable transport [`HttpBackend`] that
 /// executes requests, the base URL, configuration, and per-scheme credentials.
 ///
-/// Requests are built by the runtime itself, as an `http::Request` ([`crate::RequestBuilder`]),
-/// whichever backend executes them (see [`crate::send`]). `new`/`with_config` install the default
-/// [`ReqwestBackend`] on a `reqwest::Client` built from the configuration, `with_client` installs
-/// one on a caller-supplied `reqwest::Client`, and `with_backend` plugs a caller-supplied
-/// transport.
+/// Requests are built by the runtime itself, as an `http::Request`, whichever backend executes
+/// them; the runtime's `send` hands each one to the backend. `new`/`with_config` install the
+/// default [`ReqwestBackend`] on a `reqwest::Client` built from the configuration,
+/// `with_client` installs one on a caller-supplied `reqwest::Client`, and `with_backend` plugs a
+/// caller-supplied transport.
 ///
 /// The generated `Client` wraps one of these and documents its own constructors; each of its
 /// operation methods delegates to the shared dispatch routines.
@@ -205,7 +205,7 @@ impl ClientCore {
     /// as [`Self::with_backend`] would with `Arc::new(ReqwestBackend::new(client))`. The client's
     /// own connect and read timeouts apply instead of [`ClientConfig::connect_timeout`] and
     /// [`ClientConfig::read_timeout`]; [`ClientConfig::timeout`] still applies to each request
-    /// [`crate::send`] sends.
+    /// the runtime's `send` sends.
     pub fn with_client(client: reqwest::Client, base_url: &str) -> Result<Self, Error<Infallible>> {
         Self::with_backend(Arc::new(ReqwestBackend::new(client)), base_url)
     }
@@ -214,9 +214,9 @@ impl ClientCore {
     /// retry, middleware, or an entirely non-reqwest transport — and the default
     /// [`ClientConfig`]; nothing else is built, so several cores can share one backend. Every
     /// request is executed by `backend`, so connecting and reading are bounded however `backend`
-    /// bounds them. [`ClientConfig::timeout`] travels on each request [`crate::send`] sends, as a
-    /// [`crate::TotalTimeout`] extension, for `backend` to enforce. Returns a request-construction
-    /// error if the base URL is invalid.
+    /// bounds them. [`ClientConfig::timeout`] travels on each request the runtime's `send` sends,
+    /// as a [`crate::TotalTimeout`] extension, for `backend` to enforce. Returns a
+    /// request-construction error if the base URL is invalid.
     pub fn with_backend(
         backend: Arc<dyn HttpBackend>,
         base_url: &str,
@@ -274,7 +274,7 @@ impl ClientCore {
         Ok(())
     }
 
-    /// The transport backend that executes requests. [`crate::send`] dispatches through this;
+    /// The transport backend that executes requests. The runtime's `send` dispatches through this;
     /// retry/middleware layers can clone the `Arc` to wrap it.
     pub fn backend(&self) -> &Arc<dyn HttpBackend> {
         &self.backend
@@ -287,8 +287,10 @@ impl ClientCore {
 
     /// Unregister the credential for a named security scheme, returning it if one was registered.
     ///
-    /// This is how a caller reaches a later security alternative, as [`crate::attach_auth`]
-    /// describes. Removing a scheme that was never registered is a no-op returning `None`.
+    /// This is how a caller reaches a later security alternative: an operation attaches the first
+    /// alternative whose schemes all have a registered credential, so removing a scheme of an
+    /// earlier one lets the next call pass over it. Removing a scheme that was never registered is
+    /// a no-op returning `None`.
     pub fn remove_credential(&mut self, scheme: &str) -> Option<Credential> {
         self.credentials.remove(scheme)
     }
@@ -302,7 +304,7 @@ impl ClientCore {
     /// bound to it. An operation of a generated client whose header parameter the build bound
     /// (`Spec::bind_header`) sends this value, as written, instead of taking an argument for it.
     /// `ClientCore`'s `Debug` prints the bound name and redacts the value, and the operation sends
-    /// it through [`crate::RequestBuilder::sensitive_header`], so the request's `Debug` redacts it
+    /// it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts it
     /// too.
     pub fn bind_header(&mut self, name: &str, value: impl Into<String>) {
         self.bound_headers

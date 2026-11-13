@@ -74,6 +74,10 @@ comment. An
 `#[expect(…)]` of any of those lints left at an existing include site is now unfulfilled, which
 `deny(warnings)` turns into an error: drop it, or the whole attribute.
 
+The module may be public too (`pub mod api { … }`): the embedded runtime stays private inside it,
+and no documentation a public item carries links into it, so `RUSTDOCFLAGS="-D warnings" cargo
+doc` passes either way.
+
 Your `[dependencies]` provide the runtime set the generated code needs. The
 [petstore `Cargo.toml`](https://github.com/getkono/spargen/blob/master/examples/petstore/Cargo.toml)
 is a copyable template.
