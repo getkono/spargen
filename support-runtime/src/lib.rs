@@ -94,7 +94,7 @@ pub use base64::{deserialize_base64, serialize_base64};
 pub use blocking::BlockingRuntime;
 #[cfg(feature = "stream")]
 pub use chunked::read_as_it_arrives;
-pub use client::{ClientConfig, ClientCore, RequestOptions};
+pub use client::{ClientConfig, ClientCore, RequestOptions, TransportConfig};
 #[cfg(feature = "time")]
 pub use datetime::{Date, DateParseError, DateTime};
 pub use dispatch::{

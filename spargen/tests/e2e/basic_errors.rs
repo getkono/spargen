@@ -157,13 +157,43 @@ fn with_timeout_sets_the_total_timeout_of_a_derived_client() {
     assert_eq!(base.core().config().timeout, None);
     assert_eq!(upload.core().config().timeout, Some(std::time::Duration::from_secs(300)));
 
-    let bounded = basic_client::Client::with_config("http://127.0.0.1:1", |config| {
+    let bounded = basic_client::Client::with_config("http://127.0.0.1:1", |config, _| {
         config.timeout = Some(std::time::Duration::from_secs(15));
     })
     .unwrap();
     let unbounded = bounded.clone().with_timeout(None);
     assert_eq!(bounded.core().config().timeout, Some(std::time::Duration::from_secs(15)));
     assert_eq!(unbounded.core().config().timeout, None);
+}
+
+// Issue #1335: `with_config` hands the `TransportConfig` over beside the `ClientConfig`, and the
+// default backend's `reqwest::Client` is built from it (reqwest's `Debug` prints a read timeout,
+// and only one that is set); `TransportConfig` is nameable at the root.
+#[test]
+fn with_config_builds_the_client_from_the_transport_config() {
+    let client = basic_client::Client::with_config("http://127.0.0.1:1", |_, transport| {
+        transport.read_timeout = Some(std::time::Duration::from_secs(7));
+    })
+    .unwrap();
+    let built = format!("{:?}", client.core().backend());
+    assert!(built.contains("read_timeout: 7s"), "{built}");
+    let default: basic_client::TransportConfig = Default::default();
+    assert_eq!(default.read_timeout, Some(std::time::Duration::from_secs(300)));
+}
+
+// Issue #1335: a base URL that is not an `http` or `https` URL is refused by every constructor
+// and by `with_base_url`, before anything is sent.
+#[test]
+fn a_base_url_that_is_not_http_or_https_is_refused() {
+    for base in ["localhost:8080", "mailto:x"] {
+        let error = basic_client::Client::new(base).unwrap_err();
+        assert!(matches!(error, basic_client::Error::RequestConstruction(_)), "{error:?}");
+        let error = basic_client::Client::new("http://127.0.0.1:1")
+            .unwrap()
+            .with_base_url(base)
+            .unwrap_err();
+        assert!(matches!(error, basic_client::Error::RequestConstruction(_)), "{error:?}");
+    }
 }
 
 // Issue #1260: `with_options` replaces the options of the client value it derives, which `send`

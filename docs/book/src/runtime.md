@@ -116,18 +116,22 @@ assert_eq!(mock.calls(ops::GET_PET).len(), 1);
 
 ## Timeouts
 
-`Client::new` bounds how long a request may wait, through three `ClientConfig` fields whose
-defaults are deliberately generous, for an application to tighten or loosen:
+`Client::new` bounds how long a request may wait, through three timeouts whose defaults are
+deliberately generous, for an application to tighten or loosen:
 
 | Field | Default | Bounds |
 | --- | --- | --- |
-| `connect_timeout` | 30 s | name resolution, the TCP handshake and TLS |
-| `read_timeout` | 5 min | each wait for the next bytes of a response, a stream's included; every read restarts it |
-| `timeout` | none | one non-streaming request, from connecting until its whole body has been read |
+| `TransportConfig::connect_timeout` | 30 s | name resolution, the TCP handshake and TLS |
+| `TransportConfig::read_timeout` | 5 min | each wait for the next bytes of a response, a stream's included; every read restarts it |
+| `ClientConfig::timeout` | none | one non-streaming request, from connecting until its whole body has been read |
 
 Each one that elapses fails the request with `Error::Timeout`, which is transient. Set them with
-`Client::with_config(base_url, |config| { … })`, which hands the configuration over before the
-`reqwest::Client` the default backend runs on is built from the connect and read timeouts. The
+`Client::with_config(base_url, |config, transport| { … })`, which hands both configurations over
+before the `reqwest::Client` the default backend runs on is built from the `TransportConfig`. That
+is the one place the connect and read timeouts are read, so they are construction-only: the
+`ClientConfig` a client keeps, which `ClientCore::config_mut` reaches, holds the total `timeout`
+and the body limits. A client built with `with_client` or `with_backend` reads no
+`TransportConfig`; its `reqwest::Client` or backend bounds connecting and reading. The
 total `timeout` is applied to each request as it is sent, as a `TotalTimeout` extension the
 backend enforces (`ReqwestBackend` does, and a backend of your own reads it from the request), and
 an operation returning an `EventStream` never applies it, since a stream may rightly stay open

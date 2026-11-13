@@ -285,6 +285,30 @@ fn build_url_on_replaces_the_base_with_an_absolute_server_override() {
     assert_eq!(url.as_str(), "https://files.example.net/v2/blobs");
 }
 
+/// Issue #1335: an absolute server override is held to what the client's base URL is held to: one
+/// that is not an `http` or `https` URL is refused before anything is sent, as a
+/// request-construction error naming its scheme and never the URL.
+#[test]
+fn build_url_on_refuses_a_server_override_that_is_not_http_or_https() {
+    let core = core_at("https://example.com/api/");
+    for server in [
+        "localhost:8080",
+        "mailto:x",
+        "ftp://user:hunter2@files.example/",
+    ] {
+        let error = build_url_on(&core, Some(server), "/blobs", &[]).unwrap_err();
+        assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
+        let message = messages(&error).join(": ");
+        assert!(message.contains("`http` or `https`"), "{message}");
+        assert!(!message.contains("hunter2"), "{message}");
+        let error =
+            build_url_with_query_string_on(&core, Some(server), "/blobs", &[], None).unwrap_err();
+        assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
+    }
+    let url = build_url_on(&core, Some("http://edge.example/v2"), "/blobs", &[]).unwrap();
+    assert_eq!(url.as_str(), "http://edge.example/v2/blobs");
+}
+
 #[test]
 fn build_url_on_joins_a_relative_server_override_onto_the_base() {
     let core = core_at("https://example.com/api/");
