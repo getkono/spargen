@@ -10330,6 +10330,23 @@ pub mod types {
                     );
                 }
             }
+            let refusal: Option<&str> = match self {
+                LooseAnimal::LooseAnimalVariant2(_) => {
+                    Some(" does not select variant LooseAnimal::LooseAnimalVariant2")
+                }
+                _ => None,
+            };
+            if let (Some(refusal), Some(held)) = (refusal, value.get("petType")) {
+                if matches!(held.as_str(), Some("Cat") | Some("Dog")) {
+                    return Err(
+                        serde::ser::Error::custom(
+                            format_args!(
+                                "{}{}{}", "discriminator `petType` value ", held, refusal
+                            ),
+                        ),
+                    );
+                }
+            }
             value.serialize(serializer)
         }
     }
