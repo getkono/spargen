@@ -325,6 +325,18 @@ paths:
             schema: { $ref: '#/components/schemas/Upload' }
       responses:
         '204': { description: ok }
+  /upload-many:
+    post:
+      operationId: uploadMany
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: { $ref: '#/components/schemas/Metainfo' }
+      responses:
+        '204': { description: ok }
 components:
   schemas:
     Metainfo:
@@ -467,6 +479,33 @@ fn a_multipart_part_carries_the_octets_themselves() {
     assert!(
         !String::from_utf8_lossy(body).contains("ZDQ6aW5mb2U="),
         "the part must not carry base64 text"
+    );
+    // A binary part is a file part (#1332): RFC 7578 § 4.2 says it should carry a `filename`,
+    // and servers that see none read it as a plain field. The property's name stands in.
+    assert!(
+        String::from_utf8_lossy(body)
+            .contains("Content-Disposition: form-data; name=\"file\"; filename=\"file\"\r\n"),
+        "the binary part must carry a filename: {}",
+        String::from_utf8_lossy(body)
+    );
+}
+
+/// A binary `additionalProperties` member is a file part too, its key standing in for the
+/// `filename` as a declared property's name does (#1332).
+#[test]
+fn a_binary_overflow_part_carries_its_key_as_its_filename() {
+    let (base, server) = common::serve_no_content();
+    let client = base64_client::BlockingClient::new(&base).unwrap();
+    let mut upload = types::UploadManyBody::new();
+    upload
+        .additional
+        .insert("a\"b".to_owned(), bytes::Bytes::from_static(b"d4:infoe").into());
+    client.upload_many(&upload).expect("upload sends");
+
+    let body = String::from_utf8_lossy(&server.join().unwrap().body).into_owned();
+    assert!(
+        body.contains("Content-Disposition: form-data; name=\"a%22b\"; filename=\"a%22b\"\r\n"),
+        "the overflow part must carry its key as its filename: {body}"
     );
 }
 "##;

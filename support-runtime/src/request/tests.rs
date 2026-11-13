@@ -277,7 +277,8 @@ fn a_form_encodes_its_parts_in_order() {
             MultipartPart::bytes(vec![0_u8, 1])
                 .mime_str("image/png")
                 .unwrap()
-                .headers(headers),
+                .headers(headers)
+                .unwrap(),
         )
         .part("name", MultipartPart::text("Fido"));
     let (content_type, body) = encoded(form);
@@ -326,6 +327,42 @@ fn a_part_name_escapes_only_quote_cr_and_lf() {
         encoded(form).1,
         "--B\r\nContent-Disposition: form-data; name=\"a%22b%0D%0Ac%d é\"\r\n\r\n\r\n--B--\r\n"
     );
+}
+
+/// A part's `filename` follows its name in its `Content-Disposition`, escaped as the name is, and
+/// the last one set is the one written.
+#[test]
+fn a_part_file_name_is_written_after_its_name_and_escaped_like_it() {
+    let form = MultipartForm::new().part(
+        "file",
+        MultipartPart::bytes(vec![0_u8])
+            .file_name("first.png")
+            .file_name("a\"b\r\nc%d é.png")
+            .mime_str("image/png")
+            .unwrap(),
+    );
+    assert_eq!(
+        encoded(form).1,
+        "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a%22b%0D%0Ac%d é.png\"\r\n\
+         Content-Type: image/png\r\n\r\n\u{0}\r\n--B--\r\n"
+    );
+}
+
+/// A part header map holding `Content-Disposition`, in any case, is refused as request
+/// construction, since the part writes its own.
+#[test]
+fn a_part_header_setting_content_disposition_is_refused() {
+    for name in ["content-disposition", "Content-Disposition"] {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_static("form-data; name=\"other\""),
+        );
+        assert!(matches!(
+            MultipartPart::text("x").headers(headers),
+            Err(Error::RequestConstruction(_))
+        ));
+    }
 }
 
 /// A candidate boundary that occurs in a part, in its bytes or its header lines, is passed over
