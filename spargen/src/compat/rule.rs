@@ -6,7 +6,7 @@ use std::borrow::Cow;
 
 use super::glob::{has_glob_meta, unescape_glob, Glob};
 use crate::diag::{FileId, JsonPointer};
-use crate::source::{InputBundle, Node, SpannedValue};
+use crate::source::{FileLookupError, InputBundle, Node, SpannedValue};
 
 /// One compatibility omission (exact or glob).
 /// Strings are `Cow` so a rule can be written as a literal in [`omit!`](crate::omit) with no allocation and
@@ -239,8 +239,9 @@ impl OmitRule {
     /// The concrete construct(s) the rule targets in `bundle`. A rule whose path, name or pointer
     /// carries a glob metacharacter matches many constructs ([`RuleMatch::Glob`]); an exact rule
     /// resolves to a single pointer ([`RuleMatch::Exact`]). A pointer rule that names the
-    /// document root or an unloaded file resolves to nothing, and the error says which.
-    pub(super) fn resolve(&self, bundle: &InputBundle) -> Result<RuleMatch, &'static str> {
+    /// document root, an unloaded file, or a file more than one loaded file answers to resolves to
+    /// nothing, and the error says which (naming the candidates of an ambiguous file).
+    pub(super) fn resolve(&self, bundle: &InputBundle) -> Result<RuleMatch, Cow<'static, str>> {
         let root = bundle.root_id();
         Ok(match self {
             OmitRule::Path { path } if has_glob_meta(path) => {
@@ -308,13 +309,23 @@ impl OmitRule {
             },
             OmitRule::Pointer { file, pointer } => {
                 if pointer.is_empty() {
-                    return Err("omit rules cannot remove the document root");
+                    return Err("omit rules cannot remove the document root".into());
                 }
-                let file_id = file
-                    .as_deref()
-                    .map(|path| bundle.file_id_for_path(path))
-                    .unwrap_or(Some(root))
-                    .ok_or("omit rule references an unloaded file")?;
+                let file_id = match file.as_deref().map(|path| bundle.file_id_for_path(path)) {
+                    None => root,
+                    Some(Ok(id)) => id,
+                    Some(Err(FileLookupError::Unloaded)) => {
+                        return Err("omit rule references an unloaded file".into())
+                    }
+                    Some(Err(FileLookupError::Ambiguous(candidates))) => {
+                        return Err(format!(
+                            "omit rule's file matches more than one loaded file ({}); name it by \
+                             its path relative to the root document",
+                            candidates.join(", ")
+                        )
+                        .into())
+                    }
+                };
                 if has_glob_meta(pointer) {
                     let mut pointers = Vec::new();
                     collect_pointers(

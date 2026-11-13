@@ -192,10 +192,15 @@ pointer = "/components/schemas/X"       # pointer → OmitRule::Pointer
 file = "extra.yaml"                     #   file optional (file-local pointer)
 ```
 
-A pointer rule's `file` names a loaded document by its path exactly as loaded, else by its path
-relative to the root document's directory, else by suffix. The suffix step is the ambiguous one —
-`lib.yaml` is a suffix of `xlib.yaml` — so name a file relative to the root document to be sure
-which one a rule reaches. The rules auto-carve derives are written that way, so the omit
+A pointer rule's `file` — in `spargen.toml`, an `--omit-pointer` flag, `OmitRule::pointer`, or the
+macro's `file("…")` — is relative to the root document's directory, as the root's own `$ref`s are.
+It names a loaded document by its path exactly as loaded, else by its path relative to the root
+document's directory, else by the trailing whole path components exactly one loaded document ends
+in: `pet.yaml` reaches `schemas/pet.yaml`, never `schemas/legacy-pet.yaml`. That last step is the
+only one two documents can meet at — `a/pet.yaml` and `b/pet.yaml`, or a local `schemas/pet.yaml`
+and a vendored copy under `.spargen/vendor/<host>/…/pet.yaml` — and then the rule is `E019`
+naming each candidate, never whichever loaded first, so name a file relative to the root document
+to be sure which one a rule reaches. The rules auto-carve derives are written that way, so the omit
 fingerprint they stamp into generated output does not depend on where the checkout lives — except
 for a document the description reaches by an absolute-path `$ref`, which lies outside the root
 document's directory and is named by that absolute path instead. The description itself fixes that
