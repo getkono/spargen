@@ -111,7 +111,8 @@ impl DateTime {
     }
 
     /// The instant as a duration from `0000-01-01T00:00:00Z`, which every value has: the civil
-    /// date-time is at most ten thousand years from that origin, and the offset under a day.
+    /// date-time is within ten thousand years of that origin and the offset within 26 hours, far
+    /// inside a `SignedDuration`'s range.
     fn instant(&self) -> jiff::SignedDuration {
         self.datetime.duration_since(jiff::civil::DateTime::ZERO)
             - jiff::SignedDuration::from_secs(i64::from(self.offset.seconds()))
