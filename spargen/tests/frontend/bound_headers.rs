@@ -60,7 +60,7 @@ fn a_bound_header_leaves_every_operations_arguments() {
     assert!(
         flat.contains(
             "match self.core.bound_header(\"X-Api-Version\") { Some(value) => { request = \
-             request.header(\"X-Api-Version\", value); } None => {"
+             request.sensitive_header(\"X-Api-Version\", value); } None => {"
         ),
         "{code}"
     );
@@ -76,7 +76,7 @@ fn a_bound_header_leaves_every_operations_arguments() {
     assert!(
         flat.contains(
             "if let Some(value) = self.core.bound_header(\"x-api-version\") { request = \
-             request.header(\"x-api-version\", value); }"
+             request.sensitive_header(\"x-api-version\", value); }"
         ),
         "{code}"
     );
