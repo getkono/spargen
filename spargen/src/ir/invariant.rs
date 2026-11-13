@@ -481,7 +481,10 @@ mod tests {
                     let variant = |name: &str, ty| UnionVariant {
                         name_hint: name.to_owned(),
                         ty,
-                        dispatch: VariantDispatch::Trial { priority: 0 },
+                        dispatch: VariantDispatch::Trial {
+                            priority: 0,
+                            category: None,
+                        },
                     };
                     api.types.insert(def(
                         "Shape",
@@ -567,7 +570,10 @@ mod tests {
                 untagged: None,
             },
             VariantDispatch::Disjoint(DisjointFeature::JsonType(JsonCategory::String)),
-            VariantDispatch::Trial { priority: 0 },
+            VariantDispatch::Trial {
+                priority: 0,
+                category: None,
+            },
         ];
         for (at, strategy) in strategies.iter().enumerate() {
             for (other, dispatch) in dispatches.iter().enumerate() {
@@ -586,7 +592,10 @@ mod tests {
                     UnionVariant {
                         name_hint: "Circle".to_owned(),
                         ty: ty(0),
-                        dispatch: VariantDispatch::Trial { priority: 0 },
+                        dispatch: VariantDispatch::Trial {
+                            priority: 0,
+                            category: None,
+                        },
                     },
                     UnionVariant {
                         name_hint: "Square".to_owned(),
