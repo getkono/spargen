@@ -18,8 +18,9 @@ pub(super) fn body_send_tokens(
 ) -> TokenStream {
     let request_binding = &bindings.request;
     // A body the specification marks `required: false` arrives as `Option<&T>`, so the whole send
-    // block runs only when the caller supplied one. Only a body that lowered to a type takes an
-    // argument at all, so an untyped body is never wrapped.
+    // block runs only when the caller supplied one. Every body lowering keeps has a type (one
+    // declared without a schema takes any value its media carries), which `ir::check_invariants`
+    // holds.
     let typed_body = operation.typed_body();
     let optional_body_binding = typed_body
         .filter(|(body, _)| !body.required)
