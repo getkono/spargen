@@ -33,9 +33,9 @@ pub(super) fn emit_union(
         // field out of the buffer, so a variant struct that declares the discriminator as a
         // (usually required) property would fail with "missing field". Instead the WHOLE value is
         // handed to the selected variant (it keeps its own tag field), and on serialize a tagged
-        // variant's first tag is inserted only when the variant did not already write it; a
-        // variant selected by category or trial is written with no tag. No serde `untagged`, no
-        // `Value` degrade.
+        // variant's first tag is inserted only when the variant did not already write it; a tag
+        // it wrote that would not select it again is a serialization error. A variant selected
+        // by category or trial is written with no tag. No serde `untagged`, no `Value` degrade.
         UnionStrategy::Discriminated {
             tag_field,
             default_variant,
@@ -88,6 +88,132 @@ pub(super) fn emit_union(
             let unknown_ser_arm = unknown.map(|unknown| {
                 quote! {
                     #ident::#unknown { tag, value } => (value.clone(), Some(tag.as_str())),
+                }
+            });
+            // A tag the variant already wrote is kept only if decoding it selects that variant
+            // again: one of its own tags, or, for the `defaultMapping` variant, any value no other
+            // variant's tag claims. Any other held value is refused, never written out (#1344).
+            let refusal_arms = union.variants.iter().enumerate().map(|(index, variant)| {
+                let variant_ident = union_variant_ident(names, id, variant);
+                let refusal = format!(
+                    " does not select variant {}::{}",
+                    ident.as_str(),
+                    variant_ident.as_str()
+                );
+                if *default_variant == Some(index) {
+                    let others = union
+                        .variants
+                        .iter()
+                        .enumerate()
+                        .filter(|(other, _)| *other != index)
+                        .flat_map(|(_, other)| discriminated_dispatch(other).tags);
+                    // A non-string tag reads as an absent one, which also falls back here.
+                    let others: Vec<_> = others.collect();
+                    if others.is_empty() {
+                        return quote! { #ident::#variant_ident(_) => None, };
+                    }
+                    quote! {
+                        #ident::#variant_ident(_) => match held.as_str() {
+                            #(Some(#others))|* => Some(#refusal),
+                            _ => None,
+                        },
+                    }
+                } else {
+                    let accepted = discriminated_dispatch(variant).tags;
+                    if accepted.is_empty() {
+                        quote! { #ident::#variant_ident(_) => None, }
+                    } else {
+                        quote! {
+                            #ident::#variant_ident(_) => match held.as_str() {
+                                #(Some(#accepted))|* => None,
+                                _ => Some(#refusal),
+                            },
+                        }
+                    }
+                }
+            });
+            let unknown_refusal_arm = unknown.map(|unknown| {
+                quote! { #ident::#unknown { .. } => None, }
+            });
+            let held_tag = format!("discriminator `{tag_field}` value ");
+            // Where no variant has a tag to hold, only `Unknown` reaches the check, and it keeps
+            // whatever it holds.
+            let tag_write = if default_variant.is_some()
+                || union
+                    .variants
+                    .iter()
+                    .any(|variant| !discriminated_dispatch(variant).tags.is_empty())
+            {
+                quote! {
+                    if let Some(held) = map.get(#tag_field) {
+                        let refusal: Option<&str> = match self {
+                            #(#refusal_arms)*
+                            #unknown_refusal_arm
+                        };
+                        if let Some(refusal) = refusal {
+                            return Err(serde::ser::Error::custom(format_args!(
+                                "{}{}{}",
+                                #held_tag,
+                                held,
+                                refusal
+                            )));
+                        }
+                    } else {
+                        map.insert(
+                            #tag_field.to_owned(),
+                            serde_json::Value::String(tag.to_owned()),
+                        );
+                    }
+                }
+            } else {
+                quote! {
+                    map.entry(#tag_field.to_owned()).or_insert_with(|| {
+                        serde_json::Value::String(tag.to_owned())
+                    });
+                }
+            };
+            // A variant with no tag of its own (trial-selected, or a `defaultMapping` fallback
+            // without one) writes none, so one it holds is checked too: a tag another variant
+            // claims would route the payload there on decode, and is refused. Its other values,
+            // and a non-string, decode as an unrecognized or absent tag would.
+            let claimed: Vec<&String> = union
+                .variants
+                .iter()
+                .flat_map(|variant| discriminated_dispatch(variant).tags)
+                .collect();
+            let tagless_arms: Vec<TokenStream> = union
+                .variants
+                .iter()
+                .filter(|variant| {
+                    let dispatch = discriminated_dispatch(variant);
+                    dispatch.tags.is_empty() && dispatch.category.is_none()
+                })
+                .map(|variant| {
+                    let variant_ident = union_variant_ident(names, id, variant);
+                    let refusal = format!(
+                        " does not select variant {}::{}",
+                        ident.as_str(),
+                        variant_ident.as_str()
+                    );
+                    quote! { #ident::#variant_ident(_) => Some(#refusal), }
+                })
+                .collect();
+            let tagless_check = (!claimed.is_empty() && !tagless_arms.is_empty()).then(|| {
+                quote! {
+                    let refusal: Option<&str> = match self {
+                        #(#tagless_arms)*
+                        _ => None,
+                    };
+                    if let (Some(refusal), Some(held)) = (refusal, value.get(#tag_field)) {
+                        if matches!(held.as_str(), #(Some(#claimed))|*) {
+                            return Err(serde::ser::Error::custom(format_args!(
+                                "{}{}{}",
+                                #held_tag,
+                                held,
+                                refusal
+                            )));
+                        }
+                    }
                 }
             });
             let missing_tag = format!(
@@ -229,10 +355,9 @@ pub(super) fn emit_union(
                             let serde_json::Value::Object(map) = &mut value else {
                                 return Err(serde::ser::Error::custom(#non_object));
                             };
-                            map.entry(#tag_field.to_owned()).or_insert_with(|| {
-                                serde_json::Value::String(tag.to_owned())
-                            });
+                            #tag_write
                         }
+                        #tagless_check
                         value.serialize(serializer)
                     }
                 }
