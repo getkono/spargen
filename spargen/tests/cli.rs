@@ -514,6 +514,49 @@ fn diff_json_goes_to_stdout() {
     assert_eq!(kinds, ["operation-removed"], "{stdout}");
 }
 
+/// One operation whose 200 body is a `uuid` string.
+const UUID_BODY: &str = r##"
+openapi: 3.1.0
+info: { title: Pets, version: 1.0.0 }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: string, format: uuid }
+"##;
+
+/// `diff` reads the `spargen.toml` beside each spec on its own, so the same spec under a `uuid`
+/// mapping only the new side's config changes is a breaking change the gate fails on.
+#[test]
+fn diff_classifies_a_setting_only_one_sides_config_file_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let old_dir = temp.path().join("old");
+    let new_dir = temp.path().join("new");
+    std::fs::create_dir(&old_dir).unwrap();
+    std::fs::create_dir(&new_dir).unwrap();
+    std::fs::write(new_dir.join("spargen.toml"), "uuid = false\n").unwrap();
+    let old = spec_arg(&old_dir, "openapi.yaml", UUID_BODY);
+    let new = spec_arg(&new_dir, "openapi.yaml", UUID_BODY);
+
+    let (status, stdout, stderr) = spargen(temp.path(), &["diff", &old, &new, "--exit-code"]);
+    assert_eq!(
+        status,
+        Some(1),
+        "a retyped success body fails the gate: stdout {stdout} stderr {stderr}"
+    );
+    assert!(
+        stdout.contains("[success-type-changed] GET /pets: success type `Uuid` -> `String`")
+            && stdout.contains("recommended bump: major"),
+        "{stdout}"
+    );
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
 #[test]
 fn diff_exits_one_when_either_spec_fails_to_lower_with_or_without_the_gate() {
     let temp = tempfile::tempdir().unwrap();
