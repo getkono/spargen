@@ -441,7 +441,9 @@ async fn decode_success_within<T>(
 /// The body is read within the success-body limit the call was made under, as
 /// [`decode_success_with`] reads one, and where the call set none, within
 /// [`crate::ClientConfig::DEFAULT_MAX_BINARY_BODY`]: a binary body is never read whole without a
-/// bound. One past it is [`Error::BodyTooLarge`].
+/// bound. One past it is [`Error::BodyTooLarge`]. A generated method reads with this its one raw
+/// binary success body and each raw binary status of its success enum; its `_stream` twin hands
+/// each such body over unread instead.
 pub async fn decode_success_bytes(
     core: &ClientCore,
     response: Response,

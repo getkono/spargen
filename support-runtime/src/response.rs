@@ -56,7 +56,8 @@ impl<T> ResponseValue<T> {
 }
 
 /// A raw binary success body read as it arrives, which a binary operation's `_stream` twin
-/// returns in place of the whole `Bytes` its buffered method reads.
+/// returns in place of the whole `Bytes` its buffered method reads: as the twin's success, or in
+/// a binary status's variant of the twin's success enum.
 ///
 /// [`Self::next`] yields the body a chunk at a time, and [`Self::collect_bounded`], its only
 /// collector, reads the rest of it into one `Bytes` within a limit the caller names.

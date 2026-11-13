@@ -106,6 +106,8 @@ pub(super) fn emit_response_headers(
 /// Its accessors are generated exhaustively, one arm per variant, so a newly documented status
 /// updates them rather than every caller's `match`: `status()` when every variant is an exact
 /// status, and `body()`/`into_body()` when every bodied variant carries one generated type.
+/// Where the operation has a `_stream` twin, the twin's own success enum follows it
+/// ([`emit_stream_response_enum`]).
 pub(super) fn emit_response_enum(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
     match operation.responses.success() {
         SuccessShape::Enum(entries) => {
@@ -131,6 +133,7 @@ pub(super) fn emit_response_enum(operation: &Operation, api: &Api, names: &Names
                     }
                 }
             });
+            let stream_enum = emit_stream_response_enum(operation, &entries, api, names);
             quote! {
                 #[allow(dead_code, deprecated)]
                 #[derive(Debug, Clone)]
@@ -139,10 +142,95 @@ pub(super) fn emit_response_enum(operation: &Operation, api: &Api, names: &Names
                 }
 
                 #accessors
+
+                #stream_enum
             }
         }
         _ => quote! {},
     }
+}
+
+/// Emit the `{Method}StreamResponse` enum an operation's `_stream` twin returns, where its success
+/// is an enum with a raw binary arm ([`Api::streams_binary_arm`]): the method's success enum, one
+/// variant per documented success status in the same order, with each raw binary arm carrying a
+/// `support::ByteStream` and every other arm unchanged. Empty for an operation with no such twin.
+///
+/// A `ByteStream` is not `Clone`, so the enum derives only `Debug`. It has the method's enum's
+/// `status()`, and an `into_body()` handing the stream over where every bodied variant is a stream.
+fn emit_stream_response_enum(
+    operation: &Operation,
+    entries: &[(StatusSpec, Option<Ty>)],
+    api: &Api,
+    names: &Names,
+) -> Option<TokenStream> {
+    let ident = names
+        .operation(&operation.id)
+        .byte_stream
+        .as_ref()?
+        .success_enum
+        .as_ref()?;
+    let variants = entries.iter().map(|(spec, ty)| {
+        if api.streams_binary_arm(*ty) {
+            let variant_ident = status_variant_ident(*spec);
+            quote! { #variant_ident(support::ByteStream), }
+        } else {
+            response_variant_def(*spec, *ty, names)
+        }
+    });
+    let status = status_method(entries);
+    let into_body = entries
+        .iter()
+        .filter(|(_, ty)| ty.is_some())
+        .all(|(_, ty)| api.streams_binary_arm(*ty))
+        .then(|| {
+            let always = entries.iter().all(|(_, ty)| ty.is_some());
+            let arms = entries.iter().map(|(spec, ty)| {
+                let variant_ident = status_variant_ident(*spec);
+                match (ty, always) {
+                    (Some(_), true) => quote! { Self::#variant_ident(body) => body, },
+                    (Some(_), false) => quote! { Self::#variant_ident(body) => Some(body), },
+                    (None, _) => quote! { Self::#variant_ident => None, },
+                }
+            });
+            let (owned_ty, doc) = if always {
+                (
+                    quote! { support::ByteStream },
+                    " The body this value carries, unread, whichever status carried it.",
+                )
+            } else {
+                (
+                    quote! { Option<support::ByteStream> },
+                    " The body this value carries, unread, whichever status carried it; `None` \
+                     for a documented bodyless status.",
+                )
+            };
+            quote! {
+                #[doc = #doc]
+                pub fn into_body(self) -> #owned_ty {
+                    match self {
+                        #(#arms)*
+                    }
+                }
+            }
+        });
+    let accessors = (status.is_some() || into_body.is_some()).then(|| {
+        quote! {
+            #[allow(dead_code, deprecated)]
+            impl #ident {
+                #status
+                #into_body
+            }
+        }
+    });
+    Some(quote! {
+        #[allow(dead_code, deprecated)]
+        #[derive(Debug)]
+        pub enum #ident {
+            #(#variants)*
+        }
+
+        #accessors
+    })
 }
 
 /// The one generated type every bodied entry carries, bare (unboxed, non-nullable, since a

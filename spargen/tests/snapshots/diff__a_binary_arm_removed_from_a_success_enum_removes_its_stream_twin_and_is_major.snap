@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|stream-twin-removed|GET /blob|stream twin `get_blob_stream` removed
+major|success-type-changed|GET /blob|success type `Success{200:String, 206:Bytes}` -> `String`
+bump=major

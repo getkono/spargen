@@ -122,13 +122,19 @@ the version it emits, and the idioms spargen handles.
   can sign, route or meter by operation.
 - A `format: binary` request body is taken as `impl Into<HttpBody>`: `Bytes` or `Vec<u8>` move in
   without a copy, and `HttpBody::wrap` streams an upload as it is read. A `format: binary` success
-  body read whole is bounded (64 MiB unless `max_body` or `max_success_body` says otherwise), and
-  the operation gains a `{method}_stream` twin on `Client` returning `ResponseValue<ByteStream>`,
+  body read whole, as the one success body or as a status of a success enum, is bounded (64 MiB
+  unless `max_body` or `max_success_body` says otherwise), and the operation gains a
+  `{method}_stream` twin on `Client`. Where the binary body is the one success body, the twin
+  returns `ResponseValue<ByteStream>`; where the success is an enum (a `200` and a `206` of
+  octets, or a `200` download beside a bodyless `204`), it returns
+  `ResponseValue<{Method}StreamResponse>`, the method's enum with each binary status's variant
+  carrying a `ByteStream` and every other status read as the method reads it. A `ByteStream` is
   read chunk by chunk with `next()` or whole with `collect_bounded(limit)`. The twin is its two
   halves too: `{method}_stream_request` builds its request, without the total timeout, and
-  `decode_{method}_stream` hands a response's success body over as a `ByteStream`. Where another
-  method already spells `{method}_stream` or either of its halves, that method keeps it and the
-  twin's name takes a disambiguated one.
+  `decode_{method}_stream` hands a response's binary success body over as a `ByteStream`. Where
+  another method already spells `{method}_stream` or either of its halves, that method keeps it
+  and the twin's name takes a disambiguated one, as the twin's enum does where another type
+  already spells `{Method}StreamResponse`.
 - Every object struct in `types` derives `PartialEq`, as does every type it can hold, so a test
   compares a decoded value with an expected one by `assert_eq!`. `Type::new(..)` takes the
   required members by value in declaration order and sets each optional member as decoding an

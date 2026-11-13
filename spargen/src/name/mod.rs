@@ -126,7 +126,8 @@ pub(crate) struct OperationNames {
     response_headers: HashMap<String, ResponseHeaderNames>,
 }
 
-/// The `_stream` twin of an operation whose success is one raw binary body, and its two halves.
+/// The `_stream` twin of an operation whose success holds a raw binary body, its two halves, and
+/// the success enum it returns where the operation's success is an enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ByteStreamNames {
     /// The twin itself, `{method}_stream`. Allocated in the method scope after every URL accessor,
@@ -139,6 +140,11 @@ pub(crate) struct ByteStreamNames {
     /// The twin's response decoder, `decode_{method}_stream`, which hands a success body over
     /// unread as the twin does. Allocated after every twin's request builder, on the same terms.
     pub(crate) decoder: Ident,
+    /// The `{Method}StreamResponse` success enum the twin returns, present exactly when the
+    /// operation's [`Responses::success`](crate::ir::Responses::success) is an enum: the method's
+    /// success enum with each raw binary arm a `ByteStream`. Allocated in the root scope after
+    /// every error type and success enum, so it yields to both.
+    pub(crate) success_enum: Option<Ident>,
 }
 
 impl OperationNames {
@@ -565,17 +571,6 @@ pub(crate) fn allocate(api: &Api) -> Names {
         allocate_twin_family(api, &method_spellings, &mut operation_scope, |method| {
             format!("decode_{method}_stream")
         });
-    let byte_streams = byte_streams
-        .into_iter()
-        .zip(stream_request_builders)
-        .zip(stream_decoders)
-        .map(|((twin, request_builder), decoder)| {
-            twin.map(|twin| ByteStreamNames {
-                twin,
-                request_builder: request_builder.expect("a twin's request builder"),
-                decoder: decoder.expect("a twin's decoder"),
-            })
-        });
     let companions = request_builders
         .into_iter()
         .zip(decoders)
@@ -583,6 +578,20 @@ pub(crate) fn allocate(api: &Api) -> Names {
         .map(|((request_builder, decoder), preparer)| (request_builder, decoder, preparer));
     let methods: Vec<&Ident> = signatures.iter().map(|(method, ..)| method).collect();
     let (errors, success_enums) = allocate_operation_types(api, &methods, &mut root_scope);
+    let stream_success_enums = allocate_stream_success_enums(api, &methods, &mut root_scope);
+    let byte_streams = byte_streams
+        .into_iter()
+        .zip(stream_request_builders)
+        .zip(stream_decoders)
+        .zip(stream_success_enums)
+        .map(|(((twin, request_builder), decoder), success_enum)| {
+            twin.map(|twin| ByteStreamNames {
+                twin,
+                request_builder: request_builder.expect("a twin's request builder"),
+                decoder: decoder.expect("a twin's decoder"),
+                success_enum,
+            })
+        });
     let records = api
         .operations
         .iter()
@@ -835,6 +844,53 @@ fn allocate_operation_types(
         success_enums[*index] = Some(ident);
     }
     (errors, success_enums)
+}
+
+/// Allocate the `{Method}StreamResponse` success enum of each operation whose `_stream` twin
+/// ([`Api::streams_binary_success`](crate::ir::Api::streams_binary_success)) returns one, its
+/// success being an enum, in the root `scope`, from `methods`, every operation's allocated method
+/// in operation order, and `None` for every other operation. One ranked batch, allocated after
+/// every error type and success enum, so an operation whose own type already spells one keeps it,
+/// and the lexically smaller method wins a contest between two twins.
+fn allocate_stream_success_enums(
+    api: &Api,
+    methods: &[&Ident],
+    scope: &mut Scope,
+) -> Vec<Option<Ident>> {
+    let twinned = |operation: &crate::ir::Operation| {
+        api.streams_binary_success(operation)
+            && matches!(
+                operation.responses.success(),
+                crate::ir::SuccessShape::Enum(_)
+            )
+    };
+    let enums: Vec<(&crate::ir::Operation, &str)> = api
+        .operations
+        .iter()
+        .zip(methods)
+        .filter(|(operation, _)| twinned(operation))
+        .map(|(operation, method)| (operation, method.unraw()))
+        .collect();
+    let hints: Vec<String> = enums
+        .iter()
+        .map(|(_, method)| format!("{method} stream response"))
+        .collect();
+    let requests: Vec<_> = enums
+        .iter()
+        .zip(&hints)
+        .map(|((operation, method), hint)| RankedRequest {
+            hint,
+            provenance: &operation.provenance.pointer,
+            rank: *method,
+        })
+        .collect();
+    let mut allocated = scope.alloc_ranked(&requests, IdentRole::Type).into_iter();
+    api.operations
+        .iter()
+        .map(|operation| {
+            twinned(operation).then(|| allocated.next().expect("one name per twin success enum"))
+        })
+        .collect()
 }
 
 /// Allocate the header struct of each response of every operation of `api` that documents a
