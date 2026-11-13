@@ -9,7 +9,10 @@ use crate::wasm::{BoxFuture, MaybeSend, MaybeSync};
 use crate::{ClientCore, Error, HttpBody, RequestBuilder, RequestError};
 
 // Secret handling is delegated to `secrecy` rather than hand-rolled: it zeroizes on drop and
-// redacts `Debug`. Re-exported so generated code and consumers use one vocabulary.
+// redacts `Debug`. Re-exported so generated code and consumers use one vocabulary. The plaintext
+// a credential is formatted into on its way to a header is held in `secrecy`'s re-exported
+// `Zeroizing` for the same reason.
+use secrecy::zeroize::Zeroizing;
 pub use secrecy::{ExposeSecret, SecretString};
 
 /// A failure from an async token provider.
@@ -583,17 +586,26 @@ fn attach_token(
 ) -> Result<RequestBuilder, Error<Infallible>> {
     match scheme.kind {
         AuthKind::Basic => match credential {
+            // RFC 7617 §2: the server splits the decoded credentials at their first colon, so a
+            // username holding one would be read as another user and password.
+            Credential::Basic { username, .. } if username.contains(':') => {
+                Err(credential_mismatch(scheme.name, "http basic", credential))
+            }
             Credential::Basic { username, password } => {
-                let credentials = format!("{username}:{}", password.expose_secret());
-                let value = format!("Basic {}", base64_encode(credentials.as_bytes()));
-                Ok(request.header(AUTHORIZATION, sensitive_value(&value)?))
+                let value =
+                    basic_authorization(username.as_bytes(), password.expose_secret().as_bytes());
+                set_authorization(request, &value)
             }
             _ => Err(credential_mismatch(scheme.name, "http basic", credential)),
         },
         AuthKind::Bearer => match token {
             Some(token) => {
-                let value = format!("Bearer {}", token.expose_secret());
-                Ok(request.header(AUTHORIZATION, sensitive_value(&value)?))
+                let token = token.expose_secret();
+                let mut value =
+                    Zeroizing::new(String::with_capacity("Bearer ".len() + token.len()));
+                value.push_str("Bearer ");
+                value.push_str(token);
+                set_authorization(request, &value)
             }
             None => Err(credential_mismatch(scheme.name, "bearer", credential)),
         },
@@ -662,12 +674,43 @@ fn sensitive_value(secret: &str) -> Result<HeaderValue, Error<Infallible>> {
     Ok(value)
 }
 
-/// `bytes` in the padded standard base64 alphabet of RFC 4648 §4, as an `http basic` credential
-/// is sent (RFC 7617 §2). The `contentEncoding: base64` codec is embedded only into a client
-/// whose models use it, so `http basic` carries this encoder of its own.
-pub(crate) fn base64_encode(bytes: &[u8]) -> String {
+/// Set the request's one `Authorization` header to `value`, marked sensitive, replacing any value
+/// it already carries: the field is a singleton, and a request built from a URL with userinfo
+/// already carries one (`RequestBuilder::new`), which the scheme's credential supersedes. A value
+/// that does not convert fails the call before anything is sent; a builder that already failed is
+/// left as it is, for `build` to report its failure.
+fn set_authorization(
+    mut request: RequestBuilder,
+    value: &str,
+) -> Result<RequestBuilder, Error<Infallible>> {
+    let value = sensitive_value(value)?;
+    if let Some(headers) = request.headers_mut() {
+        headers.insert(AUTHORIZATION, value);
+    }
+    Ok(request)
+}
+
+/// The `Authorization` value `Basic <base64(username:password)>` (RFC 7617 §2). The joined
+/// credentials and the value are each built at their exact length in a buffer zeroed when dropped,
+/// so neither growth nor drop leaves a plaintext copy behind. A caller refuses a username holding
+/// `:` first. The `contentEncoding: base64` codec is embedded only into a client whose models use
+/// it, so `http basic` carries this encoder of its own.
+pub(crate) fn basic_authorization(username: &[u8], password: &[u8]) -> Zeroizing<String> {
+    let mut credentials = Zeroizing::new(Vec::with_capacity(username.len() + 1 + password.len()));
+    credentials.extend_from_slice(username);
+    credentials.push(b':');
+    credentials.extend_from_slice(password);
+    let mut value = Zeroizing::new(String::with_capacity(
+        "Basic ".len() + credentials.len().div_ceil(3) * 4,
+    ));
+    value.push_str("Basic ");
+    base64_encode_into(&credentials, &mut value);
+    value
+}
+
+/// Append `bytes` to `encoded` in the padded standard base64 alphabet of RFC 4648 §4.
+fn base64_encode_into(bytes: &[u8], encoded: &mut String) {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let group = chunk
             .iter()
@@ -684,7 +727,6 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
             }
         }
     }
-    encoded
 }
 
 fn credential_mismatch(
