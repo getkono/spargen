@@ -15,6 +15,7 @@ mod operation;
 mod responses;
 mod types;
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use indexmap::IndexMap;
@@ -414,13 +415,21 @@ pub(crate) fn list_indent(line: &str) -> Option<usize> {
     (spacing > 0).then_some(leading + digits + 1 + spacing)
 }
 
+/// The content column of the list item `line` opens, with the code fence [`fence_opener`] reads
+/// at that column, when the item's content opens one on the same line (`- ```yaml`).
+pub(crate) fn list_item_fence(line: &str) -> Option<(usize, (u8, usize, &str))> {
+    let column = list_indent(line)?;
+    Some((column, fence_opener(&line[column..])?))
+}
+
 /// The line that closes the code fence Markdown `text` leaves open at its end, at the opening
-/// fence's indentation, or `None` when it leaves none open. A line indented four columns or more
+/// fence's indentation (a fence opened on a list item's line, at the item's content column), or
+/// `None` when it leaves none open. A line indented four columns or more
 /// past the content column of the list item it is in (the margin outside one), after a blank line,
 /// opens no fence: it is an indented code block's. A prose line indented less than two columns
 /// ends the list item.
 pub(crate) fn unclosed_fence(text: &str) -> Option<String> {
-    let mut fence: Option<(u8, usize, &str)> = None;
+    let mut fence: Option<(u8, usize, Cow<'_, str>)> = None;
     let mut previous_blank = true;
     let mut previous_indented = false;
     let mut list_column: Option<usize> = None;
@@ -428,8 +437,8 @@ pub(crate) fn unclosed_fence(text: &str) -> Option<String> {
         let trimmed = line.trim_start_matches([' ', '\t']);
         let blank = trimmed.trim_end().is_empty();
         let mut indented = false;
-        if let Some((marker, length, _)) = fence {
-            if closes_fence(line, marker, length) {
+        if let Some((marker, length, _)) = &fence {
+            if closes_fence(line, *marker, *length) {
                 fence = None;
             }
         } else if !blank
@@ -439,7 +448,10 @@ pub(crate) fn unclosed_fence(text: &str) -> Option<String> {
             indented = true;
         } else if let Some((marker, length, _)) = fence_opener(line) {
             let indent = &line[..line.len() - trimmed.len()];
-            fence = Some((marker, length, indent));
+            fence = Some((marker, length, Cow::Borrowed(indent)));
+        } else if let Some((column, (marker, length, _))) = list_item_fence(line) {
+            list_column = Some(column);
+            fence = Some((marker, length, Cow::Owned(" ".repeat(column))));
         } else if let Some(column) = list_indent(line) {
             list_column = Some(column);
         } else if !blank && line.len() - trimmed.len() < 2 {
@@ -1363,6 +1375,16 @@ mod tests {
                 "a fence at a list item's content indentation opens one",
                 "- a\n\n    ```json\n    {}",
                 Some("    ```"),
+            ),
+            (
+                "a fence on a list item's line opens one at its content column",
+                "- ```yaml\n  a: 1",
+                Some("  ```"),
+            ),
+            (
+                "a fence on a list item's line closes as any other",
+                "10. ~~~\n    a\n    ~~~",
+                None,
             ),
             (
                 "a list item's indented code block's line is no fence",

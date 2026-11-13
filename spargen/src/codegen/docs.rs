@@ -9,7 +9,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use super::CodegenOptions;
-use crate::ir::{closes_fence, fence_opener, leading_columns, list_indent};
+use crate::ir::{closes_fence, fence_opener, leading_columns, list_indent, list_item_fence};
 
 /// Spec-carried prose as it is rendered under `options`: [`sanitize_carried`] applied, or, under
 /// `Spec::verbatim_docs(true)`, the text as written.
@@ -75,15 +75,20 @@ pub(super) fn doc_tokens(docs: &crate::ir::Docs, options: &CodegenOptions) -> To
 /// - a task-list marker (`- [x] done`) and an autolink (`<https://…>`) are kept as written;
 /// - a bare `http://` or `https://` URL is wrapped in `<…>`, which makes it an autolink;
 /// - an HTML tag with no partner (`Vec<T>`'s `<T>`, an unopened `</b>`, a `<` that never closes)
-///   has its `<` escaped as `\<`, so it renders as text; a void element (`<br>`), a self-closing tag
+///   has its `<` escaped as `\<`, so it renders as text, and so does a self-closing tag of an
+///   element that is not void (`<T/>`), which rustdoc rejects; a void element (`<br>`, `<br/>`)
 ///   and a closed pair (`<b>…</b>`) are HTML and stay;
 /// - code spans and backslash escapes are left as written, and so are code blocks, except that
 ///   rustdoc would read an untagged one as a Rust doctest of the consuming crate: an untagged fence
-///   (```` ``` ````, `~~~`) is tagged `text`, an indented code block becomes a fenced one tagged
+///   (```` ``` ````, `~~~`, on a line of its own or after a list item's marker) is tagged `text`, an
+///   indented code block becomes a fenced one tagged
 ///   `text`, and a fence still open at the end of the text is closed there, so the generated text
 ///   after it stays prose. A fence closes only on a fence of its character at least as long, as in
 ///   CommonMark.
+///
+/// Lines end where [`normalize_rustdoc`] ends them: at a `\n`, a `\r\n` or a lone `\r`.
 pub(super) fn sanitize_carried(text: &str) -> String {
+    let text = unify_line_ends(text);
     let lines: Vec<&str> = text.split('\n').collect();
     let mut kinds = Vec::with_capacity(lines.len());
     // The open fence's character and length, and its closing line.
@@ -113,6 +118,12 @@ pub(super) fn sanitize_carried(text: &str) -> String {
             let run = &trimmed[..length];
             fence = Some((marker, length, format!("{indent}{run}")));
             LineKind::Code(info.is_empty().then(|| format!("{indent}{run}text")))
+        } else if let Some((column, (marker, length, info))) = list_item_fence(line) {
+            // The fence opens the item's content, so it closes at the item's content column.
+            let (item, run) = (&line[..column], &line[column..column + length]);
+            list_column = Some(column);
+            fence = Some((marker, length, format!("{}{run}", " ".repeat(column))));
+            LineKind::Code(info.is_empty().then(|| format!("{item}{run}text")))
         } else if let Some((label, destination)) = link_definition(line) {
             LineKind::Definition {
                 label,
@@ -272,7 +283,7 @@ enum Piece {
 enum TagKind {
     Open,
     Close,
-    /// `<br>`, `<x/>`: complete on its own.
+    /// A void element, `<br>` or `<br/>`: complete on its own.
     Complete,
 }
 
@@ -724,7 +735,8 @@ fn html_comment(rest: &str) -> Option<usize> {
 }
 
 /// The length, lowercased name and kind of the HTML tag `rest` starts with: `<name …>`,
-/// `</name>` or `<name …/>`, on one line.
+/// `</name>`, or `<name …/>` of a void element, on one line. A non-void element's `<name …/>` is
+/// no tag: rustdoc rejects it as an invalid self-closing tag, so its `<` is escaped like any other.
 fn html_tag(rest: &str) -> Option<(usize, String, TagKind)> {
     let bytes = rest.as_bytes();
     let close = bytes.get(1) == Some(&b'/');
@@ -746,9 +758,15 @@ fn html_tag(rest: &str) -> Option<(usize, String, TagKind)> {
         return None;
     }
     let name = rest[start..name_end].to_ascii_lowercase();
+    let void = VOID_ELEMENTS.contains(&name.as_str());
     let kind = if close {
         TagKind::Close
-    } else if between.ends_with('/') || VOID_ELEMENTS.contains(&name.as_str()) {
+    } else if between.ends_with('/') {
+        if !void {
+            return None;
+        }
+        TagKind::Complete
+    } else if void {
         TagKind::Complete
     } else {
         TagKind::Open
@@ -759,14 +777,24 @@ fn html_tag(rest: &str) -> Option<(usize, String, TagKind)> {
 /// Normalize spec-authored prose for Rust's documentation lint surface, without altering what it
 /// says:
 ///
+/// - a line ends at a `\n`, a `\r\n` or a lone `\r`, and every line end becomes `\n`: rustc rejects
+///   a bare CR in a doc comment;
+/// - every bidirectional formatting control (U+202A–U+202E, U+2066–U+2069) becomes its escape as
+///   visible text (`\u{202E}`): rustc's deny-by-default `text_direction_codepoint_in_comment`
+///   rejects them in a doc comment;
 /// - every tab becomes four spaces: tabs are visually ambiguous in rustdoc and trip Clippy's
 ///   `tabs_in_doc_comments`, and four spaces preserve table and code alignment;
-/// - a lazy continuation line — a non-blank line that follows a list item or block quote without
-///   itself starting one — is made explicit, indented to the list item's content column or
-///   prefixed with `> `, which is what Clippy's `doc_lazy_continuation` asks for;
-/// - lines inside a fenced code block (```` ``` ```` or `~~~`) take no continuation rewrite: past
-///   the tab rule, which applies to the whole text, they are left as written. A fence closes only on
-///   a fence of its character at least as long, with nothing after it, as in CommonMark.
+/// - a continuation line — a non-blank line that follows a list item or block quote without itself
+///   starting one — is made explicit, indented to exactly the list item's content column or
+///   prefixed with `> `, which is what Clippy's `doc_lazy_continuation` and
+///   `doc_overindented_list_items` ask for. A list continuation indented four or more columns past
+///   that column is paragraph text, however it starts, so when its text would open a heading, a
+///   thematic break, a setext underline, a block quote or a list item at the content column its
+///   marker is escaped (`\#`, `\---`, `\>`, `\- a`, `1\. a`);
+/// - lines inside a fenced code block (```` ``` ```` or `~~~`), one opened on a list item's line
+///   (`- ```yaml`) among them, take no continuation rewrite: past the tab rule, which applies to the
+///   whole text, they are left as written. A fence closes only on a fence of its character at least
+///   as long, with nothing after it, as in CommonMark.
 pub(super) fn normalize_rustdoc(text: &str) -> String {
     #[derive(Clone, Copy)]
     enum Continuation {
@@ -775,7 +803,7 @@ pub(super) fn normalize_rustdoc(text: &str) -> String {
         Quote,
     }
 
-    let text = text.replace('\t', "    ");
+    let text = escape_bidi_controls(&unify_line_ends(text)).replace('\t', "    ");
     let mut continuation = Continuation::None;
     let mut fence: Option<(u8, usize)> = None;
     let mut output = Vec::new();
@@ -794,11 +822,27 @@ pub(super) fn normalize_rustdoc(text: &str) -> String {
             output.push(line.to_owned());
             continue;
         }
+        // A line four or more columns past a list item's content column is that item's paragraph
+        // text, whatever it starts with.
+        let paragraph_column = match continuation {
+            Continuation::List(indent) if line.len() - trimmed.len() >= indent + 4 => Some(indent),
+            _ => None,
+        };
         if trimmed.is_empty() {
             continuation = Continuation::None;
             output.push(String::new());
+        } else if let Some(indent) = paragraph_column {
+            output.push(format!(
+                "{}{}",
+                " ".repeat(indent),
+                escape_block_start(trimmed)
+            ));
         } else if trimmed.starts_with('>') {
             continuation = Continuation::Quote;
+            output.push(line.to_owned());
+        } else if let Some((_, (marker, length, _))) = list_item_fence(line) {
+            fence = Some((marker, length));
+            continuation = Continuation::None;
             output.push(line.to_owned());
         } else if let Some(indent) = list_indent(line) {
             continuation = Continuation::List(indent);
@@ -808,16 +852,67 @@ pub(super) fn normalize_rustdoc(text: &str) -> String {
                 Continuation::None => output.push(line.to_owned()),
                 Continuation::Quote => output.push(format!("> {line}")),
                 Continuation::List(indent) => {
-                    let leading = line.len() - trimmed.len();
-                    output.push(format!(
-                        "{}{line}",
-                        " ".repeat(indent.saturating_sub(leading))
-                    ));
+                    output.push(format!("{}{trimmed}", " ".repeat(indent)));
                 }
             }
         }
     }
     output.join("\n")
+}
+
+/// `text` with every `\r\n` and every lone `\r` replaced by `\n`.
+fn unify_line_ends(text: &str) -> Cow<'_, str> {
+    if text.contains('\r') {
+        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+/// `text` with every bidirectional embedding, override and isolate control replaced by its Rust
+/// escape, `\u{202E}`, as visible text.
+fn escape_bidi_controls(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
+            escaped.push_str(&format!("\\u{{{:04X}}}", u32::from(ch)));
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped
+}
+
+/// `text`, a paragraph line moved to a list item's content column, with its first marker escaped
+/// where it would open a block there: a heading, a thematic break or a setext underline (`\#`,
+/// `\---`), a block quote (`\>`), or a list item (`\- a`, `1\. a`).
+fn escape_block_start(text: &str) -> Cow<'_, str> {
+    if opens_block(text) || text.starts_with('>') {
+        Cow::Owned(format!("\\{text}"))
+    } else if list_indent(text).is_some() {
+        let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+        Cow::Owned(format!("{}\\{}", &text[..digits], &text[digits..]))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+/// Whether `text`, at the start of a line in a paragraph, ends the paragraph as an ATX heading
+/// (`# h`), or is a thematic break or setext underline (`---`, `***`, `___`, `===`).
+fn opens_block(text: &str) -> bool {
+    let hashes = text.bytes().take_while(|byte| *byte == b'#').count();
+    if (1..=6).contains(&hashes)
+        && text[hashes..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+    {
+        return true;
+    }
+    let Some(marker) = text.chars().next().filter(|ch| "-*_=".contains(*ch)) else {
+        return false;
+    };
+    text.trim_end().chars().all(|ch| ch == marker || ch == ' ')
 }
 
 #[cfg(test)]
@@ -865,6 +960,15 @@ mod tests {
                 "the text is normalized",
                 [None, Some("a\tb"), None],
                 Some("a    b"),
+            ),
+            (
+                "a fence on a list item's line keeps its code as written",
+                [
+                    None,
+                    None,
+                    Some("- ```yaml\n  a:\n      b: 1\n      # c\n  ```"),
+                ],
+                Some("- ```yaml\n  a:\n      b: 1\n      # c\n  ```"),
             ),
         ];
         for (case, [title, summary, description], expected) in rows {
@@ -1088,7 +1192,27 @@ mod tests {
                 "<B>bold</b>",
             ),
             ("a void element", "a<br>b", "a<br>b"),
-            ("a self-closing tag", "a<x/>b", "a<x/>b"),
+            (
+                "a self-closing void element",
+                "a<br/>b<IMG src=x />",
+                "a<br/>b<IMG src=x />",
+            ),
+            (
+                "a self-closing tag of a non-void element is escaped",
+                "a <T/> b <x a=1 /> c",
+                "a \\<T/> b \\<x a=1 /> c",
+            ),
+            (
+                "a closing tag pairs with no self-closing one",
+                "<b/>x</b>",
+                "\\<b/>x\\</b>",
+            ),
+            // Line ends.
+            (
+                "a lone CR ends a line",
+                "x\r```\nfn main() {}\n```\r[Store]",
+                "x\n```text\nfn main() {}\n```\nStore",
+            ),
             (
                 "a tag with attributes, closed",
                 "<a href=\"https://example.com\">x</a>",
@@ -1179,6 +1303,16 @@ mod tests {
                 "an unclosed fence at a list item's content indentation is closed there",
                 "- a\n\n    ```json\n    {}",
                 "- a\n\n    ```json\n    {}\n    ```",
+            ),
+            (
+                "an untagged fence on a list item's line is tagged, and its lines kept",
+                "- ```\n  fn main() {}\n  Vec<T> [Store]\n  ```\nb [Store]",
+                "- ```text\n  fn main() {}\n  Vec<T> [Store]\n  ```\nb Store",
+            ),
+            (
+                "an unclosed fence on a list item's line is closed at its content column",
+                "1. ~~~json\n   {}",
+                "1. ~~~json\n   {}\n   ~~~",
             ),
             (
                 "an indented code block becomes a fenced one",
@@ -1320,9 +1454,59 @@ mod tests {
                 "1. item\n   more",
             ),
             (
-                "a continuation already past the content column is kept",
+                "a continuation past the content column is clamped to it",
                 "1. item\n      more",
-                "1. item\n      more",
+                "1. item\n   more",
+            ),
+            (
+                "an over-indented bullet continuation is clamped",
+                "- a\n        over indented\n   and more",
+                "- a\n  over indented\n  and more",
+            ),
+            (
+                "a nested item's over-indented continuation is clamped to its column",
+                "- a\n  - b\n          c",
+                "- a\n  - b\n    c",
+            ),
+            (
+                "a clamped paragraph line that would open a heading is escaped",
+                "- a\n      # not a heading",
+                "- a\n  \\# not a heading",
+            ),
+            (
+                "a clamped paragraph line that would underline or break is escaped",
+                "- a\n      ---\n- b\n      ===\n- c\n      ___",
+                "- a\n  \\---\n- b\n  \\===\n- c\n  \\___",
+            ),
+            (
+                "a clamped paragraph line that would open a bullet item is escaped",
+                "- a\n        - b\n      * c\n      + d",
+                "- a\n  \\- b\n  \\* c\n  \\+ d",
+            ),
+            (
+                "a clamped paragraph line that would open an ordered item is escaped",
+                "- a\n        1. b\n        2) c",
+                "- a\n  1\\. b\n  2\\) c",
+            ),
+            (
+                "a clamped paragraph line that would open a quote is escaped",
+                "- a\n        > b",
+                "- a\n  \\> b",
+            ),
+            (
+                "a nested item indented less than four past the column stays an item",
+                "- a\n     - b\n  c",
+                "- a\n     - b\n       c",
+            ),
+            (
+                "a clamped line indented less than four past the column keeps its meaning",
+                "- a\n   # h",
+                "- a\n  # h",
+            ),
+            (
+                "a clamped line that opens no block is not escaped",
+                "- a\n      #hashtag and -x",
+                "- a\n  #hashtag and -x",
             ),
             (
                 "digits with no marker are no list",
@@ -1391,6 +1575,16 @@ mod tests {
                 "```\n```rust\n- a\nb\n```\n- c\n  d",
             ),
             (
+                "a fence opened on a list item's line takes no rewrite",
+                "- ```yaml\n  a:\n      b: 1\n      # c\n  ```\nd",
+                "- ```yaml\n  a:\n      b: 1\n      # c\n  ```\nd",
+            ),
+            (
+                "a fence on an ordered item's line closes only on one at least as long",
+                "1. ````\n   ```\n   - x\n   ````\n- c\nd",
+                "1. ````\n   ```\n   - x\n   ````\n- c\n  d",
+            ),
+            (
                 "a backtick run with a backtick after it is no fence",
                 "- a\n```x`\nb",
                 "- a\n  ```x`\n  b",
@@ -1403,6 +1597,27 @@ mod tests {
             // Line structure.
             ("a trailing newline is dropped", "a\n", "a"),
             ("CRLF line ends become LF", "- a\r\nb", "- a\n  b"),
+            (
+                "a lone CR ends a line",
+                "First.\rSecond.\nThird.\r\n- a\rb",
+                "First.\nSecond.\nThird.\n- a\n  b",
+            ),
+            // Bidirectional controls.
+            (
+                "every embedding, override and isolate control is escaped",
+                "a\u{202A}b\u{202B}c\u{202C}d\u{202D}e\u{202E}f\u{2066}g\u{2067}h\u{2068}i\u{2069}j",
+                "a\\u{202A}b\\u{202B}c\\u{202C}d\\u{202D}e\\u{202E}f\\u{2066}g\\u{2067}h\\u{2068}i\\u{2069}j",
+            ),
+            (
+                "a control inside a fence is escaped too",
+                "```\n\u{202E}x\n```",
+                "```\n\\u{202E}x\n```",
+            ),
+            (
+                "a direction mark is no control, and is kept",
+                "a\u{200E}b\u{200F}c",
+                "a\u{200E}b\u{200F}c",
+            ),
             ("an empty text", "", ""),
         ];
         for (case, input, expected) in rows {
