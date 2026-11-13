@@ -67,7 +67,10 @@ The include site needs no lint attribute either. Each generated top-level item a
 that judge what the spec chose or where you put the module (`missing_docs`, `unreachable_pub`,
 `dead_code`, `clippy::pedantic`, `clippy::nursery`), and the spec's prose is rewritten so rustdoc's
 link and HTML lints find nothing in it and none of its code blocks runs as a doctest
-(`Spec::verbatim_docs(true)` keeps it as written). An
+(`Spec::verbatim_docs(true)` keeps it as written). Either way, a lone CR ends its line, a
+bidirectional control (U+202A–U+202E, U+2066–U+2069) is written as its visible `\u{…}` escape, and
+a list item's continuation lines sit at its content column, so rustc and Clippy accept every doc
+comment. An
 `#[expect(…)]` of any of those lints left at an existing include site is now unfulfilled, which
 `deny(warnings)` turns into an error: drop it, or the whole attribute.
 

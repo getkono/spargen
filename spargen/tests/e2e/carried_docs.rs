@@ -9,7 +9,9 @@ use super::*;
 /// a schema (beside a fenced block and a definition to a path), an operation's summary and
 /// description, and a response header; and the code blocks rustdoc would run as doctests (#1300):
 /// untagged fences, indented code blocks in and out of a list, a fence nesting a shorter one, and
-/// a fence the description leaves open.
+/// a fence the description leaves open; and the input rustc, rustdoc or clippy rejects in a doc
+/// comment (#1301): a lone CR, bidirectional controls, a non-void self-closing tag and an
+/// over-indented list continuation.
 const CARRIED_DOCS_SPEC: &str = include_str!("specs/carried_docs.yaml");
 
 /// A crate root that denies the lints the generated module answers for, and `include!`s it into a
@@ -109,6 +111,13 @@ fn the_include_site_needs_no_lint_attribute() {
         "  ```text\n  curl https://example.com/c\n  ```",
         "````text\n```\nVec<T>\n```\n````",
         "```text\nan unclosed block\n```\n\nResponse `204`: exported",
+        "First line.\nSecond line, after a lone CR.\nThird line.",
+        "The author's name, as written: \\u{202E}reversed\\u{202C} and \\u{2066}isolated\\u{2069}.",
+        "Its \\u{202E}name\\u{202C} is regional.",
+        "One of \\u{2067}eu\\u{2069}.",
+        "It expires hourly.",
+        "Each is a \\<T/> page, beside a void <br/>.",
+        "- a step\n  over indented",
     ] {
         assert!(
             generated.contains(rewritten),
@@ -118,6 +127,14 @@ fn the_include_site_needs_no_lint_attribute() {
     assert!(
         !generated.contains("crate::store::ModerationStore"),
         "a reference definition to a path is dropped"
+    );
+    assert!(
+        !generated.contains('\r'),
+        "a lone CR in carried prose ends its line"
+    );
+    assert!(
+        !generated.contains(['\u{202A}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2069}']),
+        "every bidirectional control in carried prose is escaped"
     );
 
     let status = fixture_cargo(&out)
@@ -199,6 +216,7 @@ fn verbatim_docs_leaves_the_links_for_rustdoc_to_report() {
         "unresolved link to `crate::serve`",
         "this URL is not a hyperlink",
         "unopened HTML tag `b`",
+        "invalid self-closing HTML tag `T`",
     ] {
         assert!(
             stderr.contains(lint),

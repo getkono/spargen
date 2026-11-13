@@ -6,18 +6,18 @@ info:
     The moderation API, served by [`crate::serve`]. See https://example.com/docs.
 servers:
   - url: https://{region}.example.com
-    description: "The regional host, routed by [Router].\rIts ‮name‬ is regional."
+    description: "The regional host, routed by [Router].\rIts \u202Ename\u202C is regional."
     variables:
       region:
         default: eu
-        description: "A region code, as [`Region`] lists them.\rOne of ⁧eu⁩."
+        description: "A region code, as [`Region`] lists them.\rOne of \u2067eu\u2069."
 components:
   securitySchemes:
     token:
       type: http
       scheme: bearer
       description: "A token [`crate::auth::mint`] issues; see https://example.com/auth.\rIt expires\
-        \ hourly.\n- a step\n        over indented"
+        \ hourly."
   schemas:
     Report:
       description: |
@@ -39,10 +39,7 @@ components:
           description: "First line.\rSecond line, after a lone CR.\nThird line."
         author:
           type: string
-          description: "The author's name, as written: ‮reversed‬ and ⁦isolated⁩."
-        payload:
-          type: string
-          description: "A <T/> value, beside a void <br/>."
+          description: "The author's name, as written: \u202Ereversed\u202C and \u2066isolated\u2069."
         steps:
           type: string
           description: "- a step\n        over indented"
@@ -90,7 +87,7 @@ paths:
       description: |
         Reads the [store][ModerationStore] and returns <b>every</b> report, up to the
         limit </b> set in [the config](crate::config::Limits). Details at
-        https://example.com/reports.
+        https://example.com/reports. Each is a <T/> page, beside a void <br/>.
       responses:
         "200":
           description: ok
