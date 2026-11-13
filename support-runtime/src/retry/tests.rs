@@ -17,8 +17,8 @@ use crate::{HttpBody, MultipartForm, MultipartPart, RequestBuilder};
 type Request = http::Request<HttpBody>;
 
 use super::{
-    days_from_civil, exponential_backoff, parse_http_date, parse_retry_after, year_of_day,
-    RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+    days_from_civil, exponential_backoff, full_jitter, parse_http_date, parse_retry_after,
+    year_of_day, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
 };
 
 fn retrying(inner: Arc<dyn HttpBackend>, max_retries: u32) -> RetryBackend {
@@ -362,6 +362,37 @@ fn exponential_backoff_doubles_and_clamps() {
     // panics, and still clamps.
     assert_eq!(exponential_backoff(4, base, max), max);
     assert_eq!(exponential_backoff(1000, base, max), max);
+}
+
+/// Full jitter scales the backoff by the caller's unit draw: zero at `0.0`, the whole backoff at
+/// `1.0`, and proportionally between.
+#[test]
+fn full_jitter_scales_the_backoff_by_the_unit_draw() {
+    let backoff = Duration::from_millis(800);
+    assert_eq!(full_jitter(backoff, 0.0), Duration::ZERO);
+    assert_eq!(full_jitter(backoff, 0.25), Duration::from_millis(200));
+    assert_eq!(full_jitter(backoff, 0.5), Duration::from_millis(400));
+    assert_eq!(full_jitter(backoff, 1.0), backoff);
+    assert_eq!(full_jitter(Duration::ZERO, 0.7), Duration::ZERO);
+}
+
+/// A draw outside `[0, 1]`, or not a number, is clamped rather than panicking, and the result
+/// never exceeds the backoff, `Duration::MAX` included.
+#[test]
+fn full_jitter_clamps_a_draw_outside_the_unit_interval() {
+    let backoff = Duration::from_secs(3);
+    assert_eq!(full_jitter(backoff, -0.5), Duration::ZERO);
+    assert_eq!(full_jitter(backoff, f64::NEG_INFINITY), Duration::ZERO);
+    assert_eq!(full_jitter(backoff, f64::NAN), Duration::ZERO);
+    assert_eq!(full_jitter(backoff, 1.5), backoff);
+    assert_eq!(full_jitter(backoff, f64::INFINITY), backoff);
+    // `Duration::MAX` in seconds rounds up to 2^64 as an `f64`, so a draw just under one scales it
+    // past what a `Duration` holds; that saturates to the backoff instead of panicking.
+    for unit in [0.5, 0.999_999_999_999, 1.0 - f64::EPSILON] {
+        assert!(full_jitter(Duration::MAX, unit) > Duration::ZERO, "{unit}");
+        assert!(full_jitter(backoff, unit) <= backoff, "{unit}");
+    }
+    assert_eq!(full_jitter(Duration::MAX, 1.0), Duration::MAX);
 }
 
 /// `base * 2^attempt` overflowing `Duration` falls back to `max` rather than panicking, at a

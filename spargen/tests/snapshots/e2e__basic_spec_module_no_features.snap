@@ -20,11 +20,11 @@ pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
     Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
     LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next, Nullable,
-    ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
-    RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
-    RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
-    TokenProvider, TokenRefresher, TotalTimeout, TransportError, UnknownVariant,
-    exponential_backoff, next_link, token_provider,
+    ParameterError, ProblemDetails, ProtocolError, RedirectError, RejectionCheck,
+    RequestCause, RequestError, RequestOptions, ReqwestBackend, ResponseValue,
+    RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
+    TokenFuture, TokenProvider, TokenRefresher, TotalTimeout, TransportError,
+    UnknownVariant, exponential_backoff, full_jitter, next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -3497,6 +3497,8 @@ mod support {
             }
         }
         /// A typed parameter could not be represented by OpenAPI's scalar/array/object wire model.
+        ///
+        /// An operation reports it as `RequestError::Other`, whose `source()` downcasts to this type.
         #[derive(Debug)]
         pub enum ParameterError {
             /// Serialization of the generated Rust value failed.
@@ -3504,13 +3506,13 @@ mod support {
             /// A nested array or object appeared where OpenAPI parameter serialization requires a scalar.
             NestedValue,
             /// A `style: deepObject` query parameter's value was not an object
-            /// ([`serialize_deep_object`]).
+            /// (`serialize_deep_object`).
             ExpectedObject,
             /// A form-urlencoded request body did not serialize to a JSON object
-            /// ([`serialize_form_body`]).
+            /// (`serialize_form_body`).
             FormBodyNotObject,
             /// A multipart part was asked for the query-only `deepObject` style
-            /// ([`serialize_multipart_values`]).
+            /// (`serialize_multipart_values`).
             DeepObjectInMultipart,
             /// A style defined only for arrays and objects (`spaceDelimited`, `pipeDelimited`) received a
             /// scalar or undefined value.
@@ -4919,6 +4921,11 @@ mod support {
             pub fn into_inner(self) -> T {
                 self.inner
             }
+            /// Consume the wrapper, yielding its status, headers and decoded body, each owned, so a caller
+            /// keeping the headers beside the body need not clone them before [`Self::into_inner`].
+            pub fn into_parts(self) -> (StatusCode, HeaderMap, T) {
+                (self.status, self.headers, self.inner)
+            }
             /// Borrow the decoded body.
             pub fn inner(&self) -> &T {
                 &self.inner
@@ -5029,7 +5036,8 @@ mod support {
         //! `tokio::time::sleep`).
         //! [`RetryBackend`] simply `.await`s that future; it never sleeps itself. A pure
         //! [`exponential_backoff`] helper computes the delay [`Duration`] a policy hands to its timer, so
-        //! exponential backoff needs no runtime support either.
+        //! exponential backoff needs no runtime support either, and [`full_jitter`] spreads that delay
+        //! over a random fraction the caller draws, so the runtime needs no source of randomness.
         //!
         //! ## Request replay and cloneability
         //!
@@ -5064,20 +5072,29 @@ mod support {
         //! budget there. Pick a `base` above a typical loss burst and a `max` above a typical outage, so
         //! later attempts arrive after the condition has cleared.
         //!
+        //! Clients that failed together and wait exactly the backoff retry together, and can keep the
+        //! server in the state that failed them. [`full_jitter`] spreads each wait over `[0, backoff)`
+        //! with a draw the caller supplies; keep the `Retry-After` floor by raising the jittered wait to
+        //! [`RetryOutcome::retry_after`], as the example below does.
+        //!
         //! ```ignore
         //! use std::sync::Arc;
         //! use std::time::{Duration, SystemTime};
         //!
         //! // A policy that retries transient failures of idempotent requests up to five times with
-        //! // exponential backoff, never sooner than the server's `Retry-After`, using the caller's tokio
-        //! // timer for the wait — no timer lives in the runtime. The wait is a `RetryWait`, which is `Send`
-        //! // on native and not on `wasm32`, so the policy compiles on both.
+        //! // fully jittered exponential backoff, never sooner than the server's `Retry-After`, using the
+        //! // caller's tokio timer for the wait and the caller's `rand` for the jitter — no timer or random
+        //! // source lives in the runtime. The wait is a `RetryWait`, which is `Send` on native and not on
+        //! // `wasm32`, so the policy compiles on both.
         //! struct Backoff;
         //! impl RetryPolicy for Backoff {
         //!     fn retry<'a>(&'a self, attempt: u32, outcome: &RetryOutcome<'_>) -> Option<RetryWait<'a>> {
         //!         if attempt < 5 && outcome.is_transient() {
-        //!             let max = Duration::from_secs(5);
-        //!             let wait = outcome.backoff(attempt, Duration::from_millis(100), max, SystemTime::now());
+        //!             let backoff = exponential_backoff(attempt, Duration::from_millis(100), Duration::from_secs(5));
+        //!             let jittered = full_jitter(backoff, rand::random::<f64>());
+        //!             let wait = outcome
+        //!                 .retry_after(SystemTime::now())
+        //!                 .map_or(jittered, |floor| jittered.max(floor));
         //!             // A server asking for more than a minute is not worth waiting on here.
         //!             (wait <= Duration::from_secs(60)).then(|| Box::pin(tokio::time::sleep(wait)) as RetryWait<'a>)
         //!         } else {
@@ -5312,6 +5329,23 @@ mod support {
         ) -> Duration {
             let factor = 2u32.saturating_pow(attempt);
             base.checked_mul(factor).unwrap_or(max).min(max)
+        }
+        /// Full jitter: `backoff` scaled by `unit`, a uniformly random draw from `[0, 1)` the caller
+        /// supplies, so the wait is spread over `[0, backoff)` and clients that failed together do not
+        /// retry in lockstep. The runtime reads no randomness of its own: pass, for example,
+        /// `rand::random::<f64>()`.
+        ///
+        /// A draw at or below `0` (or not a number) waits nothing, and one at or above `1` the whole
+        /// `backoff`; the result never exceeds `backoff`, and the helper never panics.
+        pub fn full_jitter(backoff: Duration, unit: f64) -> Duration {
+            if unit.is_nan() || unit <= 0.0 {
+                return Duration::ZERO;
+            }
+            if unit >= 1.0 {
+                return backoff;
+            }
+            Duration::try_from_secs_f64(backoff.as_secs_f64() * unit)
+                .map_or(backoff, |jittered| jittered.min(backoff))
         }
         /// A `Retry-After` field value as the delay it asks for from `now` (RFC 9110 §10.2.3): its
         /// delay-seconds, saturating where they exceed `u64`, or the time until its HTTP-date, zero once
@@ -7134,8 +7168,8 @@ mod support {
         //!
         //! Encoding always writes the padded standard alphabet. Decoding takes the same alphabet with or
         //! without its trailing padding, and refuses anything else: another alphabet's characters
-        //! (base64url's `-` and `_`), whitespace or line breaks, padding before the end, or a length no
-        //! encoding produces.
+        //! (base64url's `-` and `_`), whitespace or line breaks, padding before the end, a length no
+        //! encoding produces, or a final quantum whose bits past its last whole byte are not zero.
         use std::fmt;
         use bytes::Bytes;
         use serde::de::{Deserializer, Unexpected, Visitor};
@@ -7232,6 +7266,10 @@ mod support {
                 for (index, character) in chunk.iter().enumerate() {
                     group |= sextet(*character)? << (18 - 6 * index);
                 }
+                let carried = 24 - 8 * (chunk.len() - 1);
+                if group & ((1 << carried) - 1) != 0 {
+                    return None;
+                }
                 for index in 0..chunk.len() - 1 {
                     out.push((group >> (16 - 8 * index)) as u8);
                 }
@@ -7254,15 +7292,23 @@ mod support {
         //!
         //! # Nested-runtime caveat
         //!
-        //! A [`BlockingRuntime`] must NOT be constructed or used from inside another async runtime:
-        //! tokio's `block_on` panics when called from within a runtime's context. Build and drive one on a
-        //! plain (non-async) thread — for example a `std::thread`, or `tokio::task::spawn_blocking` when
-        //! you are already inside an async context.
+        //! A [`BlockingRuntime`] must NOT be *driven* from inside another async runtime: tokio's
+        //! `block_on` panics when called from within a runtime's context. Drive one on a plain (non-async)
+        //! thread — for example a `std::thread`, or `tokio::task::spawn_blocking` when you are already
+        //! inside an async context. Building one inside an async runtime is fine, and so is dropping one
+        //! there: the drop shuts the owned runtime down in the background rather than waiting on it, which
+        //! inside an async context would panic, so a blocking client held in async state can be dropped at
+        //! shutdown.
         /// A current-thread tokio runtime used to drive async operation futures to completion
         /// synchronously. Held by the generated blocking client alongside the async client it wraps.
+        ///
+        /// Dropping it shuts the runtime down without waiting for its blocking-pool threads (tokio's
+        /// `Runtime::shutdown_background`), so the drop never blocks and never panics, whatever context
+        /// it runs in.
         #[derive(Debug)]
         pub struct BlockingRuntime {
-            runtime: tokio::runtime::Runtime,
+            /// The owned runtime; `Some` until the drop takes it to shut it down.
+            runtime: Option<tokio::runtime::Runtime>,
         }
         impl BlockingRuntime {
             /// Build a fresh current-thread runtime with all available drivers enabled. Returns the
@@ -7271,7 +7317,7 @@ mod support {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?;
-                Ok(Self { runtime })
+                Ok(Self { runtime: Some(runtime) })
             }
             /// Drive a future to completion on the owned runtime, blocking the current thread until it
             /// resolves.
@@ -7280,7 +7326,19 @@ mod support {
             ///
             /// Panics if called from within another async runtime — tokio forbids nested `block_on`.
             pub fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
-                self.runtime.block_on(future)
+                let Some(runtime) = &self.runtime else {
+                    unreachable!("the runtime is taken only by the drop")
+                };
+                runtime.block_on(future)
+            }
+        }
+        impl Drop for BlockingRuntime {
+            /// Shut the runtime down without waiting: a plain drop of a tokio runtime waits on its
+            /// blocking pool, which panics inside an async context.
+            fn drop(&mut self) {
+                if let Some(runtime) = self.runtime.take() {
+                    runtime.shutdown_background();
+                }
             }
         }
     }
@@ -7309,13 +7367,14 @@ mod support {
         encode, serialize_deep_object, serialize_delimited, serialize_form,
         serialize_form_body, serialize_label, serialize_matrix,
         serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty,
-        FormStyle, PercentEncoding,
+        FormStyle, ParameterError, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
     pub use request::{MultipartForm, MultipartPart, RequestBuilder};
     pub use response::{stream_success_bytes, ByteStream, ResponseValue};
     pub use retry::{
-        exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+        exponential_backoff, full_jitter, RetryBackend, RetryOutcome, RetryPolicy,
+        RetryWait,
     };
     pub use transport::{
         try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend,
@@ -20435,7 +20494,7 @@ mod __spargen_blocking {
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
     /**A synchronous client: owns the async `Client` plus a current-thread tokio runtime and `block_on`s each operation. Enable the crate's `blocking` feature to use it; it compiles only on a non-wasm32 target.
 
-Must NOT be constructed or called from inside another async runtime — tokio's `block_on` panics when nested. Build one on a plain thread (e.g. `std::thread` or `tokio::task::spawn_blocking`).*/
+Must NOT be called from inside another async runtime — tokio's `block_on` panics when nested. Call it on a plain thread (e.g. `std::thread` or `tokio::task::spawn_blocking`). Building or dropping one inside an async runtime is fine: the drop shuts its runtime down in the background without waiting.*/
     #[derive(Debug)]
     #[allow(dead_code)]
     pub struct BlockingClient {

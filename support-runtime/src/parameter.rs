@@ -64,6 +64,8 @@ impl Delimiter {
 }
 
 /// A typed parameter could not be represented by OpenAPI's scalar/array/object wire model.
+///
+/// An operation reports it as `RequestError::Other`, whose `source()` downcasts to this type.
 #[derive(Debug)]
 pub enum ParameterError {
     /// Serialization of the generated Rust value failed.
@@ -71,13 +73,13 @@ pub enum ParameterError {
     /// A nested array or object appeared where OpenAPI parameter serialization requires a scalar.
     NestedValue,
     /// A `style: deepObject` query parameter's value was not an object
-    /// ([`serialize_deep_object`]).
+    /// (`serialize_deep_object`).
     ExpectedObject,
     /// A form-urlencoded request body did not serialize to a JSON object
-    /// ([`serialize_form_body`]).
+    /// (`serialize_form_body`).
     FormBodyNotObject,
     /// A multipart part was asked for the query-only `deepObject` style
-    /// ([`serialize_multipart_values`]).
+    /// (`serialize_multipart_values`).
     DeepObjectInMultipart,
     /// A style defined only for arrays and objects (`spaceDelimited`, `pipeDelimited`) received a
     /// scalar or undefined value.
