@@ -446,7 +446,8 @@ pub(crate) fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
         // diagnostic's pointer addresses the file its span lies in, and only the bundle can name
         // that file in a rule or find the `$ref`s that reach it. The mapper must also see *every*
         // error diagnostic to carve correctly, so the probe's batch is unbounded (a spec has
-        // finitely many constructs); the user's `batch_cap` still governs the final report below.
+        // finitely many constructs); the user's `batch_cap` still governs the final report: a
+        // converged carve reruns under it, and a rejection is replayed into it by `capped`.
         let mut diags = diag::Diagnostics::new(usize::MAX);
         let bundle = load_bundle(&probe, &mut diags).ok();
         let lowered = bundle
@@ -472,7 +473,7 @@ pub(crate) fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
             .collect();
         if new_rules.is_empty() {
             // No progress possible — report the residual rejections (and any carved W009s) honestly.
-            return Err(report);
+            return Err(capped(report, spec.batch_cap));
         }
         omit.rules.extend(new_rules);
         last_rejection = Some(report);
@@ -481,12 +482,23 @@ pub(crate) fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
     // Exhausted the round cap while still rejecting: return the last honest rejection report.
     // With no round run at all, nothing was carved.
     match last_rejection {
-        Some(report) => Err(report),
+        Some(report) => Err(capped(report, spec.batch_cap)),
         None => Ok(Spec {
             carve: crate::Carve::Off,
             ..spec.clone()
         }),
     }
+}
+
+/// `report`, a rejection collected without a cap, as a batch capped at `cap` would have collected
+/// it: its diagnostics replayed in emission order, so past the cap a warning is dropped and an
+/// error evicts the most recent retained warning, and the report says it was truncated.
+fn capped(report: Report, cap: usize) -> Report {
+    let mut diags = diag::Diagnostics::new(cap);
+    for diagnostic in report.diagnostics {
+        diags.emit(diagnostic);
+    }
+    Report::new(diags, report.outcome)
 }
 
 fn emit_pipeline_error(diags: &mut diag::Diagnostics, message: String) {
@@ -780,5 +792,49 @@ paths:
             "{beyond:#?}"
         );
         assert_eq!(carved(&beyond), cap - 1, "{beyond:#?}");
+    }
+
+    /// Both rejections the carve driver returns are bounded by the spec's `batch_cap`, though its
+    /// probe collects without one: the residual error evicts the `W009`s past the cap, and the
+    /// report says it was truncated.
+    #[test]
+    fn a_carve_rejection_is_bounded_by_the_batch_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+        let carve_capped = |contents: &str| {
+            std::fs::write(&path, contents).unwrap();
+            check(
+                &Spec::new(path.clone())
+                    .with_carve(crate::Carve::Auto)
+                    .with_batch_cap(1),
+            )
+        };
+
+        // A round that finds no new rule: the `$dynamicRef` operation carved, the dialect left.
+        let stalled = carve_capped(
+            "openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+jsonSchemaDialect: https://example.com/custom-dialect
+paths:
+  /dynamic:
+    get:
+      operationId: getDynamic
+      responses:
+        \"200\":
+          description: OK
+          content:
+            application/json:
+              schema: { $dynamicRef: \"#meta\" }
+",
+        );
+        assert_eq!(stalled.outcome(), Outcome::Rejected, "{stalled:#?}");
+        assert!(stalled.truncated(), "{stalled:#?}");
+        assert_eq!(codes(&stalled), ["E002"], "{stalled:#?}");
+
+        // The round cap: `cap - 1` links carved, the next one's `E004` left.
+        let exhausted = carve_capped(&dangling_chain(compat::MAX_CARVE_ROUNDS));
+        assert_eq!(exhausted.outcome(), Outcome::Rejected, "{exhausted:#?}");
+        assert!(exhausted.truncated(), "{exhausted:#?}");
+        assert_eq!(codes(&exhausted), ["E004"], "{exhausted:#?}");
     }
 }
