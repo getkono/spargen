@@ -1342,6 +1342,120 @@ fn check_in_a_build_script_rejects_a_consumer_missing_a_runtime_dependency() {
     );
 }
 
+/// The rebuild triggers a build script prints, read from the output Cargo recorded for it (#1350).
+/// `check` names what `generate` would, bar the output module: the spec, the file it references,
+/// and the manifest and lockfile the audit read (the consumer is `publish = false`, so its lockfile
+/// is audited). A `generate` whose referenced file fails to parse names that file, not the root
+/// spec alone, so a build script that tolerates the rejection reruns once it is fixed.
+#[test]
+fn a_build_script_names_every_input_to_cargo_from_check_and_from_a_failed_load() {
+    let temp = build_script_consumer(
+        "rerun-directives-consumer",
+        r#"fn main() {
+    let dir = env!("CARGO_MANIFEST_DIR");
+    let checked = spargen::check(&spargen::Spec::new(format!("{dir}/openapi.yaml")));
+    assert_eq!(checked.outcome(), spargen::Outcome::Clean, "{checked:#?}");
+
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let broken = spargen::Spec::new(format!("{dir}/broken.yaml"))
+        .build(format!("{out_dir}/generated.rs"));
+    let rejected = spargen::generate(&broken);
+    assert_eq!(rejected.outcome(), spargen::Outcome::Rejected, "{rejected:#?}");
+}
+"#,
+    );
+    let crate_dir = temp.path().join("consumer");
+    let manifest = std::fs::read_to_string(crate_dir.join("Cargo.toml")).unwrap();
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        manifest.replace(
+            "edition = \"2021\"\n",
+            "edition = \"2021\"\npublish = false\n",
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir(crate_dir.join("schemas")).unwrap();
+    std::fs::write(
+        crate_dir.join("openapi.yaml"),
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /ping:
+    get:
+      operationId: ping
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { $ref: "schemas/pong.yaml" } } }
+"#,
+    )
+    .unwrap();
+    std::fs::write(crate_dir.join("schemas/pong.yaml"), "type: string\n").unwrap();
+    std::fs::write(
+        crate_dir.join("broken.yaml"),
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components: { schemas: { Pet: { $ref: "schemas/pet.yaml" } } }
+"#,
+    )
+    .unwrap();
+    std::fs::write(crate_dir.join("schemas/pet.yaml"), "type: [unclosed\n").unwrap();
+
+    let output = fixture_cargo(&crate_dir).arg("check").output().unwrap();
+    assert!(
+        output.status.success(),
+        "the build script's assertions failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Cargo keeps what the build script printed in `build/<package>-<hash>/output`.
+    let recorded: String = std::fs::read_dir(fixture_target_dir().join("debug/build"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("rerun-directives-consumer-")
+        })
+        .filter_map(|entry| std::fs::read_to_string(entry.path().join("output")).ok())
+        .collect();
+    let named: Vec<&str> = recorded
+        .lines()
+        .filter_map(|line| line.strip_prefix("cargo:rerun-if-changed="))
+        .collect();
+    let dir = crate_dir.to_str().unwrap();
+    let path = |file: &str| format!("{dir}/{file}");
+    // `check`'s inputs, sorted, then the manifests the audit read, sorted.
+    assert!(named.len() > 4, "too few rebuild triggers:\n{recorded}");
+    assert_eq!(
+        named[..4],
+        [
+            path("openapi.yaml"),
+            path("schemas/pong.yaml"),
+            path("Cargo.lock"),
+            path("Cargo.toml"),
+        ],
+        "{recorded}"
+    );
+    // The failed `generate`: what its load read, and the output module.
+    let (inputs, outputs): (Vec<&str>, Vec<&str>) =
+        named[4..].iter().partition(|named| named.starts_with(dir));
+    assert_eq!(
+        inputs,
+        [path("broken.yaml"), path("schemas/pet.yaml")],
+        "{recorded}"
+    );
+    assert!(
+        matches!(outputs[..], [output] if output.ends_with("/out/generated.rs")),
+        "{recorded}"
+    );
+}
+
 /// The `[dependencies]` block `spargen deps` prints for an inline spec.
 fn manifest_block(spec: &str) -> String {
     let temp = tempfile::tempdir().unwrap();
