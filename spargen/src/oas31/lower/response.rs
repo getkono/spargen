@@ -184,7 +184,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // E009 case: raw-schema
                 Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
                             .message(format!(
-                                "media type `{media_name}` requires a string-like or binary response schema"
+                                "media type `{media_name}` requires a {} response schema",
+                                super::body::raw_schema_wording(media)
                             ))
                             .remedy("use a string/binary schema, choose a structured media type, or omit this API segment with spargen::omit!")
                             .emit(self.diags);

@@ -683,6 +683,8 @@ mod shapes;
 mod stream_twins;
 #[path = "e2e/testing_mock.rs"]
 mod testing_mock;
+#[path = "e2e/text_bodies.rs"]
+mod text_bodies;
 #[path = "e2e/wire.rs"]
 mod wire;
 
