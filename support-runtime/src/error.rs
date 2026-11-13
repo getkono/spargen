@@ -567,7 +567,7 @@ pub enum RequestError {
     /// and before a registered token provider is asked for a token. The payload is the whole cause,
     /// so `source()` is `None`.
     ///
-    /// The registration is what needs correcting: [`crate::attach_auth`] never falls through to a
+    /// The registration is what needs correcting: attaching credentials never falls through to a
     /// later alternative.
     CredentialMismatch {
         /// The `securitySchemes` key the credential is registered under.
@@ -641,8 +641,8 @@ impl std::error::Error for RequestCause {
 /// read, carrying the taxonomy class it belongs to; and the payload of the transport-layer
 /// variants that keep it (taxonomy #2 / #9).
 ///
-/// A backend picks the class through the constructor it builds the error with, and
-/// [`crate::send`] maps the error to that class's [`Error`] variant: [`Self::connection`] to
+/// A backend picks the class through the constructor it builds the error with, and the
+/// runtime's `send` maps the error to that class's [`Error`] variant: [`Self::connection`] to
 /// [`Error::Transport`], [`Self::timeout`] to [`Error::Timeout`], [`Self::protocol`] to
 /// [`Error::Protocol`], [`Self::redirect`] to [`Error::Redirect`], [`Self::request`] to
 /// [`RequestError::Other`], and [`Self::interrupted`] to [`Error::InterruptedBody`].
@@ -702,7 +702,7 @@ impl TransportError {
 
     /// Classify a `reqwest::Error` from executing a request into the closest runtime taxonomy
     /// class, keeping it as the source. Each class is named below by the [`Error`] variant
-    /// [`crate::send`] maps it to.
+    /// the runtime's `send` maps it to.
     ///
     /// reqwest reports every failure of the send itself as a request-kind error, a refused
     /// connection, an unresolvable host, and a failed TLS handshake included. Those are asked for

@@ -123,7 +123,7 @@ mod support {
         /// for rotation.
         ///
         /// Registration checks nothing: a credential is stored under whatever `securitySchemes` key it is
-        /// given, and is matched against that scheme's [`AuthKind`] only when an operation that requires
+        /// given, and is matched against that scheme's kind only when an operation that requires
         /// the scheme is called. Every failure below is therefore an error of that call, raised as a
         /// request-construction error before anything is sent — never a 401 from the server:
         ///
@@ -136,13 +136,13 @@ mod support {
         ///
         /// Which variant a scheme accepts:
         ///
-        /// - `http basic` ([`AuthKind::Basic`]) accepts only [`Credential::Basic`];
+        /// - `http basic` accepts only [`Credential::Basic`];
         /// - every scheme that carries a token — `http bearer`, `oauth2` and `openIdConnect` (all three
-        ///   [`AuthKind::Bearer`]) and `apiKey` in a header, query or cookie — accepts [`Credential::Bearer`],
-        ///   [`Credential::ApiKey`], [`Credential::Provider`] and [`Credential::Refreshable`], and rejects
-        ///   [`Credential::Basic`];
-        /// - `mutualTLS` ([`AuthKind::MutualTls`]) is satisfied by the transport and never reads a
-        ///   registered credential, so one registered under it is ignored.
+        ///   sent as a bearer token) and `apiKey` in a header, query or cookie — accepts
+        ///   [`Credential::Bearer`], [`Credential::ApiKey`], [`Credential::Provider`] and
+        ///   [`Credential::Refreshable`], and rejects [`Credential::Basic`];
+        /// - `mutualTLS` is satisfied by the transport and never reads a registered credential, so one
+        ///   registered under it is ignored.
         #[derive(Clone)]
         pub enum Credential {
             /// `Authorization: Bearer <token>`.
@@ -835,19 +835,19 @@ mod support {
             /// response body has been read, before it fails with [`Error::Timeout`] (default `None`: no
             /// total bound, only the connect and read timeouts).
             ///
-            /// It is read each time [`super::send`] sends a request, so changing it through
+            /// It is read each time the runtime's `send` sends a request, so changing it through
             /// [`ClientCore::config_mut`] applies from the next request on, whichever constructor built
             /// the core, and it is honoured on `wasm32` too. A generated client's `with_timeout` sets it
             /// on the client value it returns, which is how one call gets a deadline of its own. It
             /// travels on the request itself, as a [`super::TotalTimeout`] extension: a request that
             /// already carries one keeps it, as does one given one by [`RequestOptions::extensions`],
-            /// which [`super::send`] applies first, [`ReqwestBackend`] enforces it, and so does a caller-supplied
+            /// which `send` applies first, [`ReqwestBackend`] enforces it, and so does a caller-supplied
             /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. Behind
             /// a [`super::RetryBackend`] it bounds each attempt, not the retried call as a whole. A
             /// streaming response is exempt,
             /// because a stream may rightly stay open indefinitely: an operation returning an
-            /// `EventStream` sends its request with [`super::send_streaming`], which never applies it, and
-            /// each reconnect resends that same request.
+            /// `EventStream` sends its request with the runtime's `send_streaming`, which never applies
+            /// it, and each reconnect resends that same request.
             pub timeout: Option<Duration>,
             /// Maximum bytes of a success body a non-streaming operation reads before it fails with
             /// [`Error::BodyTooLarge`] (default `None`: a structured success body is read whole, however
@@ -857,7 +857,7 @@ mod support {
             /// and one that grows past it is abandoned at the chunk that crosses it, which forgoes reuse
             /// of that connection; peak memory is the limit, not what the server chose to send.
             /// [`RequestOptions::max_body`], set per client value with a generated client's
-            /// `with_options`, replaces it. It is read each time [`super::send`] sends a request, as
+            /// `with_options`, replaces it. It is read each time the runtime's `send` sends a request, as
             /// [`Self::timeout`] is. An operation returning an `EventStream` is exempt: its items are
             /// bounded by [`Self::max_stream_frame`] instead. So is each raw binary body a `_stream` twin
             /// returns as a [`super::ByteStream`], whose reader picks its own limit; any other success body
@@ -890,7 +890,7 @@ mod support {
         /// sets them on the client value it returns, so a call that needs its own derives a client for it
         /// (`client.clone().with_options(options)`) rather than sharing mutable state with other calls.
         ///
-        /// They are read each time [`super::send`] or [`super::send_streaming`] sends a request, after the
+        /// They are read each time the runtime's `send` or `send_streaming` sends a request, after the
         /// request is built and its credentials attached.
         #[derive(Debug, Clone, Default)]
         pub struct RequestOptions {
@@ -923,11 +923,11 @@ mod support {
         /// The shared core every generated `Client` wraps: the swappable transport [`HttpBackend`] that
         /// executes requests, the base URL, configuration, and per-scheme credentials.
         ///
-        /// Requests are built by the runtime itself, as an `http::Request` ([`super::RequestBuilder`]),
-        /// whichever backend executes them (see [`super::send`]). `new`/`with_config` install the default
-        /// [`ReqwestBackend`] on a `reqwest::Client` built from the configuration, `with_client` installs
-        /// one on a caller-supplied `reqwest::Client`, and `with_backend` plugs a caller-supplied
-        /// transport.
+        /// Requests are built by the runtime itself, as an `http::Request`, whichever backend executes
+        /// them; the runtime's `send` hands each one to the backend. `new`/`with_config` install the
+        /// default [`ReqwestBackend`] on a `reqwest::Client` built from the configuration,
+        /// `with_client` installs one on a caller-supplied `reqwest::Client`, and `with_backend` plugs a
+        /// caller-supplied transport.
         ///
         /// The generated `Client` wraps one of these and documents its own constructors; each of its
         /// operation methods delegates to the shared dispatch routines.
@@ -965,7 +965,7 @@ mod support {
             /// as [`Self::with_backend`] would with `Arc::new(ReqwestBackend::new(client))`. The client's
             /// own connect and read timeouts apply instead of [`ClientConfig::connect_timeout`] and
             /// [`ClientConfig::read_timeout`]; [`ClientConfig::timeout`] still applies to each request
-            /// [`super::send`] sends.
+            /// the runtime's `send` sends.
             pub fn with_client(
                 client: reqwest::Client,
                 base_url: &str,
@@ -976,9 +976,9 @@ mod support {
             /// retry, middleware, or an entirely non-reqwest transport — and the default
             /// [`ClientConfig`]; nothing else is built, so several cores can share one backend. Every
             /// request is executed by `backend`, so connecting and reading are bounded however `backend`
-            /// bounds them. [`ClientConfig::timeout`] travels on each request [`super::send`] sends, as a
-            /// [`super::TotalTimeout`] extension, for `backend` to enforce. Returns a request-construction
-            /// error if the base URL is invalid.
+            /// bounds them. [`ClientConfig::timeout`] travels on each request the runtime's `send` sends,
+            /// as a [`super::TotalTimeout`] extension, for `backend` to enforce. Returns a
+            /// request-construction error if the base URL is invalid.
             pub fn with_backend(
                 backend: Arc<dyn HttpBackend>,
                 base_url: &str,
@@ -1033,7 +1033,7 @@ mod support {
                     .map_err(Error::request_construction)?;
                 Ok(())
             }
-            /// The transport backend that executes requests. [`super::send`] dispatches through this;
+            /// The transport backend that executes requests. The runtime's `send` dispatches through this;
             /// retry/middleware layers can clone the `Arc` to wrap it.
             pub fn backend(&self) -> &Arc<dyn HttpBackend> {
                 &self.backend
@@ -1044,8 +1044,10 @@ mod support {
             }
             /// Unregister the credential for a named security scheme, returning it if one was registered.
             ///
-            /// This is how a caller reaches a later security alternative, as [`super::attach_auth`]
-            /// describes. Removing a scheme that was never registered is a no-op returning `None`.
+            /// This is how a caller reaches a later security alternative: an operation attaches the first
+            /// alternative whose schemes all have a registered credential, so removing a scheme of an
+            /// earlier one lets the next call pass over it. Removing a scheme that was never registered is
+            /// a no-op returning `None`.
             pub fn remove_credential(&mut self, scheme: &str) -> Option<Credential> {
                 self.credentials.remove(scheme)
             }
@@ -1057,7 +1059,7 @@ mod support {
             /// bound to it. An operation of a generated client whose header parameter the build bound
             /// (`Spec::bind_header`) sends this value, as written, instead of taking an argument for it.
             /// `ClientCore`'s `Debug` prints the bound name and redacts the value, and the operation sends
-            /// it through [`super::RequestBuilder::sensitive_header`], so the request's `Debug` redacts it
+            /// it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts it
             /// too.
             pub fn bind_header(&mut self, name: &str, value: impl Into<String>) {
                 self.bound_headers
@@ -2354,7 +2356,7 @@ mod support {
             /// and before a registered token provider is asked for a token. The payload is the whole cause,
             /// so `source()` is `None`.
             ///
-            /// The registration is what needs correcting: [`super::attach_auth`] never falls through to a
+            /// The registration is what needs correcting: attaching credentials never falls through to a
             /// later alternative.
             CredentialMismatch {
                 /// The `securitySchemes` key the credential is registered under.
@@ -2424,8 +2426,8 @@ mod support {
         /// read, carrying the taxonomy class it belongs to; and the payload of the transport-layer
         /// variants that keep it (taxonomy #2 / #9).
         ///
-        /// A backend picks the class through the constructor it builds the error with, and
-        /// [`super::send`] maps the error to that class's [`Error`] variant: [`Self::connection`] to
+        /// A backend picks the class through the constructor it builds the error with, and the
+        /// runtime's `send` maps the error to that class's [`Error`] variant: [`Self::connection`] to
         /// [`Error::Transport`], [`Self::timeout`] to [`Error::Timeout`], [`Self::protocol`] to
         /// [`Error::Protocol`], [`Self::redirect`] to [`Error::Redirect`], [`Self::request`] to
         /// [`RequestError::Other`], and [`Self::interrupted`] to [`Error::InterruptedBody`].
@@ -2477,7 +2479,7 @@ mod support {
             }
             /// Classify a `reqwest::Error` from executing a request into the closest runtime taxonomy
             /// class, keeping it as the source. Each class is named below by the [`Error`] variant
-            /// [`super::send`] maps it to.
+            /// the runtime's `send` maps it to.
             ///
             /// reqwest reports every failure of the send itself as a request-kind error, a refused
             /// connection, an unresolvable host, and a failed TLS handshake included. Those are asked for
@@ -5161,13 +5163,13 @@ mod support {
         pub trait HttpBackend: MaybeSend + MaybeSync + std::fmt::Debug {
             /// Execute a prepared request, yielding the raw response or a transport failure. The request's
             /// URI is absolute. A backend that fails builds its [`TransportError`] with the constructor
-            /// naming the failure's class, so [`super::send`] maps it to the right [`super::Error`]
+            /// naming the failure's class, so the runtime's `send` maps it to the right [`super::Error`]
             /// variant.
             ///
             /// A request carrying a [`TotalTimeout`] extension is bounded by it: from the moment `execute`
             /// is called until the whole response body has been read. A deadline that elapses fails the
             /// call, or the body read in progress, with a [`TransportError::timeout`] of
-            /// [`super::TimeoutKind::Total`]. [`super::send`] puts the client's
+            /// [`super::TimeoutKind::Total`]. The runtime's `send` puts the client's
             /// [`super::ClientConfig::timeout`] there, so a backend that ignores the extension leaves the
             /// call unbounded. [`ReqwestBackend`] makes it reqwest's own request timeout. A backend that
             /// executes the request more than once through an inner one bounds each execution, not their
@@ -5544,10 +5546,10 @@ mod support {
             }
         }
         /// The total timeout of one request, from connecting until its whole response body has been
-        /// read, carried among the request's extensions. [`super::send`] gives a request without one the
-        /// client's [`super::ClientConfig::timeout`] this way, and [`ReqwestBackend`] enforces it; a
-        /// backend on another HTTP stack reads it from the request it executes and bounds the exchange by
-        /// it.
+        /// read, carried among the request's extensions. The runtime's `send` gives a request without
+        /// one the client's [`super::ClientConfig::timeout`] this way, and [`ReqwestBackend`] enforces
+        /// it; a backend on another HTTP stack reads it from the request it executes and bounds the
+        /// exchange by it.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct TotalTimeout(pub std::time::Duration);
         /// A copy of `request` to send again, its method, URI, version, headers, extensions and body
