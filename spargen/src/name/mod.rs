@@ -297,6 +297,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "Middleware",
     "MiddlewareBackend",
     "Next",
+    "Nullable",
     "ProblemDetails",
     "ProtocolError",
     "RedirectError",

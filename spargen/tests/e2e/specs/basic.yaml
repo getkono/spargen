@@ -155,8 +155,8 @@ paths:
             type: integer
             default: 1
         # Optional nullable query param: `type: [integer, "null"]` lowers to a nullable
-        # `Ty`, which `ty_tokens` renders as `Option<i64>`. The params struct must NOT wrap it again
-        # (`Option<Option<i64>>` would not serialize — `Option<i64>: !Display`).
+        # `Ty`, which `ty_tokens` renders as `Option<i64>`. A styled param has no token for `null`,
+        # so the params struct must NOT make it a `Nullable` (only a JSON `content` param is one).
         - name: filter
           in: query
           schema:
@@ -1300,7 +1300,8 @@ components:
     # Optional, non-nullable properties of every kind of type. A present `null` is a value none of
     # these schemas admits, so it is rejected wherever the property's own type rejects it rather
     # than decoding as absent; absence still decodes as `None`. The untyped `anything` admits
-    # `null` and keeps it as a present value, and the nullable `maybe` keeps collapsing `null`.
+    # `null` and keeps it as a present value, and the nullable `maybe` is a `Nullable` that keeps
+    # `null` apart from absence.
     OptionalFields:
       type: object
       properties:

@@ -1371,8 +1371,8 @@ paths:
 #[test]
 fn an_optional_nullable_json_content_parameter_can_send_an_explicit_null() {
     // A JSON `content` parameter's codec renders `null` as the text `null`, which a server tells
-    // apart from an absent parameter (#996), so its `…Params` field is `Option<Option<T>>` and its
-    // setter takes `Option<T>`. A nullable schema-styled or `text/*` parameter has no token for
+    // apart from an absent parameter (#996), so its `…Params` field is `support::Nullable<T>` and
+    // its setter takes `impl Into<Nullable<T>>`. A nullable schema-styled or `text/*` parameter has no token for
     // `null`, so it keeps the single `Option`; a required nullable JSON one is the `Option<T>`
     // argument it always was, its `None` already sent as `null`.
     let spec = r##"
@@ -1431,13 +1431,16 @@ paths:
         ("whole", "Whole"),
     ] {
         assert!(
-            flat.contains(&format!("pub {field}: Option<Option<types::{ty}>>,")),
+            flat.contains(&format!(
+                "skip_serializing_if = \"support::Nullable::is_absent\")] pub {field}: \
+                 support::Nullable<types::{ty}>,"
+            )),
             "{field}: {code}"
         );
         assert!(
             flat.contains(&format!(
-                "pub fn {field}(mut self, value: Option<types::{ty}>) -> Self {{ self.{field} = \
-                 Some(value);"
+                "pub fn {field}(mut self, value: impl Into<support::Nullable<types::{ty}>>) -> \
+                 Self {{ self.{field} = value.into();"
             )),
             "{field}: {code}"
         );
@@ -1455,11 +1458,11 @@ paths:
         );
     }
     assert!(flat.contains("x_req: Option<types::XReq>,"), "{code}");
-    assert!(!flat.contains("x_req: Option<Option"), "{code}");
+    assert!(!flat.contains("x_req: support::Nullable"), "{code}");
     // The emitted docs state the three-state contract on each explicit-null field and setter, and
     // only there: one of each per JSON parameter above, none for the text, styled or required one.
     for sentence in [
-        "`Some(None)` sends the JSON `null`; `None` omits the parameter.",
+        "`Nullable::Null` sends the JSON `null`; `Nullable::Absent` omits the parameter.",
         "`None` sends the JSON `null`; leaving the parameter unset omits it.",
     ] {
         assert_eq!(flat.matches(sentence).count(), 4, "{sentence}: {code}");

@@ -757,9 +757,10 @@ components:
         "the excluded string branch must be reported as `W011`: {report:#?}"
     );
     let types = types_module(&code);
-    for property in ["a", "b"] {
+    // `a` admits no `null`, so it is a plain optional `Option`; the nullable `b` is a `Nullable`.
+    for (property, wrapper) in [("a", "Option"), ("b", "super::support::Nullable")] {
         assert!(
-            types.contains(&format!("pub {property}: Option<Box<S2>>")),
+            types.contains(&format!("pub {property}: {wrapper}<Box<S2>>")),
             "`S2.{property}` must be the boxed component itself: {types}"
         );
     }
@@ -804,8 +805,8 @@ components:
     }
     let types = types_module(&code);
     assert!(
-        types.contains("pub a: Option<S2A>"),
-        "the dropped null branch must make `S2.a` optional: {types}"
+        types.contains("pub a: super::support::Nullable<S2A>"),
+        "the dropped null branch must make `S2.a` nullable: {types}"
     );
     assert!(
         types.contains("S2(Box<S2>),") && types.contains("S2Avariant2(Box<S2Avariant2>),"),

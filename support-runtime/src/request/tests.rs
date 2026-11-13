@@ -106,6 +106,74 @@ fn url_userinfo_becomes_basic_auth_and_leaves_the_uri() {
     }
 }
 
+/// Issue #1333: a userinfo username that percent-decodes to one holding `:` cannot be sent as
+/// `Authorization: Basic`, since the server splits at the first colon (RFC 7617 §2); the builder
+/// fails before anything is sent, and its error carries neither the username nor the password.
+#[test]
+fn a_userinfo_username_decoding_to_a_colon_fails_the_builder() {
+    for text in [
+        "https://u%3Ax:secret@example.com/op",
+        "https://u%3ax@example.com/op",
+        "https://%3A:secret@example.com/op",
+    ] {
+        let error = RequestBuilder::new(Method::GET, url(text))
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::RequestConstruction(crate::RequestError::Other(_))
+            ),
+            "{text}: {error:?}"
+        );
+        let shown = format!("{error} {error:?}");
+        assert!(shown.contains("`:`"), "{shown}");
+        assert!(
+            !shown.contains("secret") && !shown.contains("u:x"),
+            "{shown}"
+        );
+    }
+}
+
+/// Issue #1333: `Authorization` is a singleton field, so a base URL carrying `user:pass@`
+/// userinfo, which the builder sends as `Authorization: Basic`, and a scheme that attaches its own
+/// credential there send exactly one `Authorization`: the scheme's, which replaces the URL's.
+#[test]
+fn a_scheme_credential_replaces_the_authorization_a_userinfo_base_url_set() {
+    use crate::{attach_auth, AuthKind, AuthScheme, Credential, SecretString};
+    let mut core = crate::tests::core();
+    core.set_credential("token", Credential::Bearer(SecretString::from("t0k")));
+    core.set_credential(
+        "login",
+        Credential::Basic {
+            username: "aladdin".to_owned(),
+            password: SecretString::from("open sesame"),
+        },
+    );
+    for (name, kind, expected) in [
+        ("token", AuthKind::Bearer, "Bearer t0k"),
+        (
+            "login",
+            AuthKind::Basic,
+            "Basic YWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+        ),
+    ] {
+        let request = RequestBuilder::new(Method::GET, url("https://u:p@example.com/op"));
+        let scheme = [AuthScheme { name, kind }];
+        let request = poll_ready(attach_auth(&core, request, &[&scheme]))
+            .unwrap()
+            .build()
+            .unwrap();
+        let sent: Vec<_> = request
+            .headers()
+            .get_all(http::header::AUTHORIZATION)
+            .iter()
+            .collect();
+        assert_eq!(sent, [expected], "{name}");
+        assert!(sent[0].is_sensitive(), "{name}");
+    }
+}
+
 /// Only a `%` and two hexadecimal digits decode; any other `%` is kept as it is.
 #[test]
 fn percent_decoding_reads_only_well_formed_escapes() {

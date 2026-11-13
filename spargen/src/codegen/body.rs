@@ -238,7 +238,7 @@ fn form_style_tokens(style: &crate::ir::ParamStyle) -> TokenStream {
 /// `Display`, and anything composite a JSON-encoded text part; and that part carries the
 /// Content-Type its Encoding Object resolves to — explicit, or defaulted from the property's type
 /// by the specification's table — and any header the Encoding Object pins to a literal value. An
-/// optional or nullable field adds its part only when it is `Some`. Lowering guarantees a multipart
+/// optional or nullable field adds its part only when it holds a value. Lowering guarantees a multipart
 /// body is an object schema (anything else is rejected as `E009`), so the non-struct fallback
 /// stays a no-op.
 fn emit_multipart_body(
@@ -258,8 +258,8 @@ fn emit_multipart_body(
             .fields
             .get(&(ty.id, field.name.wire.clone()))
             .expect("multipart body field name allocated");
-        // A field is accessed as `Option<T>` when it is optional (an extra `Option` wrapper) or the
-        // schema itself is nullable (`ty_tokens` already wrapped it) — mirroring `emit_field`.
+        // A field may be unset when it is optional or the schema itself is nullable, mirroring
+        // `field_ty_tokens`: `Option<T>`, or `Nullable<T>` for one that is both.
         let optional = !field.required || field.ty.nullable;
         let kind = api.types.get(field.ty.id).map(|def| &def.kind);
         let property = encoding
@@ -333,10 +333,16 @@ fn emit_multipart_body(
             }
         };
         if optional {
-            // `value` is already `&T` from the `if let Some(value) = &body.field` binding.
+            // `value` is already `&T` from the `if let` binding: of `Some` for an `Option` field,
+            // and of `Value` for an optional nullable one, a `Nullable` (a `null` adds no part).
             let stmt = add_part(&quote! { value }, &quote! { value });
+            let pattern = if !field.required && field.ty.nullable {
+                quote! { support::Nullable::Value(value) }
+            } else {
+                quote! { Some(value) }
+            };
             quote! {
-                if let Some(value) = &#body_binding.#field_ident {
+                if let #pattern = &#body_binding.#field_ident {
                     #stmt
                 }
             }

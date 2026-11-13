@@ -132,6 +132,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
             pub use dispatch::{build_url_on, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, classify_with, decode_success, decode_success_bytes, decode_success_text, decode_success_with, decode_text_body, execute, prepare, send, send_streaming, unexpected_status, with_body_limits, StatusSpec};
             pub use error::{ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind, TransportError, UnknownVariant};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
+            pub use nullable::Nullable;
             pub use header::{parse_header, require_header, HeaderError, HeaderShape};
             pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty, FormStyle, PercentEncoding};
             pub use paginate::{next_link, LinkPaginator};

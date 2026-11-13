@@ -195,8 +195,10 @@ components:
     let target = |field: &str| {
         let ty = field_type(refined, &format!("pub {field}:"))
             .unwrap_or_else(|| panic!("`Refined` has no `{field}` field: {types}"));
+        // An optional member is an `Option`, or a `Nullable` where its type is nullable too.
         let inner = ty
             .strip_prefix("Option<")
+            .or_else(|| ty.strip_prefix("super::support::Nullable<"))
             .and_then(|rest| rest.strip_suffix('>'))
             .unwrap_or_else(|| panic!("optional `{field}` is `{ty}`: {types}"));
         alias_target(&types, inner).unwrap_or_else(|| format!("enum or struct {inner}"))

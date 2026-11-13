@@ -29,7 +29,10 @@
 //!   other bytes → `Bytes`, an untyped node → `Value`;
 //! * an integer/boolean scalar `enum`/`const` (which generates a `pub type X = i64`/`bool` alias,
 //!   carrying no consumer-facing structure beyond its scalar) → that scalar;
-//! * a nullable reference wraps the above in `Option<…>`.
+//! * a nullable reference wraps the above in `Option<…>`, except where its member carries it as
+//!   `Nullable<…>`: an optional nullable struct field, and a parameter that sends an explicit
+//!   `null`, render the non-nullable type wrapped in `Nullable<…>` (`nullable_canon_ty`), so
+//!   moving between that and `Option<…>` is a type change.
 //!
 //! `boxed` is *not* rendered: boxing is an internal cycle-break artifact, not a surface distinction.
 //! Because nominal types render by name (never expanded in place), rendering always terminates, and
