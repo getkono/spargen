@@ -144,8 +144,12 @@ mod api {
 ```
 
 The `spargen.toml` beside the spec is always discovered and applied first; the macro's switches
-override it in either direction, its caps replace the file's values, and its `omit { ... }` adds
-rules to the file's `[[omit]]` rules. Cargo and rustc track the root schema, every transitive
+override it in either direction (`carve` or `carve = true` turns one on, `no_carve` or
+`carve = false` turns it off), its caps replace the file's values, and its `omit { ... }` adds
+rules to the file's `[[omit]]` rules. A switch, `datetime` or cap given twice, in either spelling,
+is a compile error; `omit`, `keep` and `bind_header` may repeat and accumulate. The spec path is
+relative to the crate's `Cargo.toml`, while an `omit { file("…") { … } }` path is relative to the
+spec's directory, as a `$ref` is. Cargo and rustc track the root schema, every transitive
 source file, `spargen.lock`, and the `spargen.toml` it applied through the expansion. The
 [`spargen-macro` README](https://github.com/getkono/spargen/tree/master/spargen-macro) gives
 every argument the macro accepts.
