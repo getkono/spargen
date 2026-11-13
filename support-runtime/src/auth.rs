@@ -84,7 +84,7 @@ where
 /// for rotation.
 ///
 /// Registration checks nothing: a credential is stored under whatever `securitySchemes` key it is
-/// given, and is matched against that scheme's [`AuthKind`] only when an operation that requires
+/// given, and is matched against that scheme's kind only when an operation that requires
 /// the scheme is called. Every failure below is therefore an error of that call, raised as a
 /// request-construction error before anything is sent — never a 401 from the server:
 ///
@@ -97,13 +97,13 @@ where
 ///
 /// Which variant a scheme accepts:
 ///
-/// - `http basic` ([`AuthKind::Basic`]) accepts only [`Credential::Basic`];
+/// - `http basic` accepts only [`Credential::Basic`];
 /// - every scheme that carries a token — `http bearer`, `oauth2` and `openIdConnect` (all three
-///   [`AuthKind::Bearer`]) and `apiKey` in a header, query or cookie — accepts [`Credential::Bearer`],
-///   [`Credential::ApiKey`], [`Credential::Provider`] and [`Credential::Refreshable`], and rejects
-///   [`Credential::Basic`];
-/// - `mutualTLS` ([`AuthKind::MutualTls`]) is satisfied by the transport and never reads a
-///   registered credential, so one registered under it is ignored.
+///   sent as a bearer token) and `apiKey` in a header, query or cookie — accepts
+///   [`Credential::Bearer`], [`Credential::ApiKey`], [`Credential::Provider`] and
+///   [`Credential::Refreshable`], and rejects [`Credential::Basic`];
+/// - `mutualTLS` is satisfied by the transport and never reads a registered credential, so one
+///   registered under it is ignored.
 #[derive(Clone)]
 pub enum Credential {
     /// `Authorization: Bearer <token>`.

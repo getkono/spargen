@@ -50,13 +50,13 @@ pub type ExecuteFuture<'a> = BoxFuture<'a, Result<http::Response<HttpBody>, Tran
 pub trait HttpBackend: MaybeSend + MaybeSync + std::fmt::Debug {
     /// Execute a prepared request, yielding the raw response or a transport failure. The request's
     /// URI is absolute. A backend that fails builds its [`TransportError`] with the constructor
-    /// naming the failure's class, so [`crate::send`] maps it to the right [`crate::Error`]
+    /// naming the failure's class, so the runtime's `send` maps it to the right [`crate::Error`]
     /// variant.
     ///
     /// A request carrying a [`TotalTimeout`] extension is bounded by it: from the moment `execute`
     /// is called until the whole response body has been read. A deadline that elapses fails the
     /// call, or the body read in progress, with a [`TransportError::timeout`] of
-    /// [`crate::TimeoutKind::Total`]. [`crate::send`] puts the client's
+    /// [`crate::TimeoutKind::Total`]. The runtime's `send` puts the client's
     /// [`crate::ClientConfig::timeout`] there, so a backend that ignores the extension leaves the
     /// call unbounded. [`ReqwestBackend`] makes it reqwest's own request timeout. A backend that
     /// executes the request more than once through an inner one bounds each execution, not their
@@ -448,10 +448,10 @@ impl http_body::Body for FetchBody {
 }
 
 /// The total timeout of one request, from connecting until its whole response body has been
-/// read, carried among the request's extensions. [`crate::send`] gives a request without one the
-/// client's [`crate::ClientConfig::timeout`] this way, and [`ReqwestBackend`] enforces it; a
-/// backend on another HTTP stack reads it from the request it executes and bounds the exchange by
-/// it.
+/// read, carried among the request's extensions. The runtime's `send` gives a request without
+/// one the client's [`crate::ClientConfig::timeout`] this way, and [`ReqwestBackend`] enforces
+/// it; a backend on another HTTP stack reads it from the request it executes and bounds the
+/// exchange by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TotalTimeout(pub std::time::Duration);
 
