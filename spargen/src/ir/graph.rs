@@ -384,6 +384,8 @@ impl TypeGraph {
                 y.fields.iter().any(|other| {
                     other.name == field.name
                         && other.required == field.required
+                        && other.read_only == field.read_only
+                        && other.write_only == field.write_only
                         && other.xml.name == field.xml.name
                         && other.xml.attribute == field.xml.attribute
                         && other.xml.unsupported == field.xml.unsupported

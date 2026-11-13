@@ -253,7 +253,10 @@ fn emit_multipart_body(
     let Some(TypeKind::Struct(object)) = api.types.get(ty.id).map(|def| &def.kind) else {
         return quote! {};
     };
-    let parts = object.fields.iter().map(|field| {
+    // A `readOnly` member is never sent, so it adds no part, as `serde` leaves it out of every
+    // other body.
+    let sent = object.fields.iter().filter(|field| !field.read_only);
+    let parts = sent.map(|field| {
         let wire = &field.name.wire;
         let field_ident = names
             .fields
@@ -261,7 +264,7 @@ fn emit_multipart_body(
             .expect("multipart body field name allocated");
         // A field may be unset when it is optional or the schema itself is nullable, mirroring
         // `field_ty_tokens`: `Option<T>`, or `Nullable<T>` for one that is both.
-        let optional = !field.required || field.ty.nullable;
+        let optional = field.decodes_optional() || field.ty.nullable;
         let kind = api.types.get(field.ty.id).map(|def| &def.kind);
         let property = encoding
             .properties
@@ -337,7 +340,7 @@ fn emit_multipart_body(
             // `value` is already `&T` from the `if let` binding: of `Some` for an `Option` field,
             // and of `Value` for an optional nullable one, a `Nullable` (a `null` adds no part).
             let stmt = add_part(&quote! { value }, &quote! { value });
-            let pattern = if !field.required && field.ty.nullable {
+            let pattern = if field.decodes_optional() && field.ty.nullable {
                 quote! { support::Nullable::Value(value) }
             } else {
                 quote! { Some(value) }

@@ -402,9 +402,11 @@ pub(crate) struct Field {
     pub(crate) required: bool,
     /// `deprecated: true`, emitted as a "Deprecated per the spec." rustdoc note on the field.
     pub(crate) deprecated: bool,
-    /// `readOnly` annotation (W-class, surfaced in rustdoc).
+    /// `readOnly`: the server sets the member, so it is never serialized into a request, and is
+    /// not a `new` argument even when `required` (see [`Field::constructed`]).
     pub(crate) read_only: bool,
-    /// `writeOnly` annotation (W-class, surfaced in rustdoc).
+    /// `writeOnly`: the server accepts the member in requests and leaves it out of responses, so
+    /// it decodes as absent even when `required` (see [`Field::decodes_optional`]).
     pub(crate) write_only: bool,
     /// The JSON Schema `default` disposition, if the field declared one. `None` when the field has
     /// no `default`.
@@ -418,6 +420,29 @@ pub(crate) struct Field {
     /// the property takes that declaration instead, and one that meets another object's
     /// `additionalProperties` value schema narrows the field by it.
     pub(crate) undeclared: bool,
+}
+
+impl Field {
+    /// Whether the generated member may be absent when decoded: `Option<T>`, or `Nullable<T>` for
+    /// a nullable one. An optional property is; so is a `required` one marked `readOnly` or
+    /// `writeOnly`, since OpenAPI has `required` apply to such a property in one direction only —
+    /// a response leaves a `writeOnly` one out, and a request a `readOnly` one.
+    pub(crate) fn decodes_optional(&self) -> bool {
+        !self.required || self.read_only || self.write_only
+    }
+
+    /// Whether the struct's `new` takes the member: a `required` property that is not `readOnly`.
+    /// A `required` `writeOnly` one stays an argument, because every request must carry it, and
+    /// `new` stores `Some` of it.
+    pub(crate) fn constructed(&self) -> bool {
+        self.required && !self.read_only
+    }
+
+    /// Whether `required` is relaxed for the member: it is `required` and [`Self::decodes_optional`]
+    /// anyway. `W015` reports each one.
+    pub(crate) fn requiredness_relaxed(&self) -> bool {
+        self.required && (self.read_only || self.write_only)
+    }
 }
 
 /// The XML representation hints for a struct field, lowered from the property's OpenAPI `xml`

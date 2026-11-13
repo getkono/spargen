@@ -446,13 +446,19 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names) -> TokenStrea
     } else {
         "Option::is_none"
     };
-    let serde_default = if field.required {
+    // A `readOnly` member is never serialized: a request leaves it out, `required` or not.
+    let skip = if field.read_only {
+        quote! { skip_serializing, }
+    } else {
+        quote! { skip_serializing_if = #skip, }
+    };
+    let serde_default = if !field.decodes_optional() {
         quote! {}
     } else if applies_default(field) {
         let provider = default_provider_ident(id, ident).to_string();
-        quote! { default = #provider, skip_serializing_if = #skip, }
+        quote! { default = #provider, #skip }
     } else {
-        quote! { default, skip_serializing_if = #skip, }
+        quote! { default, #skip }
     };
     // The `Option` wrapping an optional non-nullable field stands for absence only, yet serde's
     // `Option<T>` maps a JSON `null` to `None` without ever calling `T::deserialize`, so
@@ -461,7 +467,7 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names) -> TokenStrea
     // rejects it wherever `T` does (an uninhabited `T` rejects every value); an absent field still
     // takes `default`. A nullable one is a `Nullable`, whose own decode reads `null` as `Null`, an
     // admitted value there.
-    let decode_present = (!field.required && !field.ty.nullable).then(|| {
+    let decode_present = (field.decodes_optional() && !field.ty.nullable).then(|| {
         let path = DECODE_PRESENT;
         quote! { deserialize_with = #path, }
     });
@@ -470,11 +476,13 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names) -> TokenStrea
         notes.push("Deprecated per the spec.".to_owned());
     }
     if field.read_only {
-        notes.push("Read-only: the server sets it and ignores it in requests.".to_owned());
+        notes.push("Read-only: the server sets it, so it is never sent in a request.".to_owned());
     }
     if field.write_only {
         notes.push(
-            "Write-only: the server accepts it in requests and omits it from responses.".to_owned(),
+            "Write-only: the server accepts it in requests and omits it from responses, so it \
+             decodes as absent."
+                .to_owned(),
         );
     }
     if let Some(default) = &field.default {
@@ -495,9 +503,10 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names) -> TokenStrea
 /// wraps a nullable one (`"null"` in the type array) in `Option`: present, but maybe `null`. An
 /// optional non-nullable field is `Option<T>`, its `None` the absent member. An optional nullable
 /// field has three wire states (absent, `null`, a value), so it is `support::Nullable<T>` over the
-/// non-nullable type.
+/// non-nullable type. A `required` field marked `readOnly` or `writeOnly` is optional here
+/// ([`Field::decodes_optional`]).
 fn field_ty_tokens(field: &Field, names: &Names) -> TokenStream {
-    if field.required {
+    if !field.decodes_optional() {
         ty_tokens(field.ty, names, false)
     } else if field.ty.nullable {
         nullable_tokens(non_null_ty_tokens(field.ty, names))
@@ -539,25 +548,28 @@ struct StructConstructors {
 /// Whether optional `field` takes its schema `default` when absent: decoding fills it through a
 /// generated provider, and `new` does the same.
 fn applies_default(field: &Field) -> bool {
-    !field.required
+    field.decodes_optional()
         && field
             .default
             .as_ref()
             .is_some_and(|default| default.applied.is_some())
 }
 
-/// The inherent `impl` of object struct `id`: `new`, taking every required member by value in
-/// declaration order and setting every optional member as decoding an absent one does (its schema
+/// The inherent `impl` of object struct `id`: `new`, taking every [constructed] member by value in
+/// declaration order (every required member but a `readOnly` one; a `writeOnly` one is stored as
+/// `Some` of it) and setting every other member as decoding an absent one does (its schema
 /// `default` where decoding applies one, else `None` or `Nullable::Absent`, and the overflow map
-/// empty), then one consuming `with_<field>` setter per optional member and for the overflow map,
-/// in field order. A non-nullable member's setter takes the bare `T` by value, as the `…Params`
-/// setters take theirs, and stores `Some` of it. A nullable member's takes
+/// empty), then one consuming `with_<field>` setter per member `new` does not take and for the
+/// overflow map, in field order. A non-nullable member's setter takes the bare `T` by value, as
+/// the `…Params` setters take theirs, and stores `Some` of it. A nullable member's takes
 /// `impl Into<Nullable<T>>`, so `value`, `Some(value)` and `None` (an explicit `null`) all fit,
 /// and stores what it converts to. The overflow map's takes the whole map.
 ///
-/// So `new` with the required members equals what decoding an object of just those members
-/// yields. With no required member, `Default` is `new()`: derived when every optional member is
-/// absent there, and otherwise an `impl` calling `new`. Setter names are `with_` before the field
+/// So `new` with the constructed members equals what decoding an object of just those members
+/// yields. With no constructed member, `Default` is `new()`: derived when every other member is
+/// absent there, and otherwise an `impl` calling `new`.
+///
+/// [constructed]: Field::constructed Setter names are `with_` before the field
 /// identifier unraw, so they are distinct exactly when the identifiers are, which allocation makes
 /// them within one struct.
 fn emit_struct_constructors(
@@ -572,19 +584,25 @@ fn emit_struct_constructors(
             .get(&(id, field.name.wire.clone()))
             .expect("field name allocated")
     };
+    // A constructed member is taken as the type a required field has (`T`, or `Option<T>` when
+    // nullable); a `writeOnly` one is stored as its optional member's value.
     let params = object
         .fields
         .iter()
-        .filter(|field| field.required)
+        .filter(|field| field.constructed())
         .map(|field| {
             let field_ident = field_ident(field);
-            let ty = field_ty_tokens(field, names);
+            let ty = ty_tokens(field.ty, names, false);
             quote! { #field_ident: #ty }
         });
     let inits = object.fields.iter().map(|field| {
         let field_ident = field_ident(field);
-        if field.required {
+        if field.constructed() && !field.decodes_optional() {
             quote! { #field_ident, }
+        } else if field.constructed() && field.ty.nullable {
+            quote! { #field_ident: super::support::Nullable::from(#field_ident), }
+        } else if field.constructed() {
+            quote! { #field_ident: Some(#field_ident), }
         } else if applies_default(field) {
             // By path: a required member named like the provider is a `new` parameter, which
             // would shadow the bare name.
@@ -599,7 +617,7 @@ fn emit_struct_constructors(
     let mut setters: Vec<TokenStream> = object
         .fields
         .iter()
-        .filter(|field| !field.required)
+        .filter(|field| !field.constructed())
         .map(|field| {
             let field_ident = field_ident(field);
             let setter = format_ident!("with_{}", field_ident.unraw());
@@ -653,7 +671,11 @@ fn emit_struct_constructors(
         }
         AdditionalProps::Allow | AdditionalProps::Deny => quote! {},
     };
-    let required = object.fields.iter().filter(|field| field.required).count();
+    let required = object
+        .fields
+        .iter()
+        .filter(|field| field.constructed())
+        .count();
     let optional_doc = "every optional member as decoding an absent one sets it: its schema \
                         `default` where it has one, else unset.";
     let new_doc = if required == 0 {

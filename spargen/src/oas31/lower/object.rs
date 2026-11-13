@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, Provenance};
-use crate::ir::{AdditionalProps, Docs, Field, PropertyName, Ty, TypeKind, XmlField};
+use crate::ir::{AdditionalProps, Docs, Field, PropertyName, Ty, TypeGraph, TypeKind, XmlField};
 use crate::name::hint_segment;
 use crate::oas31::{Schema, SchemaOr};
 
@@ -220,6 +220,49 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if rejected {
                 reject_heterogeneous_map_values(provenance, self.diags);
             }
+        }
+    }
+}
+
+/// `W015` for every member of an emitted struct whose `required` is relaxed because the property is
+/// also `readOnly` or `writeOnly` ([`Field::requiredness_relaxed`]). Read from the final graph, so
+/// a property an `allOf` member requires and another marks `readOnly` is reported as the merged
+/// struct generates it, once, located at that struct.
+pub(super) fn warn_relaxed_requiredness(graph: &TypeGraph, diags: &mut Diagnostics) {
+    for (_, def) in graph.emitted() {
+        let TypeKind::Struct(object) = &def.kind else {
+            continue;
+        };
+        for field in object
+            .fields
+            .iter()
+            .filter(|field| field.requiredness_relaxed())
+        {
+            let (keyword, reason) = if field.read_only {
+                (
+                    "readOnly",
+                    "a request leaves it out, so its member may be absent, is never serialized, \
+                     and is not a `new` argument",
+                )
+            } else {
+                (
+                    "writeOnly",
+                    "a response leaves it out, so its member may be absent when decoded, and \
+                     `new` still takes it",
+                )
+            };
+            Diagnostic::warning(
+                Code::ReadWriteOnlyRequirednessRelaxed,
+                def.provenance.clone(),
+            )
+            .message(format!(
+                "property `{}` of `{}` is `required` and `{keyword}`: {reason}",
+                field.name.wire, def.name_hint
+            ))
+            .remedy(format!(
+                "drop `{keyword}` to keep the property strictly required in both directions"
+            ))
+            .emit(diags);
         }
     }
 }
