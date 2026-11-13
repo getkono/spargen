@@ -28,9 +28,10 @@ pub(super) fn blocking_cfg() -> TokenStream {
 /// client's documentation, declared schemes included, as its `with_bound_header` does where the
 /// build bound a header.
 ///
-/// A `BlockingClient` must not be built or used from inside another async runtime (tokio's
-/// `block_on` panics when nested); the constructor building its own current-thread runtime is the
-/// standard shape for a non-async caller.
+/// A `BlockingClient` must not be called from inside another async runtime (tokio's `block_on`
+/// panics when nested); building or dropping one there is fine, since `BlockingRuntime`'s drop
+/// shuts its runtime down in the background. The constructor building its own current-thread
+/// runtime is the standard shape for a non-async caller.
 pub(super) fn emit_blocking_client(
     api: &Api,
     signatures: &[OperationSig],
@@ -45,9 +46,10 @@ pub(super) fn emit_blocking_client(
     let doc = "A synchronous client: owns the async `Client` plus a current-thread tokio runtime \
         and `block_on`s each operation. Enable the crate's `blocking` feature to use it; it \
         compiles only on a non-wasm32 target.\n\n\
-        Must NOT be constructed or called from inside another async runtime — tokio's `block_on` \
-        panics when nested. Build one on a plain thread (e.g. `std::thread` or \
-        `tokio::task::spawn_blocking`).";
+        Must NOT be called from inside another async runtime — tokio's `block_on` panics when \
+        nested. Call it on a plain thread (e.g. `std::thread` or \
+        `tokio::task::spawn_blocking`). Building or dropping one there is fine: the drop shuts \
+        its runtime down in the background without waiting.";
     let cfg = blocking_cfg();
     let credential_docs = with_credential_docs(api, options);
     let with_bound_header = with_bound_header_tokens(
