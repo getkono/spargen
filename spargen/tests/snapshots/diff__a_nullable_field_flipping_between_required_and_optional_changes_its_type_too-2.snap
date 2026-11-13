@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|field-requiredness-changed|Pet.name|field now optional
+major|field-type-changed|Pet.name|field type `Option<String>` -> `Nullable<String>`
+bump=major

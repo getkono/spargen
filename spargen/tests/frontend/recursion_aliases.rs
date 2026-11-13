@@ -67,9 +67,13 @@ components:
             !has_code(&report, Code::InvalidInput),
             "{applicator}: {report:#?}"
         );
-        // Boxed, because the cycle needs a finite size; `Option`, because the `null` member is what
-        // the union collapsed away. Both halves are the matrix's promise.
-        assert!(code.contains("Option<Box<Node>>"), "{applicator}: {code}");
+        // Boxed, because the cycle needs a finite size; nullable, because the `null` member is what
+        // the union collapsed away. Both halves are the matrix's promise. `parent` is optional
+        // too, so the nullable type is a `Nullable` rather than an `Option`.
+        assert!(
+            code.contains("pub parent: super::support::Nullable<Box<Node>>"),
+            "{applicator}: {code}"
+        );
         // And never `2aa5ada`'s answer.
         assert!(!code.contains("serde_json::Value>"), "{applicator}: {code}");
     }
@@ -835,9 +839,10 @@ components:
             "{entry}: {report:#?}"
         );
     }
+    // Optional here, so the nullable boxed `Node` is a `Nullable`.
     assert_eq!(
         field_type(&code, "pub parent").as_deref(),
-        Some("Option<Box<Node>>"),
+        Some("super::support::Nullable<Box<Node>>"),
         "{code}"
     );
 
@@ -883,10 +888,11 @@ components:
         );
     }
     // The whole-file spelling has no component name to take, so the target is named for the
-    // position that reached it — but it is still one boxed optional reference to one type.
+    // position that reached it — but it is still one boxed nullable reference to one type, a
+    // `Nullable` because `parent` is optional too.
     assert_eq!(
         field_type(&code, "pub parent").as_deref(),
-        Some("Option<Box<ResponseBody>>"),
+        Some("super::support::Nullable<Box<ResponseBody>>"),
         "{code}"
     );
 }
@@ -1076,10 +1082,11 @@ components:
             "{entry}: the sub-file's `Shared` is shadowed and read past in silence: {report:#?}"
         );
     }
-    // And the binding itself is the root's, boxed because it closes the cycle back to it.
+    // And the binding itself is the root's, boxed because it closes the cycle back to it (and a
+    // `Nullable`, the member being optional and nullable).
     assert_eq!(
         field_type(&code, "pub next").as_deref(),
-        Some("Option<Box<Shared>>"),
+        Some("super::support::Nullable<Box<Shared>>"),
         "{code}"
     );
     assert_eq!(
