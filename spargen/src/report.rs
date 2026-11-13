@@ -35,6 +35,9 @@ impl Outcome {
     }
 
     /// Whether the run got as far as it was asked to.
+    ///
+    /// This reads the outcome alone. A build script deciding whether to proceed wants
+    /// [`Report::succeeded`], which also requires that no error was emitted.
     pub fn is_success(self) -> bool {
         !matches!(self, Outcome::Rejected)
     }
@@ -76,17 +79,23 @@ pub struct Report {
     pub(crate) outcome: Outcome,
     /// Whether the run hit `batch_cap` and dropped diagnostics past it.
     pub(crate) truncated: bool,
+    /// Whether the run emitted an error that `batch_cap` left out of `diagnostics`, which
+    /// happens only when every retained diagnostic is already an error or the cap is zero.
+    /// [`Self::has_errors`] reads it, so it answers for the run and not only for the list.
+    #[serde(skip)]
+    pub(crate) error_dropped: bool,
 }
 
 impl Report {
     /// The report of a run that collected `diagnostics` and ended in `outcome`, truncated when
     /// the batch reached its cap.
     pub(crate) fn new(diagnostics: Diagnostics, outcome: Outcome) -> Self {
-        let (diagnostics, truncated) = diagnostics.into_parts();
+        let (diagnostics, truncated, error_dropped) = diagnostics.into_parts();
         Self {
             diagnostics,
             outcome,
             truncated,
+            error_dropped,
         }
     }
 
@@ -97,6 +106,7 @@ impl Report {
             diagnostics,
             outcome: Outcome::Rejected,
             truncated,
+            error_dropped: false,
         }
     }
 
@@ -135,9 +145,11 @@ impl Report {
             .filter(|diagnostic| diagnostic.severity == Severity::Warning)
     }
 
-    /// Whether any error-severity diagnostic was emitted.
+    /// Whether the run emitted any error-severity diagnostic, including one `batch_cap` left out
+    /// of [`Self::diagnostics`]. An error past the cap evicts a retained warning, so
+    /// [`Self::errors`] is empty while this is `true` only under a zero cap.
     pub fn has_errors(&self) -> bool {
-        self.errors().next().is_some()
+        self.error_dropped || self.errors().next().is_some()
     }
 
     /// Whether the run succeeded with no errors — the single check a build script wants.
@@ -232,6 +244,7 @@ mod tests {
             diagnostics: Vec::new(),
             outcome,
             truncated: false,
+            error_dropped: false,
         }
     }
 
@@ -316,7 +329,7 @@ mod tests {
     }
 
     /// `errors` and `warnings` split `diagnostics` by severity with nothing lost or shared, each
-    /// in emission order, and `has_errors` follows the error side alone.
+    /// in emission order, and `has_errors` follows the error side and an error the cap dropped.
     #[test]
     fn errors_and_warnings_partition_the_diagnostics_by_severity() {
         let provenance = diag::Provenance::new(JsonPointer::root(), None);
@@ -339,6 +352,7 @@ mod tests {
             ],
             outcome: Outcome::Rejected,
             truncated: false,
+            error_dropped: false,
         };
 
         let messages = |diagnostics: Vec<&Diagnostic>| {
@@ -366,11 +380,20 @@ mod tests {
             diagnostics: vec![warning("only a warning")],
             outcome: Outcome::Generated,
             truncated: false,
+            error_dropped: false,
         };
         assert!(!warned.has_errors());
         assert_eq!(warned.errors().count(), 0);
         assert_eq!(warned.warnings().count(), 1);
-        assert!(!report(Outcome::Rejected).has_errors());
+
+        // An error the cap left out of the list still counts: `has_errors` answers for the run.
+        let capped = Report {
+            error_dropped: true,
+            ..report(Outcome::Rejected)
+        };
+        assert_eq!(capped.errors().count(), 0);
+        assert!(capped.has_errors());
+        assert!(!capped.succeeded());
     }
 
     /// `expect_success` passes a successful report and leaves it with its caller unchanged.
@@ -415,6 +438,7 @@ mod tests {
             ],
             outcome: Outcome::Generated,
             truncated: false,
+            error_dropped: false,
         };
         assert!(!with_error.succeeded());
         assert!(with_error.into_result().is_err());
@@ -450,6 +474,7 @@ mod tests {
             ],
             outcome: Outcome::Rejected,
             truncated: true,
+            error_dropped: false,
         };
 
         let lines = report.cargo_directive_lines();
