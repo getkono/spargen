@@ -118,7 +118,9 @@ pub use parameter::{
 };
 pub use request::{MultipartForm, MultipartPart, RequestBuilder};
 pub use response::{stream_success_bytes, ByteStream, ResponseValue};
-pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
+pub use retry::{
+    exponential_backoff, full_jitter, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+};
 #[cfg(feature = "stream")]
 pub use stream::{
     EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,

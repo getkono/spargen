@@ -212,7 +212,10 @@ long stops instead.
 Size `base` and `max` against the failures being retried. A backoff shorter than the network's
 loss bursts, or than the server's outages, lands each retry inside the same bad state and spends
 the retry budget there; a `base` above a typical loss burst and a `max` above a typical outage
-let later attempts arrive after the condition has cleared. The [`retry` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/retry.rs)
+let later attempts arrive after the condition has cleared. `full_jitter(backoff, unit)` scales a
+backoff by a draw from `[0, 1)` the caller supplies (the runtime has no random source of its
+own), so clients that failed together do not retry in lockstep; raise its result to
+`retry_after(now)` to keep the server's floor. The [`retry` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/retry.rs)
 states the timing and replay contracts and carries an example policy; the
 [petstore example](https://github.com/getkono/spargen/tree/master/examples/petstore) ships a
 complete one driven by a tokio timer.

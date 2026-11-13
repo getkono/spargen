@@ -323,6 +323,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "TransportError",
     "UnknownVariant",
     "exponential_backoff",
+    "full_jitter",
     "next_link",
     "token_provider",
 ];

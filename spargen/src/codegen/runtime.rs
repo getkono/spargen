@@ -138,7 +138,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
             pub use paginate::{next_link, LinkPaginator};
             pub use request::{MultipartForm, MultipartPart, RequestBuilder};
             pub use response::{stream_success_bytes, ByteStream, ResponseValue};
-            pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
+            pub use retry::{exponential_backoff, full_jitter, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
             pub use transport::{try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend, TotalTimeout};
             pub use wasm::{MaybeSend, MaybeSync};
             #chunked_reexport
