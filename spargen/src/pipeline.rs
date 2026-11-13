@@ -13,6 +13,18 @@ use crate::{
 /// The body of [`generate`](crate::generate), with the cache directory as an argument so a test
 /// can point it at a directory of its own.
 pub(crate) fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Report {
+    generate_rereading(build, cache_dir, |spec| {
+        run_on_frontend_stack(|| cache::InputSnapshot::load(spec))
+    })
+}
+
+/// [`generate_with_cache_dir`], with `reread` as the read of the inputs after each preview that
+/// sees whether they changed while the preview read them, so a test can change them in between.
+fn generate_rereading(
+    build: &Build,
+    cache_dir: Option<&Utf8Path>,
+    mut reread: impl FnMut(&Spec) -> Result<cache::InputSnapshot, diag::Diagnostics>,
+) -> Report {
     let spec = &build.spec;
     let cargo = runtime_contract::cargo_environment(build);
     if cargo.fatal {
@@ -88,7 +100,7 @@ pub(crate) fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path
             return with_leading(preview.report, cargo_diagnostics);
         }
 
-        let after = match run_on_frontend_stack(|| cache::InputSnapshot::load(spec)) {
+        let after = match reread(spec) {
             Ok(snapshot) => snapshot,
             Err(diagnostics) => {
                 return with_leading(
@@ -527,6 +539,75 @@ components:
             ));
         }
         spec
+    }
+
+    /// A spec in a fresh directory whose one schema is named `schema`, built to `api.rs` beside it
+    /// outside any build script.
+    fn rereading_fixture(schema: &str) -> (tempfile::TempDir, Build) {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), spec_naming(schema)).unwrap();
+        let build = Spec::new(dir.join("openapi.yaml"))
+            .build(dir.join("api.rs"))
+            .with_cargo(crate::CargoIntegration::Off);
+        (temp, build)
+    }
+
+    /// A description whose one component schema is named `schema`.
+    fn spec_naming(schema: &str) -> String {
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n\
+             components:\n  schemas:\n    {schema}:\n      type: object\n      \
+             properties: {{ name: {{ type: string }} }}\n"
+        )
+    }
+
+    /// Inputs changed between a preview and the reread after it send the run round again, over the
+    /// changed inputs: the module written is the one the last preview rendered.
+    #[test]
+    fn inputs_changed_during_a_preview_are_previewed_again() {
+        let (_temp, build) = rereading_fixture("Before");
+        let mut rereads = 0;
+        let report = generate_rereading(&build, None, |spec| {
+            rereads += 1;
+            if rereads == 1 {
+                std::fs::write(&spec.path, spec_naming("After")).unwrap();
+            }
+            cache::InputSnapshot::load(spec)
+        });
+        assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+        assert_eq!(rereads, 2);
+        let module = std::fs::read_to_string(&build.output).unwrap();
+        assert!(module.contains("pub struct After"), "{module}");
+        assert!(!module.contains("Before"), "{module}");
+    }
+
+    /// Inputs that change after every one of the three previews end the run rejected, with nothing
+    /// written.
+    #[test]
+    fn inputs_that_keep_changing_reject_the_run_after_three_previews() {
+        let (_temp, build) = rereading_fixture("Schema0");
+        let mut rereads = 0;
+        let report = generate_rereading(&build, None, |spec| {
+            rereads += 1;
+            std::fs::write(&spec.path, spec_naming(&format!("Schema{rereads}"))).unwrap();
+            cache::InputSnapshot::load(spec)
+        });
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(rereads, 3);
+        let errors: Vec<_> = report
+            .errors()
+            .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.message.as_str()))
+            .collect();
+        assert_eq!(
+            errors,
+            [(
+                "E011",
+                "generation inputs changed repeatedly while they were being read; retry the build"
+            )],
+            "{report:#?}"
+        );
+        assert!(!build.output.exists());
     }
 
     /// A round that finds no new rule ends the carve with that round's report: the residual
