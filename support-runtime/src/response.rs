@@ -40,6 +40,12 @@ impl<T> ResponseValue<T> {
         self.inner
     }
 
+    /// Consume the wrapper, yielding its status, headers and decoded body, each owned, so a caller
+    /// keeping the headers beside the body need not clone them before [`Self::into_inner`].
+    pub fn into_parts(self) -> (StatusCode, HeaderMap, T) {
+        (self.status, self.headers, self.inner)
+    }
+
     /// Borrow the decoded body.
     pub fn inner(&self) -> &T {
         &self.inner
@@ -177,6 +183,19 @@ mod tests {
         assert_eq!(value.headers()["x-trace"], "abc");
         assert_eq!(value.inner(), "body");
         assert_eq!(value.into_inner(), "body");
+    }
+
+    #[test]
+    fn into_parts_hands_over_status_headers_and_body_owned() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-trace", "abc".parse().unwrap());
+        let value = ResponseValue::new(StatusCode::ACCEPTED, headers, "body".to_owned());
+
+        let (status, headers, body) = value.into_parts();
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers["x-trace"], "abc");
+        assert_eq!(body, "body");
     }
 
     /// A response whose body plays `chunks`, declaring `length` where one is given.

@@ -40,7 +40,7 @@ pub(super) fn query_encoding_tokens(allow_reserved: bool) -> TokenStream {
 }
 
 /// The `support::PercentEncoding` variant named `variant`.
-fn encoding_variant_tokens(variant: &str) -> TokenStream {
+pub(super) fn encoding_variant_tokens(variant: &str) -> TokenStream {
     let ident = proc_macro2::Ident::new(variant, proc_macro2::Span::call_site());
     quote! { support::PercentEncoding::#ident }
 }
