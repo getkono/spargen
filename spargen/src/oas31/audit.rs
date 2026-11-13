@@ -354,6 +354,17 @@ impl Audit<'_, '_> {
                 .remedy("keep producer-side validation for these constraints")
                 .emit(diags);
         }
+        if schema.oas30_nullable {
+            // W001 case: oas30-nullable
+            Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+                .message(
+                    "OpenAPI 3.0's `nullable` is not a keyword of OpenAPI 3.1 or 3.2: whether \
+                     `null` is valid is read from `type`, `enum`, `const` and the schema's \
+                     applicators alone",
+                )
+                .remedy("list `null` in the schema's `type` instead, as `type: [T, 'null']`")
+                .emit(diags);
+        }
 
         let content_consumed = self
             .consumed_content

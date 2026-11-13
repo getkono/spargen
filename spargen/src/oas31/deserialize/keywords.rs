@@ -3,7 +3,8 @@
 //! `maxProperties`), and the other validation keywords `parse_validation` reads (`pattern`, the
 //! numeric bounds, `multipleOf`, `uniqueItems`). One of the wrong shape is `E011` at the keyword
 //! (or the array element) that holds it; dropping it would silently widen the schema. The one
-//! exception is OpenAPI 3.0's boolean `exclusiveMinimum`/`exclusiveMaximum`, which is `W001`.
+//! exception is OpenAPI 3.0's boolean `exclusiveMinimum`/`exclusiveMaximum`, which is `W001`, as
+//! is OpenAPI 3.0's `nullable: true` ([`oas30_nullable`]).
 
 use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer};
 use crate::source::{Node, Number, SpannedMap, SpannedValue};
@@ -190,6 +191,16 @@ fn exclusive_bound(
         Some(value) if value.as_bool().is_some() => (None, true),
         _ => (number(map, keyword, pointer, diags), false),
     }
+}
+
+/// Whether the schema writes `nullable: true`, OpenAPI 3.0's admission of `null`. JSON Schema
+/// 2020-12 defines no `nullable`, so in a 3.1 or 3.2 document it is an unknown keyword, which
+/// constrains nothing: it is recorded only so the audit can report it as `W001`, since the shape
+/// it leaves differs from the one its author meant. `nullable: false` restates what the schema
+/// means without it, and a value of any other shape is an unknown keyword's to carry, so neither
+/// is recorded.
+pub(super) fn oas30_nullable(map: &SpannedMap) -> bool {
+    map.get("nullable").and_then(SpannedValue::as_bool) == Some(true)
 }
 
 /// A count keyword (`minLength`, `maxItems`, ...) of the schema at `pointer`: absent, or a

@@ -191,7 +191,7 @@ fn an_openapi_3_0_nullable_is_warned_and_not_reinterpreted() {
             "{version}: {report:#?}"
         );
         assert!(
-            code.contains("pub name: Option<String>"),
+            code.contains("pub name: Option<Uname>") && code.contains("pub type Uname = String;"),
             "{version}: {code}"
         );
 
