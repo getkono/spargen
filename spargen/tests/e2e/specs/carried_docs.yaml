@@ -6,17 +6,18 @@ info:
     The moderation API, served by [`crate::serve`]. See https://example.com/docs.
 servers:
   - url: https://{region}.example.com
-    description: The regional host, routed by [Router].
+    description: "The regional host, routed by [Router].\rIts ‮name‬ is regional."
     variables:
       region:
         default: eu
-        description: A region code, as [`Region`] lists them.
+        description: "A region code, as [`Region`] lists them.\rOne of ⁧eu⁩."
 components:
   securitySchemes:
     token:
       type: http
       scheme: bearer
-      description: A token [`crate::auth::mint`] issues; see https://example.com/auth.
+      description: "A token [`crate::auth::mint`] issues; see https://example.com/auth.\rIt expires\
+        \ hourly.\n- a step\n        over indented"
   schemas:
     Report:
       description: |
@@ -33,6 +34,18 @@ components:
       required: [id]
       properties:
         id: { type: string }
+        summary:
+          type: string
+          description: "First line.\rSecond line, after a lone CR.\nThird line."
+        author:
+          type: string
+          description: "The author's name, as written: ‮reversed‬ and ⁦isolated⁩."
+        payload:
+          type: string
+          description: "A <T/> value, beside a void <br/>."
+        steps:
+          type: string
+          description: "- a step\n        over indented"
 paths:
   /reports/export:
     post:
