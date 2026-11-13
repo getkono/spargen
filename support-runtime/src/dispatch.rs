@@ -407,7 +407,8 @@ where
 }
 
 /// Decode a raw UTF-8 success body as the JSON string value described by a textual OpenAPI media
-/// type. Converting through `Value::String` keeps generated string enums and string formats typed
+/// type, or as the JSON scalar it spells where `T` takes no string (see [`decode_text_body`]).
+/// Converting through `Value::String` keeps generated string enums and string formats typed
 /// while avoiding JSON's quote requirement on the wire. An empty body is decoded like any other
 /// (see [`decode_text_body`]): `String` yields `""`, a typed value with no empty member yields
 /// [`Error::Decode`].
@@ -498,8 +499,12 @@ pub async fn decode_success_bytes(
     .await
 }
 
-/// Deserialize a raw UTF-8 body through a JSON string value. Exposed to the generated shim so
-/// multi-status response variants use exactly the same textual codec as single-body responses.
+/// Deserialize a raw UTF-8 body through a JSON string value, or, where `T` does not take the
+/// string, through the JSON number, boolean or `null` the text spells, as a header value is read:
+/// so `42` decodes into an integer and `true` into a boolean, while a `String` still reads `42` as
+/// the text it is. Text spelling no scalar (a JSON array or object included) is offered as the
+/// string again, and fails as that. Exposed to the generated shim so multi-status response
+/// variants use exactly the same textual codec as single-body responses.
 ///
 /// An empty body is the zero-length text and is not special-cased: it becomes
 /// `Value::String("")`, so whether it decodes is `T`'s decision. `String` decodes it to `""` by
@@ -515,8 +520,10 @@ where
     T: DeserializeOwned,
 {
     let text = std::str::from_utf8(body).map_err(|error| error.to_string())?;
-    serde_json::from_value(serde_json::Value::String(text.to_owned()))
-        .map_err(|error| error.to_string())
+    if let Ok(value) = serde_json::from_value(serde_json::Value::String(text.to_owned())) {
+        return Ok(value);
+    }
+    serde_json::from_value(crate::header::json_scalar(text)).map_err(|error| error.to_string())
 }
 
 /// Read a non-success response body capped at `max_error_body`, returning its status, headers, the

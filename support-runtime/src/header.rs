@@ -208,6 +208,12 @@ fn object(raw: &str, explode: bool, scalars: Scalars) -> Value {
     Value::Object(members)
 }
 
+/// `raw` as the JSON number, boolean or `null` it spells, or as the string it is where it spells
+/// none: the JSON reading of a header token, which a `text/*` body shares (`decode_text_body`).
+pub(crate) fn json_scalar(raw: &str) -> Value {
+    scalar(raw, Scalars::Json)
+}
+
 /// Interpret one header token.
 fn scalar(raw: &str, scalars: Scalars) -> Value {
     if scalars == Scalars::Text {
