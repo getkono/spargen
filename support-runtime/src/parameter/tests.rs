@@ -924,16 +924,13 @@ fn nested_values_are_rejected() {
 }
 
 /// Each variant's message names the rule it broke, and only a serialization failure has a
-/// separate cause: `source` hands back serde's own error, which `Display` also quotes.
+/// separate cause: `source` hands back serde's own error, which `Display` leaves to the chain.
 #[test]
 fn every_parameter_error_displays_its_rule_and_only_serialize_has_a_source() {
     let serde_error = serde_json::from_str::<u8>("x").unwrap_err();
     let serde_message = serde_error.to_string();
     let serialize = ParameterError::from(serde_error);
-    assert_eq!(
-        serialize.to_string(),
-        format!("parameter serialization failed: {serde_message}")
-    );
+    assert_eq!(serialize.to_string(), "parameter serialization failed");
     let source = std::error::Error::source(&serialize).expect("serialize carries its cause");
     assert!(source.downcast_ref::<serde_json::Error>().is_some());
     assert_eq!(source.to_string(), serde_message);

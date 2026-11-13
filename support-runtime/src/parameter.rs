@@ -87,7 +87,7 @@ pub enum ParameterError {
 impl fmt::Display for ParameterError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Serialize(error) => write!(formatter, "parameter serialization failed: {error}"),
+            Self::Serialize(_) => formatter.write_str("parameter serialization failed"),
             Self::NestedValue => formatter.write_str(
                 "nested arrays and objects are not supported by OpenAPI parameter serialization",
             ),

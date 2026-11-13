@@ -6,6 +6,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::StatusCode;
 
 use super::{every_request_variant, every_variant, reqwest_error, ApiBody};
+use crate::parameter::ParameterError;
 use crate::{Error, ResponseValue, TimeoutKind, TransportError};
 
 /// The value every sensitive response header below carries.
@@ -137,13 +138,18 @@ fn every_error_with_a_source() -> Vec<Box<dyn std::error::Error + 'static>> {
     ] {
         errors.push(Box::new(failure));
     }
+    let parameter = || ParameterError::from(serde_json::from_str::<u8>("x").unwrap_err());
+    errors.push(Box::new(parameter()));
+    errors.push(Box::new(
+        Error::<ApiBody>::request_construction(parameter()),
+    ));
     errors.retain(|error| error.source().is_some());
     errors
 }
 
-/// `RequestError::Other`, `TransportError`, `ProtocolError` and `RedirectError` printed
-/// `"label: {source}"` and returned that same cause from `source()`, so a full-chain reporter
-/// (anyhow's `{:#}`, eyre) printed the cause twice. Walking the chain the way those reporters do,
+/// `RequestError::Other`, `TransportError`, `ProtocolError`, `RedirectError` and
+/// `ParameterError::Serialize` printed `"label: {source}"` and returned that same cause from
+/// `source()`, so a full-chain reporter (anyhow's `{:#}`, eyre) printed the cause twice. Walking the chain the way those reporters do,
 /// no level's `Display` repeats the text a deeper level prints.
 #[test]
 fn the_full_cause_chain_repeats_no_segment() {
