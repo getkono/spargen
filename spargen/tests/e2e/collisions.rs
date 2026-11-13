@@ -625,3 +625,54 @@ fn a_gen_named_spec_compiles_under_edition_2024() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Issue #1299: a closed string enum whose values case to the variant identifier `Err`. The
+/// enum's `FromStr` impl declares `type Err`, so a signature spelling `Self::Err` names both that
+/// associated type and the variant, which rustc rejects as an ambiguous associated item. `err` and
+/// `ERR` both case to `Err`, so one keeps it and the other is disambiguated beside it.
+const ERR_VALUED_ENUM_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /level:
+    get:
+      operationId: getLevel
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Level" } }
+components:
+  schemas:
+    Level: { type: string, enum: [err, ERR, warn] }
+"##;
+
+#[test]
+fn a_string_enum_valued_err_compiles() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "api.yaml", ERR_VALUED_ENUM_SPEC);
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "err_enum_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        generated.contains("Err,"),
+        "the fixture must allocate the variant `Err`:\n{generated}"
+    );
+    assert!(
+        generated.contains("impl std::str::FromStr for Level"),
+        "the fixture must emit `Level`'s `FromStr` impl:\n{generated}"
+    );
+
+    let output = fixture_cargo(&out)
+        .args(["clippy", "--all-features", "--", "-D", "warnings"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a string enum with a value cased to `Err` must compile lint-clean:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
