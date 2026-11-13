@@ -670,10 +670,10 @@ fn unreferenced_member_types(source: &str) -> Vec<String> {
 }
 
 /// A schema whose only value is `null` is the null type `type: 'null'` lowers to on its own,
-/// however it is composed (#1184): an `Option` of `()`, so an optional field of any spelling
-/// decodes a present `null` as `None` (no `decode_present`) and a required one is `Option<()>`.
-/// Every spelling here gives fields `a` (optional) and `r` (required) of `Merged` the attribute
-/// and type the outright spelling gives them, through `generate` and `check` alike.
+/// however it is composed (#1184): a nullable `()`, so an optional field of any spelling is a
+/// `Nullable<()>` decoding a present `null` as `Null` (no `decode_present`) and a required one is
+/// `Option<()>`. Every spelling here gives fields `a` (optional) and `r` (required) of `Merged`
+/// the attribute and type the outright spelling gives them, through `generate` and `check` alike.
 #[test]
 fn every_spelling_of_exactly_null_is_the_null_type_written_outright() {
     let outright = "{ type: 'null' }";
@@ -689,7 +689,8 @@ fn every_spelling_of_exactly_null_is_the_null_type_written_outright() {
         "{ $ref: '#/components/schemas/C' }",
         "{ allOf: [ { $ref: '#/components/schemas/Z' }, { $ref: '#/components/schemas/C' } ] }",
     ];
-    // `Merged`'s field `name`: its `#[serde(..)]` line and its type, an alias of `()` read as `()`.
+    // `Merged`'s field `name`: its `#[serde(..)]` attribute, its lines joined, and its type, an
+    // alias of `()` read as `()`.
     let field = |source: &str, name: &str| -> Option<(String, String)> {
         let prefix = format!("pub {name}: ");
         let lines: Vec<&str> = source.lines().map(str::trim).collect();
@@ -697,12 +698,22 @@ fn every_spelling_of_exactly_null_is_the_null_type_written_outright() {
         let ty = lines[at].strip_prefix(&prefix)?.trim_end_matches(',');
         let unit =
             |alias: &str| alias == "()" || source.contains(&format!("pub type {alias} = ();"));
-        let ty = match ty.strip_prefix("Option<").and_then(|t| t.strip_suffix('>')) {
-            Some(inner) if unit(inner) => "Option<()>".to_owned(),
+        let ty = match ty.strip_suffix('>').and_then(|t| {
+            t.strip_prefix("Option<")
+                .map(|inner| ("Option", inner))
+                .or_else(|| {
+                    t.strip_prefix("super::support::Nullable<")
+                        .map(|inner| ("Nullable", inner))
+                })
+        }) {
+            Some((wrapper, inner)) if unit(inner) => format!("{wrapper}<()>"),
             _ if unit(ty) => "()".to_owned(),
             _ => ty.to_owned(),
         };
-        Some((lines[at.checked_sub(1)?].to_owned(), ty))
+        let start = lines[..at]
+            .iter()
+            .rposition(|line| line.starts_with("#[serde("))?;
+        Some((lines[start..at].concat(), ty))
     };
     let answer = |prop: &str| {
         let spec = format!(
@@ -719,9 +730,10 @@ fn every_spelling_of_exactly_null_is_the_null_type_written_outright() {
     };
     let expected = (
         Some((
-            "#[serde(rename = \"a\", default, skip_serializing_if = \"Option::is_none\")]"
+            "#[serde(rename = \"a\",default,skip_serializing_if = \
+             \"super::support::Nullable::is_absent\",)]"
                 .to_owned(),
-            "Option<()>".to_owned(),
+            "Nullable<()>".to_owned(),
         )),
         Some((
             "#[serde(rename = \"r\")]".to_owned(),
