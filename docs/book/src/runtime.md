@@ -70,8 +70,10 @@ without sending it, exactly the `http::Request<HttpBody>` the method hands the b
 `client.decode_{method}(response)` decodes an `http::Response<HttpBody>` into the method's own
 `Result`, under the client's body limits. A caller that owns the send — signing the exact request,
 pacing it, re-preparing it on each attempt, or sending it over another transport — calls the two
-itself; only the method's own send replays a call a refreshable credential was rejected on. Each
-request an operation builds carries the operation's `ops::Operation` (its `id`, `method` and
+itself; only the method's own send replays a call a refreshable credential was rejected on. A
+binary operation's `{method}_stream` twin is split the same way, into
+`client.{method}_stream_request(..)` and `client.decode_{method}_stream(response)` (see
+[Binary content](#binary-content)). Each request an operation builds carries the operation's `ops::Operation` (its `id`, `method` and
 `path_template`) among its extensions, a replay and a stream reconnect included, so a backend reads
 `request.extensions().get::<ops::Operation>()` to sign, route or meter by operation rather than by
 parsing paths.
@@ -443,4 +445,17 @@ apply. Its errors are `Error<Infallible>`, which `Error::widen` turns into the o
 ```rust,ignore
 let blob = client.get_blob_stream(id).await?.into_inner();
 let bytes = blob.collect_bounded(MAX_BLOB).await.map_err(Error::widen)?;
+```
+
+The twin has its own two halves, as every operation method does: `{method}_stream_request(..)`
+builds the twin's request without sending it, which carries no total timeout where the method's
+`{method}_request` carries the client's, and `decode_{method}_stream(response)` hands a success
+body over unread as a `ByteStream` and dispatches an error status into the operation's typed error,
+as the twin does. Neither reads under the client's body limits. Where another method already spells
+either name, that method keeps it and the twin's companion takes a disambiguated name.
+
+```rust,ignore
+let request = client.get_blob_stream_request(id).await?;
+let response = my_transport.send(request).await?;
+let blob = client.decode_get_blob_stream(response).await?.into_inner();
 ```

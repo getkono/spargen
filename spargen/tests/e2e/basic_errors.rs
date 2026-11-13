@@ -552,6 +552,68 @@ fn an_operation_is_its_request_builder_and_decoder_and_names_its_operation() {
     }
 }
 
+// Issue #1290: a binary operation's `_stream` twin is its two halves as well. Its request builder
+// builds the method's request without the total timeout the method's carries, and its decoder hands
+// a success body over unread, as the twin does, and dispatches an error status as the method does.
+#[test]
+fn a_stream_twin_is_its_request_builder_and_decoder() {
+    use std::future::Future;
+    fn ready<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match future.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(output) => output,
+            std::task::Poll::Pending => panic!("nothing here waits"),
+        }
+    }
+
+    let deadline = std::time::Duration::from_secs(15);
+    let client = basic_client::Client::new("https://example.com")
+        .unwrap()
+        .with_timeout(Some(deadline));
+    let buffered = ready(client.get_artwork_request("a")).unwrap();
+    let streamed = ready(client.get_artwork_stream_request("a")).unwrap();
+    assert_eq!(
+        buffered.extensions().get::<basic_client::TotalTimeout>(),
+        Some(&basic_client::TotalTimeout(deadline))
+    );
+    assert_eq!(streamed.extensions().get::<basic_client::TotalTimeout>(), None);
+    assert_eq!(streamed.method(), buffered.method());
+    assert_eq!(streamed.uri(), buffered.uri());
+    assert_eq!(streamed.uri().to_string(), "https://example.com/artwork/a");
+    assert_eq!(
+        streamed.extensions().get::<basic_client::ops::Operation>(),
+        Some(&basic_client::ops::GET_ARTWORK)
+    );
+
+    // The decoder reads nothing under the client's body limit: the caller bounds the stream.
+    let bounded = client.clone().with_options(basic_client::RequestOptions {
+        max_body: Some(4),
+        ..basic_client::RequestOptions::default()
+    });
+    let response = http::Response::builder()
+        .status(200)
+        .header("content-type", "image/png")
+        .body(basic_client::HttpBody::from("abcdef"))
+        .unwrap();
+    let value = ready(bounded.decode_get_artwork_stream(response)).unwrap();
+    assert_eq!(value.status(), 200);
+    let stream: basic_client::ByteStream = value.into_inner();
+    assert_eq!(ready(stream.collect_bounded(6)).unwrap(), "abcdef");
+
+    // An error status is the operation's error, as the twin's own call reports it.
+    let response = http::Response::builder()
+        .status(503)
+        .body(basic_client::HttpBody::from("down"))
+        .unwrap();
+    match ready(client.decode_get_artwork_stream(response)) {
+        Err(basic_client::Error::UnexpectedStatus { status, body, .. }) => {
+            assert_eq!((status.as_u16(), body.as_ref()), (503, &b"down"[..]));
+        }
+        other => panic!("expected the unexpected 503, got {other:?}"),
+    }
+}
+
 // The third credential state: a credential is registered and selects its alternative, but it is of
 // a kind the scheme cannot carry. It is typed from generated output too, with nothing beneath it,
 // so a consumer never has to match on its text.

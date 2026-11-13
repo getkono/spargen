@@ -16612,7 +16612,7 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
     }
-    ///`download_raw`, with its success body handed over unread as a `ByteStream`, to read as it arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The request and the error branch are `download_raw`'s. Like an `EventStream`, the call is exempt from the client's total timeout and its body limits; its connect and read timeouts still apply.
+    ///`download_raw`, with its success body handed over unread as a `ByteStream`, to read as it arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The request and the error branch are `download_raw`'s. Like an `EventStream`, the call is exempt from the client's total timeout and its body limits; its connect and read timeouts still apply. It sends its request builder's request through the client's backend, replays it once where a refreshable credential was rejected, and decodes the response with its decoder.
     #[inline]
     pub async fn download_raw_stream(
         &self,
@@ -16627,6 +16627,27 @@ Response `409`: Conflict*/
         let response = support::execute(&self.core, request, replay, true)
             .await
             .map_err(support::Error::widen)?;
+        self.decode_download_raw_stream(response).await
+    }
+    ///The request `download_raw_stream` sends, built without sending it: `download_raw`'s request, exempt from the client's total timeout as `download_raw_stream`'s is, for a caller that sends it itself and hands the response to `download_raw_stream`'s decoder. Nothing is replayed after a rejected refreshable credential: that is `download_raw_stream`'s own send.
+    #[inline]
+    pub async fn download_raw_stream_request(
+        &self,
+    ) -> Result<
+        http::Request<support::HttpBody>,
+        support::Error<std::convert::Infallible>,
+    > {
+        self.prepare_download_raw(true).await.map(|(request, _)| request)
+    }
+    ///Decode a response to the request `download_raw_stream` sends (`ops::DOWNLOAD_RAW`), obtained however the caller sent it, exactly as `download_raw_stream` decodes its own: a success body handed over unread as a `ByteStream`, exempt from the client's body limits, and an error status dispatched into the operation's typed error.
+    #[inline]
+    pub async fn decode_download_raw_stream(
+        &self,
+        response: http::Response<support::HttpBody>,
+    ) -> Result<
+        support::ResponseValue<support::ByteStream>,
+        support::Error<DownloadRawError>,
+    > {
         if response.status().is_success() {
             Ok(support::stream_success_bytes(response))
         } else {
@@ -16719,7 +16740,7 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
     }
-    ///`put_ranged`, with its success body handed over unread as a `ByteStream`, to read as it arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The request and the error branch are `put_ranged`'s. Like an `EventStream`, the call is exempt from the client's total timeout and its body limits; its connect and read timeouts still apply.
+    ///`put_ranged`, with its success body handed over unread as a `ByteStream`, to read as it arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The request and the error branch are `put_ranged`'s. Like an `EventStream`, the call is exempt from the client's total timeout and its body limits; its connect and read timeouts still apply. It sends its request builder's request through the client's backend, replays it once where a refreshable credential was rejected, and decodes the response with its decoder.
     #[inline]
     pub async fn put_ranged_stream(
         &self,
@@ -16735,6 +16756,28 @@ Response `409`: Conflict*/
         let response = support::execute(&self.core, request, replay, true)
             .await
             .map_err(support::Error::widen)?;
+        self.decode_put_ranged_stream(response).await
+    }
+    ///The request `put_ranged_stream` sends, built without sending it: `put_ranged`'s request, exempt from the client's total timeout as `put_ranged_stream`'s is, for a caller that sends it itself and hands the response to `put_ranged_stream`'s decoder. Nothing is replayed after a rejected refreshable credential: that is `put_ranged_stream`'s own send.
+    #[inline]
+    pub async fn put_ranged_stream_request(
+        &self,
+        body: impl Into<support::HttpBody>,
+    ) -> Result<
+        http::Request<support::HttpBody>,
+        support::Error<std::convert::Infallible>,
+    > {
+        self.prepare_put_ranged(body, true).await.map(|(request, _)| request)
+    }
+    ///Decode a response to the request `put_ranged_stream` sends (`ops::PUT_RANGED`), obtained however the caller sent it, exactly as `put_ranged_stream` decodes its own: a success body handed over unread as a `ByteStream`, exempt from the client's body limits, and an error status dispatched into the operation's typed error.
+    #[inline]
+    pub async fn decode_put_ranged_stream(
+        &self,
+        response: http::Response<support::HttpBody>,
+    ) -> Result<
+        support::ResponseValue<support::ByteStream>,
+        support::Error<PutRangedError>,
+    > {
         if response.status().is_success() {
             Ok(support::stream_success_bytes(response))
         } else {
@@ -16845,7 +16888,7 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
     }
-    ///`get_artwork`, with its success body handed over unread as a `ByteStream`, to read as it arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The request and the error branch are `get_artwork`'s. Like an `EventStream`, the call is exempt from the client's total timeout and its body limits; its connect and read timeouts still apply.
+    ///`get_artwork`, with its success body handed over unread as a `ByteStream`, to read as it arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The request and the error branch are `get_artwork`'s. Like an `EventStream`, the call is exempt from the client's total timeout and its body limits; its connect and read timeouts still apply. It sends its request builder's request through the client's backend, replays it once where a refreshable credential was rejected, and decodes the response with its decoder.
     #[inline]
     pub async fn get_artwork_stream(
         &self,
@@ -16861,6 +16904,28 @@ Response `409`: Conflict*/
         let response = support::execute(&self.core, request, replay, true)
             .await
             .map_err(support::Error::widen)?;
+        self.decode_get_artwork_stream(response).await
+    }
+    ///The request `get_artwork_stream` sends, built without sending it: `get_artwork`'s request, exempt from the client's total timeout as `get_artwork_stream`'s is, for a caller that sends it itself and hands the response to `get_artwork_stream`'s decoder. Nothing is replayed after a rejected refreshable credential: that is `get_artwork_stream`'s own send.
+    #[inline]
+    pub async fn get_artwork_stream_request(
+        &self,
+        id: impl Into<types::Id>,
+    ) -> Result<
+        http::Request<support::HttpBody>,
+        support::Error<std::convert::Infallible>,
+    > {
+        self.prepare_get_artwork(id, true).await.map(|(request, _)| request)
+    }
+    ///Decode a response to the request `get_artwork_stream` sends (`ops::GET_ARTWORK`), obtained however the caller sent it, exactly as `get_artwork_stream` decodes its own: a success body handed over unread as a `ByteStream`, exempt from the client's body limits, and an error status dispatched into the operation's typed error.
+    #[inline]
+    pub async fn decode_get_artwork_stream(
+        &self,
+        response: http::Response<support::HttpBody>,
+    ) -> Result<
+        support::ResponseValue<support::ByteStream>,
+        support::Error<GetArtworkError>,
+    > {
         if response.status().is_success() {
             Ok(support::stream_success_bytes(response))
         } else {

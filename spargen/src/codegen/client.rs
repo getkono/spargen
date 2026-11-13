@@ -651,6 +651,29 @@ mod tests {
             name: "X-Api-Version".to_owned(),
             required: true,
         });
+        // One operation reads a raw binary success, so it has a `_stream` twin, with its request
+        // builder and decoder, on `Client` alone.
+        let bytes = api.types.insert(crate::ir::TypeDef {
+            name_hint: "Blob".to_owned(),
+            kind: crate::ir::TypeKind::Bytes(crate::ir::BytesEncoding::Raw),
+            docs: Docs::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
+        });
+        api.operations[1].responses.by_status = vec![(
+            StatusSpec::Exact(200),
+            Response {
+                body: Some(crate::ir::Ty {
+                    id: bytes,
+                    nullable: false,
+                    boxed: false,
+                }),
+                media: Some(crate::ir::MediaType::OctetStream),
+                stream: None,
+                accept: None,
+                headers: Vec::new(),
+            },
+        )];
         let names = crate::name::allocate(&api);
         let options = CodegenOptions::default();
         let signatures = super::super::operation::signatures(&api, &names, &options);
@@ -681,11 +704,24 @@ mod tests {
             })
             .map(|ident| ident.as_str().to_owned())
             .collect();
-        let preparers: std::collections::BTreeSet<String> = api
-            .operations
-            .iter()
-            .map(|operation| names.operation(&operation.id).preparer.as_str().to_owned())
-            .collect();
+        // The preparers, and each `_stream` twin with its request builder and decoder, which only
+        // `Client` defines.
+        let preparers: std::collections::BTreeSet<String> =
+            api.operations
+                .iter()
+                .map(|operation| names.operation(&operation.id))
+                .flat_map(|names| {
+                    std::iter::once(&names.preparer).chain(names.byte_stream.iter().flat_map(
+                        |stream| [&stream.twin, &stream.request_builder, &stream.decoder],
+                    ))
+                })
+                .map(|ident| ident.as_str().to_owned())
+                .collect();
+        assert_eq!(
+            preparers.len(),
+            api.operations.len() + 3,
+            "one operation has a twin family: {preparers:?}"
+        );
         let reserved: std::collections::BTreeSet<String> = crate::name::CLIENT_METHODS
             .iter()
             .map(|method| (*method).to_owned())
@@ -716,7 +752,7 @@ mod tests {
                 assert_eq!(
                     methods.contains(preparer),
                     self_ty == "Client",
-                    "only `impl Client` defines the preparer `{preparer}`: {methods:?}"
+                    "only `impl Client` defines `{preparer}`: {methods:?}"
                 );
             }
             let fixed: std::collections::BTreeSet<String> = methods
