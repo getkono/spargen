@@ -7033,7 +7033,7 @@ pub mod types {
     impl std::str::FromStr for RefinedMember1Status {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "queued" => Ok(RefinedMember1Status::Queued),
                 "complete" => Ok(RefinedMember1Status::Complete),
@@ -7415,7 +7415,7 @@ pub mod types {
     impl std::str::FromStr for NarrowDefaultEnumValid {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "a" => Ok(NarrowDefaultEnumValid::A),
                 "b" => Ok(NarrowDefaultEnumValid::B),
@@ -7459,7 +7459,7 @@ pub mod types {
     impl std::str::FromStr for NarrowDefaultEnumBad {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "a" => Ok(NarrowDefaultEnumBad::A),
                 "b" => Ok(NarrowDefaultEnumBad::B),
@@ -7672,7 +7672,7 @@ pub mod types {
     impl std::str::FromStr for NarrowDefaultSiblingConstraintValid {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "a" => Ok(NarrowDefaultSiblingConstraintValid::A),
                 "b" => Ok(NarrowDefaultSiblingConstraintValid::B),
@@ -7716,7 +7716,7 @@ pub mod types {
     impl std::str::FromStr for NarrowDefaultSiblingConstraintBad {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "a" => Ok(NarrowDefaultSiblingConstraintBad::A),
                 "b" => Ok(NarrowDefaultSiblingConstraintBad::B),
@@ -8199,7 +8199,7 @@ pub mod types {
     impl std::str::FromStr for Mode {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "auto" => Ok(Mode::Auto),
                 "manual" => Ok(Mode::Manual),
@@ -8278,7 +8278,7 @@ pub mod types {
     impl std::str::FromStr for StringLiteral {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "special" => Ok(StringLiteral::Special),
                 _ => Err(super::support::UnknownVariant::new("StringLiteral", value)),
@@ -8678,7 +8678,7 @@ pub mod types {
     impl std::str::FromStr for ContentFileType {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "file" => Ok(ContentFileType::File),
                 _ => Err(super::support::UnknownVariant::new("ContentFileType", value)),
@@ -8723,7 +8723,7 @@ pub mod types {
     impl std::str::FromStr for ContentLinkType {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "symlink" => Ok(ContentLinkType::Symlink),
                 _ => Err(super::support::UnknownVariant::new("ContentLinkType", value)),
@@ -9240,7 +9240,7 @@ pub mod types {
     impl std::str::FromStr for Priority {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "low" => Ok(Priority::Low),
                 "medium" => Ok(Priority::Medium),
