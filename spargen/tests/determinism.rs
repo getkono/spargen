@@ -3,7 +3,8 @@
 //! the same outcome, and the same diagnostics in the same order. It is held over an inline spec,
 //! every generating corpus case, the broad `e2e.rs` spec (through `generate` with default and with
 //! non-default options, and through the proc-macro preview), `e2e.rs`'s 3.2 and date specs, and
-//! generated union/`allOf` documents.
+//! generated union/`allOf` documents; and across the spellings of the spec's path and the
+//! directories a description is checked out into.
 
 use std::collections::BTreeSet;
 
@@ -117,6 +118,82 @@ fn the_inline_and_e2e_specs_are_byte_identical_across_runs() {
             assert_generates_identically(&spec_path, label),
             Outcome::Generated,
             "{label}"
+        );
+    }
+}
+
+/// A description split over a root document and a `$ref`'d file in a subdirectory, written into
+/// `dir`; returns the root's path.
+fn write_split_spec(dir: &std::path::Path) -> Utf8PathBuf {
+    std::fs::create_dir_all(dir.join("schemas")).unwrap();
+    write_spec(
+        &dir.join("schemas"),
+        "user.yaml",
+        "type: object\nrequired: [id]\nproperties:\n  id: { type: string }\n",
+    );
+    write_spec(
+        dir,
+        "openapi.yaml",
+        &SPEC.replace(
+            "schema: { $ref: \"#/components/schemas/User\" }",
+            "schema: { $ref: \"schemas/user.yaml\" }",
+        ),
+    )
+}
+
+/// `path` relative to `base`, both canonicalized first: `..` for each segment of `base` past their
+/// common prefix, then the rest of `path`.
+fn relative_path(base: &std::path::Path, path: &std::path::Path) -> Utf8PathBuf {
+    let base = base.canonicalize().unwrap();
+    let path = path.canonicalize().unwrap();
+    let base: Vec<_> = base.components().collect();
+    let path: Vec<_> = path.components().collect();
+    let common = base.iter().zip(&path).take_while(|(a, b)| a == b).count();
+    let mut relative = std::path::PathBuf::new();
+    for _ in common..base.len() {
+        relative.push("..");
+    }
+    relative.extend(&path[common..]);
+    Utf8PathBuf::from_path_buf(relative).expect("the relative path is UTF-8")
+}
+
+/// The module is a function of the description's bytes and its files' layout relative to one
+/// another, not of where the checkout lives or how the spec path is spelled (#1347). One split
+/// description, named by an absolute path, by an unnormalized absolute path, by a path relative to
+/// the working directory, and copied into another directory, generates byte-identical modules, and
+/// the provenance header names the spec by its file name alone.
+#[test]
+fn the_module_does_not_depend_on_the_spec_path_or_where_the_checkout_lives() {
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let here = tempfile::tempdir_in(scratch).unwrap();
+    let elsewhere = tempfile::tempdir_in(scratch).unwrap();
+    let absolute = write_split_spec(here.path());
+    let copied = write_split_spec(elsewhere.path());
+    let unnormalized = Utf8PathBuf::from_path_buf(here.path().join("schemas/../openapi.yaml"))
+        .expect("the temporary path is UTF-8");
+    let relative = relative_path(&std::env::current_dir().unwrap(), absolute.as_std_path());
+    assert!(relative.is_relative(), "{relative}");
+
+    let mut modules = Vec::new();
+    for (label, path) in [
+        ("absolute", &absolute),
+        ("unnormalized", &unnormalized),
+        ("relative to the working directory", &relative),
+        ("copied into another directory", &copied),
+    ] {
+        let (report, module) = generate_to_string(Spec::new(path.clone()));
+        assert_eq!(report.outcome(), Outcome::Generated, "{label}: {report:#?}");
+        modules.push((label, module.expect("a generated run wrote its module")));
+    }
+    let (_, reference) = &modules[0];
+    assert!(
+        reference.contains("\n// source: openapi.yaml\n"),
+        "the header names the spec by its file name: {reference}"
+    );
+    for (label, module) in &modules[1..] {
+        assert!(
+            module == reference,
+            "{label}: the module differs from the absolute path's"
         );
     }
 }
