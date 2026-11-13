@@ -58,7 +58,8 @@ fn generate(name: &str, carve: bool) -> (Report, Option<String>) {
 }
 
 /// One field of `pub struct ty`: its declared type and the attribute text written above it.
-/// The attributes are what tell an optional field apart from a nullable one: both are
+/// An optional nullable field is a `Nullable<T>`, which reads `null` as `Null`. Otherwise the
+/// attributes are what tell an optional field apart from a required nullable one: both are
 /// `Option<T>`, but an optional non-nullable field decodes a present value through
 /// `decode_present` (so a `null` is refused), and a nullable one reads `null` as `None`.
 struct Field {
@@ -67,8 +68,9 @@ struct Field {
 }
 
 impl Field {
-    fn is_nullable_option(&self) -> bool {
-        self.ty.starts_with("Option<") && !self.attrs.contains("decode_present")
+    fn is_nullable(&self) -> bool {
+        self.ty.starts_with("super::support::Nullable<")
+            || (self.ty.starts_with("Option<") && !self.attrs.contains("decode_present"))
     }
 }
 
@@ -156,25 +158,21 @@ fn utoipa_document_generates_cleanly() {
         assert!(text.contains(op), "missing operation {op}");
     }
 
-    // `type: [string, null]`: a nullable field, which reads `null` as `None`, of the plain type.
+    // `type: [string, null]`: a nullable field, which reads `null` as `Null`, of the plain type.
     let tag = field(&text, "Pet", "tag");
-    assert!(
-        tag.is_nullable_option(),
-        "`tag` is not nullable: {}",
-        tag.ty
-    );
+    assert!(tag.is_nullable(), "`tag` is not nullable: {}", tag.ty);
     assert_eq!(alias_target(&text, "PetTag").as_deref(), Some("String"));
     // Nullable `$ref` through a `oneOf` `null` member: nullable, of the referenced object.
     let category = field(&text, "Pet", "category");
     assert!(
-        category.is_nullable_option(),
+        category.is_nullable(),
         "`category` is not nullable: {}",
         category.ty
     );
     assert_eq!(declared_fields(&text, "PetCategory"), ["id", "name"]);
     // The control: an optional, non-nullable field refuses a present `null`.
     assert!(
-        !field(&text, "Pet", "status").is_nullable_option(),
+        !field(&text, "Pet", "status").is_nullable(),
         "an optional non-nullable field reads null as absence"
     );
     // `allOf: [$ref Pet, {created_at}]`: one struct with `Pet`'s fields and the inline member's.
@@ -253,11 +251,11 @@ fn aide_document_generates_with_only_validation_warnings() {
     ] {
         let declared = field(&text, "Item", name);
         assert!(
-            declared.is_nullable_option(),
+            declared.is_nullable(),
             "`{name}` is not nullable: {}",
             declared.ty
         );
-        assert_eq!(declared.ty, format!("Option<{alias}>"));
+        assert_eq!(declared.ty, format!("super::support::Nullable<{alias}>"));
         assert_eq!(alias_target(&text, alias).as_deref(), Some(target));
     }
     // The `allOf` flatten: `Item`'s fields plus the inline member's `note`.
