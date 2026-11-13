@@ -87,12 +87,24 @@ pub(crate) fn runtime_files() -> &'static [SupportFile] {
     FILES
 }
 
-/// The streaming runtime, embedded only when an operation has a sequential response. It carries
-/// the only references to `futures-core` and reqwest's `stream` capability.
+/// The streaming runtime, embedded only when an operation has a sequential response. With
+/// [`chunked_runtime_file`], it carries the only references to `futures-core` and reqwest's
+/// `stream` capability.
 pub(crate) fn stream_runtime_file() -> SupportFile {
     SupportFile {
         name: "stream.rs",
         contents: include_str!("runtime/stream.rs"),
+    }
+}
+
+/// The `wasm32` chunked read of a `fetch` response, embedded only when an operation reads a body
+/// as it arrives: a sequential response, or a binary `_stream` twin (see
+/// [`crate::ir::RuntimeFeatures::chunked_reads`]). It reads through `futures-core` and reqwest's
+/// `stream` capability.
+pub(crate) fn chunked_runtime_file() -> SupportFile {
+    SupportFile {
+        name: "chunked.rs",
+        contents: include_str!("runtime/chunked.rs"),
     }
 }
 

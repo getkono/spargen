@@ -208,7 +208,9 @@ pub(super) fn emit_operation(
                 response: http::Response<support::HttpBody>,
             ) -> Result<support::ResponseValue<support::ByteStream>, support::Error<#error_ty>> {
                 if response.status().is_success() {
-                    Ok(support::stream_success_bytes(response))
+                    Ok(support::stream_success_bytes(
+                        response.map(support::read_as_it_arrives),
+                    ))
                 } else {
                     #error_branch
                 }

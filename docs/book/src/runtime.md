@@ -12,7 +12,7 @@ itself, so it adds nothing:
 | Capability | Adds |
 | --- | --- |
 | A raw `bytes` value serde encodes (a `format: binary` value in a model, a JSON `content` parameter, or a serde-encoded body; a [`contentEncoding: base64`](#binary-content) one carries its own codec) | `bytes`' `serde` feature |
-| [Streaming](#streaming) (sequential responses) | `futures-core` and reqwest's `stream` feature |
+| A body read as it arrives: [streaming](#streaming) (sequential responses), or a [binary `_stream` twin](#binary-content) | `futures-core` and reqwest's `stream` feature |
 | [XML bodies](#xml-bodies) | `quick-xml` |
 | [`format: date-time` / `date`](#uuid-and-dates) | `time`, or the `jiff` or `chrono` crate the `datetime` backend selects |
 | [`format: uuid`](#uuid-and-dates) | `uuid` |
@@ -305,8 +305,9 @@ Automatic reconnect is explicit: call `with_reconnect(Arc<dyn ReconnectPolicy>)`
 policy owns attempt limits and supplies the wait future, so the runtime introduces neither a timer
 nor a retry default. A replayable prepared request is cloned, its cookies and other headers are
 preserved, and the latest event ID is sent as `Last-Event-ID`. Declining a reconnect yields the
-original typed stream error unchanged. On `wasm32`, reqwest's fetch implementation may buffer the
-body internally; the stream API and framing remain the same.
+original typed stream error unchanged. On `wasm32`, `ReqwestBackend`'s `fetch` response is read
+chunk by chunk as the browser delivers it, through reqwest's `stream` feature; the stream API and
+framing are the same as natively.
 
 ## Blocking (feature `blocking`)
 
@@ -441,6 +442,12 @@ without bound. Each such operation also has a `{method}_stream` twin returning
 of the caller's own. `collect_bounded` is its only collector. Like an `EventStream`, the
 twin is exempt from the total timeout and the body limits; the connect and read timeouts still
 apply. Its errors are `Error<Infallible>`, which `Error::widen` turns into the operation's.
+On `wasm32` too, the twin reads `ReqwestBackend`'s `fetch` response chunk by chunk as the browser
+delivers it, so `collect_bounded` stops at the chunk that crosses its limit rather than after the
+whole body is in memory; an API with a twin therefore requires reqwest's `stream` feature and
+`futures-core`, as one with a sequential response does. The buffered method reads a `fetch`
+response whole on `wasm32`, and checks its limit on what it read, or up front on a declared
+`Content-Length`.
 
 ```rust,ignore
 let blob = client.get_blob_stream(id).await?.into_inner();

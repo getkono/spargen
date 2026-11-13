@@ -34,6 +34,12 @@ mod base64;
 // the consumer opts in, and a wasm build never reaches it.
 #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
 mod blocking;
+// Reading a `wasm32` `fetch` response as it arrives pulls in the optional `futures-core` dependency
+// and reqwest's `stream` feature, so it is compiled only under the `stream` feature; a generated
+// client embeds this module only when its spec has a sequential response or a binary `_stream`
+// twin, the two readers that read a body as it arrives.
+#[cfg(feature = "stream")]
+mod chunked;
 mod client;
 // The RFC 3339 `DateTime`/`Date` newtypes pull in the optional `time` dependency, so they are
 // compiled only under the `time` feature; a generated client embeds this module only when its spec
@@ -84,6 +90,8 @@ pub use auth::{
 pub use base64::{deserialize_base64, serialize_base64};
 #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
 pub use blocking::BlockingRuntime;
+#[cfg(feature = "stream")]
+pub use chunked::read_as_it_arrives;
 pub use client::{ClientConfig, ClientCore, RequestOptions};
 #[cfg(feature = "time")]
 pub use datetime::{Date, DateParseError, DateTime};

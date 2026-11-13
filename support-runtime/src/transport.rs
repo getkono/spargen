@@ -220,7 +220,7 @@ impl HttpBody {
 
     /// The `fetch` response a body reqwest's `fetch` backend received still holds, before anything
     /// has read it; any other body comes back unchanged. The `allow` is for a build without the
-    /// `stream` module, its only caller.
+    /// `chunked` module, its only caller.
     #[cfg(target_arch = "wasm32")]
     #[allow(dead_code)]
     pub(crate) fn into_fetch_response(self) -> Result<reqwest::Response, Self> {
@@ -397,9 +397,10 @@ impl http_body::Body for ReqwestBody {
 
 /// A response body reqwest's `fetch` backend reads whole, its failure classified by
 /// [`TransportError::from_reqwest_body`]. Until it is first polled it holds the response itself,
-/// which the `stream` module takes back to read chunk by chunk as the browser delivers them
-/// ([`HttpBody::into_fetch_response`]), since only an API with a streaming response carries the
-/// dependencies that read needs.
+/// which the `chunked` module takes back to read chunk by chunk as the browser delivers them
+/// ([`HttpBody::into_fetch_response`]) for an `EventStream` or a binary `_stream` twin's
+/// `ByteStream`, since only an API with one of those carries the dependencies that read needs.
+/// Every other reader of the body, a buffered method's decoder included, reads it whole.
 // Mutation testing: replacing `HttpBody::into_fetch_response` or `FetchBody`'s `poll_frame`
 // survives the native suite and is declared rather than killed. Both are compiled only for
 // `wasm32`, so no native test reaches them; on `wasm32` the runtime is compile-checked, not
@@ -488,8 +489,8 @@ fn request_into_reqwest(
 }
 
 /// A response reqwest received, as the seam carries it. Off `wasm32` the body is reqwest's own,
-/// read as it arrives; on `wasm32` it is the `fetch` response's, read whole unless `EventStream`
-/// takes it back to stream it. One function for both targets, with the target-specific steps
+/// read as it arrives; on `wasm32` it is the `fetch` response's, read whole unless an
+/// `EventStream` or a `ByteStream` takes it back to stream it. One function for both targets, with the target-specific steps
 /// `cfg`-gated inside it, so a native test reaches it and no mutation of it survives by being
 /// compiled out.
 pub(crate) fn response_from_reqwest(

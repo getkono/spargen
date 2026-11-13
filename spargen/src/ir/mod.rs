@@ -67,6 +67,11 @@ pub(crate) struct RuntimeFeatures {
     pub(crate) xml: bool,
     /// The sequential-response `stream` module: [`Api::uses_streams`].
     pub(crate) streams: bool,
+    /// The `chunked` module, which reads a `wasm32` `fetch` response as the browser delivers it,
+    /// and the `futures-core` / reqwest `stream` requirements that read needs: every API that
+    /// reads a body as it arrives, through a sequential response ([`Api::uses_streams`]) or a
+    /// binary `_stream` twin ([`Api::uses_byte_streams`]).
+    pub(crate) chunked_reads: bool,
     /// The RFC 3339 `Date`/`DateTime` newtypes and the crate they wrap: [`Api::uses_time`], with
     /// a typed [`DateTimeBackend`] selected. Never `Some(DateTimeBackend::String)`.
     pub(crate) datetime: Option<DateTimeBackend>,
@@ -82,6 +87,7 @@ impl Api {
         RuntimeFeatures {
             xml: self.uses_xml(),
             streams: self.uses_streams(),
+            chunked_reads: self.uses_streams() || self.uses_byte_streams(),
             datetime: (datetime.is_typed() && self.uses_time()).then_some(datetime),
             base64: self.uses_base64(),
         }
@@ -157,11 +163,21 @@ impl Api {
     }
 
     /// Whether any operation returns a sequential response as a typed stream. Drives conditional
-    /// stream-runtime embedding and the `futures-core` / reqwest `stream` requirements.
+    /// stream-runtime embedding and, with [`Api::uses_byte_streams`], the `futures-core` / reqwest
+    /// `stream` requirements.
     pub(crate) fn uses_streams(&self) -> bool {
         self.operations
             .iter()
             .any(|operation| operation.responses.stream_success().is_some())
+    }
+
+    /// Whether any operation has a binary `_stream` twin ([`Api::streams_binary_success`]), whose
+    /// `ByteStream` reads the body as it arrives. With [`Api::uses_streams`], drives the
+    /// `futures-core` / reqwest `stream` requirements the `wasm32` chunked read needs.
+    pub(crate) fn uses_byte_streams(&self) -> bool {
+        self.operations
+            .iter()
+            .any(|operation| self.streams_binary_success(operation))
     }
 
     /// Whether generated code serializes or deserializes a `bytes` value through `bytes`' own serde
@@ -562,7 +578,10 @@ mod tests {
             for (case, api, expected) in [("no date", &plain, None), ("a date", &dated, typed)] {
                 let features = api.runtime_features(backend);
                 assert_eq!(features.datetime, expected, "{case}, {backend}");
-                assert!(!features.xml && !features.streams, "{case}, {backend}");
+                assert!(
+                    !features.xml && !features.streams && !features.chunked_reads,
+                    "{case}, {backend}"
+                );
             }
         }
     }
@@ -690,6 +709,105 @@ mod tests {
             ],
             |api| api.streams_binary_success(&api.operations[0]),
         );
+    }
+
+    /// Issue #1305: an API whose only streaming construct is a binary `_stream` twin uses byte
+    /// streams; a sequential response alone does not.
+    #[test]
+    fn uses_byte_streams_follows_the_table() {
+        check(
+            &[
+                ("no body", |_| {}, false),
+                (
+                    "an octet-stream success",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(api, OK, MediaType::OctetStream, ty);
+                    },
+                    true,
+                ),
+                (
+                    "an event-stream success",
+                    |api| {
+                        let ty = string(api);
+                        respond(api, OK, MediaType::EventStream, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a bytes body on the error side only",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(
+                            api,
+                            Some(StatusSpec::Exact(500)),
+                            MediaType::OctetStream,
+                            ty,
+                        );
+                    },
+                    false,
+                ),
+            ],
+            Api::uses_byte_streams,
+        );
+    }
+
+    /// Issue #1305: the chunked `wasm32` read, and the dependencies it needs, are carried by an
+    /// API that reads a body as it arrives through either construct, and the sequential-response
+    /// module only by one with a sequential response.
+    #[test]
+    fn runtime_features_read_chunked_for_either_streaming_construct() {
+        type Build = fn(&mut Api);
+        let rows: [(&str, Build, bool, bool); 4] = [
+            (
+                "a JSON success",
+                |api| {
+                    let ty = string(api);
+                    respond(api, OK, MediaType::Json, ty);
+                },
+                false,
+                false,
+            ),
+            (
+                "an event-stream success",
+                |api| {
+                    let ty = string(api);
+                    respond(api, OK, MediaType::EventStream, ty);
+                },
+                true,
+                true,
+            ),
+            (
+                "a binary _stream twin alone",
+                |api| {
+                    let ty = bytes(api);
+                    respond(api, OK, MediaType::OctetStream, ty);
+                },
+                false,
+                true,
+            ),
+            (
+                "a bytes body on the error side only",
+                |api| {
+                    let ty = bytes(api);
+                    respond(
+                        api,
+                        Some(StatusSpec::Exact(500)),
+                        MediaType::OctetStream,
+                        ty,
+                    );
+                },
+                false,
+                false,
+            ),
+        ];
+        for (case, build, streams, chunked_reads) in rows {
+            let mut api = api();
+            build(&mut api);
+            let features = api.runtime_features(DateTimeBackend::String);
+            assert_eq!(features.streams, streams, "{case}");
+            assert_eq!(features.chunked_reads, chunked_reads, "{case}");
+        }
     }
 
     /// Issue #1263: only a raw `bytes` request body is taken as an `HttpBody`.
