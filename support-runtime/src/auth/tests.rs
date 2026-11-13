@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::{ClientCore, Error, RequestBuilder, RequestError};
+use crate::{ClientCore, Error, MultipartForm, MultipartPart, RequestBuilder, RequestError};
 
 use super::{
     attach_auth, attach_auth_replayable, replay_rejected, token_provider, AuthError, AuthKind,
@@ -1161,6 +1161,44 @@ fn a_rejected_token_is_refreshed_and_the_call_replayed_once() {
     );
     // The replay carries the refreshed token; `token` is asked only for the first send.
     assert_eq!(calls.token.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.refreshed.load(Ordering::SeqCst), 1);
+}
+
+/// A `multipart/form-data` body is encoded in memory, so a call carrying one is replayed after a
+/// refresh like any other, the replay sending the same `Content-Type` and the same bytes (#1289: a
+/// form sent as a stream was never replayed).
+#[test]
+fn a_rejected_multipart_call_is_refreshed_and_replayed_with_its_body() {
+    let backend = SequenceBackend::new([Reply::status(401, "expired"), Reply::status(200, "ok")]);
+    let mut core = core_over(&backend);
+    let calls = Arc::new(Calls::default());
+    core.set_credential("token", refreshable(&calls, Some("fresh")));
+
+    let request = request_to(&core, reqwest::Method::POST, "https://example.com/pets").multipart(
+        MultipartForm::new()
+            .part("name", MultipartPart::text("Rex"))
+            .part("tag", MultipartPart::text("dog")),
+    );
+    let (status, _, body) = call(&core, request, &[BEARER]);
+    assert_eq!((status, body.as_str()), (200, "ok"));
+    assert_eq!(
+        backend.header("authorization"),
+        [
+            Some("Bearer stale".to_owned()),
+            Some("Bearer fresh".to_owned())
+        ]
+    );
+    let bodies = backend.bodies();
+    let sent = bodies[0].as_deref().expect("an in-memory body");
+    let sent = std::str::from_utf8(sent).unwrap();
+    assert!(sent.contains("name=\"name\"\r\n\r\nRex\r\n"), "{sent}");
+    assert!(sent.contains("name=\"tag\"\r\n\r\ndog\r\n"), "{sent}");
+    assert_eq!(bodies[0], bodies[1]);
+    let content_type = backend.header("content-type");
+    assert!(content_type[0]
+        .as_deref()
+        .is_some_and(|value| value.starts_with("multipart/form-data; boundary=")));
+    assert_eq!(content_type[0], content_type[1]);
     assert_eq!(calls.refreshed.load(Ordering::SeqCst), 1);
 }
 

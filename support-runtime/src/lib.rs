@@ -434,8 +434,12 @@ mod tests {
     #[derive(Debug)]
     pub(crate) struct SequenceBackend {
         script: Mutex<VecDeque<Reply>>,
-        requests: Mutex<Vec<(String, HeaderMap)>>,
+        requests: Mutex<Vec<Sent>>,
     }
+
+    /// One request a [`SequenceBackend`] was handed: its URL, its headers, and its body where
+    /// that is in memory.
+    type Sent = (String, HeaderMap, Option<Vec<u8>>);
 
     impl SequenceBackend {
         pub(crate) fn new(script: impl IntoIterator<Item = Reply>) -> Arc<Self> {
@@ -458,7 +462,7 @@ mod tests {
         /// The URL of every request, in order.
         pub(crate) fn urls(&self) -> Vec<String> {
             let requests = self.requests.lock().unwrap();
-            requests.iter().map(|(url, _)| url.clone()).collect()
+            requests.iter().map(|(url, ..)| url.clone()).collect()
         }
 
         /// Header `name` of every request, in order, `None` where a request lacked it.
@@ -466,21 +470,28 @@ mod tests {
             let requests = self.requests.lock().unwrap();
             requests
                 .iter()
-                .map(|(_, headers)| {
+                .map(|(_, headers, _)| {
                     headers
                         .get(name)
                         .map(|value| value.to_str().expect("a visible-ASCII header").to_owned())
                 })
                 .collect()
         }
+
+        /// The body of every request, in order, `None` where a request's body was a stream.
+        pub(crate) fn bodies(&self) -> Vec<Option<Vec<u8>>> {
+            let requests = self.requests.lock().unwrap();
+            requests.iter().map(|(.., body)| body.clone()).collect()
+        }
     }
 
     impl HttpBackend for SequenceBackend {
         fn execute(&self, request: http::Request<HttpBody>) -> ExecuteFuture<'_> {
-            self.requests
-                .lock()
-                .unwrap()
-                .push((request.uri().to_string(), request.headers().clone()));
+            self.requests.lock().unwrap().push((
+                request.uri().to_string(),
+                request.headers().clone(),
+                request.body().as_bytes().map(<[u8]>::to_vec),
+            ));
             let Reply {
                 outcome,
                 headers,
