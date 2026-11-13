@@ -84,7 +84,9 @@ pub(super) fn doc_tokens(docs: &crate::ir::Docs, options: &CodegenOptions) -> To
 ///   indented code block becomes a fenced one tagged
 ///   `text`, and a fence still open at the end of the text is closed there, so the generated text
 ///   after it stays prose. A fence closes only on a fence of its character at least as long, as in
-///   CommonMark.
+///   CommonMark. A line four or more columns past the content column of the list item whose
+///   paragraph it continues is that paragraph's text, as [`normalize_rustdoc`] reads it: it opens
+///   neither a list item nor the fence after one's marker (```` - ``` ````).
 ///
 /// Lines end where [`normalize_rustdoc`] ends them: at a `\n`, a `\r\n` or a lone `\r`.
 pub(super) fn sanitize_carried(text: &str) -> String {
@@ -98,6 +100,9 @@ pub(super) fn sanitize_carried(text: &str) -> String {
     // The content column of the list item the text is in, which an indented code block nested in
     // it is indented four past.
     let mut list_column: Option<usize> = None;
+    // The content column of the list item whose paragraph the next line may continue, as
+    // `normalize_rustdoc` reads it: a line four or more columns past it is that paragraph's text.
+    let mut paragraph_item: Option<usize> = None;
     for line in &lines {
         let trimmed = line.trim_start_matches([' ', '\t']);
         let blank = trimmed.trim_end().is_empty();
@@ -106,6 +111,9 @@ pub(super) fn sanitize_carried(text: &str) -> String {
             && !blank
             && leading_columns(line) >= base + 4
             && (previous_blank || previous_indented_code);
+        let paragraph = fence.is_none()
+            && !blank
+            && paragraph_item.is_some_and(|column| leading_columns(line) >= column + 4);
         let kind = if let Some((marker, length, _)) = &fence {
             if closes_fence(line, *marker, *length) {
                 fence = None;
@@ -118,6 +126,8 @@ pub(super) fn sanitize_carried(text: &str) -> String {
             let run = &trimmed[..length];
             fence = Some((marker, length, format!("{indent}{run}")));
             LineKind::Code(info.is_empty().then(|| format!("{indent}{run}text")))
+        } else if paragraph {
+            LineKind::Prose
         } else if let Some((column, (marker, length, info))) = list_item_fence(line) {
             // The fence opens the item's content, so it closes at the item's content column.
             let (item, run) = (&line[..column], &line[column..column + length]);
@@ -132,14 +142,27 @@ pub(super) fn sanitize_carried(text: &str) -> String {
         } else {
             LineKind::Prose
         };
-        // A list's content may be indented as far as code; a line back at the margin ends it.
-        if matches!(kind, LineKind::Prose | LineKind::Definition { .. }) {
+        // A list's content may be indented as far as code; a line back at the margin ends it. A
+        // list item's paragraph text opens no item, however it starts.
+        if matches!(kind, LineKind::Prose | LineKind::Definition { .. }) && !paragraph {
             if let Some(column) = list_indent(line) {
                 list_column = Some(column);
             } else if !blank && line.len() - trimmed.len() < 2 {
                 list_column = None;
             }
         }
+        paragraph_item = match kind {
+            _ if blank => None,
+            LineKind::Prose | LineKind::Definition { .. } if !paragraph => {
+                if trimmed.starts_with('>') {
+                    None
+                } else {
+                    list_indent(line).or(paragraph_item)
+                }
+            }
+            LineKind::Prose | LineKind::Definition { .. } => paragraph_item,
+            LineKind::Code(_) | LineKind::Indented { .. } => None,
+        };
         previous_indented_code = indented_code;
         previous_blank = blank;
         kinds.push(kind);
@@ -970,6 +993,11 @@ mod tests {
                 ],
                 Some("- ```yaml\n  a:\n      b: 1\n      # c\n  ```"),
             ),
+            (
+                "an over-indented list continuation is paragraph text, not a fence",
+                [None, None, Some("- a\n        - ```\n  b")],
+                Some("- a\n  \\- ```\n  b"),
+            ),
         ];
         for (case, [title, summary, description], expected) in rows {
             let docs = crate::ir::Docs {
@@ -1308,6 +1336,16 @@ mod tests {
                 "an untagged fence on a list item's line is tagged, and its lines kept",
                 "- ```\n  fn main() {}\n  Vec<T> [Store]\n  ```\nb [Store]",
                 "- ```text\n  fn main() {}\n  Vec<T> [Store]\n  ```\nb Store",
+            ),
+            (
+                "an over-indented list continuation opens no fence on a list item's line",
+                "- a\n        - ```\n  b",
+                "- a\n        - ```\n  b",
+            ),
+            (
+                "an over-indented list continuation leaves the item's content column",
+                "- a\n        - b\n\n      [Store]",
+                "- a\n        - b\n\n  ```text\n  [Store]\n  ```",
             ),
             (
                 "an unclosed fence on a list item's line is closed at its content column",

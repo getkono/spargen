@@ -415,13 +415,17 @@ pub(crate) fn list_item_fence(line: &str) -> Option<(usize, (u8, usize, &str))> 
 /// fence's indentation (a fence opened on a list item's line, at the item's content column), or
 /// `None` when it leaves none open. A line indented four columns or more
 /// past the content column of the list item it is in (the margin outside one), after a blank line,
-/// opens no fence: it is an indented code block's. A prose line indented less than two columns
-/// ends the list item.
+/// opens no fence: it is an indented code block's. A line indented four columns or more past the
+/// content column of the list item whose paragraph it continues is that paragraph's text, as
+/// `normalize_rustdoc` reads it, and opens neither a list item nor the fence on one. A prose line
+/// indented less than two columns ends the list item.
 pub(crate) fn unclosed_fence(text: &str) -> Option<String> {
     let mut fence: Option<(u8, usize, Cow<'_, str>)> = None;
     let mut previous_blank = true;
     let mut previous_indented = false;
     let mut list_column: Option<usize> = None;
+    // The content column of the list item whose paragraph the next line may continue.
+    let mut paragraph_item: Option<usize> = None;
     for line in text.lines() {
         let trimmed = line.trim_start_matches([' ', '\t']);
         let blank = trimmed.trim_end().is_empty();
@@ -430,21 +434,34 @@ pub(crate) fn unclosed_fence(text: &str) -> Option<String> {
             if closes_fence(line, *marker, *length) {
                 fence = None;
             }
+            paragraph_item = None;
         } else if !blank
             && (previous_blank || previous_indented)
             && leading_columns(line) >= list_column.unwrap_or(0) + 4
         {
             indented = true;
+            paragraph_item = None;
         } else if let Some((marker, length, _)) = fence_opener(line) {
             let indent = &line[..line.len() - trimmed.len()];
             fence = Some((marker, length, Cow::Borrowed(indent)));
+            paragraph_item = None;
+        } else if !blank && paragraph_item.is_some_and(|column| leading_columns(line) >= column + 4)
+        {
+            // The list item's paragraph text, however it starts.
         } else if let Some((column, (marker, length, _))) = list_item_fence(line) {
             list_column = Some(column);
             fence = Some((marker, length, Cow::Owned(" ".repeat(column))));
+            paragraph_item = None;
         } else if let Some(column) = list_indent(line) {
             list_column = Some(column);
-        } else if !blank && line.len() - trimmed.len() < 2 {
-            list_column = None;
+            paragraph_item = Some(column);
+        } else {
+            if !blank && line.len() - trimmed.len() < 2 {
+                list_column = None;
+            }
+            if blank || trimmed.starts_with('>') {
+                paragraph_item = None;
+            }
         }
         previous_blank = blank;
         previous_indented = indented;
@@ -1324,6 +1341,16 @@ mod tests {
             (
                 "a line back at the margin ends the list",
                 "- a\n\nb\n\n    ```",
+                None,
+            ),
+            (
+                "an over-indented list continuation opens no fence on a list item's line",
+                "- a\n        - ```\n  b",
+                None,
+            ),
+            (
+                "an over-indented list continuation leaves the item's content column",
+                "- a\n        - b\n\n      ```",
                 None,
             ),
             ("an empty text", "", None),
