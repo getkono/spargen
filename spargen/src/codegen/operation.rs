@@ -6,7 +6,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::ir::{Api, BoundHeader, MediaType, Operation, ParamLoc, Ty, TypeKind};
-use crate::name::{Names, OperationNames};
+use crate::name::{ByteStreamNames, Names, OperationNames};
 
 use super::body::{accept_tokens, body_send_tokens};
 use super::dispatch::{
@@ -32,9 +32,10 @@ use super::ty::{reqwest_method, ty_tokens};
 /// body or error type.
 ///
 /// The operation's URL accessor (`emit_operation_url`) is emitted after them, from the same
-/// URL-building statements, and last, where the operation has one, its `_stream` twin: the
-/// preparer's request, exempt from the total timeout, sent through `support::execute`, with the
-/// success body handed over unread and the method's own error branch.
+/// URL-building statements, and last, where the operation has one, its `_stream` twin with its
+/// request builder and decoder: the preparer's request, exempt from the total timeout, sent
+/// through `support::execute`, and decoded with the success body handed over unread and the
+/// method's own error branch.
 pub(super) fn emit_operation(
     operation: &Operation,
     sig: &OperationSig,
@@ -156,10 +157,18 @@ pub(super) fn emit_operation(
         quote! { let response = support::with_body_limits(&self.core, response); }
     });
     // A raw binary success body read whole is bounded; the twin hands it over unread instead. It
-    // sends the request the operation's preparer builds, exempt from the total timeout, and shares
-    // the method's error branch.
-    let byte_stream = operation_names.byte_stream.as_ref().map(|twin| {
+    // sends the request the operation's preparer builds, exempt from the total timeout, and its
+    // decoder shares the method's error branch. Like the method, it is its two halves: a request
+    // builder and a decoder.
+    let byte_stream = operation_names.byte_stream.as_ref().map(|stream_names| {
+        let ByteStreamNames {
+            twin,
+            request_builder: stream_request_builder,
+            decoder: stream_decoder,
+        } = stream_names;
         let doc = byte_stream_doc(method_ident);
+        let stream_builder_doc = stream_request_builder_doc(method_ident, twin);
+        let stream_decoder_doc = stream_decoder_doc(twin, &operation_const);
         let twin_forwards = forwards_streaming(true);
         quote! {
             #[doc = #doc]
@@ -176,6 +185,28 @@ pub(super) fn emit_operation(
                 let response = support::execute(&self.core, #request_binding, #replay_binding, true)
                     .await
                     .map_err(support::Error::widen)?;
+                self.#stream_decoder(response).await
+            }
+
+            #[doc = #stream_builder_doc]
+            #deprecated
+            #[inline]
+            pub async fn #stream_request_builder(
+                &self,
+                #(#decls),*
+            ) -> Result<http::Request<support::HttpBody>, support::Error<std::convert::Infallible>> {
+                self.#preparer(#(#twin_forwards),*)
+                    .await
+                    .map(|(#request_binding, _)| #request_binding)
+            }
+
+            #[doc = #stream_decoder_doc]
+            #deprecated
+            #[inline]
+            pub async fn #stream_decoder(
+                &self,
+                response: http::Response<support::HttpBody>,
+            ) -> Result<support::ResponseValue<support::ByteStream>, support::Error<#error_ty>> {
                 if response.status().is_success() {
                     Ok(support::stream_success_bytes(response))
                 } else {
@@ -360,7 +391,35 @@ fn byte_stream_doc(method_ident: &crate::name::Ident) -> String {
          arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The \
          request and the error branch are `{method}`'s. Like an `EventStream`, the call is exempt \
          from the client's total timeout and its body limits; its connect and read timeouts \
-         still apply."
+         still apply. It sends its request builder's request through the client's backend, \
+         replays it once where a refreshable credential was rejected, and decodes the response \
+         with its decoder."
+    ))
+}
+
+/// The rustdoc of a `_stream` twin's request builder.
+fn stream_request_builder_doc(
+    method_ident: &crate::name::Ident,
+    twin: &crate::name::Ident,
+) -> String {
+    let method = method_ident.unraw();
+    let twin = twin.unraw();
+    normalize_rustdoc(&format!(
+        "The request `{twin}` sends, built without sending it: `{method}`'s request, exempt from \
+         the client's total timeout as `{twin}`'s is, for a caller that sends it itself and hands \
+         the response to `{twin}`'s decoder. Nothing is replayed after a rejected refreshable \
+         credential: that is `{twin}`'s own send."
+    ))
+}
+
+/// The rustdoc of a `_stream` twin's response decoder.
+fn stream_decoder_doc(twin: &crate::name::Ident, operation_const: &proc_macro2::Ident) -> String {
+    let twin = twin.unraw();
+    normalize_rustdoc(&format!(
+        "Decode a response to the request `{twin}` sends (`ops::{operation_const}`), obtained \
+         however the caller sent it, exactly as `{twin}` decodes its own: a success body handed \
+         over unread as a `ByteStream`, exempt from the client's body limits, and an error status \
+         dispatched into the operation's typed error."
     ))
 }
 

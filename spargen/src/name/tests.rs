@@ -438,12 +438,70 @@ fn a_binary_success_twin_yields_to_a_method_spelling_it() {
         let record = |id: &str| &names.operations[&OperationId(id.to_owned())];
         assert_eq!(record("getItemStream").method.as_str(), "get_item_stream");
         assert!(record("getItemStream").byte_stream.is_none());
-        let twin = record("getItem").byte_stream.as_ref().unwrap().as_str();
+        let stream = record("getItem").byte_stream.as_ref().unwrap();
+        let twin = stream.twin.as_str();
         assert!(
             twin.len() > "get_item_stream".len() && twin.starts_with("get_item_stream_"),
             "{twin}"
         );
+        // Issue #1290: the twin's request builder and decoder are allocated after every other
+        // companion, so they yield to `getItemStream`'s own request builder and decoder, which
+        // spell them too.
+        let spelled = record("getItemStream");
+        assert_eq!(spelled.request_builder.as_str(), "get_item_stream_request");
+        assert_eq!(spelled.decoder.as_str(), "decode_get_item_stream");
+        for (yielded, spelling) in [
+            (&stream.request_builder, "get_item_stream_request"),
+            (&stream.decoder, "decode_get_item_stream"),
+        ] {
+            let yielded = yielded.as_str();
+            assert!(
+                yielded.len() > spelling.len() && yielded.starts_with(&format!("{spelling}_")),
+                "{yielded}"
+            );
+        }
     }
+}
+
+/// Issue #1290: an operation's `_stream` twin has a request builder, `{method}_stream_request`,
+/// and a decoder, `decode_{method}_stream`, beside the method's own companions.
+#[test]
+fn a_binary_success_twin_has_a_request_builder_and_decoder() {
+    use crate::ir::{BytesEncoding, Response, StatusSpec};
+    let mut api = api(Vec::new(), false);
+    let bytes = api.types.insert(TypeDef {
+        name_hint: "Blob".to_owned(),
+        kind: TypeKind::Bytes(BytesEncoding::Raw),
+        docs: Default::default(),
+        provenance: Provenance::new(JsonPointer::root(), None),
+        document: String::new(),
+    });
+    api.operations[0].responses.by_status = vec![(
+        StatusSpec::Exact(200),
+        Response {
+            body: Some(Ty {
+                id: bytes,
+                nullable: false,
+                boxed: false,
+            }),
+            media: Some(MediaType::OctetStream),
+            stream: None,
+            accept: None,
+            headers: Vec::new(),
+        },
+    )];
+    let names = allocate(&api);
+    let record = &names.operations[&api.operations[0].id];
+    let stream = record
+        .byte_stream
+        .as_ref()
+        .expect("a binary success has a twin");
+    assert_eq!(record.method.as_str(), "get_item");
+    assert_eq!(stream.twin.as_str(), "get_item_stream");
+    assert_eq!(stream.request_builder.as_str(), "get_item_stream_request");
+    assert_eq!(stream.decoder.as_str(), "decode_get_item_stream");
+    assert_eq!(record.request_builder.as_str(), "get_item_request");
+    assert_eq!(record.decoder.as_str(), "decode_get_item");
 }
 
 /// A keyword operation's method is raw (`r#type`); its accessor is spelled from the bare
@@ -1061,8 +1119,9 @@ proptest::proptest! {
                 .chain(records.iter().map(|record| &record.request_builder))
                 .chain(records.iter().map(|record| &record.decoder))
                 .chain(records.iter().map(|record| &record.preparer))
-
-                .chain(records.iter().filter_map(|record| record.byte_stream.as_ref())),
+                .chain(records.iter().filter_map(|record| record.byte_stream.as_ref()).flat_map(
+                    |stream| [&stream.twin, &stream.request_builder, &stream.decoder],
+                )),
             super::CLIENT_METHODS,
         )?;
         let enum_successes = api

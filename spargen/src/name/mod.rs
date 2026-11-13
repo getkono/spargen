@@ -87,10 +87,9 @@ pub(crate) struct OperationNames {
     /// that name and the accessor takes a pointer-seeded suffix instead.
     pub(crate) url_accessor: Ident,
     /// The `{method}_stream` twin on `Client` reading a raw binary success body as a `ByteStream`,
-    /// present exactly when [`Api::streams_binary_success`](crate::ir::Api::streams_binary_success)
-    /// holds. Allocated in the method scope after every URL accessor, so an operation or accessor
-    /// that already spells it keeps that name and the twin takes a pointer-seeded suffix instead.
-    pub(crate) byte_stream: Option<Ident>,
+    /// with its request builder and decoder, present exactly when
+    /// [`Api::streams_binary_success`](crate::ir::Api::streams_binary_success) holds.
+    pub(crate) byte_stream: Option<ByteStreamNames>,
     /// The request builder, `{method}_request`, which returns the request the method sends without
     /// sending it. Allocated after every URL accessor and `_stream` twin, on the URL accessor's
     /// terms.
@@ -125,6 +124,21 @@ pub(crate) struct OperationNames {
     parameters: Vec<Ident>,
     /// The header struct per status label whose response documents a header.
     response_headers: HashMap<String, ResponseHeaderNames>,
+}
+
+/// The `_stream` twin of an operation whose success is one raw binary body, and its two halves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ByteStreamNames {
+    /// The twin itself, `{method}_stream`. Allocated in the method scope after every URL accessor,
+    /// so an operation or accessor that already spells it keeps that name and the twin takes a
+    /// pointer-seeded suffix instead.
+    pub(crate) twin: Ident,
+    /// The twin's request builder, `{method}_stream_request`, which returns the request the twin
+    /// sends without sending it. Allocated after every preparer, on the URL accessor's terms.
+    pub(crate) request_builder: Ident,
+    /// The twin's response decoder, `decode_{method}_stream`, which hands a success body over
+    /// unread as the twin does. Allocated after every twin's request builder, on the same terms.
+    pub(crate) decoder: Ident,
 }
 
 impl OperationNames {
@@ -520,28 +534,15 @@ pub(crate) fn allocate(api: &Api) -> Names {
         .collect();
     let url_accessors =
         operation_scope.alloc_ranked(&operation_requests(api, &accessor_hints), IdentRole::Method);
+    let method_spellings: Vec<&str> = signatures
+        .iter()
+        .map(|(method, ..)| method.unraw())
+        .collect();
     // After every accessor, so the twin yields to both (see `OperationNames::byte_stream`).
-    let stream_hints: Vec<String> = signatures
-        .iter()
-        .map(|(method, ..)| format!("{}_stream", method.unraw()))
-        .collect();
-    let stream_requests: Vec<_> = operation_requests(api, &stream_hints)
-        .into_iter()
-        .zip(&api.operations)
-        .filter(|(_, operation)| api.streams_binary_success(operation))
-        .map(|(request, _)| request)
-        .collect();
-    let mut byte_streams = operation_scope
-        .alloc_ranked(&stream_requests, IdentRole::Method)
-        .into_iter();
-    let byte_streams: Vec<Option<Ident>> = api
-        .operations
-        .iter()
-        .map(|operation| {
-            api.streams_binary_success(operation)
-                .then(|| byte_streams.next().expect("one twin per binary success"))
-        })
-        .collect();
+    let byte_streams =
+        allocate_twin_family(api, &method_spellings, &mut operation_scope, |method| {
+            format!("{method}_stream")
+        });
     // Each companion family after the URL accessors and twins, in a fixed order, so adding one
     // renames no name allocated before it.
     let mut companions = |spell: fn(&str) -> String| {
@@ -554,6 +555,27 @@ pub(crate) fn allocate(api: &Api) -> Names {
     let request_builders = companions(|method| format!("{method}_request"));
     let decoders = companions(|method| format!("decode_{method}"));
     let preparers = companions(|method| format!("prepare_{method}"));
+    // The twin's own request builder and decoder after every other companion, so adding them
+    // renames none of those.
+    let stream_request_builders =
+        allocate_twin_family(api, &method_spellings, &mut operation_scope, |method| {
+            format!("{method}_stream_request")
+        });
+    let stream_decoders =
+        allocate_twin_family(api, &method_spellings, &mut operation_scope, |method| {
+            format!("decode_{method}_stream")
+        });
+    let byte_streams = byte_streams
+        .into_iter()
+        .zip(stream_request_builders)
+        .zip(stream_decoders)
+        .map(|((twin, request_builder), decoder)| {
+            twin.map(|twin| ByteStreamNames {
+                twin,
+                request_builder: request_builder.expect("a twin's request builder"),
+                decoder: decoder.expect("a twin's decoder"),
+            })
+        });
     let companions = request_builders
         .into_iter()
         .zip(decoders)
@@ -680,6 +702,33 @@ fn is_declared_schema(pointer: &crate::diag::JsonPointer) -> bool {
     let tokens = pointer.tokens();
     tokens.is_empty()
         || matches!(tokens.as_slice(), [components, schemas, _] if components == "components" && schemas == "schemas")
+}
+
+/// One method per operation that has a `_stream` twin
+/// ([`Api::streams_binary_success`](crate::ir::Api::streams_binary_success)), spelled by `spell`
+/// from its method's spelling in `methods` (in operation order) and allocated as one ranked batch
+/// in the method `scope`, in operation order; `None` for every other operation.
+fn allocate_twin_family(
+    api: &Api,
+    methods: &[&str],
+    scope: &mut Scope,
+    spell: fn(&str) -> String,
+) -> Vec<Option<Ident>> {
+    let hints: Vec<String> = methods.iter().map(|method| spell(method)).collect();
+    let requests: Vec<_> = operation_requests(api, &hints)
+        .into_iter()
+        .zip(&api.operations)
+        .filter(|(_, operation)| api.streams_binary_success(operation))
+        .map(|(request, _)| request)
+        .collect();
+    let mut allocated = scope.alloc_ranked(&requests, IdentRole::Method).into_iter();
+    api.operations
+        .iter()
+        .map(|operation| {
+            api.streams_binary_success(operation)
+                .then(|| allocated.next().expect("one name per binary success"))
+        })
+        .collect()
 }
 
 /// One ranked request per operation of `api`, asking for its entry of `hints` and ranked by its
