@@ -159,6 +159,125 @@ fn an_added_operation_taking_a_stream_twin_name_renames_the_twin_and_is_major() 
     }
 }
 
+/// `getBlob` with the given success responses, under `/blob`.
+fn blob_with(responses: &str) -> String {
+    format!(
+        "  /blob:
+    get:
+      operationId: getBlob
+      responses:
+{responses}"
+    )
+}
+
+const BLOB_200_JSON: &str = "        '200':
+          description: a listing
+          content:
+            application/json: { schema: { type: string } }
+";
+
+const BLOB_206_OCTETS: &str = "        '206':
+          description: part of the blob
+          content:
+            application/octet-stream: { schema: {} }
+";
+
+#[test]
+fn a_binary_arm_added_to_a_success_enum_adds_a_stream_twin_beside_the_success_change() {
+    // Issue #1306: a `206` of octets beside a JSON `200` makes the success an enum with a raw
+    // binary arm, which gets a `_stream` twin. The method's success type changes (major); the twin
+    // is new (minor).
+    let old = full(&blob_with(BLOB_200_JSON), PET_SCHEMA);
+    let new = full(
+        &blob_with(&format!("{BLOB_200_JSON}{BLOB_206_OCTETS}")),
+        PET_SCHEMA,
+    );
+    let report = diff(&old, &new);
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::SuccessTypeChanged, ChangeKind::StreamTwinAdded],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.changes[1].location, "GET /blob");
+    assert_eq!(
+        report.changes[1].detail,
+        "stream twin `get_blob_stream` added"
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn a_binary_arm_removed_from_a_success_enum_removes_its_stream_twin_and_is_major() {
+    let old = full(
+        &blob_with(&format!("{BLOB_200_JSON}{BLOB_206_OCTETS}")),
+        PET_SCHEMA,
+    );
+    let new = full(&blob_with(BLOB_200_JSON), PET_SCHEMA);
+    let report = diff(&old, &new);
+    assert_eq!(
+        kinds(&report),
+        vec![
+            ChangeKind::StreamTwinRemoved,
+            ChangeKind::SuccessTypeChanged
+        ],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(
+        report.changes[0].detail,
+        "stream twin `get_blob_stream` removed"
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn an_added_operation_taking_a_stream_twins_enum_name_renames_it_and_is_major() {
+    // Issue #1306: `getBlob`'s twin returns `GetBlobStreamResponse`. `getBlobStream`, whose
+    // success is a JSON `200` beside a bodyless `204`, takes that name for its own success enum
+    // (and `get_blob_stream` for its method), so the twin's enum yields to a suffixed spelling: the
+    // twin's success type changes, which breaks every `match` naming it.
+    let blob = blob_with(&format!("{BLOB_200_JSON}{BLOB_206_OCTETS}"));
+    let added = "  /blob/stream:
+    get:
+      operationId: getBlobStream
+      responses:
+        '200':
+          description: a listing
+          content:
+            application/json: { schema: { type: string } }
+        '204':
+          description: none
+";
+    let old = full(&blob, PET_SCHEMA);
+    let new = full(&format!("{blob}{added}"), PET_SCHEMA);
+    let report = diff(&old, &new);
+    assert_eq!(
+        kinds(&report),
+        // The twin and its two companions yield to `getBlobStream`'s method and companions too.
+        vec![
+            ChangeKind::MethodRenamed,
+            ChangeKind::MethodRenamed,
+            ChangeKind::MethodRenamed,
+            ChangeKind::SuccessTypeChanged,
+            ChangeKind::OperationAdded,
+        ],
+        "{:?}",
+        report.changes
+    );
+    let changed = &report.changes[3];
+    assert_eq!(changed.location, "GET /blob");
+    assert!(
+        changed.detail.starts_with(
+            "stream twin success type `GetBlobStreamResponse{200:String, 206:ByteStream}` -> \
+             `GetBlobStreamResponse"
+        ) && changed.detail.ends_with("{200:String, 206:ByteStream}`"),
+        "{}",
+        changed.detail
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
 const REQUEST_BODY_PET: &str = "      requestBody:
         required: true
         content:

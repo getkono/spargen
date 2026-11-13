@@ -134,6 +134,9 @@ struct ByteStreamSurface {
     request_builder_name: String,
     /// The twin's decoder, `decode_{method}_stream`.
     decoder_name: String,
+    /// Canonical rendering of the twin's success type: `ByteStream` for a single binary body, or
+    /// its `{Method}StreamResponse` enum, by name and by status, its binary arms `ByteStream`.
+    success: String,
 }
 
 /// One argument of an operation's `{method}_url` accessor: a required path, query or querystring
@@ -293,7 +296,7 @@ pub enum ChangeKind {
     /// An operation's request body flipped between required and optional. **Major** — `&T` ↔
     /// `Option<&T>`.
     RequestBodyRequirednessChanged,
-    /// An operation's success return type changed. **Major**.
+    /// An operation's success return type changed, or its `{method}_stream` twin's did. **Major**.
     SuccessTypeChanged,
     /// An operation's error type changed. **Major**.
     ErrorTypeChanged,
@@ -375,6 +378,12 @@ pub enum ChangeKind {
     AdditionalPropertiesRemoved,
     /// The value type of a struct's typed `additionalProperties` map changed. **Major**.
     AdditionalPropertiesTypeChanged,
+    /// An operation gained a `{method}_stream` twin, with its request builder and decoder (and the
+    /// twin's success enum, where its success is an enum). **Minor** — additive.
+    StreamTwinAdded,
+    /// An operation lost its `{method}_stream` twin and its companions. **Major** — the methods a
+    /// consumer calls disappear.
+    StreamTwinRemoved,
 }
 
 impl ChangeKind {
@@ -391,7 +400,8 @@ impl ChangeKind {
             | ChangeKind::ResponseHeaderAdded
             | ChangeKind::ServerAdded
             | ChangeKind::ServerVariableAdded
-            | ChangeKind::AdditionalPropertiesAdded => Impact::Minor,
+            | ChangeKind::AdditionalPropertiesAdded
+            | ChangeKind::StreamTwinAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::UrlAccessorArgsChanged
@@ -424,7 +434,8 @@ impl ChangeKind {
             | ChangeKind::ServerVariableRemoved
             | ChangeKind::ServerVariableTypeChanged
             | ChangeKind::AdditionalPropertiesRemoved
-            | ChangeKind::AdditionalPropertiesTypeChanged => Impact::Major,
+            | ChangeKind::AdditionalPropertiesTypeChanged
+            | ChangeKind::StreamTwinRemoved => Impact::Major,
         }
     }
 
@@ -475,6 +486,8 @@ impl ChangeKind {
             ChangeKind::AdditionalPropertiesAdded => "additional-properties-added",
             ChangeKind::AdditionalPropertiesRemoved => "additional-properties-removed",
             ChangeKind::AdditionalPropertiesTypeChanged => "additional-properties-type-changed",
+            ChangeKind::StreamTwinAdded => "stream-twin-added",
+            ChangeKind::StreamTwinRemoved => "stream-twin-removed",
         }
     }
 }

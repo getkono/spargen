@@ -135,6 +135,7 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             format!("success type `{}` -> `{}`", old.success, new.success),
         ));
     }
+    diff_byte_stream(key, old, new, changes);
     if old.error != new.error {
         changes.push(Change::new(
             ChangeKind::ErrorTypeChanged,
@@ -177,6 +178,35 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
         }
     }
     diff_response_headers(key, &old.response_headers, &new.response_headers, changes);
+}
+
+/// The changes to an operation's `{method}_stream` twin other than its companions' renames, which
+/// `diff_operation` reports beside the method's own: a twin that appears or disappears, and a
+/// twin whose success type changes, its enum's name included.
+fn diff_byte_stream(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec<Change>) {
+    match (&old.byte_stream, &new.byte_stream) {
+        (None, Some(stream)) => changes.push(Change::new(
+            ChangeKind::StreamTwinAdded,
+            key,
+            format!("stream twin `{}` added", stream.twin_name),
+        )),
+        (Some(stream), None) => changes.push(Change::new(
+            ChangeKind::StreamTwinRemoved,
+            key,
+            format!("stream twin `{}` removed", stream.twin_name),
+        )),
+        (Some(old_stream), Some(new_stream)) if old_stream.success != new_stream.success => {
+            changes.push(Change::new(
+                ChangeKind::SuccessTypeChanged,
+                key,
+                format!(
+                    "stream twin success type `{}` -> `{}`",
+                    old_stream.success, new_stream.success
+                ),
+            ));
+        }
+        _ => {}
+    }
 }
 
 /// A URL accessor's arguments as a change's detail lists them, comma-separated.

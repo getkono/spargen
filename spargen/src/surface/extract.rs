@@ -74,6 +74,12 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                         twin_name: stream.twin.as_str().to_owned(),
                         request_builder_name: stream.request_builder.as_str().to_owned(),
                         decoder_name: stream.decoder.as_str().to_owned(),
+                        success: stream_success_sig(
+                            &operation.responses.success(),
+                            stream.success_enum.as_ref(),
+                            api,
+                            names,
+                        ),
                     }),
                 url_args,
                 params,
@@ -350,6 +356,35 @@ fn success_sig(shape: &SuccessShape, api: &Api, names: &Names) -> String {
         SuccessShape::Unit => "()".to_owned(),
         SuccessShape::Plain(ty) => canon_ty(*ty, api, names),
         SuccessShape::Enum(entries) => status_enum_sig("Success", entries, api, names),
+    }
+}
+
+/// Render the success type of an operation's `_stream` twin to a stable string: `ByteStream` for
+/// a single binary body, or the twin's enum `enum_name` followed by its per-status bodies in the
+/// IR's precedence order, each raw binary arm ([`Api::streams_binary_arm`]) a `ByteStream`. The
+/// enum's name is part of it, since a consumer names the twin's enum to match on it.
+fn stream_success_sig(
+    shape: &SuccessShape,
+    enum_name: Option<&crate::name::Ident>,
+    api: &Api,
+    names: &Names,
+) -> String {
+    match (shape, enum_name) {
+        (SuccessShape::Enum(entries), Some(enum_name)) => {
+            let rendered: Vec<String> = entries
+                .iter()
+                .map(|(status, body)| {
+                    let ty = match body {
+                        _ if api.streams_binary_arm(*body) => "ByteStream".to_owned(),
+                        Some(ty) => canon_ty(*ty, api, names),
+                        None => "()".to_owned(),
+                    };
+                    format!("{}:{ty}", status.display_label())
+                })
+                .collect();
+            format!("{}{{{}}}", enum_name.as_str(), rendered.join(", "))
+        }
+        _ => "ByteStream".to_owned(),
     }
 }
 
