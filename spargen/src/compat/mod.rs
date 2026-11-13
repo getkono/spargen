@@ -28,6 +28,7 @@ mod glob;
 mod keep;
 mod rule;
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use crate::diag::{fnv1a64, Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance, Span};
@@ -158,7 +159,7 @@ fn apply_rule(rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics
                     emit_omitted(diags, &pointer, value.span(), &rule.describe());
                     Ok(())
                 }
-                None => Err("omit rule did not match any source construct"),
+                None => Err("omit rule did not match any source construct".into()),
             }
         }
         Ok(RuleMatch::Glob { file, mut pointers }) => {
@@ -177,7 +178,7 @@ fn apply_rule(rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics
             if removed_any {
                 Ok(())
             } else {
-                Err("glob omit rule did not match any source construct")
+                Err("glob omit rule did not match any source construct".into())
             }
         }
     };
@@ -238,7 +239,7 @@ fn emit_invalid_rule(
     rule: &OmitRule,
     bundle: &InputBundle,
     diags: &mut Diagnostics,
-    message: &'static str,
+    message: Cow<'static, str>,
 ) {
     Diagnostic::error(
         Code::InvalidOmitRule,

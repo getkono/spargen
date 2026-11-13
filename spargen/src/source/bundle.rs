@@ -35,6 +35,16 @@ enum Origin {
     Remote(String),
 }
 
+/// Why [`InputBundle::file_id_for_path`] found no single file for a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FileLookupError {
+    /// No loaded file is named by the path.
+    Unloaded,
+    /// Two or more loaded files end in the path's components: each one's
+    /// [`InputBundle::root_relative_path`], in load order.
+    Ambiguous(Vec<String>),
+}
+
 /// An input bundle: the root document plus every document reachable through `$ref`s — local files
 /// loaded on demand, and remote (`http`/`https`) documents resolved *only* from their locally
 /// vendored, hash-pinned copies. Builds are hermetic: the bundle never touches the network. An
@@ -234,15 +244,20 @@ impl InputBundle {
             .map(|file| (file.path.as_path(), file.bytes.as_ref()))
     }
 
-    /// Find a loaded file by its stored path: exact first, then relative to the root document's
-    /// directory, and suffix last for ergonomic file-local omit rules.
+    /// Find a loaded file by the path a file-scoped omit rule names it by: its stored path exactly,
+    /// then its path relative to the root document's directory, and last any loaded file whose
+    /// stored path ends in `path`'s whole components, for ergonomic file-local omit rules.
     ///
-    /// The relative step comes before the suffix one because a suffix is ambiguous — `lib.yaml` is
-    /// a suffix of `xlib.yaml` — and the first match in load order would win. A path
-    /// [`Self::root_relative_path`] produced always resolves at the relative step, to its own file.
-    pub(crate) fn file_id_for_path(&self, path: &str) -> Option<FileId> {
+    /// The last step compares path components, never strings, so `pet.yaml` names
+    /// `schemas/pet.yaml` and not `schemas/legacy-pet.yaml`. It is the only step two files can
+    /// meet at (`a/pet.yaml` and `b/pet.yaml` both end in `pet.yaml`, and so does a vendored
+    /// `.spargen/vendor/<host>/…/pet.yaml`); then the lookup is [`FileLookupError::Ambiguous`],
+    /// never the first in load order. A path [`Self::root_relative_path`] produced always resolves
+    /// at the relative step, to its own file.
+    pub(crate) fn file_id_for_path(&self, path: &str) -> Result<FileId, FileLookupError> {
         let relative = self.root_dir().join(path);
-        self.files
+        if let Some(id) = self
+            .files
             .iter()
             .find_map(|(id, file)| (file.path.as_str() == path).then_some(*id))
             .or_else(|| {
@@ -250,11 +265,31 @@ impl InputBundle {
                     .iter()
                     .find_map(|(id, file)| (file.path == relative).then_some(*id))
             })
-            .or_else(|| {
-                self.files
+        {
+            return Ok(id);
+        }
+        let suffix = Utf8Path::new(path);
+        // An empty path ends every path; it names no file.
+        if suffix.components().next().is_none() {
+            return Err(FileLookupError::Unloaded);
+        }
+        let matches: Vec<FileId> = self
+            .files
+            .iter()
+            .filter(|(_, file)| file.path.ends_with(suffix))
+            .map(|(id, _)| *id)
+            .collect();
+        match matches.as_slice() {
+            [] => Err(FileLookupError::Unloaded),
+            [id] => Ok(*id),
+            _ => Err(FileLookupError::Ambiguous(
+                matches
                     .iter()
-                    .find_map(|(id, file)| file.path.as_str().ends_with(path).then_some(*id))
-            })
+                    .filter_map(|id| self.root_relative_path(*id))
+                    .map(str::to_owned)
+                    .collect(),
+            )),
+        }
     }
 
     /// The path a file-scoped omit rule names `file` by: its stored path relative to the root
@@ -877,5 +912,125 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    /// A root in `dir` whose schemas `$ref` each of `files` (relative or absolute) in order, so
+    /// they load in that order after the root.
+    fn root_referring_to(dir: &Utf8Path, files: &[&str]) -> InputBundle {
+        let mut root = String::from(
+            "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+             schemas:\n",
+        );
+        for (index, file) in files.iter().enumerate() {
+            root.push_str(&format!("    S{index}: {{ $ref: '{file}' }}\n"));
+        }
+        std::fs::write(dir.join("openapi.yaml"), root).unwrap();
+        load(&dir.join("openapi.yaml"))
+    }
+
+    /// The loaded file whose root-relative path is `relative`.
+    fn file_named(bundle: &InputBundle, relative: &str) -> FileId {
+        bundle
+            .file_ids()
+            .find(|id| bundle.root_relative_path(*id) == Some(relative))
+            .unwrap_or_else(|| panic!("`{relative}` is not loaded"))
+    }
+
+    /// A bare file name matches whole path components, never a string suffix: with
+    /// `schemas/legacy-pet.yaml` loaded first, `pet.yaml` names `schemas/pet.yaml`, which a string
+    /// suffix match took the first file in load order for.
+    #[test]
+    fn a_file_name_matches_whole_path_components_not_a_string_suffix() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::create_dir(dir.join("schemas")).unwrap();
+        std::fs::write(dir.join("schemas/legacy-pet.yaml"), "type: string\n").unwrap();
+        std::fs::write(dir.join("schemas/pet.yaml"), "type: integer\n").unwrap();
+        let bundle = root_referring_to(&dir, &["schemas/legacy-pet.yaml", "schemas/pet.yaml"]);
+        let pet = file_named(&bundle, "schemas/pet.yaml");
+        assert_eq!(bundle.file_id_for_path("pet.yaml"), Ok(pet));
+        assert_eq!(bundle.file_id_for_path("schemas/pet.yaml"), Ok(pet));
+        assert_eq!(
+            bundle.file_id_for_path("legacy-pet.yaml"),
+            Ok(file_named(&bundle, "schemas/legacy-pet.yaml"))
+        );
+        assert_eq!(
+            bundle.file_id_for_path("t.yaml"),
+            Err(FileLookupError::Unloaded)
+        );
+        assert_eq!(bundle.file_id_for_path(""), Err(FileLookupError::Unloaded));
+    }
+
+    /// A name two loaded files end in is ambiguous, and the error names both in load order; a
+    /// longer suffix, or the path relative to the root document, names one of them.
+    #[test]
+    fn a_file_name_two_loaded_files_share_is_ambiguous() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        for sub in ["a", "b"] {
+            std::fs::create_dir(dir.join(sub)).unwrap();
+            std::fs::write(dir.join(sub).join("pet.yaml"), "type: string\n").unwrap();
+        }
+        let bundle = root_referring_to(&dir, &["b/pet.yaml", "a/pet.yaml"]);
+        assert_eq!(
+            bundle.file_id_for_path("pet.yaml"),
+            Err(FileLookupError::Ambiguous(vec![
+                "b/pet.yaml".to_owned(),
+                "a/pet.yaml".to_owned()
+            ]))
+        );
+        assert_eq!(
+            bundle.file_id_for_path("a/pet.yaml"),
+            Ok(file_named(&bundle, "a/pet.yaml"))
+        );
+        let absolute = dir.join("b/pet.yaml");
+        assert_eq!(
+            bundle.file_id_for_path(absolute.as_str()),
+            Ok(file_named(&bundle, "b/pet.yaml"))
+        );
+    }
+
+    /// A vendored remote copy is a loaded file like any other: a bare name it shares with a local
+    /// file is ambiguous, and each is named by its path relative to the root document.
+    #[test]
+    fn a_file_name_a_vendored_copy_shares_is_ambiguous() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let url = "https://h.example/v1/pet.yaml";
+        let remote = "type: string\n";
+        std::fs::create_dir_all(dir.join(VENDOR_DIR).join("h.example/v1")).unwrap();
+        std::fs::write(dir.join(VENDOR_DIR).join("h.example/v1/pet.yaml"), remote).unwrap();
+        std::fs::write(
+            dir.join(LOCK_FILE_NAME),
+            format!(
+                "version = 1\n\n[[remote]]\nurl = \"{url}\"\nsha256 = \"{}\"\n\
+                 path = \"h.example/v1/pet.yaml\"\n",
+                sha256_hex(remote.as_bytes()),
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir(dir.join("schemas")).unwrap();
+        std::fs::write(dir.join("schemas/pet.yaml"), "type: integer\n").unwrap();
+        let bundle = root_referring_to(&dir, &["schemas/pet.yaml", url]);
+        let vendored = format!("{VENDOR_DIR}/h.example/v1/pet.yaml");
+        assert_eq!(
+            bundle.file_id_for_path("pet.yaml"),
+            Err(FileLookupError::Ambiguous(vec![
+                "schemas/pet.yaml".to_owned(),
+                vendored.clone()
+            ]))
+        );
+        assert_eq!(
+            bundle.file_id_for_path("schemas/pet.yaml"),
+            Ok(file_named(&bundle, "schemas/pet.yaml"))
+        );
+        assert_eq!(
+            bundle.file_id_for_path(&vendored),
+            Ok(file_named(&bundle, &vendored))
+        );
+        assert_eq!(
+            bundle.file_id_for_path("v1/pet.yaml"),
+            Ok(file_named(&bundle, &vendored))
+        );
     }
 }

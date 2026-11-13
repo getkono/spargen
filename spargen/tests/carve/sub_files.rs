@@ -478,3 +478,137 @@ paths:
     let generated = std::fs::read_to_string(&out).unwrap();
     assert_eq!(operation_methods(&generated), ["get_good", "get_good_url"]);
 }
+
+/// A root in `dir` whose operation `getN` answers with each of `refs` in turn (relative files or
+/// vendored remote URLs), so they load in that order after the root. Returns its path.
+fn write_root_referring_to(dir: &Path, refs: &[&str]) -> Utf8PathBuf {
+    let mut root = String::from(
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\n\
+         servers: [ { url: https://example.com } ]\npaths:\n",
+    );
+    for (index, reference) in refs.iter().enumerate() {
+        root.push_str(&format!(
+            "  /p{index}:\n    get:\n      operationId: get{index}\n      responses:\n        \
+             \"200\":\n          description: OK\n          content:\n            \
+             application/json:\n              schema: {{ $ref: \"{reference}\" }}\n"
+        ));
+    }
+    write_spec(dir, "openapi.yaml", &root)
+}
+
+/// An object schema declaring `field` beside a `keep` property, written at `dir/relative`.
+fn write_schema_file(dir: &Path, relative: &str, field: &str) {
+    let path = dir.join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        format!(
+            "type: object\nproperties:\n  {field}: {{ type: string }}\n  keep: {{ type: string }}\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// The messages of every `E019` in `report`.
+fn e019_messages(report: &Report) -> Vec<&str> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == Code::InvalidOmitRule)
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect()
+}
+
+/// A rule's `file` names a loaded file by whole path components, never by string suffix: with
+/// `schemas/legacy-pet.yaml` loaded before `schemas/pet.yaml`, `pet.yaml` names the second. A
+/// string suffix match took `legacy-pet.yaml`, the first in load order, where the pointer missed
+/// and the run ended `E019`.
+#[test]
+fn a_file_scoped_rule_names_its_file_by_whole_path_components() {
+    let temp = tempfile::tempdir().unwrap();
+    write_schema_file(temp.path(), "schemas/legacy-pet.yaml", "legacy_field");
+    write_schema_file(temp.path(), "schemas/pet.yaml", "pet_field");
+    let spec = write_root_referring_to(
+        temp.path(),
+        &["./schemas/legacy-pet.yaml", "./schemas/pet.yaml"],
+    );
+    let out = temp.path().join("client.rs");
+    let rule = spargen::OmitRule::pointer(Some("pet.yaml".into()), "/properties/pet_field");
+    let report = spargen::generate(&omitting(&spec, &out, omit_of(vec![rule])));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert_eq!(
+        w009_messages(&report),
+        ["omitted construct matched by `pointer pet.yaml#/properties/pet_field`"]
+    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(!generated.contains("pet_field"), "{generated}");
+    assert!(generated.contains("legacy_field"), "{generated}");
+}
+
+/// A `file` two loaded files end in — two local files sharing a basename, or a local file and a
+/// vendored remote copy under `.spargen/vendor/` — is `E019` naming both, rather than whichever
+/// loaded first. The path relative to the root document names exactly one of them.
+#[test]
+fn a_file_scoped_rule_naming_a_shared_basename_is_e019_naming_the_candidates() {
+    use sha2::{Digest, Sha256};
+
+    let url = "https://h.example/v1/pet.yaml";
+    let vendored = ".spargen/vendor/h.example/v1/pet.yaml";
+    for (label, refs, candidates) in [
+        (
+            "two local files",
+            ["./b/pet.yaml", "./a/pet.yaml"],
+            ["b/pet.yaml", "a/pet.yaml"],
+        ),
+        (
+            "a local file and a vendored copy",
+            ["./schemas/pet.yaml", url],
+            ["schemas/pet.yaml", vendored],
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        for candidate in candidates {
+            write_schema_file(temp.path(), candidate, "pet_field");
+        }
+        if let Ok(bytes) = std::fs::read(temp.path().join(vendored)) {
+            std::fs::write(
+                temp.path().join("spargen.lock"),
+                format!(
+                    "version = 1\n\n[[remote]]\nurl = \"{url}\"\nsha256 = \"{:x}\"\n\
+                     path = \"h.example/v1/pet.yaml\"\n",
+                    Sha256::digest(&bytes)
+                ),
+            )
+            .unwrap();
+        }
+        let spec = write_root_referring_to(temp.path(), &refs);
+        let out = temp.path().join("client.rs");
+
+        let rule = spargen::OmitRule::pointer(Some("pet.yaml".into()), "/properties/pet_field");
+        let report = spargen::generate(&omitting(&spec, &out, omit_of(vec![rule])));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+        assert_eq!(
+            e019_messages(&report),
+            [format!(
+                "omit rule's file matches more than one loaded file ({}, {}); name it by its \
+                 path relative to the root document: pointer pet.yaml#/properties/pet_field",
+                candidates[0], candidates[1]
+            )],
+            "{label}"
+        );
+
+        for candidate in candidates {
+            let rule = spargen::OmitRule::pointer(
+                Some(candidate.to_owned().into()),
+                "/properties/pet_field",
+            );
+            let report = spargen::generate(&omitting(&spec, &out, omit_of(vec![rule])));
+            assert_eq!(
+                report.outcome(),
+                Outcome::Generated,
+                "{label}, {candidate}: {report:#?}"
+            );
+            assert_eq!(w009_messages(&report).len(), 1, "{label}, {candidate}");
+        }
+    }
+}

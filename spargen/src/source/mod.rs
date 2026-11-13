@@ -35,7 +35,7 @@ mod vendor;
 #[cfg(all(test, feature = "remote-fetch"))]
 mod selfid_diff_tests;
 
-pub(crate) use bundle::InputBundle;
+pub(crate) use bundle::{FileLookupError, InputBundle};
 // The build cache's input fingerprint names each input by the same identity the bundle keys it by.
 pub(crate) use bundle::{local_identity, working_dir};
 pub(crate) use lock::LOCK_FILE_NAME;
