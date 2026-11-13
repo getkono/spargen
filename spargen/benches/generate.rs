@@ -88,7 +88,7 @@ fn bench_check(c: &mut Criterion) {
             b.iter(|| {
                 let report = spargen::check(black_box(&config));
                 assert_ne!(report.outcome(), Outcome::Rejected, "{name} must lower");
-                black_box(report);
+                let _ = black_box(report);
             });
         });
     }
@@ -114,7 +114,7 @@ fn bench_generate(c: &mut Criterion) {
             Utf8PathBuf::from_path_buf(out_dir.path().join("api.rs")).expect("utf8 out path");
         let config = Spec::new(spec.clone())
             .build(out_path.clone())
-            .cargo(CargoIntegration::Off);
+            .with_cargo(CargoIntegration::Off);
         group.bench_function(*name, |b| {
             b.iter_batched(
                 || match std::fs::remove_file(&out_path) {
@@ -127,7 +127,7 @@ fn bench_generate(c: &mut Criterion) {
                     // With the output removed there is nothing for the cache to verify, so a
                     // `Cached` here would mean the bench measured a lookup, not a generation.
                     assert_eq!(report.outcome(), Outcome::Generated, "{name} must generate");
-                    black_box(report);
+                    let _ = black_box(report);
                 },
                 BatchSize::PerIteration,
             );

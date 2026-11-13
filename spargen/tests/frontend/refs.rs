@@ -778,7 +778,7 @@ fn an_unreadable_relative_file_ref_is_e011_at_the_ref() {
                 run_generate(
                     &input
                         .build(dir.join("client.rs"))
-                        .cargo(CargoIntegration::Off),
+                        .with_cargo(CargoIntegration::Off),
                 )
             };
             let reported: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();

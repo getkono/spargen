@@ -999,7 +999,7 @@ fn generating_outside_a_build_script_reports_the_degradation() {
 
     let build = spargen::Spec::new(dir.join("openapi.yaml"))
         .build(dir.join("client.rs"))
-        .cargo(spargen::CargoIntegration::Auto);
+        .with_cargo(spargen::CargoIntegration::Auto);
     let report = spargen::generate(&build);
 
     assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
@@ -1020,7 +1020,7 @@ fn required_cargo_integration_outside_a_build_script_is_fatal() {
 
     let build = spargen::Spec::new(dir.join("openapi.yaml"))
         .build(dir.join("client.rs"))
-        .cargo(spargen::CargoIntegration::Required);
+        .with_cargo(spargen::CargoIntegration::Required);
     let report = spargen::generate(&build);
 
     assert_eq!(report.outcome(), spargen::Outcome::Rejected, "{report:#?}");
@@ -1043,7 +1043,7 @@ fn cargo_integration_off_reports_neither_degradation_nor_failure() {
 
     let build = spargen::Spec::new(dir.join("openapi.yaml"))
         .build(dir.join("client.rs"))
-        .cargo(spargen::CargoIntegration::Off);
+        .with_cargo(spargen::CargoIntegration::Off);
     let report = spargen::generate(&build);
 
     assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
@@ -1054,20 +1054,27 @@ fn cargo_integration_off_reports_neither_degradation_nor_failure() {
 #[test]
 fn the_getters_read_back_the_defaults() {
     let spec = spargen::Spec::new("openapi.yaml");
-    assert!(spec.uuid_enabled());
-    assert_eq!(spec.datetime_backend(), spargen::DateTimeBackend::Time);
+    assert_eq!(spec.uuid(), spargen::UuidMapping::Uuid);
+    assert_eq!(spec.datetime(), spargen::DateTimeBackend::Time);
     assert!(spec.omissions().is_empty());
-    assert_eq!(spec.error_body_cap_bytes(), 64 * 1024);
-    assert_eq!(spec.batch_cap_count(), 100);
-    assert!(!spec.carve_enabled());
-    assert!(!spec.open_narrowing_enabled());
-    assert!(!spec.open_unions_enabled());
-    assert!(!spec.verbatim_docs_enabled());
-    assert!(!spec.testing_enabled());
+    assert_eq!(spec.error_body_cap(), 64 * 1024);
+    assert_eq!(spec.batch_cap(), 100);
+    assert_eq!(spec.carve(), spargen::Carve::Off);
+    assert_eq!(spec.open_narrowing(), spargen::Narrowing::Exact);
+    assert_eq!(spec.open_unions(), spargen::UnionTags::Closed);
+    assert_eq!(spec.verbatim_docs(), spargen::CarriedDocs::Rewritten);
+    assert_eq!(spec.testing(), spargen::TestingModule::Omitted);
+    // Each switch's `Default` is the value `Spec::new` picks.
+    assert_eq!(spec.uuid(), spargen::UuidMapping::default());
+    assert_eq!(spec.carve(), spargen::Carve::default());
+    assert_eq!(spec.open_narrowing(), spargen::Narrowing::default());
+    assert_eq!(spec.open_unions(), spargen::UnionTags::default());
+    assert_eq!(spec.verbatim_docs(), spargen::CarriedDocs::default());
+    assert_eq!(spec.testing(), spargen::TestingModule::default());
     assert!(spec.bound_headers().is_empty());
     assert!(spec.config_files().is_empty());
     assert_eq!(
-        spec.build("out.rs").cargo_integration(),
+        spec.build("out.rs").cargo(),
         spargen::CargoIntegration::Auto
     );
 }
@@ -1085,38 +1092,38 @@ fn the_getters_read_back_what_the_setters_wrote() {
     let mut omit = spargen::Omit::default();
     omit.rules.push(rule.clone());
     let spec = spargen::Spec::new("openapi.yaml")
-        .uuid(false)
-        .datetime(spargen::DateTimeBackend::String)
-        // `omit` replaces the rule set `omit_rule` started, and a later `omit_rule` appends to it.
+        .with_uuid(spargen::UuidMapping::String)
+        .with_datetime(spargen::DateTimeBackend::String)
+        // `omit` and `omit_rule` each append to the rules set before them.
         .omit_rule(appended.clone())
         .omit(omit)
         .omit_rule(appended.clone())
-        .error_body_cap(11)
-        .batch_cap(7)
-        .carve(true)
-        .open_narrowing(true)
-        .open_unions(true)
-        .verbatim_docs(true)
-        .testing(true)
+        .with_error_body_cap(11)
+        .with_batch_cap(7)
+        .with_carve(spargen::Carve::Auto)
+        .with_open_narrowing(spargen::Narrowing::Open)
+        .with_open_unions(spargen::UnionTags::Open)
+        .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
+        .with_testing(spargen::TestingModule::Emitted)
         .bind_header("X-Api-Version")
         .bind_header("X-Tenant");
-    assert!(!spec.uuid_enabled());
-    assert_eq!(spec.datetime_backend(), spargen::DateTimeBackend::String);
-    assert_eq!(spec.omissions().rules, [rule, appended]);
-    assert_eq!(spec.error_body_cap_bytes(), 11);
-    assert_eq!(spec.batch_cap_count(), 7);
-    assert!(spec.carve_enabled());
-    assert!(spec.open_narrowing_enabled());
-    assert!(spec.open_unions_enabled());
-    assert!(spec.verbatim_docs_enabled());
-    assert!(spec.testing_enabled());
+    assert_eq!(spec.uuid(), spargen::UuidMapping::String);
+    assert_eq!(spec.datetime(), spargen::DateTimeBackend::String);
+    assert_eq!(spec.omissions().rules, [appended.clone(), rule, appended]);
+    assert_eq!(spec.error_body_cap(), 11);
+    assert_eq!(spec.batch_cap(), 7);
+    assert_eq!(spec.carve(), spargen::Carve::Auto);
+    assert_eq!(spec.open_narrowing(), spargen::Narrowing::Open);
+    assert_eq!(spec.open_unions(), spargen::UnionTags::Open);
+    assert_eq!(spec.verbatim_docs(), spargen::CarriedDocs::Verbatim);
+    assert_eq!(spec.testing(), spargen::TestingModule::Emitted);
     assert_eq!(spec.bound_headers(), ["X-Api-Version", "X-Tenant"]);
     for integration in [
         spargen::CargoIntegration::Required,
         spargen::CargoIntegration::Off,
     ] {
-        let build = spec.clone().build("out.rs").cargo(integration);
-        assert_eq!(build.cargo_integration(), integration);
+        let build = spec.clone().build("out.rs").with_cargo(integration);
+        assert_eq!(build.cargo(), integration);
     }
 }
 
@@ -1138,8 +1145,8 @@ fn every_applied_config_file_is_listed_in_the_order_applied() {
         .unwrap();
 
     assert_eq!(spec.config_files(), [discovered, explicit]);
-    assert!(spec.carve_enabled());
-    assert_eq!(spec.batch_cap_count(), 7);
+    assert_eq!(spec.carve(), spargen::Carve::Auto);
+    assert_eq!(spec.batch_cap(), 7);
     assert_eq!(
         spec.omissions().rules,
         [spargen::OmitRule::Path {
@@ -1189,16 +1196,62 @@ fn keep_rules_apply_from_the_flag_and_the_config_file() {
     );
 }
 
-/// `keep_operation` appends to the profile `omissions` reads back, and `omit` replaces the keep
-/// rules with the rest of the profile.
+/// `keep_operation` appends to the profile `omissions` reads back, `omit` appends a profile's keep
+/// rules after it, and `clear_omissions` removes the keep rules with the rest of the profile.
 #[test]
-fn keep_operation_reads_back_and_omit_replaces_it() {
+fn keep_operation_reads_back_and_clear_omissions_removes_it() {
+    let post = spargen::KeepRule::operation(spargen::OmitMethod::Post, "/kept");
+    let put = spargen::KeepRule::operation(spargen::OmitMethod::Put, "/appended");
     let get = spargen::KeepRule::operation(spargen::OmitMethod::Get, "/pets");
+    let mut profile = spargen::Omit::default();
+    profile.keep.push(put.clone());
     let spec = spargen::Spec::new("openapi.yaml")
-        .keep_operation(spargen::OmitMethod::Post, "/dropped")
-        .omit(spargen::Omit::default())
+        .keep_operation(spargen::OmitMethod::Post, "/kept")
+        .omit(profile);
+    assert_eq!(spec.omissions().keep, [post, put]);
+
+    let spec = spec
+        .omit_rule(spargen::OmitRule::path("/dropped"))
+        .clear_omissions()
         .keep_operation(spargen::OmitMethod::Get, "/pets");
     assert_eq!(spec.omissions().keep, [get]);
     assert!(spec.omissions().rules.is_empty());
     assert!(!spec.omissions().is_empty());
+}
+
+/// `omit` after a config file keeps the file's `[[omit]]` and `[[keep]]` rules and appends its
+/// own (#1328), and applying the same file again appends neither its rules nor a second
+/// `config_files` entry, while its keys are set again over a setter in between.
+#[test]
+fn omit_after_a_config_file_keeps_the_file_rules_and_a_reapplied_file_adds_none() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let file = dir.join("spargen.toml");
+    std::fs::write(
+        &file,
+        "batch_cap = 7\n[[omit]]\npath = \"/from-file\"\n[[keep]]\nmethod = \"get\"\npath = \"/kept\"\n",
+    )
+    .unwrap();
+    let from_file = spargen::OmitRule::path("/from-file");
+    let from_setter = spargen::OmitRule::path("/from-setter");
+    let kept = spargen::KeepRule::operation(spargen::OmitMethod::Get, "/kept");
+    let mut omit = spargen::Omit::default();
+    omit.rules.push(from_setter.clone());
+
+    let spec = spargen::Spec::new(dir.join("openapi.yaml"))
+        .config_file(&file)
+        .unwrap()
+        .omit(omit);
+    assert_eq!(
+        spec.omissions().rules,
+        [from_file.clone(), from_setter.clone()]
+    );
+    assert_eq!(spec.omissions().keep, std::slice::from_ref(&kept));
+    assert_eq!(spec.config_files(), std::slice::from_ref(&file));
+
+    let spec = spec.with_batch_cap(1).config_file(&file).unwrap();
+    assert_eq!(spec.omissions().rules, [from_file, from_setter]);
+    assert_eq!(spec.omissions().keep, [kept]);
+    assert_eq!(spec.config_files(), [file]);
+    assert_eq!(spec.batch_cap(), 7);
 }

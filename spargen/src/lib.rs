@@ -50,7 +50,9 @@
 //! [`Build`], [`DiffRejection`] and [`DiffSides`] keep their fields private and are read through
 //! accessors, and `Spec` and `Build` are set through chained setters, so a new field or knob is
 //! additive. A type with public fields or variants that may grow — [`Diagnostic`], [`Outcome`],
-//! [`Code`] and [`CargoIntegration`] among them — is `#[non_exhaustive]` instead. [`Severity`]
+//! [`Code`], [`CargoIntegration`], [`ConfigError`], [`Loc`] and [`Span`] among them — is
+//! `#[non_exhaustive]` instead, with a constructor where a caller builds one ([`Loc::new`],
+//! [`Span::new`], [`ConfigError::flag`]). [`Severity`]
 //! stays exhaustive: its two variants are the error/warning partition every [`Report`] splits on.
 
 mod diag;
@@ -77,7 +79,10 @@ mod test_support;
 use std::str::FromStr;
 
 pub use compat::{ComponentKind, KeepRule, Omit, OmitMethod, OmitRule, UnknownOmitToken};
-pub use config::{Build, CargoIntegration, ConfigError, Spec};
+pub use config::{
+    Build, CargoIntegration, CarriedDocs, Carve, ConfigError, Narrowing, Spec, TestingModule,
+    UnionTags, UuidMapping,
+};
 pub use diag::{
     Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, OutcomeClaim, Severity, Span, UnknownCode,
 };
