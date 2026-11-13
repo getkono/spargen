@@ -138,7 +138,7 @@ fn every_typed_backend_puts_rfc3339_on_the_wire() {
         let out = temp.path().join("client");
         let name = format!("dates_{crate_name}_client");
         let report = generate_configured_fixture_crate(&spec, &out, &name, "2021", |spec: Spec| {
-            spec.datetime(backend)
+            spec.with_datetime(backend)
         });
         assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
@@ -161,7 +161,7 @@ fn every_typed_backend_puts_rfc3339_on_the_wire() {
         );
 
         // The backend's crate replaces `time` in the fixture manifest, at its stated floor.
-        let floor = spargen::requirements(&Spec::new(spec.clone()).datetime(backend))
+        let floor = spargen::requirements(&Spec::new(spec.clone()).with_datetime(backend))
             .expect("spec lowers")
             .0
             .dependencies

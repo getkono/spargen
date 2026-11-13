@@ -737,7 +737,9 @@ paths:
         let path =
             camino::Utf8PathBuf::from_path_buf(directory.path().join("openapi.yaml")).unwrap();
         std::fs::write(&path, REPLIES).unwrap();
-        let preview = crate::__private::preview(&crate::Spec::new(path).testing(testing));
+        let preview = crate::__private::preview(
+            &crate::Spec::new(path).with_testing(crate::TestingModule::from_on(testing)),
+        );
         let contents = preview
             .contents
             .unwrap_or_else(|| panic!("the spec generates: {:?}", preview.report.diagnostics));

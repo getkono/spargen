@@ -460,7 +460,7 @@ tokio = {{ version = "{tokio}", features = ["rt"], optional = true }}
         .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
         // This test process is not a build script; the fixture crate below is compiled by a
         // real `cargo build`, which is where the manifest audit belongs.
-        .cargo(CargoIntegration::Off),
+        .with_cargo(CargoIntegration::Off),
     )
 }
 
@@ -612,8 +612,10 @@ fn the_provenance_header_stamps_this_spargen_version() {
 /// the construct it changes, so enabling it emits the default module byte for byte.
 #[test]
 fn basic_spec_module_without_type_mapping_features_is_pinned() {
-    let module =
-        basic_spec_module(|spec| spec.uuid(false).datetime(spargen::DateTimeBackend::String));
+    let module = basic_spec_module(|spec| {
+        spec.with_uuid(spargen::UuidMapping::String)
+            .with_datetime(spargen::DateTimeBackend::String)
+    });
     assert_ne!(
         module,
         basic_spec_module(|spec| spec),

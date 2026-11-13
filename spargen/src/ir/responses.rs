@@ -185,7 +185,7 @@ impl Responses {
     ///     )).unwrap();
     ///     let build = spargen::Spec::new(camino::Utf8PathBuf::from_path_buf(spec).unwrap())
     ///         .build(camino::Utf8PathBuf::from_path_buf(out.clone()).unwrap())
-    ///         .cargo(spargen::CargoIntegration::Off);
+    ///         .with_cargo(spargen::CargoIntegration::Off);
     ///     spargen::generate(&build).expect_success();
     ///     std::fs::read_to_string(out).unwrap()
     /// }

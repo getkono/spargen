@@ -12,7 +12,7 @@ use super::CodegenOptions;
 use crate::ir::{closes_fence, fence_opener, leading_columns, list_indent, list_item_fence};
 
 /// Spec-carried prose as it is rendered under `options`: [`sanitize_carried`] applied, or, under
-/// `Spec::verbatim_docs(true)`, the text as written.
+/// `Spec::with_verbatim_docs(CarriedDocs::Verbatim)`, the text as written.
 pub(super) fn carried<'a>(text: &'a str, options: &CodegenOptions) -> Cow<'a, str> {
     if options.verbatim_docs {
         Cow::Borrowed(text)
