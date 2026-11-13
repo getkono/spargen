@@ -56,6 +56,8 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::AdditionalPropertiesTypeChanged,
         ChangeKind::StreamTwinAdded,
         ChangeKind::StreamTwinRemoved,
+        ChangeKind::TestingModuleAdded,
+        ChangeKind::TestingModuleRemoved,
     ];
     for kind in every {
         // Exhaustive by construction: adding a variant to `ChangeKind` fails to compile here
@@ -106,7 +108,9 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::AdditionalPropertiesRemoved
             | ChangeKind::AdditionalPropertiesTypeChanged
             | ChangeKind::StreamTwinAdded
-            | ChangeKind::StreamTwinRemoved => {}
+            | ChangeKind::StreamTwinRemoved
+            | ChangeKind::TestingModuleAdded
+            | ChangeKind::TestingModuleRemoved => {}
         }
     }
     every.to_vec()
@@ -161,6 +165,8 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::AdditionalPropertiesTypeChanged => "AdditionalPropertiesTypeChanged",
         ChangeKind::StreamTwinAdded => "StreamTwinAdded",
         ChangeKind::StreamTwinRemoved => "StreamTwinRemoved",
+        ChangeKind::TestingModuleAdded => "TestingModuleAdded",
+        ChangeKind::TestingModuleRemoved => "TestingModuleRemoved",
     }
 }
 
@@ -168,7 +174,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
 fn the_kind_list_covers_the_whole_enum() {
     assert_eq!(
         all_kinds().len(),
-        46,
+        48,
         "a `ChangeKind` variant reached the exhaustive match without joining the list"
     );
 }
@@ -242,6 +248,7 @@ fn only_the_additive_kinds_are_minor() {
         ChangeKind::ServerVariableAdded,
         ChangeKind::AdditionalPropertiesAdded,
         ChangeKind::StreamTwinAdded,
+        ChangeKind::TestingModuleAdded,
     ];
     for kind in all_kinds() {
         let expected = if MINOR.contains(&kind) {
@@ -554,6 +561,21 @@ fn node() -> impl proptest::strategy::Strategy<Value = Node> {
     })
 }
 
+/// Every combination of the settings a primitive's label reads.
+fn settings() -> impl proptest::strategy::Strategy<Value = super::Settings> {
+    use proptest::prelude::*;
+    (
+        any::<bool>(),
+        proptest::sample::select(crate::ir::DateTimeBackend::ALL),
+        any::<bool>(),
+    )
+        .prop_map(|(uuid, datetime, testing)| super::Settings {
+            uuid,
+            datetime,
+            testing,
+        })
+}
+
 /// Insert `node` into `api`'s type graph bottom-up, naming each nominal definition, and return
 /// the reference to it. Definitions are made through `reserve` and filled in place, which is
 /// how a graph is built without naming `crate::diag` (a layer this subsystem does not take).
@@ -650,6 +672,7 @@ fn check(
     parsed: &syn::Type,
     api: &crate::ir::Api,
     names: &crate::name::Names,
+    settings: super::Settings,
 ) -> Result<(), proptest::test_runner::TestCaseError> {
     use crate::ir::TypeKind;
     use proptest::{prop_assert, prop_assert_eq};
@@ -687,7 +710,7 @@ fn check(
                 unreachable!("arity checked above")
             };
             for ((node, item), element) in nodes.iter().zip(items).zip(&tuple.elems) {
-                check(node, *item, element, api, names)?;
+                check(node, *item, element, api, names, settings)?;
             }
             return Ok(());
         }
@@ -697,11 +720,21 @@ fn check(
             };
             let inner = generic_argument(parsed, "Vec");
             prop_assert!(inner.is_some(), "an array renders `Vec<…>`");
-            return check(node, **item, inner.expect("checked"), api, names);
+            return check(node, **item, inner.expect("checked"), api, names, settings);
         }
         // The arity check above is all there is to `()`.
         Shape::Null => return Ok(()),
-        Shape::Primitive(prim) => super::extract::prim_label(*prim).to_owned(),
+        // A mapped format may render generic (`DateTime<time>`), so compare whole types.
+        Shape::Primitive(prim) => {
+            let label = super::extract::prim_label(*prim, settings);
+            let expected = syn::parse_str::<syn::Type>(&label);
+            prop_assert!(expected.is_ok(), "{label:?} does not parse as a type");
+            prop_assert_eq!(
+                quote::ToTokens::to_token_stream(parsed).to_string(),
+                quote::ToTokens::to_token_stream(&expected.expect("checked")).to_string()
+            );
+            return Ok(());
+        }
         Shape::Nominal(_) => names.types[&ty.id].as_str().to_owned(),
         Shape::IntEnum => "i64".to_owned(),
         Shape::BoolEnum => "bool".to_owned(),
@@ -717,7 +750,10 @@ proptest::proptest! {
     /// the tree's: in particular a one-position tuple keeps the trailing comma that makes it
     /// `(T,)` rather than a parenthesized `T` (#449), at any depth.
     #[test]
-    fn canon_ty_parses_as_the_type_its_tree_describes(node in node()) {
+    fn canon_ty_parses_as_the_type_its_tree_describes(
+        node in node(),
+        settings in settings(),
+    ) {
         let mut api = crate::ir::Api {
             info: crate::ir::Info {
                 title: "T".to_owned(),
@@ -731,9 +767,9 @@ proptest::proptest! {
         };
         let mut names = crate::name::Names::default();
         let ty = insert(&node, &mut api, &mut names);
-        let rendered = super::extract::canon_ty(ty, &api, &names);
+        let rendered = super::extract::canon_ty(ty, &api, &names, settings);
         let parsed = syn::parse_str::<syn::Type>(&rendered);
         proptest::prop_assert!(parsed.is_ok(), "{rendered:?} does not parse as a type");
-        check(&node, ty, &parsed.expect("checked"), &api, &names)?;
+        check(&node, ty, &parsed.expect("checked"), &api, &names, settings)?;
     }
 }
