@@ -541,7 +541,7 @@ paths:
     let report = spargen::generate(
         &Spec::new(spec_path)
             .build(out.clone())
-            .cargo(CargoIntegration::Off),
+            .with_cargo(CargoIntegration::Off),
     );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 

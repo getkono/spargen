@@ -80,9 +80,9 @@ A `paths` entry written as a `$ref` is kept **whole** once one of its target's o
 because the target can be shared by other entries; a keep rule names such an operation by the
 `paths` key that refers to it.
 
-Keep rules are part of the `Omit` profile and its fingerprint: `Spec::omit` replaces them along with
-the omit rules, so call `keep_operation` after it. In `spargen.toml` each is a `[[keep]]` entry with
-both keys required:
+Keep rules are part of the `Omit` profile and its fingerprint: `Spec::omit` appends a profile's keep
+rules as it appends its omit rules, and `Spec::clear_omissions` removes both. In `spargen.toml` each
+is a `[[keep]]` entry with both keys required:
 
 ```toml
 [[keep]]
@@ -95,7 +95,7 @@ a `keep { get "/v1/sync"; }` block. Each adds to the keep rules the file already
 
 ## Auto-carve
 
-`Spec::carve(true)` (or the macro's `carve` argument) turns a spec that would **reject**
+`Spec::with_carve(Carve::Auto)` (or the macro's `carve` argument) turns a spec that would **reject**
 into a generate-what-you-can outcome. Instead of failing on rejections, spargen:
 
 1. runs the frontend audit;
@@ -224,5 +224,5 @@ the CLI. Setters called after it still win, so build code remains authoritative:
 ```rust
 let spec = spargen::Spec::new("api/openapi.yaml")
     .discover_config_file()?
-    .carve(false);   // overrides the file
+    .with_carve(spargen::Carve::Off);   // overrides the file
 ```

@@ -301,7 +301,7 @@ pub(crate) enum Prim {
 }
 
 /// The crate `format: date-time` and `format: date` map to, chosen with
-/// [`Spec::datetime`](crate::Spec::datetime).
+/// [`Spec::with_datetime`](crate::Spec::with_datetime).
 ///
 /// Every typed backend emits an embedded `DateTime` newtype for `date-time` and a `Date` newtype
 /// for `date`, each with spargen's own RFC 3339 `Serialize`/`Deserialize`, `Display` and `FromStr`.

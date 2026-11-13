@@ -14,7 +14,13 @@ const OPEN_NARROWING_SPEC: &str = include_str!("../e2e/specs/open_narrowing.yaml
 fn generate_narrowing(open: bool) -> (Report, Vec<(&'static str, String)>, String) {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = write_spec(temp.path(), "problems.yaml", OPEN_NARROWING_SPEC);
-    let (report, code) = generate_spec_with_code(Spec::new(spec_path).open_narrowing(open));
+    let narrowing = if open {
+        spargen::Narrowing::Open
+    } else {
+        spargen::Narrowing::Exact
+    };
+    let (report, code) =
+        generate_spec_with_code(Spec::new(spec_path).with_open_narrowing(narrowing));
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let reported = report
         .diagnostics()

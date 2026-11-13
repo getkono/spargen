@@ -159,15 +159,15 @@ fn the_e2e_basic_spec_is_byte_identical_across_runs_under_default_and_non_defaul
     let spec_path = write_spec(src.path(), "openapi.yaml", e2e_basic_spec());
     let (outcome, module) =
         assert_configured_generates_identically(&spec_path, "e2e BASIC_SPEC, options", |spec| {
-            spec.uuid(false)
-                .datetime(spargen::DateTimeBackend::String)
-                .open_narrowing(true)
-                .open_unions(true)
-                .verbatim_docs(true)
-                .testing(true)
-                .error_body_cap(1024)
-                .batch_cap(7)
-                .carve(true)
+            spec.with_uuid(spargen::UuidMapping::String)
+                .with_datetime(spargen::DateTimeBackend::String)
+                .with_open_narrowing(spargen::Narrowing::Open)
+                .with_open_unions(spargen::UnionTags::Open)
+                .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
+                .with_testing(spargen::TestingModule::Emitted)
+                .with_error_body_cap(1024)
+                .with_batch_cap(7)
+                .with_carve(spargen::Carve::Auto)
         });
     assert_eq!(outcome, Outcome::Generated);
     let (default_outcome, default_module) =

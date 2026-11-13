@@ -222,11 +222,11 @@ fn the_macro_preview_emits_the_module_generate_writes() {
     let spec = write_spec(temp.path(), "openapi.yaml", BASIC_SPEC);
     let out = temp.path().join("client");
     let configure = |spec: Spec| {
-        spec.uuid(false)
-            .datetime(spargen::DateTimeBackend::String)
-            .open_narrowing(true)
-            .error_body_cap(4096)
-            .batch_cap(7)
+        spec.with_uuid(spargen::UuidMapping::String)
+            .with_datetime(spargen::DateTimeBackend::String)
+            .with_open_narrowing(spargen::Narrowing::Open)
+            .with_error_body_cap(4096)
+            .with_batch_cap(7)
     };
 
     let report = generate_configured_fixture_crate(&spec, &out, "parity_client", "2021", configure);

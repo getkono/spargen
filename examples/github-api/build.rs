@@ -5,9 +5,9 @@ fn main() {
         "/../../corpus/github-api-3-1/api.github.com.json"
     ))
     // GitHub's spec is large enough that the default 100-diagnostic batch truncates its warnings.
-    .batch_cap(100_000)
+    .with_batch_cap(100_000)
     .build(format!("{out}/github.rs"))
-    .cargo(spargen::CargoIntegration::Required);
+    .with_cargo(spargen::CargoIntegration::Required);
     let report = spargen::generate(&build);
     report.emit_cargo_diagnostics();
     report.expect_success();

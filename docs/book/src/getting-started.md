@@ -67,7 +67,7 @@ The include site needs no lint attribute either. Each generated top-level item a
 that judge what the spec chose or where you put the module (`missing_docs`, `unreachable_pub`,
 `dead_code`, `clippy::pedantic`, `clippy::nursery`), and the spec's prose is rewritten so rustdoc's
 link and HTML lints find nothing in it and none of its code blocks runs as a doctest
-(`Spec::verbatim_docs(true)` keeps it as written). Either way, a lone CR ends its line, a
+(`Spec::with_verbatim_docs(CarriedDocs::Verbatim)` keeps it as written). Either way, a lone CR ends its line, a
 bidirectional control (U+202A–U+202E, U+2066–U+2069) is written as its visible `\u{…}` escape, and
 a list item's continuation lines sit at its content column, so rustc and Clippy accept every doc
 comment. An
@@ -122,7 +122,7 @@ root is found and what the diagnostic reports when it cannot be read, is the tex
 #### Cargo integration
 
 Rebuild triggers and the consumer-manifest dependency audit (`E023`) both need a real
-build-script process. `Build::cargo` decides what happens when there is not one:
+build-script process. `Build::with_cargo` decides what happens when there is not one:
 
 | Value | Under a build script | Anywhere else |
 | --- | --- | --- |

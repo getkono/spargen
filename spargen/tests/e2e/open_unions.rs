@@ -20,7 +20,7 @@ fn open_unions_decodes_an_unlisted_tag_into_the_unknown_variant() {
 
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "open_unions", "2021", |spec| {
-        spec.open_unions(true)
+        spec.with_open_unions(spargen::UnionTags::Open)
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
@@ -217,7 +217,7 @@ fn open_unions_opens_only_a_discriminated_union_without_a_fallback() {
     let closed = spec_module("events.yaml", OPEN_UNIONS_SPEC, |spec| spec);
     assert!(!closed.contains(OPEN_VARIANT_DOC), "{closed}");
     let open = spec_module("events.yaml", OPEN_UNIONS_SPEC, |spec| {
-        spec.open_unions(true)
+        spec.with_open_unions(spargen::UnionTags::Open)
     });
     assert_eq!(
         open.matches(OPEN_VARIANT_DOC).count(),
@@ -267,6 +267,8 @@ components:
       properties:
         outcome: { type: string }
 "##;
-    let module = spec_module("fallback.yaml", fallback, |spec| spec.open_unions(true));
+    let module = spec_module("fallback.yaml", fallback, |spec| {
+        spec.with_open_unions(spargen::UnionTags::Open)
+    });
     assert!(!module.contains(OPEN_VARIANT_DOC), "{module}");
 }

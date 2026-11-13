@@ -88,7 +88,7 @@ fn generate_at(root: &Utf8Path) -> (Report, String) {
     let report = spargen::generate(
         &Spec::new(root)
             .build(out.clone())
-            .cargo(CargoIntegration::Off),
+            .with_cargo(CargoIntegration::Off),
     );
     let source = std::fs::read_to_string(&out).unwrap_or_default();
     let module = (report.outcome() == Outcome::Generated).then_some(source.as_str());

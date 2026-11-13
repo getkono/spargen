@@ -54,7 +54,11 @@ fn check(name: &str) -> Report {
 /// Run `generate` on a vendored recipe spec (optionally with `--carve`), returning the report and
 /// the emitted module text (when generation ran). Output goes to a throwaway tempdir.
 fn generate(name: &str, carve: bool) -> (Report, Option<String>) {
-    generate_to_string(Spec::new(recipe_path(name)).carve(carve))
+    generate_to_string(Spec::new(recipe_path(name)).with_carve(if carve {
+        spargen::Carve::Auto
+    } else {
+        spargen::Carve::Off
+    }))
 }
 
 /// One field of `pub struct ty`: its declared type and the attribute text written above it.

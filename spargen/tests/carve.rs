@@ -44,7 +44,10 @@ fn config(spec: &Utf8Path, out: &Path) -> Build {
 
 /// As [`config`], but with auto-carve on.
 fn carving(spec: &Utf8Path, out: &Path) -> Build {
-    build(Spec::new(spec.to_owned()).carve(true), out)
+    build(
+        Spec::new(spec.to_owned()).with_carve(spargen::Carve::Auto),
+        out,
+    )
 }
 
 /// An omit profile holding exactly `rules`, built from its default the way a consumer builds one
@@ -63,7 +66,7 @@ fn omitting(spec: &Utf8Path, out: &Path, omit: spargen::Omit) -> Build {
 fn build(spec: Spec, out: &Path) -> Build {
     spec.build(Utf8PathBuf::from_path_buf(out.to_path_buf()).unwrap())
         // Not a build script; keep `W013` out of the carve reports these tests assert on.
-        .cargo(CargoIntegration::Off)
+        .with_cargo(CargoIntegration::Off)
 }
 
 fn w009_count(report: &Report) -> usize {
