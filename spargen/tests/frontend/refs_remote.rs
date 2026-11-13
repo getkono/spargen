@@ -58,7 +58,7 @@ fn run(
     let report = if check_only {
         run_check(&spec)
     } else {
-        run_generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
+        run_generate(&spec.build(out.clone()).with_cargo(CargoIntegration::Off))
     };
     (report, temp, out)
 }
@@ -213,7 +213,7 @@ fn a_ref_with_any_rfc_3986_scheme_is_e003_and_a_drive_letter_is_one() {
                     &spec
                         .clone()
                         .build(dir.join("client.rs"))
-                        .cargo(CargoIntegration::Off),
+                        .with_cargo(CargoIntegration::Off),
                 )
             };
             assert_eq!(
@@ -436,7 +436,7 @@ pub(super) fn run_layout(
     let report = if check_only {
         run_check(&spec)
     } else {
-        run_generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
+        run_generate(&spec.build(out.clone()).with_cargo(CargoIntegration::Off))
     };
     (report, temp, out)
 }

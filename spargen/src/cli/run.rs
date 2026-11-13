@@ -151,9 +151,16 @@ fn warn_ignored(flags: &[&str], format: Format) {
     }
 }
 
-/// Render a config/flag error to stderr and exit with a usage status — never a panic.
+/// Render a config/flag error, followed by each error in its `source` chain, to stderr and exit
+/// with a usage status — never a panic.
 fn config_error(error: ConfigError) -> ExitCode {
-    eprintln!("error: {error}");
+    let mut rendered = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        rendered.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    eprintln!("error: {rendered}");
     ExitStatus::Usage.into()
 }
 

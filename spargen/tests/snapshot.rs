@@ -42,7 +42,13 @@ fn corpus_path(rel: &str) -> Utf8PathBuf {
 /// any Cargo build: the snapshots record what the spec produced, not what the process happened to
 /// be.
 fn config_for(spec: Utf8PathBuf, carve: bool) -> Spec {
-    Spec::new(spec).batch_cap(usize::MAX).carve(carve)
+    Spec::new(spec)
+        .with_batch_cap(usize::MAX)
+        .with_carve(if carve {
+            spargen::Carve::Auto
+        } else {
+            spargen::Carve::Off
+        })
 }
 
 /// A deterministic, reviewable rendering of a run: the outcome plus a sorted `code: count`

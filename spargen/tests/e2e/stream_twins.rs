@@ -53,7 +53,7 @@ fn a_success_enum_with_a_binary_arm_streams_it_through_its_twin() {
     let spec = write_spec(temp.path(), "twins.yaml", TWINS_SPEC);
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "twins_client", "2021", |spec| {
-        spec.testing(true)
+        spec.with_testing(spargen::TestingModule::Emitted)
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();

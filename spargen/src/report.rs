@@ -68,6 +68,7 @@ impl std::fmt::Display for Outcome {
 
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
 #[derive(Debug, Clone, serde::Serialize)]
+#[must_use = "the report carries the outcome and every diagnostic; a rejection is lost unless it is read, e.g. with `.expect_success()`"]
 pub struct Report {
     /// Every diagnostic emitted during the run (batch reporting).
     pub(crate) diagnostics: Vec<Diagnostic>,
@@ -115,7 +116,7 @@ impl Report {
     ///
     /// A truncated report is a partial view: the constructs behind the dropped diagnostics were
     /// still diagnosed, so fixing every diagnostic listed here may not be enough to make the run
-    /// clean. Raise [`Spec::batch_cap`](crate::Spec::batch_cap) to see the rest.
+    /// clean. Raise [`Spec::with_batch_cap`](crate::Spec::with_batch_cap) to see the rest.
     pub fn truncated(&self) -> bool {
         self.truncated
     }
@@ -195,11 +196,12 @@ impl Report {
         )
     }
 
-    /// Panic with the rendered report unless the run succeeded. The build-script one-liner —
-    /// deliberately not `#[must_use]`, because discarding the returned report is the normal use.
-    pub fn expect_success(self) -> Self {
+    /// Panic with the rendered report unless the run succeeded. The build-script one-liner: it
+    /// borrows the report and returns nothing, so `generate(&build).expect_success();` reads the
+    /// `#[must_use]` report and leaves no value to use, and a caller holding the report still has
+    /// it afterwards.
+    pub fn expect_success(&self) {
         assert!(self.succeeded(), "{self}");
-        self
     }
 }
 
@@ -371,11 +373,12 @@ mod tests {
         assert!(!report(Outcome::Rejected).has_errors());
     }
 
-    /// `expect_success` hands a successful report back unchanged.
+    /// `expect_success` passes a successful report and leaves it with its caller unchanged.
     #[test]
-    fn expect_success_returns_a_successful_report() {
-        let returned = report(Outcome::Cached).expect_success();
-        assert_eq!(returned.outcome(), Outcome::Cached);
+    fn expect_success_passes_a_successful_report() {
+        let cached = report(Outcome::Cached);
+        cached.expect_success();
+        assert_eq!(cached.outcome(), Outcome::Cached);
     }
 
     /// `expect_success` panics with the rendered report, whose first line names the outcome.

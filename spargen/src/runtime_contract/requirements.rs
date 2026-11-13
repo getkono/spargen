@@ -80,7 +80,7 @@ impl RuntimeRequirements {
             bytes_serde: api.uses_bytes_serde(),
             streams: features.chunked_reads,
             xml: features.xml,
-            uuid: spec.uuid
+            uuid: spec.uuid.is_on()
                 && api.types.emitted().any(|(_, definition)| {
                     matches!(definition.kind, TypeKind::Primitive(Prim::Uuid))
                 }),
