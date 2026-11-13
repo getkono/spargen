@@ -10,7 +10,7 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::ir::{Api, Operation, Response, StatusSpec};
+use crate::ir::{Api, Operation, Response, Responses, StatusSpec, Ty, TypeKind};
 use crate::name::Names;
 
 use super::dispatch::BodyCodec;
@@ -198,6 +198,24 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                         status / 100 == prefix,
                         "testing::Reply: {status} is not a {prefix}XX status"
                     );
+                    status
+                }
+
+                /// Panic unless `status` is one no entry more precise than the constructor's own
+                /// documents, since the client decodes such a status with that entry's codec:
+                /// `exact` pairs each exact status with its constructor, and `ranges` each range's
+                /// leading digit with its constructor.
+                fn unclaimed(status: u16, exact: &[(u16, &str)], ranges: &[(u16, &str)]) -> u16 {
+                    let claimed = exact
+                        .iter()
+                        .find(|&&(code, _)| code == status)
+                        .or_else(|| ranges.iter().find(|&&(prefix, _)| prefix == status / 100));
+                    if let Some((_, constructor)) = claimed {
+                        panic!(
+                            "testing::Reply: {status} has a documented response of its own; \
+                             use `{constructor}`"
+                        );
+                    }
                     status
                 }
 
@@ -405,7 +423,7 @@ fn reply_module(operation: &Operation, api: &Api, names: &Names) -> TokenStream 
     let constructors = operation
         .responses
         .entries()
-        .map(|(spec, response)| constructor(spec, response, api, names));
+        .map(|(spec, response)| constructor(spec, response, &operation.responses, api, names));
     let module_doc = normalize_rustdoc(&format!(
         "The replies `MockBackend::on_{}` handlers answer with.",
         method.unraw()
@@ -416,8 +434,10 @@ fn reply_module(operation: &Operation, api: &Api, names: &Names) -> TokenStream 
         method.unraw()
     ));
     let root = generated_root();
+    // An operation named `testing` gets `testing::testing`, the module inception Clippy refuses.
     quote! {
         #[doc = #module_doc]
+        #[allow(clippy::module_inception)]
         pub mod #method {
             #[allow(unused_imports)]
             use #root::*;
@@ -455,32 +475,128 @@ fn generated_root() -> TokenStream {
     quote! { #up::#up }
 }
 
+/// Whether `ty` is a top-level sequence (an array or a tuple), which quick-xml writes only as
+/// sibling elements of a name it is given.
+fn is_sequence_ty(api: &Api, ty: Ty) -> bool {
+    matches!(
+        api.types.get(ty.id).map(|definition| &definition.kind),
+        Some(TypeKind::Array(_) | TypeKind::Tuple(_))
+    )
+}
+
+/// The name of the constructor that answers the response `spec` selects: `from_reply` where the
+/// body is streamed, which no typed constructor writes.
+fn constructor_name(spec: StatusSpec, response: &Response) -> String {
+    if response.body.is_some() && response.stream.is_some() {
+        return "from_reply".to_owned();
+    }
+    match spec {
+        StatusSpec::Exact(code) => format!("status_{code}"),
+        StatusSpec::Range(prefix) => format!("status_{prefix}xx"),
+        StatusSpec::Default => "default".to_owned(),
+    }
+}
+
+/// The `(selector, constructor)` pairs of the operation's exact entries `keep` admits and of its
+/// range entries `keep_range` admits, as the `unclaimed` check's two slices.
+fn claims(
+    responses: &Responses,
+    keep: impl Fn(u16) -> bool,
+    keep_range: impl Fn(u8) -> bool,
+) -> (Vec<TokenStream>, Vec<TokenStream>) {
+    let mut exact = Vec::new();
+    let mut ranges = Vec::new();
+    for (spec, response) in responses.entries() {
+        let name = constructor_name(spec, response);
+        match spec {
+            StatusSpec::Exact(code) if keep(code) => exact.push(quote! { (#code, #name) }),
+            StatusSpec::Range(prefix) if keep_range(prefix) => {
+                let prefix = u16::from(prefix);
+                ranges.push(quote! { (#prefix, #name) });
+            }
+            _ => {}
+        }
+    }
+    (exact, ranges)
+}
+
 /// The constructor of the reply to one documented response: named for its status selector, taking
 /// the status where the selector is a range or `default`, and the body where the response has one.
-/// A streamed body has no constructor: its framing is `from_reply`'s to write.
-fn constructor(spec: StatusSpec, response: &Response, api: &Api, names: &Names) -> TokenStream {
-    let (ident, status_param, status, selector) = match spec {
+/// A streamed body has no constructor: its framing is `from_reply`'s to write. A range or
+/// `default` constructor refuses a status a more precise entry of `responses` documents (an exact
+/// status within the range; an exact status or range beside `default`), since the client decodes
+/// that status with the other entry's codec.
+fn constructor(
+    spec: StatusSpec,
+    response: &Response,
+    responses: &Responses,
+    api: &Api,
+    names: &Names,
+) -> TokenStream {
+    let (ident, status_param, status, selector, panics) = match spec {
         StatusSpec::Exact(code) => (
             format_ident!("status_{code}"),
             None,
             quote! { #code },
             format!("`{code}`"),
+            String::new(),
         ),
         StatusSpec::Range(prefix) => {
+            let (exact, _) = claims(responses, |code| code / 100 == u16::from(prefix), |_| false);
             let prefix = u16::from(prefix);
+            let in_range = quote! { super::Reply::in_range(status, #prefix) };
+            let (status, panics) = if exact.is_empty() {
+                (
+                    in_range,
+                    format!("When `status` is not a {prefix}XX status."),
+                )
+            } else {
+                (
+                    quote! { super::Reply::unclaimed(#in_range, &[#(#exact),*], &[]) },
+                    format!(
+                        "When `status` is not a {prefix}XX status, or is one an exact entry \
+                         documents, which the client decodes with that entry's codec: answer it \
+                         with that entry's own constructor."
+                    ),
+                )
+            };
             (
                 format_ident!("status_{prefix}xx"),
                 Some(quote! { status: u16, }),
-                quote! { super::Reply::in_range(status, #prefix) },
+                status,
                 format!("`{prefix}XX` (`status`, which must be in it)"),
+                panics,
             )
         }
-        StatusSpec::Default => (
-            format_ident!("default"),
-            Some(quote! { status: u16, }),
-            quote! { status },
-            "`default` (`status`)".to_owned(),
-        ),
+        StatusSpec::Default => {
+            let (exact, ranges) = claims(responses, |_| true, |_| true);
+            let (status, panics) = if exact.is_empty() && ranges.is_empty() {
+                (
+                    quote! { status },
+                    "When `status` is not an HTTP status code.".to_owned(),
+                )
+            } else {
+                (
+                    quote! { super::Reply::unclaimed(status, &[#(#exact),*], &[#(#ranges),*]) },
+                    "When `status` is not an HTTP status code, or is one an exact or range entry \
+                     documents, which the client decodes with that entry's codec: answer it with \
+                     that entry's own constructor."
+                        .to_owned(),
+                )
+            };
+            (
+                format_ident!("default"),
+                Some(quote! { status: u16, }),
+                status,
+                "`default` (`status`)".to_owned(),
+                panics,
+            )
+        }
+    };
+    let panics = if panics.is_empty() {
+        panics
+    } else {
+        format!("\n\n# Panics\n\n{panics}")
     };
     let body = match (response.body, response.stream) {
         (Some(ty), None) => Some(ty),
@@ -488,7 +604,7 @@ fn constructor(spec: StatusSpec, response: &Response, api: &Api, names: &Names) 
         (None, _) => None,
     };
     let Some(ty) = body else {
-        let doc = normalize_rustdoc(&format!("The bodyless response {selector}."));
+        let doc = normalize_rustdoc(&format!("The bodyless response {selector}.{panics}"));
         return quote! {
             #[doc = #doc]
             pub fn #ident(#status_param) -> Self {
@@ -502,6 +618,29 @@ fn constructor(spec: StatusSpec, response: &Response, api: &Api, names: &Names) 
             quote! { super::Reply::octets(#status, body) },
             "raw octets",
         ),
+        BodyCodec::Xml if is_sequence_ty(api, ty) => {
+            let ty = ty_tokens(ty, names, true);
+            (
+                quote! { body: &#ty },
+                quote! {
+                    {
+                        /// One element of the sequence: the client reads a top-level sequence
+                        /// from sibling root elements, which have no XML form without a name.
+                        #[derive(::serde::Serialize)]
+                        #[serde(rename = "item")]
+                        struct Element<'a, T>(&'a T);
+
+                        match support::to_xml(&Element(body)) {
+                            Ok(xml) => super::Reply::encoded(#status, "application/xml", xml.into()),
+                            Err(error) => {
+                                panic!("testing::Reply: the body has no XML form: {error}")
+                            }
+                        }
+                    }
+                },
+                "XML, one `item` element per member",
+            )
+        }
         BodyCodec::Xml => {
             let ty = ty_tokens(ty, names, true);
             (
@@ -533,7 +672,7 @@ fn constructor(spec: StatusSpec, response: &Response, api: &Api, names: &Names) 
         }
     };
     let doc = normalize_rustdoc(&format!(
-        "The response {selector} carrying `body`, encoded as {codec}."
+        "The response {selector} carrying `body`, encoded as {codec}.{panics}"
     ));
     quote! {
         #[doc = #doc]
@@ -546,8 +685,9 @@ fn constructor(spec: StatusSpec, response: &Response, api: &Api, names: &Names) 
 #[cfg(test)]
 mod tests {
     /// One operation per reply shape: an exact JSON body beside a `4XX` text range and a bodyless
-    /// `default` (`getItem`), an XML body (`getXml`), raw octets (`getRaw`), and a streamed body
-    /// (`watch`).
+    /// `default` (`getItem`), an XML body (`getXml`), a top-level XML sequence beside a bodyless
+    /// `204`, both claimed from the `2XX` range beside them, and a `5XX` nothing claims from (`getList`), raw octets
+    /// (`getRaw`), and a streamed body (`watch`).
     const REPLIES: &str = r##"openapi: 3.1.0
 info: {title: T, version: '1'}
 components:
@@ -566,6 +706,14 @@ paths:
       operationId: getXml
       responses:
         '200': {description: ok, content: {application/xml: {schema: {$ref: '#/components/schemas/Item'}}}}
+  /list:
+    get:
+      operationId: getList
+      responses:
+        '200': {description: ok, content: {application/xml: {schema: {type: array, items: {type: string}}}}}
+        '204': {description: empty}
+        '2XX': {description: other}
+        '5XX': {description: failed}
   /raw:
     get:
       operationId: getRaw
@@ -601,8 +749,12 @@ paths:
         for expected in [
             "pubfnstatus_200(body:&types::Item)->Self{Self(super::Reply::json(200u16,body))}",
             "pubfnstatus_4xx(status:u16,body:&types::ResponseBody)->Self{Self(super::Reply::text(super::Reply::in_range(status,4u16),body))}",
-            "pubfndefault(status:u16)->Self{Self(super::Reply::new(status))}",
+            "pubfndefault(status:u16)->Self{Self(super::Reply::new(super::Reply::unclaimed(status,&[(200u16,\"status_200\")],&[(4u16,\"status_4xx\")],),),)}",
             "matchsupport::to_xml(body){Ok(xml)=>{super::Reply::encoded(200u16,\"application/xml\",xml.into())}",
+            "#[serde(rename=\"item\")]structElement<'a,T>(&'aT);matchsupport::to_xml(&Element(body)){Ok(xml)=>{super::Reply::encoded(200u16,\"application/xml\",xml.into())}",
+            "pubfnstatus_2xx(status:u16)->Self{Self(super::Reply::new(super::Reply::unclaimed(super::Reply::in_range(status,2u16),&[(200u16,\"status_200\"),(204u16,\"status_204\")],&[],),),)}",
+            "pubfnstatus_5xx(status:u16)->Self{Self(super::Reply::new(super::Reply::in_range(status,5u16)))}",
+            "#[allow(clippy::module_inception)]pubmodget_item{",
             "pubfnstatus_200(body:implInto<::bytes::Bytes>)->Self{Self(super::Reply::octets(200u16,body))}",
             "pubfnon_get_item(self,handler:implFn(&Call)->get_item::Reply+Send+Sync+'static,)->Self{self.route(super::ops::GET_ITEM.id,",
             "pubfnon_watch(self,handler:implFn(&Call)->watch::Reply+Send+Sync+'static,)->Self",
@@ -613,7 +765,11 @@ paths:
         let watch = &watch[..watch.find("implFrom<Reply>").expect("its conversion")];
         assert!(watch.contains("pubfnfrom_reply("), "{watch}");
         assert!(!watch.contains("pubfnstatus_200"), "{watch}");
-        assert_eq!(generated.matches("pubfnfrom_reply(").count(), 4);
+        assert_eq!(generated.matches("pubfnfrom_reply(").count(), 5);
+        // A top-level object keeps its own root element, unwrapped.
+        let xml = &generated[generated.find("pubmodget_xml{").expect("the XML replies")..];
+        let xml = &xml[..xml.find("implFrom<Reply>").expect("its conversion")];
+        assert!(!xml.contains("structElement"), "{xml}");
     }
 
     /// Without the switch, nothing of the module is emitted.

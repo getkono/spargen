@@ -332,10 +332,8 @@ fn a_top_level_xml_sequence_of_strings_reads_back() {
 
 #[test]
 fn a_top_level_xml_sequence_of_objects_reads_back() {
-    let items: shadow_client::types::GetItemsResponse = serde_json::from_value(
-        serde_json::json!([{ "name": "a" }, { "name": "b" }]),
-    )
-    .unwrap();
+    let items: Vec<shadow_client::types::Item> =
+        serde_json::from_value(serde_json::json!([{ "name": "a" }, { "name": "b" }])).unwrap();
     let mock = testing::MockBackend::new().on_get_items({
         let items = items.clone();
         move |_| testing::get_items::Reply::status_200(&items)
