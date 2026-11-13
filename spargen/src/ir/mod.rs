@@ -329,6 +329,60 @@ pub(crate) struct Docs {
     pub(crate) deprecated: bool,
 }
 
+/// The character, length and trimmed info string of the Markdown code fence `line` opens: a run of
+/// at least three backticks or tildes, a backtick run followed by no other backtick, as in
+/// CommonMark.
+pub(crate) fn fence_opener(line: &str) -> Option<(u8, usize, &str)> {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    let marker = *trimmed.as_bytes().first()?;
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+    let length = trimmed.bytes().take_while(|byte| *byte == marker).count();
+    let info = &trimmed[length..];
+    (length >= 3 && !(marker == b'`' && info.contains('`'))).then(|| (marker, length, info.trim()))
+}
+
+/// Whether `line` closes a code fence of `marker` that is `length` long: a run of the same
+/// character at least as long, followed by nothing but whitespace, as in CommonMark.
+pub(crate) fn closes_fence(line: &str, marker: u8, length: usize) -> bool {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    let run = trimmed.bytes().take_while(|byte| *byte == marker).count();
+    run >= length && trimmed[run..].trim().is_empty()
+}
+
+/// The line that closes the code fence Markdown `text` leaves open at its end, at the opening
+/// fence's indentation, or `None` when it leaves none open. A line indented four columns or more
+/// after a blank line opens no fence: it is an indented code block's.
+pub(crate) fn unclosed_fence(text: &str) -> Option<String> {
+    let mut fence: Option<(u8, usize, &str)> = None;
+    let mut previous_blank = true;
+    let mut previous_indented = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start_matches([' ', '\t']);
+        let blank = trimmed.trim_end().is_empty();
+        let mut indented = false;
+        if let Some((marker, length, _)) = fence {
+            if closes_fence(line, marker, length) {
+                fence = None;
+            }
+        } else if !blank
+            && (previous_blank || previous_indented)
+            && (line.starts_with('\t') || line.starts_with("    "))
+        {
+            indented = true;
+        } else if let Some((marker, length, _)) = fence_opener(line) {
+            let indent = &line[..line.len() - trimmed.len()];
+            fence = Some((marker, length, indent));
+        }
+        previous_blank = blank;
+        previous_indented = indented;
+    }
+    fence.map(|(marker, length, indent)| {
+        format!("{indent}{}", char::from(marker).to_string().repeat(length))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1036,5 +1090,52 @@ mod tests {
         assert!(api.binds_headers());
         assert_eq!(api.unmatched_bindings(&bindings), ["X-Missing"]);
         assert!(api.unmatched_bindings(&[]).is_empty());
+    }
+
+    /// `unclosed_fence` over each row's text yields that row's closing line: one row per rule of
+    /// the CommonMark fence grammar it reads.
+    #[test]
+    fn unclosed_fence_follows_the_table() {
+        let rows: &[(&str, &str, Option<&str>)] = &[
+            ("no fence", "a\nb", None),
+            ("a closed fence", "```\nx\n```\n", None),
+            ("an open fence", "a\n```json\nx\n", Some("```")),
+            ("an open `~~~` fence, indented", "  ~~~~\nx", Some("  ~~~~")),
+            (
+                "a shorter fence closes nothing",
+                "````\n```\nx\n```",
+                Some("````"),
+            ),
+            ("a longer fence closes", "```\nx\n`````", None),
+            (
+                "a fence with an info string closes nothing",
+                "```\n```rust",
+                Some("```"),
+            ),
+            (
+                "the other character closes nothing",
+                "```\n~~~",
+                Some("```"),
+            ),
+            ("a backtick in the info string is no fence", "```a```", None),
+            (
+                "an indented code block's line is no fence",
+                "a\n\n    ```",
+                None,
+            ),
+            (
+                "an indented line straight after a paragraph opens one",
+                "a\n    ```",
+                Some("    ```"),
+            ),
+            ("an empty text", "", None),
+        ];
+        for (case, text, expected) in rows {
+            assert_eq!(
+                super::unclosed_fence(text).as_deref(),
+                *expected,
+                "{case}: {text:?}"
+            );
+        }
     }
 }

@@ -9,6 +9,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use super::CodegenOptions;
+use crate::ir::{closes_fence, fence_opener};
 
 /// Spec-carried prose as it is rendered under `options`: [`sanitize_carried`] applied, or, under
 /// `Spec::verbatim_docs(true)`, the text as written.
@@ -76,32 +77,42 @@ pub(super) fn doc_tokens(docs: &crate::ir::Docs, options: &CodegenOptions) -> To
 /// - an HTML tag with no partner (`Vec<T>`'s `<T>`, an unopened `</b>`, a `<` that never closes)
 ///   has its `<` escaped as `\<`, so it renders as text; a void element (`<br>`), a self-closing tag
 ///   and a closed pair (`<b>…</b>`) are HTML and stay;
-/// - code spans, fenced code blocks, indented code blocks and backslash escapes are left as written.
+/// - code spans and backslash escapes are left as written, and so are code blocks, except that
+///   rustdoc would read an untagged one as a Rust doctest of the consuming crate: an untagged fence
+///   (```` ``` ````, `~~~`) is tagged `text`, an indented code block becomes a fenced one tagged
+///   `text`, and a fence still open at the end of the text is closed there, so the generated text
+///   after it stays prose. A fence closes only on a fence of its character at least as long, as in
+///   CommonMark.
 pub(super) fn sanitize_carried(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut kinds = Vec::with_capacity(lines.len());
-    let mut fence: Option<char> = None;
+    // The open fence's character and length, and its closing line.
+    let mut fence: Option<(u8, usize, String)> = None;
     let mut previous_blank = true;
     let mut previous_indented_code = false;
-    let mut in_list = false;
+    // The content column of the list item the text is in, which an indented code block nested in
+    // it is indented four past.
+    let mut list_column: Option<usize> = None;
     for line in &lines {
         let trimmed = line.trim_start_matches([' ', '\t']);
         let blank = trimmed.trim_end().is_empty();
+        let base = list_column.unwrap_or(0);
         let indented_code = fence.is_none()
             && !blank
-            && code_indented(line)
-            && (previous_blank || previous_indented_code)
-            && !in_list;
-        let kind = if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            let marker = trimmed.chars().next().expect("non-empty fence");
-            fence = match fence {
-                Some(active) if active == marker => None,
-                None => Some(marker),
-                active => active,
-            };
-            LineKind::Code
-        } else if fence.is_some() || indented_code {
-            LineKind::Code
+            && leading_columns(line) >= base + 4
+            && (previous_blank || previous_indented_code);
+        let kind = if let Some((marker, length, _)) = &fence {
+            if closes_fence(line, *marker, *length) {
+                fence = None;
+            }
+            LineKind::Code(None)
+        } else if indented_code {
+            LineKind::Indented { column: base }
+        } else if let Some((marker, length, info)) = fence_opener(line) {
+            let indent = &line[..line.len() - trimmed.len()];
+            let run = &trimmed[..length];
+            fence = Some((marker, length, format!("{indent}{run}")));
+            LineKind::Code(info.is_empty().then(|| format!("{indent}{run}text")))
         } else if let Some((label, destination)) = link_definition(line) {
             LineKind::Definition {
                 label,
@@ -111,14 +122,27 @@ pub(super) fn sanitize_carried(text: &str) -> String {
             LineKind::Prose
         };
         // A list's content may be indented as far as code; a line back at the margin ends it.
-        if list_indent(line).is_some() {
-            in_list = true;
-        } else if !blank && line.len() - trimmed.len() < 2 && !matches!(kind, LineKind::Code) {
-            in_list = false;
+        if matches!(kind, LineKind::Prose | LineKind::Definition { .. }) {
+            if let Some(column) = list_indent(line) {
+                list_column = Some(column);
+            } else if !blank && line.len() - trimmed.len() < 2 {
+                list_column = None;
+            }
         }
         previous_indented_code = indented_code;
         previous_blank = blank;
         kinds.push(kind);
+    }
+    // A fence left open is closed at the end, before the empty line a trailing `\n` leaves.
+    let mut lines: Vec<Cow<'_, str>> = lines.into_iter().map(Cow::Borrowed).collect();
+    if let Some((_, _, closing)) = fence {
+        let at = if lines.len() > 1 && lines.last().is_some_and(|line| line.is_empty()) {
+            lines.len() - 1
+        } else {
+            lines.len()
+        };
+        lines.insert(at, Cow::Owned(closing));
+        kinds.insert(at, LineKind::Code(None));
     }
 
     // A definition to a URL keeps the links that use it; one to a path is dropped, and so is every
@@ -130,6 +154,17 @@ pub(super) fn sanitize_carried(text: &str) -> String {
         }
     }
 
+    // Whether the next non-blank line from each index on is an indented code block's: a blank
+    // line before one is inside the block, a blank line before anything else ends it.
+    let mut indented_next = vec![false; lines.len() + 1];
+    for index in (0..lines.len()).rev() {
+        indented_next[index] = if lines[index].trim().is_empty() {
+            indented_next[index + 1]
+        } else {
+            matches!(kinds[index], LineKind::Indented { .. })
+        };
+    }
+
     // Every line kept ends in `\n` among the pieces, and `render_pieces` drops the last one.
     let mut pieces = Vec::new();
     let mut prose: Vec<&str> = Vec::new();
@@ -139,26 +174,96 @@ pub(super) fn sanitize_carried(text: &str) -> String {
             prose.clear();
         }
     };
-    for (line, kind) in lines.iter().zip(&kinds) {
+    // The closing line of the fence an indented code block was rewritten into, while it is open.
+    let mut indented_fence: Option<String> = None;
+    for (index, (line, kind)) in lines.iter().zip(&kinds).enumerate() {
+        if let Some(closing) = &indented_fence {
+            if !indented_next[index] {
+                pieces.push(Piece::Text(format!("{closing}\n")));
+                indented_fence = None;
+            } else if !matches!(kind, LineKind::Indented { .. }) {
+                // A blank line inside the block.
+                pieces.push(Piece::Text("\n".to_owned()));
+                continue;
+            }
+        }
         match kind {
             LineKind::Prose => prose.push(line),
             LineKind::Definition { path: true, .. } => {}
-            LineKind::Code | LineKind::Definition { path: false, .. } => {
+            LineKind::Indented { column } => {
+                if indented_fence.is_none() {
+                    flush_prose(&mut prose, &mut pieces);
+                    let run = "`".repeat(indented_fence_length(&lines[index..], &kinds[index..]));
+                    let indent = " ".repeat(*column);
+                    pieces.push(Piece::Text(format!("{indent}{run}text\n")));
+                    indented_fence = Some(format!("{indent}{run}"));
+                }
+                let content = line.trim_start_matches([' ', '\t']);
+                let columns = leading_columns(line) - 4;
+                pieces.push(Piece::Text(format!("{}{content}\n", " ".repeat(columns))));
+            }
+            LineKind::Code(rewritten) => {
+                flush_prose(&mut prose, &mut pieces);
+                let line = rewritten.as_deref().unwrap_or(line);
+                pieces.push(Piece::Text(format!("{line}\n")));
+            }
+            LineKind::Definition { path: false, .. } => {
                 flush_prose(&mut prose, &mut pieces);
                 pieces.push(Piece::Text(format!("{line}\n")));
             }
         }
     }
+    if let Some(closing) = indented_fence {
+        pieces.push(Piece::Text(format!("{closing}\n")));
+    }
     flush_prose(&mut prose, &mut pieces);
     render_pieces(pieces)
+}
+
+/// The length of the backtick fence an indented code block starting at `lines[0]` is rewritten
+/// into: three, or one past the longest backtick run a line of the block starts with, so no line of
+/// it closes the fence.
+fn indented_fence_length(lines: &[Cow<'_, str>], kinds: &[LineKind]) -> usize {
+    let mut longest = 0;
+    for (line, kind) in lines.iter().zip(kinds) {
+        match kind {
+            LineKind::Indented { .. } => {
+                let run = line
+                    .trim_start_matches([' ', '\t'])
+                    .bytes()
+                    .take_while(|byte| *byte == b'`')
+                    .count();
+                longest = longest.max(run);
+            }
+            _ if line.trim().is_empty() => {}
+            _ => break,
+        }
+    }
+    (longest + 1).max(3)
+}
+
+/// The width of `line`'s leading whitespace, a tab counted as the four spaces
+/// [`normalize_rustdoc`] turns it into.
+fn leading_columns(line: &str) -> usize {
+    line.bytes()
+        .map_while(|byte| match byte {
+            b' ' => Some(1),
+            b'\t' => Some(4),
+            _ => None,
+        })
+        .sum()
 }
 
 /// How [`sanitize_carried`] treats one line of carried text.
 enum LineKind {
     /// Scanned for links, URLs and tags, together with the prose lines around it.
     Prose,
-    /// Inside a fenced or indented code block: kept as written.
-    Code,
+    /// A fenced code block's line: kept as written, or replaced by the line it holds (an untagged
+    /// opening fence tagged `text`).
+    Code(Option<String>),
+    /// An indented code block's line, in a list item whose content starts at `column` (0 outside
+    /// one): rewritten into a fenced block at that column.
+    Indented { column: usize },
     /// A link reference definition, `[label]: destination`: kept when the destination is a URL,
     /// dropped when rustdoc would read it as a path.
     Definition { label: String, path: bool },
@@ -466,11 +571,6 @@ impl<'a> Scanner<'a> {
     }
 }
 
-/// Whether `line` is indented far enough to be an indented code block line.
-fn code_indented(line: &str) -> bool {
-    line.starts_with('\t') || line.starts_with("    ")
-}
-
 /// The label and destination of a link reference definition line, `[label]: destination`.
 fn link_definition(line: &str) -> Option<(String, &str)> {
     let leading = line.len() - line.trim_start_matches(' ').len();
@@ -701,7 +801,8 @@ fn list_indent(line: &str) -> Option<usize> {
 ///   itself starting one — is made explicit, indented to the list item's content column or
 ///   prefixed with `> `, which is what Clippy's `doc_lazy_continuation` asks for;
 /// - lines inside a fenced code block (```` ``` ```` or `~~~`) take no continuation rewrite: past
-///   the tab rule, which applies to the whole text, they are left as written.
+///   the tab rule, which applies to the whole text, they are left as written. A fence closes only on
+///   a fence of its character at least as long, with nothing after it, as in CommonMark.
 pub(super) fn normalize_rustdoc(text: &str) -> String {
     #[derive(Clone, Copy)]
     enum Continuation {
@@ -712,22 +813,20 @@ pub(super) fn normalize_rustdoc(text: &str) -> String {
 
     let text = text.replace('\t', "    ");
     let mut continuation = Continuation::None;
-    let mut fence: Option<char> = None;
+    let mut fence: Option<(u8, usize)> = None;
     let mut output = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim_start_matches(' ');
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            let marker = trimmed.chars().next().expect("non-empty fence");
-            fence = match fence {
-                Some(active) if active == marker => None,
-                None => Some(marker),
-                active => active,
-            };
-            continuation = Continuation::None;
+        if let Some((marker, length)) = fence {
+            if closes_fence(line, marker, length) {
+                fence = None;
+            }
             output.push(line.to_owned());
             continue;
         }
-        if fence.is_some() {
+        if let Some((marker, length, _)) = fence_opener(line) {
+            fence = Some((marker, length));
+            continuation = Continuation::None;
             output.push(line.to_owned());
             continue;
         }
@@ -1056,15 +1155,86 @@ mod tests {
                 "``a ` [Store]``",
             ),
             ("an unclosed backtick", "`[Store]", "`Store"),
+            // Code blocks: kept, and kept from rustdoc's doctests.
             (
-                "a fenced code block",
+                "a fenced code block, tagged `text`",
                 "x\n```\n[Store] Vec<T>\n```\ny [Store]",
-                "x\n```\n[Store] Vec<T>\n```\ny Store",
+                "x\n```text\n[Store] Vec<T>\n```\ny Store",
             ),
             (
-                "an indented code block",
+                "an untagged fence followed by spaces is untagged",
+                "```  \n{\"id\":1}\n```",
+                "```text\n{\"id\":1}\n```",
+            ),
+            (
+                "an untagged `~~~` fence, indented, is tagged",
+                "  ~~~\nfn main() {}\n  ~~~",
+                "  ~~~text\nfn main() {}\n  ~~~",
+            ),
+            (
+                "a tagged fence is kept",
+                "```json\n[Store]\n```\n```rust\nVec<T>\n```",
+                "```json\n[Store]\n```\n```rust\nVec<T>\n```",
+            ),
+            (
+                "a backtick run with a backtick after it is a code span, not a fence",
+                "```a``` [Store]",
+                "```a``` Store",
+            ),
+            (
+                "a fence closes only on one at least as long",
+                "````\n```\nVec<T>\n```\n````\n[Store]",
+                "````text\n```\nVec<T>\n```\n````\nStore",
+            ),
+            (
+                "a longer fence closes a shorter one",
+                "```\nx\n`````\n[Store]",
+                "```text\nx\n`````\nStore",
+            ),
+            (
+                "a fence with an info string closes nothing",
+                "```\n```json\nVec<T>\n```\n[Store]",
+                "```text\n```json\nVec<T>\n```\nStore",
+            ),
+            (
+                "the other fence character closes nothing",
+                "~~~\n```\nVec<T>\n~~~\n[Store]",
+                "~~~text\n```\nVec<T>\n~~~\nStore",
+            ),
+            (
+                "an unclosed fence is closed at the end",
+                "```\nVec<T>",
+                "```text\nVec<T>\n```",
+            ),
+            (
+                "an unclosed fence is closed before a trailing newline",
+                "x\n  ````json\nVec<T>\n",
+                "x\n  ````json\nVec<T>\n  ````\n",
+            ),
+            (
+                "an indented code block becomes a fenced one",
                 "x\n\n    [Store] Vec<T>\n\ny",
-                "x\n\n    [Store] Vec<T>\n\ny",
+                "x\n\n```text\n[Store] Vec<T>\n```\n\ny",
+            ),
+            (
+                "an indented code block keeps its inner blank lines and indentation",
+                "    a\n\n      b\n\n\nc",
+                "```text\na\n\n  b\n```\n\n\nc",
+            ),
+            (
+                "a tab indents a code block",
+                "\tcurl https://example.com/b",
+                "```text\ncurl https://example.com/b\n```",
+            ),
+            (
+                "an indented code block holding a fence takes a longer one",
+                "    ```\n    x\n    ```",
+                "````text\n```\nx\n```\n````",
+            ),
+            (
+                "an indented code block ends at the next unindented line",
+                "    a\nb [Store]",
+                "```text\na\n```\nb Store",
             ),
             (
                 "indented list content is prose",
@@ -1072,9 +1242,19 @@ mod tests {
                 "- a\n\n    Store",
             ),
             (
+                "an indented code block under a list item is fenced at its column",
+                "- a\n\n      curl https://example.com/c\n- b",
+                "- a\n\n  ```text\n  curl https://example.com/c\n  ```\n- b",
+            ),
+            (
+                "an indented line straight after a paragraph is prose",
+                "x\n    [Store]",
+                "x\n    Store",
+            ),
+            (
                 "an indented line straight after a fence is prose",
                 "```\nx\n```\n    [Store]",
-                "```\nx\n```\n    Store",
+                "```text\nx\n```\n    Store",
             ),
             (
                 "task-list markers are no links",
@@ -1230,6 +1410,21 @@ mod tests {
                 "an indented fence is a fence",
                 "- a\n   ```\nb\n   ```\nc",
                 "- a\n   ```\nb\n   ```\nc",
+            ),
+            (
+                "a fence closes only on one at least as long",
+                "````\n```\n- a\nb\n````\n- c\nd",
+                "````\n```\n- a\nb\n````\n- c\n  d",
+            ),
+            (
+                "a fence with an info string closes nothing",
+                "```\n```rust\n- a\nb\n```\n- c\nd",
+                "```\n```rust\n- a\nb\n```\n- c\n  d",
+            ),
+            (
+                "a backtick run with a backtick after it is no fence",
+                "- a\n```x`\nb",
+                "- a\n  ```x`\n  b",
             ),
             (
                 "an unclosed fence runs to the end",
