@@ -224,6 +224,11 @@ pub(crate) enum VariantDispatch {
     Trial {
         /// The variant's static specificity: of two matches, the higher is selected.
         priority: u32,
+        /// The JSON category every value of the variant's type serializes as, which a payload
+        /// must have before the variant is tried; `None` for a type that spans several or none
+        /// (a nested union, `Any`, the exact `null`, raw bytes, a reservation), which is tried on
+        /// every payload.
+        category: Option<JsonCategory>,
     },
 }
 
