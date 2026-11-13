@@ -313,7 +313,7 @@ fn reqwest_error() -> reqwest::Error {
 
 /// How many variants `Error` has. `every_variant` returns an array of exactly this length, so
 /// raising it will not compile until a value of the new variant is listed.
-const ERROR_VARIANTS: usize = 11;
+const ERROR_VARIANTS: usize = 12;
 
 /// Each variant's position in `every_variant`. Indices are dense and unique. This is the same
 /// guard `request_variant_index` carries, applied to the other taxonomy that is a semver
@@ -331,6 +331,7 @@ fn error_variant_index(error: &Error<ApiBody>) -> usize {
         Error::InterruptedBody(_) => 8,
         Error::PaginationCycle { .. } => 9,
         Error::BodyTooLarge { .. } => 10,
+        Error::PaginationOriginChanged { .. } => 11,
     }
 }
 
@@ -391,6 +392,10 @@ fn every_variant() -> [Error<ApiBody>; ERROR_VARIANTS] {
         Error::InterruptedBody(TransportError::interrupted(reqwest_error())),
         Error::PaginationCycle {
             url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
+        },
+        Error::PaginationOriginChanged {
+            from: reqwest::Url::parse("https://x/items?page=1").unwrap(),
+            to: reqwest::Url::parse("http://x/items?page=2").unwrap(),
         },
         Error::BodyTooLarge {
             limit: 1024,
@@ -784,6 +789,7 @@ fn is_transient_classifies_every_variant() {
             | Error::Protocol(_)
             | Error::Redirect(_)
             | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. }
             | Error::BodyTooLarge { .. } => false,
         };
         assert_eq!(
@@ -810,7 +816,8 @@ fn status_is_present_exactly_on_the_four_status_variants() {
             | Error::Protocol(_)
             | Error::Redirect(_)
             | Error::InterruptedBody(_)
-            | Error::PaginationCycle { .. } => None,
+            | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. } => None,
         };
         assert_eq!(error.status(), expected, "status() disagrees for {error}");
     }
@@ -858,6 +865,10 @@ fn status_on_an_uninhabited_api_error_is_present_only_for_the_response_variants(
         Error::PaginationCycle {
             url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
         },
+        Error::PaginationOriginChanged {
+            from: reqwest::Url::parse("https://x/items?page=1").unwrap(),
+            to: reqwest::Url::parse("http://x/items?page=2").unwrap(),
+        },
         Error::BodyTooLarge {
             limit: 8,
             status: StatusCode::ACCEPTED,
@@ -875,7 +886,8 @@ fn status_on_an_uninhabited_api_error_is_present_only_for_the_response_variants(
             | Error::Protocol(_)
             | Error::Redirect(_)
             | Error::InterruptedBody(_)
-            | Error::PaginationCycle { .. } => None,
+            | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. } => None,
         };
         assert_eq!(error.status(), expected, "status() disagrees for {error}");
     }
@@ -932,6 +944,7 @@ fn every_variant_displays_something_that_names_its_class() {
             Error::Decode { .. } => "response decode failed",
             Error::InterruptedBody(_) => "response body was interrupted",
             Error::PaginationCycle { .. } => "pagination cycle",
+            Error::PaginationOriginChanged { .. } => "pagination origin changed",
             Error::BodyTooLarge { .. } => "1024-byte limit",
         };
         assert!(
@@ -996,6 +1009,7 @@ fn source_is_present_exactly_where_the_taxonomy_carries_a_cause() {
             | Error::UnexpectedStatus { .. }
             | Error::Decode { .. }
             | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. }
             | Error::BodyTooLarge { .. } => false,
         };
         assert_eq!(
@@ -1043,6 +1057,10 @@ fn widen_preserves_every_reachable_variant() {
         Error::InterruptedBody(TransportError::interrupted(reqwest_error())),
         Error::PaginationCycle {
             url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
+        },
+        Error::PaginationOriginChanged {
+            from: reqwest::Url::parse("https://x/items?page=1").unwrap(),
+            to: reqwest::Url::parse("http://x/items?page=2").unwrap(),
         },
         Error::BodyTooLarge {
             limit: 8,
@@ -1124,6 +1142,19 @@ fn widen_preserves_every_reachable_variant() {
     };
     assert_eq!(url, revisited);
 
+    // ... and the origin change both URLs.
+    let first = reqwest::Url::parse("https://x/items?page=1").unwrap();
+    let refused = reqwest::Url::parse("https://y/items?page=2").unwrap();
+    let widened: Error<ApiBody> = Error::<std::convert::Infallible>::PaginationOriginChanged {
+        from: first.clone(),
+        to: refused.clone(),
+    }
+    .widen();
+    let Error::PaginationOriginChanged { from, to } = widened else {
+        panic!("widen changed the variant");
+    };
+    assert_eq!((from, to), (first, refused));
+
     // ... and the oversized body its limit and status.
     let widened: Error<ApiBody> = Error::<std::convert::Infallible>::BodyTooLarge {
         limit: 4096,
@@ -1164,6 +1195,7 @@ fn api_body_is_present_exactly_on_the_documented_api_error() {
             | Error::Decode { .. }
             | Error::InterruptedBody(_)
             | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. }
             | Error::BodyTooLarge { .. } => false,
         };
         assert_eq!(
@@ -1225,7 +1257,8 @@ fn headers_are_present_exactly_where_a_status_is_and_are_the_responses_own() {
             | Error::Protocol(_)
             | Error::Redirect(_)
             | Error::InterruptedBody(_)
-            | Error::PaginationCycle { .. } => {
+            | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. } => {
                 assert!(error.headers().is_none(), "{error}");
                 assert!(error.status().is_none(), "{error}");
             }
@@ -1279,7 +1312,8 @@ fn status_and_api_body_agree_on_every_variant() {
             | Error::Protocol(_)
             | Error::Redirect(_)
             | Error::InterruptedBody(_)
-            | Error::PaginationCycle { .. } => {
+            | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. } => {
                 assert!(error.status().is_none(), "{error}");
                 assert!(error.api_body().is_none(), "{error}");
             }
@@ -1333,6 +1367,7 @@ fn problem_is_read_exactly_where_an_error_body_was_received() {
             | Error::Redirect(_)
             | Error::InterruptedBody(_)
             | Error::PaginationCycle { .. }
+            | Error::PaginationOriginChanged { .. }
             | Error::BodyTooLarge { .. } => assert!(problem.is_none(), "{error}"),
         }
     }
