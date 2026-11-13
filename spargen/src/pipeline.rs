@@ -89,10 +89,16 @@ fn generate_rereading(
             return with_leading(preview.report, cargo_diagnostics);
         }
         let Some(plan) = preview.plan.as_ref() else {
-            return pipeline_error_report("generation produced no module".to_owned());
+            return with_leading(
+                pipeline_error_report("generation produced no module".to_owned()),
+                cargo_diagnostics,
+            );
         };
         let Some(requirements) = preview.requirements.as_ref() else {
-            return pipeline_error_report("generation produced no runtime requirements".to_owned());
+            return with_leading(
+                pipeline_error_report("generation produced no runtime requirements".to_owned()),
+                cargo_diagnostics,
+            );
         };
         // A fresh run rejects on any audit finding, before anything is written. The inner run's
         // truncation carries: merging its diagnostics into a wider list does not make the dropped
@@ -120,7 +126,7 @@ fn generate_rereading(
 
         let (contents, content_digest) = cache::finalized(&plan.contents, &snapshot.digest);
         if let Err(message) = output::write_output(&build.output, &contents) {
-            return pipeline_error_report(message);
+            return with_leading(pipeline_error_report(message), cargo_diagnostics);
         }
         if let Some(path) = &cache_path {
             if let Err(message) = cache::write_cache(
@@ -136,9 +142,12 @@ fn generate_rereading(
         return with_leading(preview.report, cargo_diagnostics);
     }
 
-    pipeline_error_report(
-        "generation inputs changed repeatedly while they were being read; retry the build"
-            .to_owned(),
+    with_leading(
+        pipeline_error_report(
+            "generation inputs changed repeatedly while they were being read; retry the build"
+                .to_owned(),
+        ),
+        cargo_diagnostics,
     )
 }
 
@@ -611,6 +620,59 @@ components:
             "{report:#?}"
         );
         assert!(!build.output.exists());
+    }
+
+    /// A spec in a fresh directory whose one schema is named `Pet`, built to `output` relative to
+    /// that directory under the default `CargoIntegration::Auto`, which outside a build script (as
+    /// a test process is) puts `W013` ahead of the run's own diagnostics.
+    fn auto_integration_fixture(output: &str) -> (tempfile::TempDir, Build) {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), spec_naming("Pet")).unwrap();
+        let build = Spec::new(dir.join("openapi.yaml")).build(dir.join(output));
+        (temp, build)
+    }
+
+    /// The codes of `report`'s diagnostics, in order.
+    fn codes(report: &Report) -> Vec<&'static str> {
+        report
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect()
+    }
+
+    /// An output that cannot be written rejects the run with the write's `E011`, and keeps the
+    /// build-environment warning the run opened with ahead of it.
+    #[test]
+    fn an_output_write_failure_keeps_the_build_environment_warnings() {
+        let (temp, build) = auto_integration_fixture("occupied/api.rs");
+        // A regular file where the output's directory should be, so the write cannot land.
+        std::fs::write(temp.path().join("occupied"), "").unwrap();
+
+        let report = generate_with_cache_dir(&build, None);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(codes(&report), ["W013", "E011"], "{report:#?}");
+        assert_eq!(
+            report.diagnostics()[0].code,
+            Code::CargoIntegrationDegraded,
+            "{report:#?}"
+        );
+    }
+
+    /// Inputs that keep changing reject the run with the build-environment warning it opened with
+    /// still ahead of the rejection.
+    #[test]
+    fn inputs_that_keep_changing_keep_the_build_environment_warnings() {
+        let (_temp, build) = auto_integration_fixture("api.rs");
+        let mut rereads = 0;
+        let report = generate_rereading(&build, None, |spec| {
+            rereads += 1;
+            std::fs::write(&spec.path, spec_naming(&format!("Schema{rereads}"))).unwrap();
+            cache::InputSnapshot::load(spec)
+        });
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(codes(&report), ["W013", "E011"], "{report:#?}");
     }
 
     /// A round that finds no new rule ends the carve with that round's report: the residual
