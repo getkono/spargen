@@ -155,6 +155,55 @@ fn an_openapi_3_0_boolean_exclusive_bound_is_warned_as_an_unenforced_validation_
     }
 }
 
+// W001 case: oas30-nullable
+#[test]
+fn an_openapi_3_0_nullable_is_warned_and_not_reinterpreted() {
+    // #1342: OpenAPI 3.0's `nullable: true`, which documents converted to 3.1 often keep, is no
+    // keyword of JSON Schema 2020-12, so `name` stays a strict `Option<String>` and the `null` its
+    // author meant to admit fails decoding. That used to pass the build with nothing said. It is
+    // `W001` at the schema carrying it, in 3.1 and 3.2 alike, and the shape is unchanged.
+    let property =
+        "      type: object\n      properties:\n        name: { type: string, nullable: ";
+    for version in ["3.1.0", "3.2.0"] {
+        let document = |nullable: &str| {
+            single_component_document(&format!("{property}{nullable} }}"))
+                .replace("openapi: 3.1.0", &format!("openapi: {version}"))
+        };
+        let (report, code) = generate_with_code(&document("true"));
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{version}: {report:#?}"
+        );
+        let warned: Vec<(&str, &str)> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::ValidationKeywordIgnored)
+            .map(|d| (d.pointer.as_str(), d.message.as_str()))
+            .collect();
+        assert_eq!(
+            warned,
+            [(
+                "/components/schemas/U/properties/name",
+                "OpenAPI 3.0's `nullable` is not a keyword of OpenAPI 3.1 or 3.2: whether `null` \
+                 is valid is read from `type`, `enum`, `const` and the schema's applicators alone"
+            )],
+            "{version}: {report:#?}"
+        );
+        assert!(
+            code.contains("pub name: Option<String>"),
+            "{version}: {code}"
+        );
+
+        // `nullable: false` states what the schema means without it, so it changes nothing.
+        let report = generate(&document("false"));
+        assert!(
+            !has_code(&report, Code::ValidationKeywordIgnored),
+            "{version}: {report:#?}"
+        );
+    }
+}
+
 #[test]
 fn well_typed_value_keywords_generate_cleanly() {
     let spec = single_component_document(
