@@ -9,7 +9,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use super::CodegenOptions;
-use crate::ir::{closes_fence, fence_opener, leading_columns, list_indent};
+use crate::ir::{closes_fence, fence_opener, leading_columns, list_indent, list_item_fence};
 
 /// Spec-carried prose as it is rendered under `options`: [`sanitize_carried`] applied, or, under
 /// `Spec::verbatim_docs(true)`, the text as written.
@@ -80,7 +80,8 @@ pub(super) fn doc_tokens(docs: &crate::ir::Docs, options: &CodegenOptions) -> To
 ///   and a closed pair (`<b>…</b>`) are HTML and stay;
 /// - code spans and backslash escapes are left as written, and so are code blocks, except that
 ///   rustdoc would read an untagged one as a Rust doctest of the consuming crate: an untagged fence
-///   (```` ``` ````, `~~~`) is tagged `text`, an indented code block becomes a fenced one tagged
+///   (```` ``` ````, `~~~`, on a line of its own or after a list item's marker) is tagged `text`, an
+///   indented code block becomes a fenced one tagged
 ///   `text`, and a fence still open at the end of the text is closed there, so the generated text
 ///   after it stays prose. A fence closes only on a fence of its character at least as long, as in
 ///   CommonMark.
@@ -117,6 +118,12 @@ pub(super) fn sanitize_carried(text: &str) -> String {
             let run = &trimmed[..length];
             fence = Some((marker, length, format!("{indent}{run}")));
             LineKind::Code(info.is_empty().then(|| format!("{indent}{run}text")))
+        } else if let Some((column, (marker, length, info))) = list_item_fence(line) {
+            // The fence opens the item's content, so it closes at the item's content column.
+            let (item, run) = (&line[..column], &line[column..column + length]);
+            list_column = Some(column);
+            fence = Some((marker, length, format!("{}{run}", " ".repeat(column))));
+            LineKind::Code(info.is_empty().then(|| format!("{item}{run}text")))
         } else if let Some((label, destination)) = link_definition(line) {
             LineKind::Definition {
                 label,
@@ -781,11 +788,13 @@ fn html_tag(rest: &str) -> Option<(usize, String, TagKind)> {
 ///   starting one — is made explicit, indented to exactly the list item's content column or
 ///   prefixed with `> `, which is what Clippy's `doc_lazy_continuation` and
 ///   `doc_overindented_list_items` ask for. A list continuation indented four or more columns past
-///   that column is paragraph text, so when its text would open a heading, a thematic break or a
-///   setext underline at the content column its first character is escaped (`\#`, `\---`);
-/// - lines inside a fenced code block (```` ``` ```` or `~~~`) take no continuation rewrite: past
-///   the tab rule, which applies to the whole text, they are left as written. A fence closes only on
-///   a fence of its character at least as long, with nothing after it, as in CommonMark.
+///   that column is paragraph text, however it starts, so when its text would open a heading, a
+///   thematic break, a setext underline, a block quote or a list item at the content column its
+///   marker is escaped (`\#`, `\---`, `\>`, `\- a`, `1\. a`);
+/// - lines inside a fenced code block (```` ``` ```` or `~~~`), one opened on a list item's line
+///   (`- ```yaml`) among them, take no continuation rewrite: past the tab rule, which applies to the
+///   whole text, they are left as written. A fence closes only on a fence of its character at least
+///   as long, with nothing after it, as in CommonMark.
 pub(super) fn normalize_rustdoc(text: &str) -> String {
     #[derive(Clone, Copy)]
     enum Continuation {
@@ -813,11 +822,27 @@ pub(super) fn normalize_rustdoc(text: &str) -> String {
             output.push(line.to_owned());
             continue;
         }
+        // A line four or more columns past a list item's content column is that item's paragraph
+        // text, whatever it starts with.
+        let paragraph_column = match continuation {
+            Continuation::List(indent) if line.len() - trimmed.len() >= indent + 4 => Some(indent),
+            _ => None,
+        };
         if trimmed.is_empty() {
             continuation = Continuation::None;
             output.push(String::new());
+        } else if let Some(indent) = paragraph_column {
+            output.push(format!(
+                "{}{}",
+                " ".repeat(indent),
+                escape_block_start(trimmed)
+            ));
         } else if trimmed.starts_with('>') {
             continuation = Continuation::Quote;
+            output.push(line.to_owned());
+        } else if let Some((_, (marker, length, _))) = list_item_fence(line) {
+            fence = Some((marker, length));
+            continuation = Continuation::None;
             output.push(line.to_owned());
         } else if let Some(indent) = list_indent(line) {
             continuation = Continuation::List(indent);
@@ -827,13 +852,7 @@ pub(super) fn normalize_rustdoc(text: &str) -> String {
                 Continuation::None => output.push(line.to_owned()),
                 Continuation::Quote => output.push(format!("> {line}")),
                 Continuation::List(indent) => {
-                    let leading = line.len() - trimmed.len();
-                    let escape = if leading >= indent + 4 && opens_block(trimmed) {
-                        "\\"
-                    } else {
-                        ""
-                    };
-                    output.push(format!("{}{escape}{trimmed}", " ".repeat(indent)));
+                    output.push(format!("{}{trimmed}", " ".repeat(indent)));
                 }
             }
         }
@@ -862,6 +881,20 @@ fn escape_bidi_controls(text: &str) -> String {
         }
     }
     escaped
+}
+
+/// `text`, a paragraph line moved to a list item's content column, with its first marker escaped
+/// where it would open a block there: a heading, a thematic break or a setext underline (`\#`,
+/// `\---`), a block quote (`\>`), or a list item (`\- a`, `1\. a`).
+fn escape_block_start(text: &str) -> Cow<'_, str> {
+    if opens_block(text) || text.starts_with('>') {
+        Cow::Owned(format!("\\{text}"))
+    } else if list_indent(text).is_some() {
+        let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+        Cow::Owned(format!("{}\\{}", &text[..digits], &text[digits..]))
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 /// Whether `text`, at the start of a line in a paragraph, ends the paragraph as an ATX heading
