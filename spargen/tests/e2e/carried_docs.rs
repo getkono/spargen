@@ -10,8 +10,9 @@ use super::*;
 /// description, and a response header; and the code blocks rustdoc would run as doctests (#1300):
 /// untagged fences, indented code blocks in and out of a list, a fence nesting a shorter one, and
 /// a fence the description leaves open; and the input rustc, rustdoc or clippy rejects in a doc
-/// comment (#1301): a lone CR, bidirectional controls, a non-void self-closing tag and an
-/// over-indented list continuation.
+/// comment (#1301): a lone CR, bidirectional controls, a non-void self-closing tag, an
+/// over-indented list continuation (one starting with a list marker or `>` among them), and a
+/// fence opened on a list item's line.
 const CARRIED_DOCS_SPEC: &str = include_str!("specs/carried_docs.yaml");
 
 /// A crate root that denies the lints the generated module answers for, and `include!`s it into a
@@ -117,7 +118,8 @@ fn the_include_site_needs_no_lint_attribute() {
         "One of \\u{2067}eu\\u{2069}.",
         "It expires hourly.",
         "Each is a \\<T/> page, beside a void <br/>.",
-        "- a step\n  over indented",
+        "- a step\n  over indented\n  \\- not a nested item\n  \\> not a quote\n  1\\. not an ordered item",
+        "- ```yaml\n  a:\n      b: 1\n      # c\n  ```",
     ] {
         assert!(
             generated.contains(rewritten),

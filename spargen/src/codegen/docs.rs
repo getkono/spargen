@@ -928,6 +928,15 @@ mod tests {
                 [None, Some("a\tb"), None],
                 Some("a    b"),
             ),
+            (
+                "a fence on a list item's line keeps its code as written",
+                [
+                    None,
+                    None,
+                    Some("- ```yaml\n  a:\n      b: 1\n      # c\n  ```"),
+                ],
+                Some("- ```yaml\n  a:\n      b: 1\n      # c\n  ```"),
+            ),
         ];
         for (case, [title, summary, description], expected) in rows {
             let docs = crate::ir::Docs {
@@ -1263,6 +1272,16 @@ mod tests {
                 "- a\n\n    ```json\n    {}\n    ```",
             ),
             (
+                "an untagged fence on a list item's line is tagged, and its lines kept",
+                "- ```\n  fn main() {}\n  Vec<T> [Store]\n  ```\nb [Store]",
+                "- ```text\n  fn main() {}\n  Vec<T> [Store]\n  ```\nb Store",
+            ),
+            (
+                "an unclosed fence on a list item's line is closed at its content column",
+                "1. ~~~json\n   {}",
+                "1. ~~~json\n   {}\n   ~~~",
+            ),
+            (
                 "an indented code block becomes a fenced one",
                 "x\n\n    [Store] Vec<T>\n\ny",
                 "x\n\n```text\n[Store] Vec<T>\n```\n\ny",
@@ -1427,6 +1446,26 @@ mod tests {
                 "- a\n  \\---\n- b\n  \\===\n- c\n  \\___",
             ),
             (
+                "a clamped paragraph line that would open a bullet item is escaped",
+                "- a\n        - b\n      * c\n      + d",
+                "- a\n  \\- b\n  \\* c\n  \\+ d",
+            ),
+            (
+                "a clamped paragraph line that would open an ordered item is escaped",
+                "- a\n        1. b\n        2) c",
+                "- a\n  1\\. b\n  2\\) c",
+            ),
+            (
+                "a clamped paragraph line that would open a quote is escaped",
+                "- a\n        > b",
+                "- a\n  \\> b",
+            ),
+            (
+                "a nested item indented less than four past the column stays an item",
+                "- a\n     - b\n  c",
+                "- a\n     - b\n       c",
+            ),
+            (
                 "a clamped line indented less than four past the column keeps its meaning",
                 "- a\n   # h",
                 "- a\n  # h",
@@ -1501,6 +1540,16 @@ mod tests {
                 "a fence with an info string closes nothing",
                 "```\n```rust\n- a\nb\n```\n- c\nd",
                 "```\n```rust\n- a\nb\n```\n- c\n  d",
+            ),
+            (
+                "a fence opened on a list item's line takes no rewrite",
+                "- ```yaml\n  a:\n      b: 1\n      # c\n  ```\nd",
+                "- ```yaml\n  a:\n      b: 1\n      # c\n  ```\nd",
+            ),
+            (
+                "a fence on an ordered item's line closes only on one at least as long",
+                "1. ````\n   ```\n   - x\n   ````\n- c\nd",
+                "1. ````\n   ```\n   - x\n   ````\n- c\n  d",
             ),
             (
                 "a backtick run with a backtick after it is no fence",

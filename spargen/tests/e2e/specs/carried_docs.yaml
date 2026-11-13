@@ -42,7 +42,10 @@ components:
           description: "The author's name, as written: \u202Ereversed\u202C and \u2066isolated\u2069."
         steps:
           type: string
-          description: "- a step\n        over indented"
+          description: "- a step\n        over indented\n        - not a nested item\n        > not a quote\n        1. not an ordered item"
+        layout:
+          type: string
+          description: "- ```yaml\n  a:\n      b: 1\n      # c\n  ```"
 paths:
   /reports/export:
     post:

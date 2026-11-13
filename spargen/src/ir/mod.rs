@@ -1177,6 +1177,16 @@ mod tests {
                 Some("    ```"),
             ),
             (
+                "a fence on a list item's line opens one at its content column",
+                "- ```yaml\n  a: 1",
+                Some("  ```"),
+            ),
+            (
+                "a fence on a list item's line closes as any other",
+                "10. ~~~\n    a\n    ~~~",
+                None,
+            ),
+            (
                 "a list item's indented code block's line is no fence",
                 "- a\n\n      ```",
                 None,
