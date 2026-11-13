@@ -305,6 +305,16 @@ struct BodyLimits {
     error: Option<usize>,
 }
 
+/// The most bytes of a failed `response`'s body its error reads: `max_error_body`, or the error
+/// limit of the [`BodyLimits`] it carries where that is smaller.
+pub(crate) fn error_body_bound(max_error_body: usize, response: &Response) -> usize {
+    response
+        .extensions()
+        .get::<BodyLimits>()
+        .and_then(|limits| limits.error)
+        .map_or(max_error_body, |limit| limit.min(max_error_body))
+}
+
 /// Marks a response [`execute`] received for a `HEAD` request, so the reader of its body knows its
 /// `Content-Length` describes a representation it does not carry.
 #[derive(Debug, Clone, Copy)]

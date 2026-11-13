@@ -403,11 +403,14 @@ mod support {
         ///
         /// A success, or a call with no `Replay`, is returned as it came. Otherwise the response's body is
         /// read into memory as the operation's error would read it, up to the first chunk past
-        /// `ClientConfig::max_error_body`, and each refreshable credential whose `is_rejection` holds for it
+        /// `ClientConfig::max_error_body`, or past [`super::RequestOptions::max_body`] where that is
+        /// smaller, and each refreshable credential whose `is_rejection` holds for it
         /// is handed the token it sent to its `on_rejected`. When none holds, the response is returned.
         /// When one does, the request is signed again — a refreshed scheme with its fresh token, another
         /// refreshable scheme with the token it sent, any other credential attached as it was the first
-        /// time — and sent once more. Its response is returned unless it is rejected again.
+        /// time — and sent once more. Its response is returned unless it is rejected again. The replay is
+        /// prepared as the first send was, so it carries a `TotalTimeout` of its own: a call that replays
+        /// may take [`super::ClientConfig::timeout`] twice over, plus the refresh.
         ///
         /// A refresh that fails, a credential that can no longer attach, a replay that fails to send or
         /// whose failed body cannot be read, and a replay rejected again each return the original response,
@@ -491,16 +494,21 @@ mod support {
             Ok(unbuffered(if rejected_again { original } else { replayed }))
         }
         /// A failed `response` with its body read into memory for a [`RejectionCheck`] to read, as the
-        /// error classifier reads it: up to the first chunk past the client's `max_error_body`, the rest
-        /// abandoned. A body that held more keeps more than `max_error_body` bytes, so the operation's
-        /// error classifies it as truncated, as it would have the whole body.
+        /// error classifier reads it: up to the first chunk past the client's `max_error_body`, or past
+        /// the call's [`super::RequestOptions::max_body`] where that is smaller, the rest abandoned. A body
+        /// that held more keeps more than that bound, so the operation's error classifies it as it would
+        /// have the whole body: truncated past `max_error_body`, and [`Error::BodyTooLarge`] past
+        /// `max_body`.
         async fn buffered(
             core: &ClientCore,
             response: http::Response<HttpBody>,
         ) -> Result<http::Response<Bytes>, super::TransportError> {
+            let bound = super::dispatch::error_body_bound(
+                core.config().max_error_body,
+                &response,
+            );
             let (parts, body) = response.into_parts();
-            let body = super::dispatch::read_prefix(core.config().max_error_body, body)
-                .await?;
+            let body = super::dispatch::read_prefix(bound, body).await?;
             Ok(http::Response::from_parts(parts, body))
         }
         /// A [`buffered`] response back on the transport seam, its body in memory.
@@ -1415,6 +1423,18 @@ mod support {
             success: Option<usize>,
             /// The most bytes an error body may hold, where it is less than `max_error_body`.
             error: Option<usize>,
+        }
+        /// The most bytes of a failed `response`'s body its error reads: `max_error_body`, or the error
+        /// limit of the [`BodyLimits`] it carries where that is smaller.
+        pub(crate) fn error_body_bound(
+            max_error_body: usize,
+            response: &Response,
+        ) -> usize {
+            response
+                .extensions()
+                .get::<BodyLimits>()
+                .and_then(|limits| limits.error)
+                .map_or(max_error_body, |limit| limit.min(max_error_body))
         }
         /// Marks a response [`execute`] received for a `HEAD` request, so the reader of its body knows its
         /// `Content-Length` describes a representation it does not carry.
