@@ -16,11 +16,11 @@ pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
     Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
     LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next, Nullable,
-    ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
-    RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
-    RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
-    TokenProvider, TokenRefresher, TotalTimeout, TransportError, UnknownVariant,
-    exponential_backoff, next_link, token_provider,
+    ParameterError, ProblemDetails, ProtocolError, RedirectError, RejectionCheck,
+    RequestCause, RequestError, RequestOptions, ReqwestBackend, ResponseValue,
+    RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
+    TokenFuture, TokenProvider, TokenRefresher, TotalTimeout, TransportError,
+    UnknownVariant, exponential_backoff, next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -46,11 +46,11 @@ pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
     Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
     LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next, Nullable,
-    ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
-    RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
-    RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
-    TokenProvider, TokenRefresher, TotalTimeout, TransportError, UnknownVariant,
-    exponential_backoff, next_link, token_provider,
+    ParameterError, ProblemDetails, ProtocolError, RedirectError, RejectionCheck,
+    RequestCause, RequestError, RequestOptions, ReqwestBackend, ResponseValue,
+    RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
+    TokenFuture, TokenProvider, TokenRefresher, TotalTimeout, TransportError,
+    UnknownVariant, exponential_backoff, next_link, token_provider,
 };
 #[allow(
     unused_imports,

@@ -20,11 +20,11 @@ pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
     Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
     LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next, Nullable,
-    ProblemDetails, ProtocolError, RedirectError, RejectionCheck, RequestCause,
-    RequestError, RequestOptions, ReqwestBackend, ResponseValue, RetryBackend,
-    RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
-    TokenProvider, TokenRefresher, TotalTimeout, TransportError, UnknownVariant,
-    exponential_backoff, next_link, token_provider,
+    ParameterError, ProblemDetails, ProtocolError, RedirectError, RejectionCheck,
+    RequestCause, RequestError, RequestOptions, ReqwestBackend, ResponseValue,
+    RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
+    TokenFuture, TokenProvider, TokenRefresher, TotalTimeout, TransportError,
+    UnknownVariant, exponential_backoff, next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -3463,6 +3463,8 @@ mod support {
             }
         }
         /// A typed parameter could not be represented by OpenAPI's scalar/array/object wire model.
+        ///
+        /// An operation reports it as `RequestError::Other`, whose `source()` downcasts to this type.
         #[derive(Debug)]
         pub enum ParameterError {
             /// Serialization of the generated Rust value failed.
@@ -7180,7 +7182,7 @@ mod support {
         encode, serialize_deep_object, serialize_delimited, serialize_form,
         serialize_form_body, serialize_label, serialize_matrix,
         serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty,
-        FormStyle, PercentEncoding,
+        FormStyle, ParameterError, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
     pub use request::{MultipartForm, MultipartPart, RequestBuilder};

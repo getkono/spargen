@@ -64,6 +64,8 @@ impl Delimiter {
 }
 
 /// A typed parameter could not be represented by OpenAPI's scalar/array/object wire model.
+///
+/// An operation reports it as `RequestError::Other`, whose `source()` downcasts to this type.
 #[derive(Debug)]
 pub enum ParameterError {
     /// Serialization of the generated Rust value failed.
