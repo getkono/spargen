@@ -610,10 +610,12 @@ fn emit_struct_constructors(
                     field.name.wire
                 );
                 let nullable = nullable_tokens(inner);
+                // Spelled by path: `name::TYPES_MODULE_NAMES` does not reserve `Into`, so a schema
+                // may take that name in this module.
                 quote! {
                     #[doc = #doc]
                     #[must_use]
-                    pub fn #setter(mut self, value: impl Into<#nullable>) -> Self {
+                    pub fn #setter(mut self, value: impl std::convert::Into<#nullable>) -> Self {
                         self.#field_ident = value.into();
                         self
                     }

@@ -8428,7 +8428,7 @@ pub mod types {
         #[must_use]
         pub fn with_x(
             mut self,
-            value: impl Into<super::support::Nullable<NullOnlyPropertyX>>,
+            value: impl std::convert::Into<super::support::Nullable<NullOnlyPropertyX>>,
         ) -> Self {
             self.x = value.into();
             self
@@ -8608,7 +8608,7 @@ pub mod types {
         #[must_use]
         pub fn with_maybe(
             mut self,
-            value: impl Into<super::support::Nullable<OptionalFieldsMaybe>>,
+            value: impl std::convert::Into<super::support::Nullable<OptionalFieldsMaybe>>,
         ) -> Self {
             self.maybe = value.into();
             self
@@ -9466,7 +9466,7 @@ pub mod types {
         #[must_use]
         pub fn with_priority(
             mut self,
-            value: impl Into<super::support::Nullable<Priority>>,
+            value: impl std::convert::Into<super::support::Nullable<Priority>>,
         ) -> Self {
             self.priority = value.into();
             self
@@ -9493,7 +9493,7 @@ pub mod types {
         #[must_use]
         pub fn with_notes(
             mut self,
-            value: impl Into<super::support::Nullable<StringListOrNull>>,
+            value: impl std::convert::Into<super::support::Nullable<StringListOrNull>>,
         ) -> Self {
             self.notes = value.into();
             self
@@ -9679,7 +9679,7 @@ pub mod types {
         #[must_use]
         pub fn with_parent(
             mut self,
-            value: impl Into<super::support::Nullable<Box<AliasNode>>>,
+            value: impl std::convert::Into<super::support::Nullable<Box<AliasNode>>>,
         ) -> Self {
             self.parent = value.into();
             self
@@ -10195,7 +10195,7 @@ pub mod types {
         #[must_use]
         pub fn with_parent(
             mut self,
-            value: impl Into<super::support::Nullable<Box<AliasNode>>>,
+            value: impl std::convert::Into<super::support::Nullable<Box<AliasNode>>>,
         ) -> Self {
             self.parent = value.into();
             self
@@ -10869,7 +10869,9 @@ pub mod types {
         #[must_use]
         pub fn with_thumb(
             mut self,
-            value: impl Into<super::support::Nullable<PostNullablePartsBodyThumb>>,
+            value: impl std::convert::Into<
+                super::support::Nullable<PostNullablePartsBodyThumb>,
+            >,
         ) -> Self {
             self.thumb = value.into();
             self
