@@ -101,7 +101,7 @@ fn text_bodies_of_every_scalar_schema_round_trip_as_bare_text() {
     let spec = write_spec(temp.path(), "text.yaml", TEXT_SPEC);
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "text_client", "2021", |spec| {
-        spec.testing(true)
+        spec.with_testing(spargen::TestingModule::Emitted)
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
