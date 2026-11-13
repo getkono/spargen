@@ -3481,13 +3481,13 @@ mod support {
             /// A nested array or object appeared where OpenAPI parameter serialization requires a scalar.
             NestedValue,
             /// A `style: deepObject` query parameter's value was not an object
-            /// ([`serialize_deep_object`]).
+            /// (`serialize_deep_object`).
             ExpectedObject,
             /// A form-urlencoded request body did not serialize to a JSON object
-            /// ([`serialize_form_body`]).
+            /// (`serialize_form_body`).
             FormBodyNotObject,
             /// A multipart part was asked for the query-only `deepObject` style
-            /// ([`serialize_multipart_values`]).
+            /// (`serialize_multipart_values`).
             DeepObjectInMultipart,
             /// A style defined only for arrays and objects (`spaceDelimited`, `pipeDelimited`) received a
             /// scalar or undefined value.
@@ -7356,9 +7356,10 @@ mod support {
         //! A [`BlockingRuntime`] must NOT be *driven* from inside another async runtime: tokio's
         //! `block_on` panics when called from within a runtime's context. Drive one on a plain (non-async)
         //! thread — for example a `std::thread`, or `tokio::task::spawn_blocking` when you are already
-        //! inside an async context. Building one there is fine, and so is dropping one: the drop shuts the
-        //! owned runtime down in the background rather than waiting on it, which inside an async context
-        //! would panic, so a blocking client held in async state can be dropped at shutdown.
+        //! inside an async context. Building one inside an async runtime is fine, and so is dropping one
+        //! there: the drop shuts the owned runtime down in the background rather than waiting on it, which
+        //! inside an async context would panic, so a blocking client held in async state can be dropped at
+        //! shutdown.
         /// A current-thread tokio runtime used to drive async operation futures to completion
         /// synchronously. Held by the generated blocking client alongside the async client it wraps.
         ///
@@ -7386,10 +7387,10 @@ mod support {
             ///
             /// Panics if called from within another async runtime — tokio forbids nested `block_on`.
             pub fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
-                self.runtime
-                    .as_ref()
-                    .expect("the runtime is taken only by the drop")
-                    .block_on(future)
+                let Some(runtime) = &self.runtime else {
+                    unreachable!("the runtime is taken only by the drop")
+                };
+                runtime.block_on(future)
             }
         }
         impl Drop for BlockingRuntime {
@@ -20518,7 +20519,7 @@ mod __spargen_blocking {
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
     /**A synchronous client: owns the async `Client` plus a current-thread tokio runtime and `block_on`s each operation. Enable the crate's `blocking` feature to use it; it compiles only on a non-wasm32 target.
 
-Must NOT be called from inside another async runtime — tokio's `block_on` panics when nested. Call it on a plain thread (e.g. `std::thread` or `tokio::task::spawn_blocking`). Building or dropping one there is fine: the drop shuts its runtime down in the background without waiting.*/
+Must NOT be called from inside another async runtime — tokio's `block_on` panics when nested. Call it on a plain thread (e.g. `std::thread` or `tokio::task::spawn_blocking`). Building or dropping one inside an async runtime is fine: the drop shuts its runtime down in the background without waiting.*/
     #[derive(Debug)]
     #[allow(dead_code)]
     pub struct BlockingClient {

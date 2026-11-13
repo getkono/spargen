@@ -14,9 +14,10 @@
 //! A [`BlockingRuntime`] must NOT be *driven* from inside another async runtime: tokio's
 //! `block_on` panics when called from within a runtime's context. Drive one on a plain (non-async)
 //! thread — for example a `std::thread`, or `tokio::task::spawn_blocking` when you are already
-//! inside an async context. Building one there is fine, and so is dropping one: the drop shuts the
-//! owned runtime down in the background rather than waiting on it, which inside an async context
-//! would panic, so a blocking client held in async state can be dropped at shutdown.
+//! inside an async context. Building one inside an async runtime is fine, and so is dropping one
+//! there: the drop shuts the owned runtime down in the background rather than waiting on it, which
+//! inside an async context would panic, so a blocking client held in async state can be dropped at
+//! shutdown.
 
 /// A current-thread tokio runtime used to drive async operation futures to completion
 /// synchronously. Held by the generated blocking client alongside the async client it wraps.
@@ -49,10 +50,11 @@ impl BlockingRuntime {
     ///
     /// Panics if called from within another async runtime — tokio forbids nested `block_on`.
     pub fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
-        self.runtime
-            .as_ref()
-            .expect("the runtime is taken only by the drop")
-            .block_on(future)
+        // Only the drop takes the runtime, and nothing borrows `self` after it begins.
+        let Some(runtime) = &self.runtime else {
+            unreachable!("the runtime is taken only by the drop")
+        };
+        runtime.block_on(future)
     }
 }
 

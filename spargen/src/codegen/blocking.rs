@@ -48,8 +48,8 @@ pub(super) fn emit_blocking_client(
         compiles only on a non-wasm32 target.\n\n\
         Must NOT be called from inside another async runtime — tokio's `block_on` panics when \
         nested. Call it on a plain thread (e.g. `std::thread` or \
-        `tokio::task::spawn_blocking`). Building or dropping one there is fine: the drop shuts \
-        its runtime down in the background without waiting.";
+        `tokio::task::spawn_blocking`). Building or dropping one inside an async runtime is fine: \
+        the drop shuts its runtime down in the background without waiting.";
     let cfg = blocking_cfg();
     let credential_docs = with_credential_docs(api, options);
     let with_bound_header = with_bound_header_tokens(
