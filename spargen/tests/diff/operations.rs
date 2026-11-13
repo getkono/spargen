@@ -100,6 +100,65 @@ fn an_added_operation_taking_a_companion_name_renames_the_companion_and_is_major
     }
 }
 
+#[test]
+fn an_added_operation_taking_a_stream_twin_name_renames_the_twin_and_is_major() {
+    // Issue #1296: `getBlob`'s binary success gives it a `get_blob_stream` twin with
+    // `get_blob_stream_request` and `decode_get_blob_stream` companions. `getBlobStream`'s method
+    // spells the twin (and its own request builder and decoder the twin's, which are allocated
+    // after every other companion), `getBlobStreamRequest`'s method the twin's request builder,
+    // and `decodeGetBlobStream`'s method the twin's decoder. Each existing name yields to a
+    // suffixed spelling, which breaks its callers.
+    let blob = "  /blob:
+    get:
+      operationId: getBlob
+      responses:
+        '200':
+          description: ok
+          content:
+            application/octet-stream: { schema: {} }
+";
+    const TWIN: &str = "stream twin renamed `get_blob_stream` -> `get_blob_stream_";
+    const REQUEST_BUILDER: &str =
+        "stream request builder renamed `get_blob_stream_request` -> `get_blob_stream_request_";
+    const DECODER: &str =
+        "stream decoder renamed `decode_get_blob_stream` -> `decode_get_blob_stream_";
+    for (operation, path, renamed) in [
+        (
+            "getBlobStream",
+            "/blob/stream",
+            // In the report's order, which sorts one location's changes of one kind by detail.
+            &[DECODER, REQUEST_BUILDER, TWIN][..],
+        ),
+        (
+            "getBlobStreamRequest",
+            "/blob/stream-request",
+            &[REQUEST_BUILDER],
+        ),
+        ("decodeGetBlobStream", "/blob/decode", &[DECODER]),
+    ] {
+        let added = format!(
+            "  {path}:
+    get:
+      operationId: {operation}
+      responses:
+        '204':
+          description: none
+"
+        );
+        let old = full(blob, PET_SCHEMA);
+        let new = full(&format!("{blob}{added}"), PET_SCHEMA);
+        let report = diff(&old, &new);
+        let mut expected = vec![ChangeKind::MethodRenamed; renamed.len()];
+        expected.push(ChangeKind::OperationAdded);
+        assert_eq!(kinds(&report), expected, "{:?}", report.changes);
+        for (change, renamed) in report.changes.iter().zip(renamed) {
+            assert_eq!(change.location, "GET /blob");
+            assert!(change.detail.starts_with(renamed), "{}", change.detail);
+        }
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
 const REQUEST_BODY_PET: &str = "      requestBody:
         required: true
         content:

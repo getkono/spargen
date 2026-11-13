@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    HeadersSurface, MemberSurface, OpSurface, OverflowSurface, ServerSurface,
+    ByteStreamSurface, HeadersSurface, MemberSurface, OpSurface, OverflowSurface, ServerSurface,
     ServerVariableSurface, Surface, TypeSurface, UrlArgSurface,
 };
 use crate::ir::{
@@ -67,6 +67,14 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                 url_accessor_name,
                 request_builder_name: operation_names.request_builder.as_str().to_owned(),
                 decoder_name: operation_names.decoder.as_str().to_owned(),
+                byte_stream: operation_names
+                    .byte_stream
+                    .as_ref()
+                    .map(|stream| ByteStreamSurface {
+                        twin_name: stream.twin.as_str().to_owned(),
+                        request_builder_name: stream.request_builder.as_str().to_owned(),
+                        decoder_name: stream.decoder.as_str().to_owned(),
+                    }),
                 url_args,
                 params,
                 request_body,

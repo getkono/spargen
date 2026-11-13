@@ -70,7 +70,7 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
     } else {
         // A companion was renamed although its method was not (see `OperationNames::url_accessor`
         // and the companions allocated after it): its callers break just as a method's would.
-        for (label, old_name, new_name) in [
+        let mut companions = vec![
             (
                 "URL accessor",
                 &old.url_accessor_name,
@@ -82,7 +82,24 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
                 &new.request_builder_name,
             ),
             ("decoder", &old.decoder_name, &new.decoder_name),
-        ] {
+        ];
+        // The `_stream` twin and its companions, when both sides have a twin to rename.
+        if let (Some(old_stream), Some(new_stream)) = (&old.byte_stream, &new.byte_stream) {
+            companions.extend([
+                ("stream twin", &old_stream.twin_name, &new_stream.twin_name),
+                (
+                    "stream request builder",
+                    &old_stream.request_builder_name,
+                    &new_stream.request_builder_name,
+                ),
+                (
+                    "stream decoder",
+                    &old_stream.decoder_name,
+                    &new_stream.decoder_name,
+                ),
+            ]);
+        }
+        for (label, old_name, new_name) in companions {
             if old_name != new_name {
                 changes.push(Change::new(
                     ChangeKind::MethodRenamed,
