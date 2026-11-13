@@ -1342,6 +1342,38 @@ fn a_replay_failing_for_another_reason_returns_its_own_response() {
     assert_eq!(backend.calls(), 2);
 }
 
+/// A credential replaced by one that is not refreshable, or removed, between the send and
+/// `replay_rejected` is not refreshed: the rejected response is the call's answer, unreplayed, and
+/// neither the old credential's check nor its refresh is asked.
+#[test]
+fn a_credential_replaced_or_removed_after_the_send_is_not_refreshed() {
+    for replace in [true, false] {
+        let backend =
+            SequenceBackend::new([Reply::status(401, "expired"), Reply::status(200, "ok")]);
+        let mut core = core_over(&backend);
+        let calls = Arc::new(Calls::default());
+        core.set_credential("token", refreshable(&calls, Some("fresh")));
+        let (request, replay) =
+            poll_ready(attach_auth_replayable(&core, get(&core), &[BEARER])).unwrap();
+        assert!(replay.is_some());
+        let response = poll_ready(crate::send(&core, request.build().unwrap())).unwrap();
+
+        if replace {
+            core.set_credential("token", Credential::Bearer(SecretString::from("other")));
+        } else {
+            assert!(core.remove_credential("token").is_some());
+        }
+        let response = poll_ready(replay_rejected(&core, response, replay, false)).unwrap();
+
+        let status = response.status().as_u16();
+        let body = poll_ready(response.into_body().collect()).unwrap();
+        let checked = calls.checked.load(Ordering::SeqCst);
+        let refreshed = calls.refreshed.load(Ordering::SeqCst);
+        let observed = (status, &body[..], backend.calls(), checked, refreshed);
+        assert_eq!(observed, (401, &b"expired"[..], 1, 0, 0), "{replace}");
+    }
+}
+
 #[test]
 fn a_replay_the_transport_fails_returns_the_original_response() {
     let backend = SequenceBackend::new([Reply::status(401, "expired"), Reply::failure(503)]);

@@ -289,6 +289,18 @@ fn build_url_on_joins_a_relative_server_override_onto_the_base() {
     assert_eq!(url.as_str(), "https://example.com/edge/blobs");
 }
 
+/// A relative server override is resolved against the base URL as RFC 3986 §5.2 resolves a
+/// reference: an override with a path of its own drops the base's query, as an absolute override
+/// does, and the base's query reaches the request only with no override.
+#[test]
+fn a_relative_server_override_drops_the_query_of_the_base() {
+    let core = core_at("https://example.com/api/?tenant=acme");
+    let kept = build_url_on(&core, None, "/blobs", &[]).unwrap();
+    assert_eq!(kept.as_str(), "https://example.com/api/blobs?tenant=acme");
+    let overridden = build_url_on(&core, Some("../edge/"), "/blobs", &["a=1".to_owned()]).unwrap();
+    assert_eq!(overridden.as_str(), "https://example.com/edge/blobs?a=1");
+}
+
 #[test]
 fn build_url_with_query_string_installs_a_whole_query_verbatim() {
     let core = core_at("https://example.com?stale=server-value");
@@ -350,6 +362,30 @@ fn status_spec_matches_exact_range_and_any() {
 
     assert!(StatusSpec::Any.matches(StatusCode::OK));
     assert!(StatusSpec::Any.matches(StatusCode::IM_A_TEAPOT));
+}
+
+/// `Range(d)` covers exactly the statuses whose hundreds digit is `d`, over every status
+/// `StatusCode` admits (100 to 999): `Range(0)` and `Range(10)` cover none, and `Range(6)` to
+/// `Range(9)` cover the non-standard statuses of their hundred.
+#[test]
+fn status_spec_range_covers_exactly_its_hundred() {
+    use reqwest::StatusCode;
+
+    let covered = |digit: u8| -> Vec<u16> {
+        (100..=999)
+            .filter(|&code| StatusSpec::Range(digit).matches(StatusCode::from_u16(code).unwrap()))
+            .collect()
+    };
+    for digit in [0, 10, 255] {
+        assert!(covered(digit).is_empty(), "Range({digit})");
+    }
+    for (digit, first) in [(1, 100), (5, 500), (6, 600), (9, 900)] {
+        assert_eq!(
+            covered(digit),
+            (first..first + 100).collect::<Vec<u16>>(),
+            "Range({digit})"
+        );
+    }
 }
 
 use std::convert::Infallible;
