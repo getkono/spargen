@@ -4843,6 +4843,11 @@ mod support {
             pub fn into_inner(self) -> T {
                 self.inner
             }
+            /// Consume the wrapper, yielding its status, headers and decoded body, each owned, so a caller
+            /// keeping the headers beside the body need not clone them before [`Self::into_inner`].
+            pub fn into_parts(self) -> (StatusCode, HeaderMap, T) {
+                (self.status, self.headers, self.inner)
+            }
             /// Borrow the decoded body.
             pub fn inner(&self) -> &T {
                 &self.inner
