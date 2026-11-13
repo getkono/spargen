@@ -6694,8 +6694,8 @@ mod support {
         /// requires, a line ends at CRLF, at a bare LF, or at a bare CR. Returns `Err` with the offset the
         /// next search starts from when no full line is buffered yet, which includes a CR that is the last
         /// buffered byte: the byte after it decides whether it ends the line alone or begins a CRLF, so it
-        /// is held, and searched again, until that byte arrives (at EOF, `sse_next` drops the tail with
-        /// the event it belongs to).
+        /// is held, and searched again, until that byte arrives (at EOF, where none will, `sse_next`
+        /// reads the tail itself).
         fn take_line(
             buf: &[u8],
             from: usize,

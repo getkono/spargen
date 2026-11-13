@@ -775,9 +775,6 @@ fn sse_next(buffer: &mut FrameBuffer, at_eof: bool, output: SseOutput) -> FrameP
                 std::mem::take(&mut buffer.event)
             }
             None if !at_eof => return FramePoll::NeedMore,
-            // The body ended before the blank line that dispatches the event in progress, so it
-            // is dropped, with the `id` and `retry` it set: "if the file ends in the middle of an
-            // event, before the final empty line, the incomplete event is not dispatched".
             // A CR that is the body's last byte is held only for the LF that could follow it; at
             // EOF none will, so it ends its line, and when that line is blank it dispatches.
             None if buffer.bytes[buffer.line_start..] == *b"\r" => {
@@ -785,6 +782,9 @@ fn sse_next(buffer: &mut FrameBuffer, at_eof: bool, output: SseOutput) -> FrameP
                 buffer.clear();
                 fields
             }
+            // The body ended before the blank line that dispatches the event in progress, so it
+            // is dropped, with the `id` and `retry` it set: "if the file ends in the middle of an
+            // event, before the final empty line, the incomplete event is not dispatched".
             None => {
                 buffer.clear();
                 return FramePoll::NeedMore;
@@ -884,8 +884,8 @@ fn finish_sse_fields(mut fields: SseFields, output: SseOutput) -> FramePoll {
 /// requires, a line ends at CRLF, at a bare LF, or at a bare CR. Returns `Err` with the offset the
 /// next search starts from when no full line is buffered yet, which includes a CR that is the last
 /// buffered byte: the byte after it decides whether it ends the line alone or begins a CRLF, so it
-/// is held, and searched again, until that byte arrives (at EOF, `sse_next` drops the tail with
-/// the event it belongs to).
+/// is held, and searched again, until that byte arrives (at EOF, where none will, `sse_next`
+/// reads the tail itself).
 fn take_line(buf: &[u8], from: usize, scanned: usize) -> Result<(&[u8], usize), usize> {
     let Some(end) = buf[scanned..]
         .iter()
