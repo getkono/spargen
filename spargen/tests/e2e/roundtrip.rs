@@ -245,6 +245,30 @@ fn a_discriminated_variant_holding_another_variants_tag_does_not_serialize() {
     }
 }
 
+// An untagged variant holding a tag a tagged variant claims would decode as that variant, so it
+// is refused too; one holding an unclaimed tag, or none, decodes back as itself.
+#[test]
+fn an_untagged_discriminated_variant_holding_a_claimed_tag_does_not_serialize() {
+    for tag in ["car", "Car"] {
+        let vehicle = types::Vehicle::VehicleVariant1(Box::new(types::VehicleVariant1 {
+            kind: Some(tag.to_owned()),
+            label: Some("x".to_owned()),
+        }));
+        let error = serde_json::to_value(&vehicle).expect_err(tag).to_string();
+        assert!(error.contains(&format!("\"{tag}\"")), "{tag}: {error}");
+        assert!(error.contains("Vehicle::VehicleVariant1"), "{tag}: {error}");
+    }
+    for kind in [Some("bike"), None] {
+        let vehicle = types::Vehicle::VehicleVariant1(Box::new(types::VehicleVariant1 {
+            kind: kind.map(str::to_owned),
+            label: Some("x".to_owned()),
+        }));
+        let written = serde_json::to_value(&vehicle).expect("an unclaimed tag serializes");
+        let back: types::Vehicle = serde_json::from_value(written).expect("decodes back");
+        assert_eq!(back, vehicle);
+    }
+}
+
 // A unit string-enum variant refuses the one-key object serde_json would otherwise read as that
 // variant, so the `anyOf` takes only strings.
 #[test]
@@ -335,6 +359,7 @@ components:
         - $ref: "#/components/schemas/Car"
         - type: object
           properties:
+            kind: { type: string }
             label: { type: string }
       discriminator:
         propertyName: kind

@@ -250,11 +250,24 @@ fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
     let unknown = oas32_client::types::CacheOutcome::CacheUnknown(Box::new(
         oas32_client::types::CacheUnknown {
             detail: "not recognized".to_owned(),
-            outcome: Some("purged".to_owned()),
+            outcome: oas32_client::Nullable::Value("purged".to_owned()),
         },
     ));
     let error = serde_json::to_value(&unknown).unwrap_err().to_string();
     assert!(error.contains("CacheOutcome::CacheUnknown"), "{error}");
+
+    // A `null` tag is no tag to the decoder, which routes it to the `defaultMapping` branch, so
+    // that branch writes it back.
+    let unknown = oas32_client::types::CacheOutcome::CacheUnknown(Box::new(
+        oas32_client::types::CacheUnknown {
+            detail: "not recognized".to_owned(),
+            outcome: oas32_client::Nullable::Null,
+        },
+    ));
+    let written = serde_json::to_value(&unknown).expect("a null tag selects the fallback");
+    assert_eq!(written["outcome"], serde_json::Value::Null, "{written}");
+    let back: oas32_client::types::CacheOutcome = serde_json::from_value(written).unwrap();
+    assert_eq!(back, unknown);
 }
 "##,
     );
