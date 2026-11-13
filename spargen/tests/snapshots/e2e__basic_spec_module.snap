@@ -9011,9 +9011,10 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Ok(inner) = serde_json::from_value::<
-                Box<AnyStringVariant0>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_string()
+                .then(|| serde_json::from_value::<Box<AnyStringVariant0>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 500u32 > *selected_priority,
@@ -9023,9 +9024,10 @@ pub mod types {
                     selected = Some((500u32, AnyString::AnyStringVariant0(inner)));
                 }
             }
-            if let Ok(inner) = serde_json::from_value::<
-                Box<StringLiteral>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_string()
+                .then(|| serde_json::from_value::<Box<StringLiteral>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 1999u32 > *selected_priority,
@@ -9064,10 +9066,15 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if serde_json::from_value::<Box<AnyStringVariant0>>(value.clone()).is_ok() {
+            if value.is_string()
+                && serde_json::from_value::<Box<AnyStringVariant0>>(value.clone())
+                    .is_ok()
+            {
                 match_count += 1;
             }
-            if serde_json::from_value::<Box<StringLiteral>>(value.clone()).is_ok() {
+            if value.is_string()
+                && serde_json::from_value::<Box<StringLiteral>>(value.clone()).is_ok()
+            {
                 match_count += 1;
             }
             if match_count >= 1 {
@@ -9095,9 +9102,10 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Ok(inner) = serde_json::from_value::<
-                Box<AnyNumberVariant0>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_number()
+                .then(|| serde_json::from_value::<Box<AnyNumberVariant0>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 500u32 > *selected_priority,
@@ -9107,9 +9115,10 @@ pub mod types {
                     selected = Some((500u32, AnyNumber::AnyNumberVariant0(inner)));
                 }
             }
-            if let Ok(inner) = serde_json::from_value::<
-                Box<AnyNumberVariant1>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_number()
+                .then(|| serde_json::from_value::<Box<AnyNumberVariant1>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 650u32 > *selected_priority,
@@ -9148,10 +9157,16 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if serde_json::from_value::<Box<AnyNumberVariant0>>(value.clone()).is_ok() {
+            if value.is_number()
+                && serde_json::from_value::<Box<AnyNumberVariant0>>(value.clone())
+                    .is_ok()
+            {
                 match_count += 1;
             }
-            if serde_json::from_value::<Box<AnyNumberVariant1>>(value.clone()).is_ok() {
+            if value.is_number()
+                && serde_json::from_value::<Box<AnyNumberVariant1>>(value.clone())
+                    .is_ok()
+            {
                 match_count += 1;
             }
             if match_count >= 1 {
@@ -9180,9 +9195,12 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Ok(inner) = serde_json::from_value::<
-                Box<OneOverlapVariant0>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_string()
+                .then(|| serde_json::from_value::<
+                    Box<OneOverlapVariant0>,
+                >(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 500u32 > *selected_priority,
@@ -9192,9 +9210,10 @@ pub mod types {
                     selected = Some((500u32, OneOverlap::OneOverlapVariant0(inner)));
                 }
             }
-            if let Ok(inner) = serde_json::from_value::<
-                Box<StringLiteral>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_string()
+                .then(|| serde_json::from_value::<Box<StringLiteral>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 1999u32 > *selected_priority,
@@ -9233,10 +9252,15 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if serde_json::from_value::<Box<OneOverlapVariant0>>(value.clone()).is_ok() {
+            if value.is_string()
+                && serde_json::from_value::<Box<OneOverlapVariant0>>(value.clone())
+                    .is_ok()
+            {
                 match_count += 1;
             }
-            if serde_json::from_value::<Box<StringLiteral>>(value.clone()).is_ok() {
+            if value.is_string()
+                && serde_json::from_value::<Box<StringLiteral>>(value.clone()).is_ok()
+            {
                 match_count += 1;
             }
             if match_count == 1 {
@@ -9286,7 +9310,10 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Ok(inner) = serde_json::from_value::<Box<BroadOwner>>(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_object()
+                .then(|| serde_json::from_value::<Box<BroadOwner>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 1000u32 > *selected_priority,
@@ -9296,9 +9323,10 @@ pub mod types {
                     selected = Some((1000u32, AnyOwner::BroadOwner(inner)));
                 }
             }
-            if let Ok(inner) = serde_json::from_value::<
-                Box<DetailedOwner>,
-            >(value.clone()) {
+            if let Some(Ok(inner)) = value
+                .is_object()
+                .then(|| serde_json::from_value::<Box<DetailedOwner>>(value.clone()))
+            {
                 match_count += 1;
                 let replace = match &selected {
                     Some((selected_priority, _)) => 1021u32 > *selected_priority,
@@ -9337,10 +9365,14 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if serde_json::from_value::<Box<BroadOwner>>(value.clone()).is_ok() {
+            if value.is_object()
+                && serde_json::from_value::<Box<BroadOwner>>(value.clone()).is_ok()
+            {
                 match_count += 1;
             }
-            if serde_json::from_value::<Box<DetailedOwner>>(value.clone()).is_ok() {
+            if value.is_object()
+                && serde_json::from_value::<Box<DetailedOwner>>(value.clone()).is_ok()
+            {
                 match_count += 1;
             }
             if match_count >= 1 {
@@ -10111,9 +10143,12 @@ pub mod types {
                 return {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    if let Ok(inner) = serde_json::from_value::<
-                        Box<LooseAnimalVariant2>,
-                    >(value.clone()) {
+                    if let Some(Ok(inner)) = value
+                        .is_object()
+                        .then(|| serde_json::from_value::<
+                            Box<LooseAnimalVariant2>,
+                        >(value.clone()))
+                    {
                         match_count += 1;
                         let replace = match &selected {
                             Some((selected_priority, _)) => 1042u32 > *selected_priority,
@@ -10152,9 +10187,12 @@ pub mod types {
                 _ => {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    if let Ok(inner) = serde_json::from_value::<
-                        Box<LooseAnimalVariant2>,
-                    >(value.clone()) {
+                    if let Some(Ok(inner)) = value
+                        .is_object()
+                        .then(|| serde_json::from_value::<
+                            Box<LooseAnimalVariant2>,
+                        >(value.clone()))
+                    {
                         match_count += 1;
                         let replace = match &selected {
                             Some((selected_priority, _)) => 1042u32 > *selected_priority,

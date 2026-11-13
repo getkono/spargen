@@ -121,11 +121,14 @@ pub(super) fn emit_union(
                     let variant_ident = union_variant_ident(names, id, variant);
                     let ty = boxed_ty_tokens(variant.ty, names, false);
                     let unknown = open_member_unknown_test(types, names, variant.ty);
+                    let guard =
+                        trial_guard_tokens(untagged_category(types, variant.ty), variant.ty);
                     Some(trial_attempt_tokens(
                         ident,
                         variant_ident,
                         &ty,
                         priority,
+                        guard.as_ref(),
                         unknown.as_ref(),
                     ))
                 })
@@ -295,16 +298,19 @@ pub(super) fn emit_union(
         UnionStrategy::Trial { mode } => {
             let decl = union_enum_decl(id, ident, union, names, &docs, &deprecated);
             let attempts = union.variants.iter().map(|variant| {
-                let priority = match variant.dispatch {
-                    VariantDispatch::Trial { priority } => priority,
-                    VariantDispatch::Discriminated { .. } | VariantDispatch::Disjoint(_) => {
-                        unreachable!("{MISMATCHED_DISPATCH}")
-                    }
-                };
+                let (priority, category) = trial_dispatch(variant);
                 let variant_ident = union_variant_ident(names, id, variant);
                 let ty = boxed_ty_tokens(variant.ty, names, false);
                 let unknown = open_member_unknown_test(types, names, variant.ty);
-                trial_attempt_tokens(ident, variant_ident, &ty, priority, unknown.as_ref())
+                let guard = trial_guard_tokens(category, variant.ty);
+                trial_attempt_tokens(
+                    ident,
+                    variant_ident,
+                    &ty,
+                    priority,
+                    guard.as_ref(),
+                    unknown.as_ref(),
+                )
             });
             let ser_arms = union.variants.iter().map(|variant| {
                 let variant_ident = union_variant_ident(names, id, variant);
@@ -319,24 +325,32 @@ pub(super) fn emit_union(
                 .iter()
                 .any(|variant| open_member_unknown_test(types, names, variant.ty).is_some());
             // A value an open member decodes only as its `Unknown` is held to the same rule on
-            // serialize as on decode: it counts only when no variant matches outright.
+            // serialize as on decode: it counts only when no variant matches outright. A variant
+            // is tried on the written value under the same category guard as on decode.
             let validations = union.variants.iter().map(|variant| {
                 let ty = boxed_ty_tokens(variant.ty, names, false);
+                let guard = trial_guard_tokens(trial_dispatch(variant).1, variant.ty);
                 match open_member_unknown_test(types, names, variant.ty) {
-                    Some(unknown) => quote! {
-                        if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
-                            if #unknown {
-                                unknown_match = true;
-                            } else {
+                    Some(unknown) => {
+                        let (pattern, attempt) = guarded_decode_tokens(&ty, guard.as_ref());
+                        quote! {
+                            if let #pattern = #attempt {
+                                if #unknown {
+                                    unknown_match = true;
+                                } else {
+                                    match_count += 1;
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        let guard = guard.map(|guard| quote! { #guard && });
+                        quote! {
+                            if #guard serde_json::from_value::<#ty>(value.clone()).is_ok() {
                                 match_count += 1;
                             }
                         }
-                    },
-                    None => quote! {
-                        if serde_json::from_value::<#ty>(value.clone()).is_ok() {
-                            match_count += 1;
-                        }
-                    },
+                    }
                 }
             });
             let expected = match mode {
@@ -552,11 +566,62 @@ fn json_category_predicate(category: &JsonCategory) -> TokenStream {
     }
 }
 
+/// The `(priority, category)` of `variant`, as a variant of a [`UnionStrategy::Trial`] union
+/// carries them.
+fn trial_dispatch(variant: &UnionVariant) -> (u32, Option<JsonCategory>) {
+    match variant.dispatch {
+        VariantDispatch::Trial { priority, category } => (priority, category),
+        VariantDispatch::Discriminated { .. } | VariantDispatch::Disjoint(_) => {
+            unreachable!("{MISMATCHED_DISPATCH}")
+        }
+    }
+}
+
+/// The JSON category of an untagged variant of a [`UnionStrategy::Discriminated`] union, whose
+/// type `ty` is an object struct wherever lowering gives a variant no tag; `None`, trying it on
+/// every payload, for any other type, a reservation included.
+fn untagged_category(types: &TypeGraph, ty: Ty) -> Option<JsonCategory> {
+    let definition = types.get(ty.id)?;
+    matches!(definition.kind, TypeKind::Struct(_)).then_some(JsonCategory::Object)
+}
+
+/// The test a buffered `value` passes before a trial tries a variant of type `ty` whose values all
+/// serialize as `category`: that category's predicate, or `null` beside it when `ty` is nullable.
+/// `None` for an uncategorised variant, which is tried on every payload. serde_json's `Value`
+/// deserializer is more lenient than the schema: it reads an array into a derived struct field by
+/// field, and a one-key object into a unit enum variant, so an unguarded attempt would take a
+/// payload of another category.
+fn trial_guard_tokens(category: Option<JsonCategory>, ty: Ty) -> Option<TokenStream> {
+    let predicate = json_category_predicate(&category?);
+    Some(if ty.nullable {
+        quote! { (value.is_null() || #predicate) }
+    } else {
+        predicate
+    })
+}
+
+/// The `if let` pattern and scrutinee that decode `value` as `ty` into `inner`, only when `guard`
+/// ([`trial_guard_tokens`]) holds where there is one.
+fn guarded_decode_tokens(
+    ty: &TokenStream,
+    guard: Option<&TokenStream>,
+) -> (TokenStream, TokenStream) {
+    let decode = quote! { serde_json::from_value::<#ty>(value.clone()) };
+    match guard {
+        Some(guard) => (
+            quote! { Some(Ok(inner)) },
+            quote! { #guard.then(|| #decode) },
+        ),
+        None => (quote! { Ok(inner) }, decode),
+    }
+}
+
 /// One variant's attempt in a trial decode: decode `value` as the variant's type, count the
 /// match, and keep it when its priority beats the one selected so far (the earlier variant wins a
 /// tie). The emitted block expects `value`, `match_count`, and `selected: Option<(u32, Self)>` in
 /// scope. `Trial` tries every variant through it, and `Discriminated` its untagged variants, so
-/// the two strategies share one selection rule.
+/// the two strategies share one selection rule. `guard` ([`trial_guard_tokens`]) is the category
+/// test the payload must pass before the variant is tried at all.
 ///
 /// `unknown` is [`open_member_unknown_test`] for a variant that is itself an open union: a value
 /// it decodes only as its `Unknown` is not counted as a match but kept, the first such one, in
@@ -568,8 +633,10 @@ fn trial_attempt_tokens(
     variant_ident: &crate::name::Ident,
     ty: &TokenStream,
     priority: u32,
+    guard: Option<&TokenStream>,
     unknown: Option<&TokenStream>,
 ) -> TokenStream {
+    let (pattern, attempt) = guarded_decode_tokens(ty, guard);
     let count = quote! {
         match_count += 1;
         let replace = match &selected {
@@ -582,7 +649,7 @@ fn trial_attempt_tokens(
     };
     match unknown {
         Some(unknown) => quote! {
-            if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
+            if let #pattern = #attempt {
                 if #unknown {
                     if unknown_fallback.is_none() {
                         unknown_fallback = Some(#ident::#variant_ident(inner));
@@ -593,7 +660,7 @@ fn trial_attempt_tokens(
             }
         },
         None => quote! {
-            if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
+            if let #pattern = #attempt {
                 #count
             }
         },

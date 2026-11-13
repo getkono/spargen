@@ -71,7 +71,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Trial matching under `mode` for the variants of types `variants`, each ranked by its
-    /// static specificity.
+    /// static specificity and tried only on a payload of its JSON category, where it has one.
     pub(super) fn trial_strategy(&self, variants: &[Ty], mode: UnionMode) -> UnionDispatch {
         UnionDispatch {
             strategy: UnionStrategy::Trial { mode },
@@ -79,6 +79,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .iter()
                 .map(|ty| VariantDispatch::Trial {
                     priority: self.type_specificity(*ty, &mut HashSet::new()),
+                    category: self.json_category(*ty),
                 })
                 .collect(),
         }
