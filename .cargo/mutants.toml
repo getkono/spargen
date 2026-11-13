@@ -32,12 +32,6 @@ exclude_re = [
   # until it is updated, rather than excluding whatever moved onto that line.
   '^support-runtime/src/paginate\.rs:238:21: replace match guard respect_angles && !in_quote with true in split_outside$',
   '^support-runtime/src/paginate\.rs:238:36: replace && with \|\| in split_outside$',
-  # `support-runtime/src/stream.rs`, `sse_next`'s `buffer.line_start < buffer.len()` to `<=`: at
-  # `line_start == len` the field appended is the empty line, whose empty name matches no field,
-  # so `append_sse_field` leaves the event's fields as they were. The entry is anchored on line and
-  # column like the ones above, so an edit that moves it fails the run instead of excluding another
-  # comparison of the same kind in the same function.
-  '^support-runtime/src/stream\.rs:710:38: replace < with <= in sse_next$',
   # `support-runtime/src/error.rs`, `ApiErrorBody::body`, `ApiErrorBody::into_body` and
   # `ApiErrorProblem::problem` for `std::convert::Infallible`: the type is uninhabited, so no
   # `self` exists to call any of them with, and no test or caller can observe what they return.
