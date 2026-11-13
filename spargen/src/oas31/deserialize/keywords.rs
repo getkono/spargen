@@ -3,8 +3,8 @@
 //! `maxProperties`), and the other validation keywords `parse_validation` reads (`pattern`, the
 //! numeric bounds, `multipleOf`, `uniqueItems`). One of the wrong shape is `E011` at the keyword
 //! (or the array element) that holds it; dropping it would silently widen the schema. The one
-//! exception is OpenAPI 3.0's boolean `exclusiveMinimum`/`exclusiveMaximum`, which is `W001`, as
-//! is OpenAPI 3.0's `nullable: true` ([`oas30_nullable`]).
+//! exception is OpenAPI 3.0's boolean `exclusiveMinimum`/`exclusiveMaximum`, which is `W001`.
+//! OpenAPI 3.0's `nullable: true` is read here too ([`oas30_nullable`]), only to be reported.
 
 use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer};
 use crate::source::{Node, Number, SpannedMap, SpannedValue};
