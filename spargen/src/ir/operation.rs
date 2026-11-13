@@ -135,8 +135,9 @@ impl Api {
 }
 
 impl Operation {
-    /// The request body beside the type it lowered to, when it lowered to one: the only body the
-    /// operation's method takes an argument for and sends.
+    /// The request body beside the type it lowered to: the body the operation's method takes an
+    /// argument for and sends. Lowering types every body it keeps (`check_invariants` reports one
+    /// it did not), so this is `None` exactly when [`Self::request_body`] is.
     pub(crate) fn typed_body(&self) -> Option<(&RequestBody, Ty)> {
         self.request_body
             .as_ref()

@@ -998,7 +998,9 @@ fn with_reconnect_refuses_a_stream_that_holds_no_replayable_request() {
     ] {
         match stream.with_reconnect(policy.clone()) {
             Err(Error::RequestConstruction(cause)) => assert_eq!(
-                cause.to_string(),
+                std::error::Error::source(&cause)
+                    .expect("the message is the cause")
+                    .to_string(),
                 "this streaming request cannot be cloned safely for automatic reconnect"
             ),
             Err(error) => panic!("expected RequestConstruction, got {error}"),
@@ -1037,7 +1039,9 @@ fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
 
     match poll_ready(stream.next()) {
         Some(Err(Error::RequestConstruction(cause))) => assert_eq!(
-            cause.to_string(),
+            std::error::Error::source(&cause)
+                .expect("the message is the cause")
+                .to_string(),
             "streaming request could not be cloned for reconnect"
         ),
         other => panic!("expected RequestConstruction, got {other:?}"),

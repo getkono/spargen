@@ -9,7 +9,7 @@ use crate::ir::DateTimeBackend;
 use crate::output::atomic_write;
 use crate::runtime_contract::RuntimeRequirements;
 use crate::source::{local_identity, sha256_hex, working_dir, InputBundle, Sha256, LOCK_FILE_NAME};
-use crate::{Build, Code, Report, Spec};
+use crate::{Code, Report, Spec};
 
 const CACHE_FORMAT: u32 = 5;
 const INPUT_PREFIX: &str = "// input-sha256: ";
@@ -20,10 +20,20 @@ pub(crate) struct InputSnapshot {
     pub(crate) paths: Vec<Utf8PathBuf>,
 }
 
+/// Why the build inputs did not load, and what the attempt read.
+#[derive(Debug)]
+pub(crate) struct LoadFailure {
+    /// The whole diagnostic batch, not just its items, so a caller can tell a complete failure
+    /// list from one the `batch_cap` truncated. Boxed, so the `Result` carrying it stays small.
+    pub(crate) diagnostics: Box<Diagnostics>,
+    /// Every file the attempt read or tried to read, the one that failed it included (see
+    /// [`InputBundle::load_recording`]): what a failed build names to Cargo, so fixing that file
+    /// reruns it.
+    pub(crate) paths: Vec<Utf8PathBuf>,
+}
+
 impl InputSnapshot {
-    /// The error carries the whole diagnostic batch, not just its items, so a caller can tell a
-    /// complete failure list from one the `batch_cap` truncated.
-    pub(crate) fn load(spec: &Spec) -> Result<Self, Diagnostics> {
+    pub(crate) fn load(spec: &Spec) -> Result<Self, LoadFailure> {
         let inputs = read_inputs(spec)?;
         let inputs = inputs.sorted();
         Ok(Self {
@@ -139,12 +149,18 @@ fn datetime_byte(backend: DateTimeBackend) -> u8 {
 }
 
 /// The paths [`InputSnapshot::load`] fingerprints, read without hashing them.
-pub(crate) fn input_paths(spec: &Spec) -> Result<Vec<Utf8PathBuf>, Diagnostics> {
+pub(crate) fn input_paths(spec: &Spec) -> Result<Vec<Utf8PathBuf>, LoadFailure> {
     Ok(read_inputs(spec)?
         .sorted()
         .into_iter()
         .map(|(path, _)| path.to_path_buf())
         .collect())
+}
+
+/// The files reading `spec`'s build inputs reads: [`input_paths`] when they load, and every file
+/// the failed attempt read or tried to read when they do not.
+pub(crate) fn read_paths(spec: &Spec) -> Vec<Utf8PathBuf> {
+    input_paths(spec).unwrap_or_else(|failure| failure.paths)
 }
 
 /// The build inputs [`read_inputs`] read: the loaded bundle, whose files' bytes are borrowed
@@ -175,11 +191,17 @@ impl Inputs {
 
 /// Every build input `spec` reads: the bundle's files, `spargen.lock` beside the spec when there
 /// is one, and the applied config files.
-fn read_inputs(spec: &Spec) -> Result<Inputs, Diagnostics> {
+fn read_inputs(spec: &Spec) -> Result<Inputs, LoadFailure> {
     let mut diagnostics = Diagnostics::new(spec.batch_cap);
-    let bundle = match InputBundle::load(&spec.path, &mut diagnostics) {
+    let mut read = Vec::new();
+    let bundle = match InputBundle::load_recording(&spec.path, &mut diagnostics, &mut read) {
         Ok(bundle) => bundle,
-        Err(_) => return Err(diagnostics),
+        Err(_) => {
+            return Err(LoadFailure {
+                diagnostics: Box::new(diagnostics),
+                paths: read,
+            })
+        }
     };
 
     let mut files = Vec::new();
@@ -197,22 +219,28 @@ fn read_inputs(spec: &Spec) -> Result<Inputs, Diagnostics> {
                     format!("failed to read build input `{path}`: {error}"),
                 )
                 .emit(&mut diagnostics);
-                return Err(diagnostics);
+                return Err(LoadFailure {
+                    diagnostics: Box::new(diagnostics),
+                    paths: read,
+                });
             }
         }
     }
     Ok(Inputs { bundle, files })
 }
 
-/// The paths a build names to Cargo as `cargo:rerun-if-changed`: each input the snapshot read
-/// (only the root spec when there is no snapshot), each applied config file, and the output
-/// module, sorted and deduplicated.
-pub(crate) fn rerun_paths(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<Utf8PathBuf> {
-    let mut paths = snapshot
-        .map(|snapshot| snapshot.paths.clone())
-        .unwrap_or_else(|| vec![build.spec.path.clone()]);
-    paths.extend(build.spec.config_files.iter().cloned());
-    paths.push(build.output.clone());
+/// The paths a run over `spec` names to Cargo as `cargo:rerun-if-changed`: the root spec, each
+/// file in `read` (a snapshot's inputs, or what a failed load read), each applied config file, and
+/// the `output` module when the run writes one, sorted and deduplicated.
+pub(crate) fn rerun_paths(
+    spec: &Spec,
+    read: &[Utf8PathBuf],
+    output: Option<&Utf8Path>,
+) -> Vec<Utf8PathBuf> {
+    let mut paths = vec![spec.path.clone()];
+    paths.extend(read.iter().cloned());
+    paths.extend(spec.config_files.iter().cloned());
+    paths.extend(output.map(Utf8Path::to_path_buf));
     paths.sort();
     paths.dedup();
     paths
@@ -480,9 +508,9 @@ mod tests {
     use crate::{Build, CargoIntegration, DateTimeBackend, OmitRule, Outcome, Spec};
     use camino::{Utf8Path, Utf8PathBuf};
 
-    /// The `cargo:rerun-if-changed` lines a build prints for its inputs and output.
-    fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<String> {
-        rerun_if_changed_lines(&rerun_paths(build, snapshot))
+    /// The `cargo:rerun-if-changed` lines a build prints for the inputs it `read` and its output.
+    fn rerun_directives(build: &Build, read: &[Utf8PathBuf]) -> Vec<String> {
+        rerun_if_changed_lines(&rerun_paths(&build.spec, read, Some(&build.output)))
     }
 
     fn fixture() -> (tempfile::TempDir, Build) {
@@ -527,7 +555,7 @@ components:
             ],
         };
         assert_eq!(
-            rerun_directives(&build, Some(&snapshot)),
+            rerun_directives(&build, &snapshot.paths),
             [
                 "cargo:rerun-if-changed=/work/a.yaml",
                 "cargo:rerun-if-changed=/work/openapi.yaml",
@@ -535,11 +563,11 @@ components:
             ]
         );
 
-        // Without a snapshot only the root spec and the output are named, under the same guard.
+        // With nothing read, only the root spec and the output are named, under the same guard.
         let crafted = Spec::new(Utf8PathBuf::from("/work/z\ncargo:rustc-cfg=injected.yaml"))
             .build(Utf8PathBuf::from("/work/out/api.rs"));
         assert_eq!(
-            rerun_directives(&crafted, None),
+            rerun_directives(&crafted, &[]),
             ["cargo:rerun-if-changed=/work/out/api.rs"]
         );
     }
@@ -572,8 +600,8 @@ components:
             assert!(snapshot.paths.contains(path), "{:?}", snapshot.paths);
             let directive = format!("cargo:rerun-if-changed={path}");
             for directives in [
-                rerun_directives(&configured, Some(&snapshot)),
-                rerun_directives(&configured, None),
+                rerun_directives(&configured, &snapshot.paths),
+                rerun_directives(&configured, &[]),
             ] {
                 assert!(directives.contains(&directive), "{directives:#?}");
             }
@@ -591,6 +619,51 @@ components:
         std::fs::remove_file(&discovered).unwrap();
         let undiscovered = build.spec.clone().discover_config_file().unwrap();
         assert!(undiscovered.config_files.is_empty());
+    }
+
+    #[test]
+    fn a_failed_load_names_every_file_it_read_and_the_failing_target() {
+        // A build script that tolerates a rejection must rerun once the broken sub-file is fixed,
+        // so a failed load names what it read, not the root spec alone (#1350). `fixture`'s root
+        // references `schema.yaml`, which references `pet.yaml`.
+        let (temp, build) = fixture();
+        let dir = Utf8Path::from_path(temp.path()).unwrap();
+        std::fs::write(dir.join("schema.yaml"), "$ref: pet.yaml\n").unwrap();
+        let expected = [
+            format!("cargo:rerun-if-changed={dir}/api.rs"),
+            format!("cargo:rerun-if-changed={dir}/openapi.yaml"),
+            format!("cargo:rerun-if-changed={dir}/pet.yaml"),
+            format!("cargo:rerun-if-changed={dir}/schema.yaml"),
+        ];
+
+        // Missing, then malformed: either way the load fails and names the failing target.
+        for pet in [None, Some("type: [unclosed\n")] {
+            if let Some(contents) = pet {
+                std::fs::write(dir.join("pet.yaml"), contents).unwrap();
+            }
+            let Err(failure) = InputSnapshot::load(&build.spec) else {
+                panic!("{pet:?}: the load must fail");
+            };
+            assert!(failure.diagnostics.has_errors(), "{pet:?}");
+            assert_eq!(
+                rerun_directives(&build, &failure.paths),
+                expected,
+                "{pet:?}"
+            );
+            assert_eq!(super::read_paths(&build.spec), failure.paths, "{pet:?}");
+        }
+
+        // Fixed, the snapshot names the same files, and `read_paths` its inputs.
+        std::fs::write(dir.join("pet.yaml"), "type: string\n").unwrap();
+        let snapshot = InputSnapshot::load(&build.spec).unwrap();
+        assert_eq!(rerun_directives(&build, &snapshot.paths), expected);
+        assert_eq!(super::read_paths(&build.spec), snapshot.paths);
+
+        // `check` writes no output, so it names the same inputs and no module.
+        assert_eq!(
+            rerun_if_changed_lines(&rerun_paths(&build.spec, &snapshot.paths, None)),
+            expected[1..]
+        );
     }
 
     #[test]

@@ -11,8 +11,13 @@ use crate::{AuthError, ResponseValue};
 /// Twelve variants are constructed: classes #1 to #9, and #11 to #13. Taxonomy class #10, cancellation, is a
 /// documented drop-safety guarantee rather than a variant: dropping a returned future is safe and
 /// side-effect-free beyond standard HTTP semantics. The enum implements [`std::error::Error`], whose `source()` reaches
-/// each retained cause, and `Debug` never leaks secrets.
-#[derive(Debug)]
+/// each retained cause; each level of that chain displays only its own text, so a reporter that
+/// prints the whole chain prints each cause once.
+///
+/// `Debug` prints the response headers of [`Error::Api`], [`Error::UnexpectedStatus`] and
+/// [`Error::Decode`] with the value of every `Set-Cookie`, `Authorization` and
+/// `Proxy-Authenticate` header, and of every header whose value is marked sensitive, replaced by
+/// `[redacted]`; header names, every other header, the status and the body print as they are.
 #[non_exhaustive]
 pub enum Error<E> {
     /// #1 — a request could not be built, or failed inside the send before that request produced
@@ -516,6 +521,112 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
     }
 }
 
+impl<E: std::fmt::Debug> std::fmt::Debug for Error<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::RequestConstruction(e) => f.debug_tuple("RequestConstruction").field(e).finish(),
+            Error::Transport(e) => f.debug_tuple("Transport").field(e).finish(),
+            Error::Timeout(kind) => f.debug_tuple("Timeout").field(kind).finish(),
+            Error::Protocol(e) => f.debug_tuple("Protocol").field(e).finish(),
+            Error::Redirect(e) => f.debug_tuple("Redirect").field(e).finish(),
+            Error::Api(value) => f
+                .debug_tuple("Api")
+                .field(&RedactedResponse {
+                    status: value.status(),
+                    headers: value.headers(),
+                    inner: value.inner(),
+                })
+                .finish(),
+            Error::UnexpectedStatus {
+                status,
+                headers,
+                body,
+            } => f
+                .debug_struct("UnexpectedStatus")
+                .field("status", status)
+                .field("headers", &RedactedHeaders(headers))
+                .field("body", body)
+                .finish(),
+            Error::Decode {
+                status,
+                headers,
+                path,
+                body,
+                truncated,
+            } => f
+                .debug_struct("Decode")
+                .field("status", status)
+                .field("headers", &RedactedHeaders(headers))
+                .field("path", path)
+                .field("body", body)
+                .field("truncated", truncated)
+                .finish(),
+            Error::InterruptedBody(e) => f.debug_tuple("InterruptedBody").field(e).finish(),
+            Error::PaginationCycle { url } => {
+                f.debug_struct("PaginationCycle").field("url", url).finish()
+            }
+            Error::PaginationOriginChanged { from, to } => f
+                .debug_struct("PaginationOriginChanged")
+                .field("from", from)
+                .field("to", to)
+                .finish(),
+            Error::BodyTooLarge { limit, status } => f
+                .debug_struct("BodyTooLarge")
+                .field("limit", limit)
+                .field("status", status)
+                .finish(),
+        }
+    }
+}
+
+/// The `Debug` of an [`Error::Api`]'s `ResponseValue`, laid out as its own derive lays it out,
+/// with its headers redacted.
+struct RedactedResponse<'a, E> {
+    status: StatusCode,
+    headers: &'a HeaderMap,
+    inner: &'a E,
+}
+
+impl<E: std::fmt::Debug> std::fmt::Debug for RedactedResponse<'_, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResponseValue")
+            .field("status", &self.status)
+            .field("headers", &RedactedHeaders(self.headers))
+            .field("inner", self.inner)
+            .finish()
+    }
+}
+
+/// A response's headers as `HeaderMap`'s own `Debug` prints them, one entry per value, except
+/// that a value [`is_redacted`] prints as `[redacted]`.
+struct RedactedHeaders<'a>(&'a HeaderMap);
+
+impl std::fmt::Debug for RedactedHeaders<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut map = f.debug_map();
+        for (name, value) in self.0 {
+            if is_redacted(name, value) {
+                map.entry(name, &format_args!("[redacted]"));
+            } else {
+                map.entry(name, value);
+            }
+        }
+        map.finish()
+    }
+}
+
+/// Whether an error's `Debug` redacts a response header's value: a `Set-Cookie`,
+/// `Authorization` or `Proxy-Authenticate` header, or a value marked sensitive.
+fn is_redacted(name: &reqwest::header::HeaderName, value: &reqwest::header::HeaderValue) -> bool {
+    value.is_sensitive()
+        || [
+            reqwest::header::SET_COOKIE,
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::PROXY_AUTHENTICATE,
+        ]
+        .contains(name)
+}
+
 /// Write `text` with each control character replaced by its `escape_debug` form, so text quoted
 /// from a server (a LF, CR or tab included) cannot break or forge the line it is written into.
 pub(crate) fn write_escaped(f: &mut std::fmt::Formatter<'_>, text: &str) -> std::fmt::Result {
@@ -1014,7 +1125,8 @@ impl std::fmt::Display for RequestError {
                 f,
                 "the operation requires header `{name}`, and the client binds no value to it"
             ),
-            RequestError::Other(cause) => write!(f, "{cause}"),
+            // The cause is this level's `source()`, so a full-chain reporter prints it there.
+            RequestError::Other(_) => f.write_str("the request could not be built or sent"),
         }
     }
 }
@@ -1038,8 +1150,9 @@ impl std::error::Error for RequestError {
 macro_rules! impl_source_error {
     ($ty:ty, $label:literal) => {
         impl std::fmt::Display for $ty {
+            // The label alone: the cause is `source()`, so a full-chain reporter prints it there.
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}: {}", $label, self.source)
+                f.write_str($label)
             }
         }
 
@@ -1053,7 +1166,8 @@ macro_rules! impl_source_error {
 }
 
 impl_source_error!(TransportError, "transport error");
-impl_source_error!(ProtocolError, "protocol error");
+// Not "protocol error", which `Error::Protocol` already displays one level up.
+impl_source_error!(ProtocolError, "malformed or undecodable response");
 impl_source_error!(RedirectError, "redirect error");
 
 #[cfg(test)]
