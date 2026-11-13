@@ -88,8 +88,8 @@ pub(super) fn with_bound_header_tokens(api: &Api, body: TokenStream) -> Option<T
 
 /// The declared security schemes, rendered as rustdoc for `with_credential`, for the reason
 /// [`crate::ir::SecuritySchemeDef`] gives. The lines carry the spec's scheme and scope
-/// descriptions, so they go through [`carried`] together, as the one Markdown text rustdoc joins
-/// them into.
+/// descriptions, so they go through [`carried`] and then [`normalize_rustdoc`] together, as the one
+/// Markdown text rustdoc joins them into.
 fn scheme_doc_lines(api: &Api, options: &CodegenOptions) -> Vec<TokenStream> {
     let documented: Vec<&str> = api
         .security_schemes
@@ -105,7 +105,7 @@ fn scheme_doc_lines(api: &Api, options: &CodegenOptions) -> Vec<TokenStream> {
         String::new(),
     ];
     lines.extend(
-        carried(&documented.join("\n"), options)
+        normalize_rustdoc(&carried(&documented.join("\n"), options))
             .split('\n')
             .map(str::to_owned),
     );
@@ -327,7 +327,7 @@ fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStre
         let ident = names.servers.get(index).expect("server name allocated");
         let mut docs = vec![format!("Server `{}`.", server.url)];
         if let Some(description) = &server.description {
-            docs.push(carried(description, options).into_owned());
+            docs.push(normalize_rustdoc(&carried(description, options)));
         }
         let doc_attrs = docs.iter().map(|line| quote! { #[doc = #line] });
 
@@ -408,6 +408,7 @@ fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStre
                 doc.push(' ');
                 doc.push_str(&carried(description, options));
             }
+            let doc = normalize_rustdoc(&doc);
             match enum_ident(name) {
                 Some(enum_ident) => {
                     quote! {
