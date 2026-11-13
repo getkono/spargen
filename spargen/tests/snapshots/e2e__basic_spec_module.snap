@@ -403,11 +403,14 @@ mod support {
         ///
         /// A success, or a call with no `Replay`, is returned as it came. Otherwise the response's body is
         /// read into memory as the operation's error would read it, up to the first chunk past
-        /// `ClientConfig::max_error_body`, and each refreshable credential whose `is_rejection` holds for it
+        /// `ClientConfig::max_error_body`, or past [`super::RequestOptions::max_body`] where that is
+        /// smaller, and each refreshable credential whose `is_rejection` holds for it
         /// is handed the token it sent to its `on_rejected`. When none holds, the response is returned.
         /// When one does, the request is signed again — a refreshed scheme with its fresh token, another
         /// refreshable scheme with the token it sent, any other credential attached as it was the first
-        /// time — and sent once more. Its response is returned unless it is rejected again.
+        /// time — and sent once more. Its response is returned unless it is rejected again. The replay is
+        /// prepared as the first send was, so it carries a `TotalTimeout` of its own: a call that replays
+        /// may take [`super::ClientConfig::timeout`] twice over, plus the refresh.
         ///
         /// A refresh that fails, a credential that can no longer attach, a replay that fails to send or
         /// whose failed body cannot be read, and a replay rejected again each return the original response,
@@ -491,16 +494,21 @@ mod support {
             Ok(unbuffered(if rejected_again { original } else { replayed }))
         }
         /// A failed `response` with its body read into memory for a [`RejectionCheck`] to read, as the
-        /// error classifier reads it: up to the first chunk past the client's `max_error_body`, the rest
-        /// abandoned. A body that held more keeps more than `max_error_body` bytes, so the operation's
-        /// error classifies it as truncated, as it would have the whole body.
+        /// error classifier reads it: up to the first chunk past the client's `max_error_body`, or past
+        /// the call's [`super::RequestOptions::max_body`] where that is smaller, the rest abandoned. A body
+        /// that held more keeps more than that bound, so the operation's error classifies it as it would
+        /// have the whole body: truncated past `max_error_body`, and [`Error::BodyTooLarge`] past
+        /// `max_body`.
         async fn buffered(
             core: &ClientCore,
             response: http::Response<HttpBody>,
         ) -> Result<http::Response<Bytes>, super::TransportError> {
+            let bound = super::dispatch::error_body_bound(
+                core.config().max_error_body,
+                &response,
+            );
             let (parts, body) = response.into_parts();
-            let body = super::dispatch::read_prefix(core.config().max_error_body, body)
-                .await?;
+            let body = super::dispatch::read_prefix(bound, body).await?;
             Ok(http::Response::from_parts(parts, body))
         }
         /// A [`buffered`] response back on the transport seam, its body in memory.
@@ -852,7 +860,10 @@ mod support {
             /// already carries one keeps it, as does one given one by [`RequestOptions::extensions`],
             /// which `send` applies first, [`ReqwestBackend`] enforces it, and so does a caller-supplied
             /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. Behind
-            /// a [`super::RetryBackend`] it bounds each attempt, not the retried call as a whole. A
+            /// a [`super::RetryBackend`] it bounds each attempt, not the retried call as a whole. A call
+            /// replayed after a refreshable credential was rejected and refreshed sends the replay with a
+            /// `TotalTimeout` of its own, so the call as a whole may take this long for the first
+            /// exchange, the refresh as long as it takes, and this long again for the replay. A
             /// streaming response is exempt,
             /// because a stream may rightly stay open indefinitely: an operation returning an
             /// `EventStream` sends its request with the runtime's `send_streaming`, which never applies
@@ -864,7 +875,10 @@ mod support {
             ///
             /// A response whose `Content-Length` declares more is refused before any of its body is read,
             /// and one that grows past it is abandoned at the chunk that crosses it, which forgoes reuse
-            /// of that connection; peak memory is the limit, not what the server chose to send.
+            /// of that connection; peak memory is the limit, not what the server chose to send. The
+            /// answer to a `HEAD` request and a `1xx`, `204` or `304` response carry no body, so their
+            /// `Content-Length`, which describes a representation they do not carry, refuses nothing;
+            /// whatever body they do carry is bounded as it is read.
             /// [`RequestOptions::max_body`], set per client value with a generated client's
             /// `with_options`, replaces it. It is read each time the runtime's `send` sends a request, as
             /// [`Self::timeout`] is. An operation returning an `EventStream` is exempt: its items are
@@ -908,7 +922,8 @@ mod support {
             /// force.
             ///
             /// On a success body it replaces [`ClientConfig::max_success_body`], and bounds the read as
-            /// that field describes: a `Content-Length` past it is refused before the body is read, and a
+            /// that field describes: a `Content-Length` past it is refused before the body is read (unless
+            /// the response carries no body, as that field says), and a
             /// body that grows past it is abandoned at the chunk that crosses it. An error body is read no
             /// further than [`ClientConfig::max_error_body`] in any case; where this limit is the smaller
             /// of the two, an error body past it fails with [`Error::BodyTooLarge`] the same way, instead
@@ -1331,7 +1346,11 @@ mod support {
             request: http::Request<HttpBody>,
             streaming: bool,
         ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
+            let head = request.method() == http::Method::HEAD;
             let mut response = send_on(core.backend().as_ref(), request).await?;
+            if head {
+                response.extensions_mut().insert(HeadResponse);
+            }
             if !streaming {
                 insert_body_limits(core, &mut response);
             }
@@ -1405,6 +1424,41 @@ mod support {
             /// The most bytes an error body may hold, where it is less than `max_error_body`.
             error: Option<usize>,
         }
+        /// The most bytes of a failed `response`'s body its error reads: `max_error_body`, or the error
+        /// limit of the [`BodyLimits`] it carries where that is smaller.
+        pub(crate) fn error_body_bound(
+            max_error_body: usize,
+            response: &Response,
+        ) -> usize {
+            response
+                .extensions()
+                .get::<BodyLimits>()
+                .and_then(|limits| limits.error)
+                .map_or(max_error_body, |limit| limit.min(max_error_body))
+        }
+        /// Marks a response [`execute`] received for a `HEAD` request, so the reader of its body knows its
+        /// `Content-Length` describes a representation it does not carry.
+        #[derive(Debug, Clone, Copy)]
+        struct HeadResponse;
+        /// Whether the response `parts` describe carries no body whatever its `Content-Length` says: the
+        /// answer to a `HEAD` request [`execute`] sent, or a `1xx`, `204` or `304` response (RFC 9110
+        /// §6.4.1). Its body is still bounded as it is read.
+        fn is_bodiless(parts: &http::response::Parts) -> bool {
+            parts.extensions.get::<HeadResponse>().is_some()
+                || parts.status.is_informational()
+                || parts.status == http::StatusCode::NO_CONTENT
+                || parts.status == http::StatusCode::NOT_MODIFIED
+        }
+        /// The body length a response declares in a well-formed `Content-Length`, unless it
+        /// [`is_bodiless`], whose `Content-Length` declares no body it carries.
+        pub(crate) fn declared_body_length(
+            parts: &http::response::Parts,
+        ) -> Option<u64> {
+            if is_bodiless(parts) {
+                return None;
+            }
+            declared_length(&parts.headers)
+        }
         /// Whether `headers` declare a `Content-Length` past `limit`. A missing or malformed one declares
         /// nothing, and the body is bounded as it is read instead.
         fn declares_more_than(
@@ -1414,9 +1468,7 @@ mod support {
             declared_length(headers).is_some_and(|length| exceeds(length, limit))
         }
         /// The body length `headers` declare in a well-formed `Content-Length`.
-        pub(crate) fn declared_length(
-            headers: &reqwest::header::HeaderMap,
-        ) -> Option<u64> {
+        fn declared_length(headers: &reqwest::header::HeaderMap) -> Option<u64> {
             headers
                 .get(reqwest::header::CONTENT_LENGTH)
                 .and_then(|length| length.to_str().ok())
@@ -1426,15 +1478,17 @@ mod support {
         pub(crate) fn exceeds(length: u64, limit: usize) -> bool {
             u64::try_from(limit).is_ok_and(|limit| length > limit)
         }
-        /// Read `body` whole, or fail with [`Error::BodyTooLarge`] once it is known to hold more than
-        /// `limit` bytes: up front from a `Content-Length` past it, or at the chunk that carries it past.
+        /// Read `body`, the body of the response `parts` describe, whole, or fail with
+        /// [`Error::BodyTooLarge`] once it is known to hold more than `limit` bytes: up front from a
+        /// `Content-Length` past it, unless the response [`is_bodiless`], or at the chunk that carries it
+        /// past.
         async fn read_within<E>(
             limit: usize,
-            status: reqwest::StatusCode,
-            headers: &reqwest::header::HeaderMap,
+            parts: &http::response::Parts,
             body: HttpBody,
         ) -> Result<Bytes, Error<E>> {
-            if declares_more_than(headers, limit) {
+            let status = parts.status;
+            if !is_bodiless(parts) && declares_more_than(&parts.headers, limit) {
                 return Err(Error::BodyTooLarge {
                     limit,
                     status,
@@ -1524,11 +1578,11 @@ mod support {
                 .get::<BodyLimits>()
                 .and_then(|limits| limits.success)
                 .or(default_limit);
-            let (status, headers) = (parts.status, parts.headers);
             let body = match limit {
-                Some(limit) => read_within(limit, status, &headers, body).await?,
+                Some(limit) => read_within(limit, &parts, body).await?,
                 None => body.collect().await.map_err(Error::from_transport)?,
             };
+            let (status, headers) = (parts.status, parts.headers);
             match decode(&body) {
                 Ok(value) => Ok(ResponseValue::new(status, headers, value)),
                 Err(path) => {
@@ -1612,7 +1666,7 @@ mod support {
                 .and_then(|limits| limits.error)
                 .filter(|limit| *limit < max_error_body);
             if let Some(limit) = limit {
-                let body = read_within(limit, parts.status, &parts.headers, body).await?;
+                let body = read_within(limit, &parts, body).await?;
                 let (body, truncated) = cap_body(body, max_error_body);
                 return Ok((parts.status, parts.headers, body, truncated));
             }
@@ -1902,7 +1956,8 @@ mod support {
             /// `ClientConfig::max_success_body`, and for a raw binary success body where neither is set
             /// `ClientConfig::DEFAULT_MAX_BINARY_BODY`; or the limit a [`super::ByteStream`]'s
             /// `collect_bounded` was given. A `Content-Length` past it is refused before the body is
-            /// read; a body that grows past it is abandoned at the chunk that crosses it. Nothing of the
+            /// read, unless the response carries no body (a `HEAD` request's answer, or a `1xx`, `204` or
+            /// `304`); a body that grows past it is abandoned at the chunk that crosses it. Nothing of the
             /// body is retained. Not transient: the same limit refuses the same response again.
             BodyTooLarge {
                 /// The limit, in bytes, the body exceeded.
@@ -4620,7 +4675,9 @@ mod support {
             /// The rest of the body as one `Bytes`, or [`Error::BodyTooLarge`] once it is known to hold
             /// more than `limit` bytes: before anything is read, where nothing has been and the response
             /// declared a `Content-Length` past `limit`, and otherwise at the chunk that carries it past
-            /// `limit`, which is never buffered. Nothing of an over-limit body is returned.
+            /// `limit`, which is never buffered. Nothing of an over-limit body is returned. A `1xx`, `204`
+            /// or `304` response, or the answer to a `HEAD` request, declares no body it carries, so its
+            /// `Content-Length` refuses nothing.
             pub async fn collect_bounded(
                 self,
                 limit: usize,
@@ -4663,7 +4720,7 @@ mod support {
             response: http::Response<HttpBody>,
         ) -> ResponseValue<ByteStream> {
             let (parts, body) = response.into_parts();
-            let declared = super::dispatch::declared_length(&parts.headers);
+            let declared = super::dispatch::declared_body_length(&parts);
             ResponseValue::new(
                 parts.status,
                 parts.headers,

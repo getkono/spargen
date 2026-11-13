@@ -349,11 +349,14 @@ pub async fn attach_auth_replayable(
 ///
 /// A success, or a call with no `Replay`, is returned as it came. Otherwise the response's body is
 /// read into memory as the operation's error would read it, up to the first chunk past
-/// `ClientConfig::max_error_body`, and each refreshable credential whose `is_rejection` holds for it
+/// `ClientConfig::max_error_body`, or past [`crate::RequestOptions::max_body`] where that is
+/// smaller, and each refreshable credential whose `is_rejection` holds for it
 /// is handed the token it sent to its `on_rejected`. When none holds, the response is returned.
 /// When one does, the request is signed again — a refreshed scheme with its fresh token, another
 /// refreshable scheme with the token it sent, any other credential attached as it was the first
-/// time — and sent once more. Its response is returned unless it is rejected again.
+/// time — and sent once more. Its response is returned unless it is rejected again. The replay is
+/// prepared as the first send was, so it carries a `TotalTimeout` of its own: a call that replays
+/// may take [`crate::ClientConfig::timeout`] twice over, plus the refresh.
 ///
 /// A refresh that fails, a credential that can no longer attach, a replay that fails to send or
 /// whose failed body cannot be read, and a replay rejected again each return the original response,
@@ -436,15 +439,18 @@ pub async fn replay_rejected(
 }
 
 /// A failed `response` with its body read into memory for a [`RejectionCheck`] to read, as the
-/// error classifier reads it: up to the first chunk past the client's `max_error_body`, the rest
-/// abandoned. A body that held more keeps more than `max_error_body` bytes, so the operation's
-/// error classifies it as truncated, as it would have the whole body.
+/// error classifier reads it: up to the first chunk past the client's `max_error_body`, or past
+/// the call's [`crate::RequestOptions::max_body`] where that is smaller, the rest abandoned. A body
+/// that held more keeps more than that bound, so the operation's error classifies it as it would
+/// have the whole body: truncated past `max_error_body`, and [`Error::BodyTooLarge`] past
+/// `max_body`.
 async fn buffered(
     core: &ClientCore,
     response: http::Response<HttpBody>,
 ) -> Result<http::Response<Bytes>, crate::TransportError> {
+    let bound = crate::dispatch::error_body_bound(core.config().max_error_body, &response);
     let (parts, body) = response.into_parts();
-    let body = crate::dispatch::read_prefix(core.config().max_error_body, body).await?;
+    let body = crate::dispatch::read_prefix(bound, body).await?;
     Ok(http::Response::from_parts(parts, body))
 }
 

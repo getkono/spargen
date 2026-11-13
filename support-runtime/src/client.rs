@@ -79,7 +79,10 @@ pub struct ClientConfig {
     /// already carries one keeps it, as does one given one by [`RequestOptions::extensions`],
     /// which `send` applies first, [`ReqwestBackend`] enforces it, and so does a caller-supplied
     /// [`HttpBackend`] that delegates to a `ReqwestBackend` or reads the extension itself. Behind
-    /// a [`crate::RetryBackend`] it bounds each attempt, not the retried call as a whole. A
+    /// a [`crate::RetryBackend`] it bounds each attempt, not the retried call as a whole. A call
+    /// replayed after a refreshable credential was rejected and refreshed sends the replay with a
+    /// `TotalTimeout` of its own, so the call as a whole may take this long for the first
+    /// exchange, the refresh as long as it takes, and this long again for the replay. A
     /// streaming response is exempt,
     /// because a stream may rightly stay open indefinitely: an operation returning an
     /// `EventStream` sends its request with the runtime's `send_streaming`, which never applies
@@ -91,7 +94,10 @@ pub struct ClientConfig {
     ///
     /// A response whose `Content-Length` declares more is refused before any of its body is read,
     /// and one that grows past it is abandoned at the chunk that crosses it, which forgoes reuse
-    /// of that connection; peak memory is the limit, not what the server chose to send.
+    /// of that connection; peak memory is the limit, not what the server chose to send. The
+    /// answer to a `HEAD` request and a `1xx`, `204` or `304` response carry no body, so their
+    /// `Content-Length`, which describes a representation they do not carry, refuses nothing;
+    /// whatever body they do carry is bounded as it is read.
     /// [`RequestOptions::max_body`], set per client value with a generated client's
     /// `with_options`, replaces it. It is read each time the runtime's `send` sends a request, as
     /// [`Self::timeout`] is. An operation returning an `EventStream` is exempt: its items are
@@ -138,7 +144,8 @@ pub struct RequestOptions {
     /// force.
     ///
     /// On a success body it replaces [`ClientConfig::max_success_body`], and bounds the read as
-    /// that field describes: a `Content-Length` past it is refused before the body is read, and a
+    /// that field describes: a `Content-Length` past it is refused before the body is read (unless
+    /// the response carries no body, as that field says), and a
     /// body that grows past it is abandoned at the chunk that crosses it. An error body is read no
     /// further than [`ClientConfig::max_error_body`] in any case; where this limit is the smaller
     /// of the two, an error body past it fails with [`Error::BodyTooLarge`] the same way, instead

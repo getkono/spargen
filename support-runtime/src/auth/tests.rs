@@ -1353,6 +1353,54 @@ fn the_failed_body_the_check_reads_is_capped_at_max_error_body() {
     assert_classified_as_truncated(&core, response);
 }
 
+/// Issue #1308: where `RequestOptions::max_body` is below `max_error_body`, the failed body
+/// `is_rejection` is handed is read no further than `max_body`, up to the first chunk past it, and
+/// the operation's error refuses it as `BodyTooLarge`, as it would with no refreshable credential.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_failed_body_the_check_reads_is_bounded_by_a_smaller_max_body() {
+    let backend = SequenceBackend::new([Reply::status(200, "ok")]);
+    let mut core = core_over(&backend);
+    core.config_mut().max_error_body = 4096;
+    core.set_options(crate::RequestOptions {
+        max_body: Some(2048),
+        ..crate::RequestOptions::default()
+    });
+    let seen = Arc::new(AtomicUsize::new(0));
+    let seen_by_check = seen.clone();
+    core.set_credential(
+        "token",
+        Credential::refreshable(
+            token_provider(|| async { Ok(SecretString::from("stale")) }),
+            move |response| {
+                seen_by_check.store(response.body().len(), Ordering::SeqCst);
+                false
+            },
+            |_| async { Ok(SecretString::from("fresh")) },
+        ),
+    );
+    let (_, replay) = poll_ready(attach_auth_replayable(&core, get(&core), &[BEARER])).unwrap();
+    let body = crate::tests::Chunks::repeat(1024, 1024);
+    let pulled = body.pulled();
+    let response = http::Response::builder()
+        .status(401)
+        .body(crate::HttpBody::wrap(body))
+        .unwrap();
+    let response = crate::dispatch::with_body_limits(&core, response);
+
+    let response = poll_ready(replay_rejected(&core, response, replay, false)).unwrap();
+    // Two pulls reach `max_body` exactly, and the third is the first past it.
+    assert_eq!(pulled.load(Ordering::SeqCst), 3);
+    assert_eq!(seen.load(Ordering::SeqCst), 3 * 1024);
+    let error =
+        poll_ready(crate::dispatch::read_error_body::<std::convert::Infallible>(&core, response))
+            .unwrap_err();
+    assert!(
+        matches!(error, Error::BodyTooLarge { limit: 2048, status } if status == 401),
+        "{error:?}"
+    );
+}
+
 /// A transport answering a 401 its refreshable credential rejects, then a 1 MiB failed body in
 /// 1 KiB chunks, counting the chunks pulled from it.
 struct OversizedReplay {

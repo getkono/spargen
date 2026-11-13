@@ -223,7 +223,11 @@ pub(crate) async fn execute_once(
     request: http::Request<HttpBody>,
     streaming: bool,
 ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
+    let head = request.method() == http::Method::HEAD;
     let mut response = send_on(core.backend().as_ref(), request).await?;
+    if head {
+        response.extensions_mut().insert(HeadResponse);
+    }
     if !streaming {
         insert_body_limits(core, &mut response);
     }
@@ -301,6 +305,40 @@ struct BodyLimits {
     error: Option<usize>,
 }
 
+/// The most bytes of a failed `response`'s body its error reads: `max_error_body`, or the error
+/// limit of the [`BodyLimits`] it carries where that is smaller.
+pub(crate) fn error_body_bound(max_error_body: usize, response: &Response) -> usize {
+    response
+        .extensions()
+        .get::<BodyLimits>()
+        .and_then(|limits| limits.error)
+        .map_or(max_error_body, |limit| limit.min(max_error_body))
+}
+
+/// Marks a response [`execute`] received for a `HEAD` request, so the reader of its body knows its
+/// `Content-Length` describes a representation it does not carry.
+#[derive(Debug, Clone, Copy)]
+struct HeadResponse;
+
+/// Whether the response `parts` describe carries no body whatever its `Content-Length` says: the
+/// answer to a `HEAD` request [`execute`] sent, or a `1xx`, `204` or `304` response (RFC 9110
+/// §6.4.1). Its body is still bounded as it is read.
+fn is_bodiless(parts: &http::response::Parts) -> bool {
+    parts.extensions.get::<HeadResponse>().is_some()
+        || parts.status.is_informational()
+        || parts.status == http::StatusCode::NO_CONTENT
+        || parts.status == http::StatusCode::NOT_MODIFIED
+}
+
+/// The body length a response declares in a well-formed `Content-Length`, unless it
+/// [`is_bodiless`], whose `Content-Length` declares no body it carries.
+pub(crate) fn declared_body_length(parts: &http::response::Parts) -> Option<u64> {
+    if is_bodiless(parts) {
+        return None;
+    }
+    declared_length(&parts.headers)
+}
+
 /// Whether `headers` declare a `Content-Length` past `limit`. A missing or malformed one declares
 /// nothing, and the body is bounded as it is read instead.
 fn declares_more_than(headers: &reqwest::header::HeaderMap, limit: usize) -> bool {
@@ -308,7 +346,7 @@ fn declares_more_than(headers: &reqwest::header::HeaderMap, limit: usize) -> boo
 }
 
 /// The body length `headers` declare in a well-formed `Content-Length`.
-pub(crate) fn declared_length(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+fn declared_length(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::CONTENT_LENGTH)
         .and_then(|length| length.to_str().ok())
@@ -320,15 +358,17 @@ pub(crate) fn exceeds(length: u64, limit: usize) -> bool {
     u64::try_from(limit).is_ok_and(|limit| length > limit)
 }
 
-/// Read `body` whole, or fail with [`Error::BodyTooLarge`] once it is known to hold more than
-/// `limit` bytes: up front from a `Content-Length` past it, or at the chunk that carries it past.
+/// Read `body`, the body of the response `parts` describe, whole, or fail with
+/// [`Error::BodyTooLarge`] once it is known to hold more than `limit` bytes: up front from a
+/// `Content-Length` past it, unless the response [`is_bodiless`], or at the chunk that carries it
+/// past.
 async fn read_within<E>(
     limit: usize,
-    status: reqwest::StatusCode,
-    headers: &reqwest::header::HeaderMap,
+    parts: &http::response::Parts,
     body: HttpBody,
 ) -> Result<Bytes, Error<E>> {
-    if declares_more_than(headers, limit) {
+    let status = parts.status;
+    if !is_bodiless(parts) && declares_more_than(&parts.headers, limit) {
         return Err(Error::BodyTooLarge { limit, status });
     }
     body.collect_within(limit)
@@ -415,11 +455,11 @@ async fn decode_success_within<T>(
         .get::<BodyLimits>()
         .and_then(|limits| limits.success)
         .or(default_limit);
-    let (status, headers) = (parts.status, parts.headers);
     let body = match limit {
-        Some(limit) => read_within(limit, status, &headers, body).await?,
+        Some(limit) => read_within(limit, &parts, body).await?,
         None => body.collect().await.map_err(Error::from_transport)?,
     };
+    let (status, headers) = (parts.status, parts.headers);
     match decode(&body) {
         Ok(value) => Ok(ResponseValue::new(status, headers, value)),
         Err(path) => {
@@ -504,7 +544,7 @@ async fn read_error_body_capped<E>(
         .and_then(|limits| limits.error)
         .filter(|limit| *limit < max_error_body);
     if let Some(limit) = limit {
-        let body = read_within(limit, parts.status, &parts.headers, body).await?;
+        let body = read_within(limit, &parts, body).await?;
         // Within `limit`, so under the cap: `cap_body` only detaches the retained copy.
         let (body, truncated) = cap_body(body, max_error_body);
         return Ok((parts.status, parts.headers, body, truncated));
