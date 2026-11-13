@@ -185,6 +185,8 @@ components:
       type: object
       required: [detail]
       properties:
+        # The fallback keeps the unrecognized tag it was decoded with, and writes it back.
+        outcome: { type: string }
         detail: { type: string }
   mediaTypes:
     QueryBody:
