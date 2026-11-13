@@ -106,6 +106,35 @@ fn url_userinfo_becomes_basic_auth_and_leaves_the_uri() {
     }
 }
 
+/// Issue #1333: a userinfo username that percent-decodes to one holding `:` cannot be sent as
+/// `Authorization: Basic`, since the server splits at the first colon (RFC 7617 §2); the builder
+/// fails before anything is sent, and its error carries neither the username nor the password.
+#[test]
+fn a_userinfo_username_decoding_to_a_colon_fails_the_builder() {
+    for text in [
+        "https://u%3Ax:secret@example.com/op",
+        "https://u%3ax@example.com/op",
+        "https://%3A:secret@example.com/op",
+    ] {
+        let error = RequestBuilder::new(Method::GET, url(text))
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::RequestConstruction(crate::RequestError::Other(_))
+            ),
+            "{text}: {error:?}"
+        );
+        let shown = format!("{error} {error:?}");
+        assert!(shown.contains("`:`"), "{shown}");
+        assert!(
+            !shown.contains("secret") && !shown.contains("u:x"),
+            "{shown}"
+        );
+    }
+}
+
 /// Only a `%` and two hexadecimal digits decode; any other `%` is kept as it is.
 #[test]
 fn percent_decoding_reads_only_well_formed_escapes() {

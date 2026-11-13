@@ -930,14 +930,111 @@ fn a_basic_credential_is_base64_of_user_colon_password() {
         assert_eq!(header, expected);
         assert!(header.is_sensitive());
     }
-    assert_eq!(super::base64_encode(b""), "");
-    assert_eq!(super::base64_encode(b"f"), "Zg==");
-    assert_eq!(super::base64_encode(b"fo"), "Zm8=");
-    assert_eq!(super::base64_encode(b"foo"), "Zm9v");
-    assert_eq!(super::base64_encode(b"foob"), "Zm9vYg==");
-    assert_eq!(super::base64_encode(b"fooba"), "Zm9vYmE=");
-    assert_eq!(super::base64_encode(b"foobar"), "Zm9vYmFy");
-    assert_eq!(super::base64_encode(&[0xfb, 0xff]), "+/8=");
+    // The encoder over raw bytes, each padding length, and both alphabet characters past `9`.
+    let cases: [(&[u8], &[u8], &str); 5] = [
+        (b"", b"", "Basic Og=="),
+        (b"f", b"", "Basic Zjo="),
+        (b"f", b"o", "Basic Zjpv"),
+        (b"foo", b"bar", "Basic Zm9vOmJhcg=="),
+        (b"\xfb", b"\xff", "Basic +zr/"),
+    ];
+    for (username, password, expected) in cases {
+        let value = super::basic_authorization(username, password);
+        assert_eq!(value.as_str(), expected);
+        // Built at its exact length, so no growth left a copy of the secret behind.
+        assert_eq!(value.capacity(), value.len());
+    }
+}
+
+/// Issue #1333: RFC 7617 §2 forbids a colon in a Basic user-id, because the server splits the
+/// decoded credentials at the first one. A `Basic` credential whose username holds one is refused
+/// as `CredentialMismatch` before anything is sent, rather than sent for the server to read as a
+/// different user and password; a colon in the password is the server's to keep.
+#[test]
+fn a_basic_username_holding_a_colon_is_refused_before_send() {
+    let attach = |username: &str| {
+        let mut core = core();
+        core.set_credential(
+            "login",
+            Credential::Basic {
+                username: username.to_owned(),
+                password: SecretString::from("pa:ss"),
+            },
+        );
+        poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "login",
+                kind: AuthKind::Basic,
+            }]],
+        ))
+    };
+    for username in [":", "us:er", "user:", ":user"] {
+        let error = match attach(username).unwrap_err() {
+            Error::RequestConstruction(
+                error @ RequestError::CredentialMismatch {
+                    scheme: "login",
+                    required: "http basic",
+                    registered: "Basic",
+                },
+            ) => error,
+            other => panic!("{username}: expected CredentialMismatch, got {other:?}"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "the `Credential::Basic` registered for security scheme `login` has a username \
+             holding `:`, which `http basic` cannot carry (RFC 7617 §2)"
+        );
+    }
+    // base64("user:pa:ss")
+    let request = attach("user").unwrap().build().unwrap();
+    assert_eq!(
+        request.headers()[http::header::AUTHORIZATION],
+        "Basic dXNlcjpwYTpzcw=="
+    );
+}
+
+/// Issue #1333: `Authorization` is a singleton field, so a base URL carrying `user:pass@`
+/// userinfo, which the builder sends as `Authorization: Basic`, and a scheme that attaches its own
+/// credential there send exactly one `Authorization`: the scheme's, which replaces the URL's.
+#[test]
+fn a_scheme_credential_replaces_the_authorization_a_userinfo_base_url_set() {
+    let mut core = core();
+    core.set_credential("token", Credential::Bearer(SecretString::from("t0k")));
+    core.set_credential(
+        "login",
+        Credential::Basic {
+            username: "aladdin".to_owned(),
+            password: SecretString::from("open sesame"),
+        },
+    );
+    for (scheme, expected) in [
+        (BEARER, "Bearer t0k"),
+        (
+            &[AuthScheme {
+                name: "login",
+                kind: AuthKind::Basic,
+            }][..],
+            "Basic YWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+        ),
+    ] {
+        let request = RequestBuilder::new(
+            reqwest::Method::GET,
+            url::Url::parse("https://u:p@example.com/op").unwrap(),
+        );
+        let request = poll_ready(attach_auth(&core, request, &[scheme]))
+            .unwrap()
+            .build()
+            .unwrap();
+        let sent: Vec<_> = request
+            .headers()
+            .get_all(http::header::AUTHORIZATION)
+            .iter()
+            .collect();
+        assert_eq!(sent, [expected], "{scheme:?}");
+        assert!(sent[0].is_sensitive());
+    }
 }
 
 #[test]

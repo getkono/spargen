@@ -9,6 +9,7 @@ use std::hash::{BuildHasher, Hasher};
 use bytes::{Bytes, BytesMut};
 use http::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use http::Method;
+use secrecy::zeroize::Zeroizing;
 use url::Url;
 
 use crate::{Error, HttpBody};
@@ -37,12 +38,15 @@ impl RequestBuilder {
     /// Start a `method` request to `url`, with an empty body and no headers, except where `url`
     /// carries `user:pass@` userinfo: that is taken off the URL and sent as an
     /// `Authorization: Basic` header (RFC 7617), percent-decoded and marked sensitive, as
-    /// reqwest's own builder sends it, so the password reaches no backend's URI or error text.
+    /// reqwest's own builder sends it, so the password reaches no backend's URI or error text. A
+    /// username that percent-decodes to one holding `:` fails the builder, since RFC 7617 §2
+    /// forbids it: the server would split the credentials at that colon. A security scheme that
+    /// attaches its own `Authorization` replaces this one.
     pub fn new(method: Method, mut url: Url) -> Self {
         let mut headers = HeaderMap::new();
-        if let Some(credentials) = take_userinfo(&mut url) {
-            let value = format!("Basic {}", crate::auth::base64_encode(&credentials));
-            match HeaderValue::try_from(value) {
+        match take_userinfo(&mut url) {
+            Ok(None) => {}
+            Ok(Some(value)) => match HeaderValue::from_str(&value) {
                 Ok(mut value) => {
                     value.set_sensitive(true);
                     headers.insert(AUTHORIZATION, value);
@@ -51,6 +55,11 @@ impl RequestBuilder {
                     return Self {
                         request: Err(Error::request_construction(error)),
                     }
+                }
+            },
+            Err(error) => {
+                return Self {
+                    request: Err(error),
                 }
             }
         }
@@ -190,20 +199,30 @@ impl RequestBuilder {
     }
 }
 
-/// Take `url`'s userinfo off it, returning its `username:password` credentials, percent-decoded,
-/// a missing password as empty; `None`, leaving `url` as it is, where it carries neither.
-fn take_userinfo(url: &mut Url) -> Option<Vec<u8>> {
-    let password = url.password().map(percent_decode);
+/// Take `url`'s userinfo off it, returning the `Basic` `Authorization` value of its
+/// `username:password` credentials, percent-decoded, a missing password as empty; `None`, leaving
+/// `url` as it is, where it carries neither. The decoded credentials are held in buffers zeroed
+/// when dropped. A username that decodes to one holding `:` is refused (RFC 7617 §2), with an
+/// error that names neither the username nor the password.
+fn take_userinfo(url: &mut Url) -> Result<Option<Zeroizing<String>>, Error<Infallible>> {
+    let password = url
+        .password()
+        .map(|text| Zeroizing::new(percent_decode(text)));
     if url.username().is_empty() && password.is_none() {
-        return None;
+        return Ok(None);
     }
-    let mut credentials = percent_decode(url.username());
-    credentials.push(b':');
-    credentials.extend(password.unwrap_or_default());
+    let username = Zeroizing::new(percent_decode(url.username()));
     // Both fail only on a URL that cannot carry userinfo, which this one does.
     let _ = url.set_username("");
     let _ = url.set_password(None);
-    Some(credentials)
+    if username.contains(&b':') {
+        return Err(Error::request_message(
+            "the URL's userinfo username percent-decodes to one holding `:`, which \
+             `Authorization: Basic` cannot carry (RFC 7617 §2)",
+        ));
+    }
+    let password = password.as_deref().map_or(&[][..], Vec::as_slice);
+    Ok(Some(crate::auth::basic_authorization(&username, password)))
 }
 
 /// `text` with each `%XX` escape replaced by the byte it encodes; a `%` not followed by two
