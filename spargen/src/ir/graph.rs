@@ -259,8 +259,9 @@ impl TypeGraph {
     /// same XML hints, each field's type matches by this same test, and their
     /// `additionalProperties` policies match;
     /// two string enums, or two integer or boolean sets' checked newtypes, match when they are held
-    /// in one width, list the same value set and agree on whether they are open; two `Never` definitions match, since neither decodes any value (#643), so arrays of
-    /// two such items both decode only `[]`; two base64 bytes newtypes match, since both decode
+    /// in one width, list the same value set and agree on whether they are open; two `Never`
+    /// definitions match, since neither decodes any value (#643), so arrays of two such items both
+    /// decode only `[]`; two base64 bytes newtypes match, since both decode
     /// the same base64 strings. A union still matches only itself. Sound rather than
     /// complete, like
     /// [`same_generated_type`]: `true` means no value tells the two apart, which is what a `oneOf`'s

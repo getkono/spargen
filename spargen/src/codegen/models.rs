@@ -434,7 +434,6 @@ fn emit_checked_newtype(
         #docs
         #separator
         #[doc = #listing]
-
         #deprecated
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct #ident(#width);
