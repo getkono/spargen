@@ -209,10 +209,56 @@ paths:
       operationId: http_body
       responses:
         "200": { description: ok }
+  /testing:
+    get:
+      operationId: testing
+      responses:
+        "200": { description: ok }
+  /names:
+    get:
+      operationId: getNames
+      responses:
+        "200":
+          description: a top-level XML sequence
+          content:
+            application/xml:
+              schema: { type: array, items: { type: string } }
+  /items:
+    get:
+      operationId: getItems
+      responses:
+        "200":
+          description: a top-level XML sequence of objects
+          content:
+            application/xml:
+              schema: { type: array, items: { $ref: "#/components/schemas/Item" } }
+  /claimed:
+    get:
+      operationId: getClaimed
+      responses:
+        "200":
+          description: exact
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Item" }
+        "2XX":
+          description: range
+          content:
+            text/plain:
+              schema: { type: string }
+        "404": { description: exact without a body }
+        "4XX": { description: range without a body }
+        default:
+          description: fallback
+          content:
+            text/plain:
+              schema: { type: string }
 "##;
 
-/// An operation whose method is `http`, `bytes`, `std`, `serde`, `serde_json` or `http_body` gets a
-/// `testing::{method}` module of that name, and the `testing` module still compiles and lints clean.
+/// An operation whose method is `http`, `bytes`, `std`, `serde`, `serde_json`, `http_body` or
+/// `testing` gets a `testing::{method}` module of that name, and the `testing` module still compiles
+/// and lints clean; a top-level XML sequence reply reads back through the client, and a range or
+/// `default` constructor refuses a status a more precise entry documents.
 #[test]
 fn a_reply_module_named_for_a_crate_does_not_shadow_it() {
     let temp = tempfile::tempdir().unwrap();
@@ -223,21 +269,126 @@ fn a_reply_module_named_for_a_crate_does_not_shadow_it() {
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
-    for module in ["http", "bytes", "std", "serde", "serde_json", "http_body"] {
+    for module in [
+        "http",
+        "bytes",
+        "std",
+        "serde",
+        "serde_json",
+        "http_body",
+        "testing",
+    ] {
         assert!(
             generated.contains(&format!("pub mod {module} {{")),
             "the `{module}` reply module is emitted"
         );
     }
+    write_fixture_test(&out, "shadow", SHADOW_TEST);
     let status = fixture_cargo(&out)
         .args(["clippy", "--all-targets", "--", "-D", "warnings"])
         .status()
         .unwrap();
     assert!(
         status.success(),
-        "a reply module named for a crate must not shadow it"
+        "a reply module named for a crate or for `testing` must not shadow it or trip a lint"
+    );
+    let status = fixture_cargo(&out)
+        .args(["test", "--test", "shadow"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "XML sequence replies must decode, and claimed statuses must be refused"
     );
 }
+
+const SHADOW_TEST: &str = r##"use std::future::Future;
+use std::sync::Arc;
+
+use shadow_client::testing;
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(output) => output,
+        std::task::Poll::Pending => panic!("a call over the mock never waits"),
+    }
+}
+
+fn client(mock: &testing::MockBackend) -> shadow_client::Client {
+    shadow_client::Client::with_backend(Arc::new(mock.clone()), "http://mock").unwrap()
+}
+
+#[test]
+fn a_top_level_xml_sequence_of_strings_reads_back() {
+    let names = vec!["a".to_owned(), "b".to_owned()];
+    let mock = testing::MockBackend::new().on_get_names({
+        let names = names.clone();
+        move |_| testing::get_names::Reply::status_200(&names)
+    });
+    assert_eq!(block_on(client(&mock).get_names()).unwrap().into_inner(), names);
+}
+
+#[test]
+fn a_top_level_xml_sequence_of_objects_reads_back() {
+    let items: shadow_client::types::GetItemsResponse = serde_json::from_value(
+        serde_json::json!([{ "name": "a" }, { "name": "b" }]),
+    )
+    .unwrap();
+    let mock = testing::MockBackend::new().on_get_items({
+        let items = items.clone();
+        move |_| testing::get_items::Reply::status_200(&items)
+    });
+    let read = block_on(client(&mock).get_items()).unwrap().into_inner();
+    assert_eq!(serde_json::to_value(&read).unwrap(), serde_json::to_value(&items).unwrap());
+}
+
+#[test]
+fn an_empty_top_level_xml_sequence_is_still_encoded() {
+    let _ = testing::get_names::Reply::status_200(&Vec::new());
+}
+
+#[test]
+fn a_range_constructor_answers_a_status_no_exact_entry_documents() {
+    let mock = testing::MockBackend::new()
+        .on_get_claimed(|_| testing::get_claimed::Reply::status_2xx(201, &"made".to_owned()));
+    let reply = block_on(client(&mock).get_claimed()).unwrap();
+    assert_eq!(reply.status(), 201);
+}
+
+#[test]
+#[should_panic(expected = "use `status_200`")]
+fn a_range_constructor_refuses_a_status_an_exact_entry_documents() {
+    let _ = testing::get_claimed::Reply::status_2xx(200, &"x".to_owned());
+}
+
+#[test]
+#[should_panic(expected = "use `status_404`")]
+fn a_bodyless_range_constructor_refuses_a_status_an_exact_entry_documents() {
+    let _ = testing::get_claimed::Reply::status_4xx(404);
+}
+
+#[test]
+#[should_panic(expected = "use `status_200`")]
+fn the_default_constructor_refuses_a_status_an_exact_entry_documents() {
+    let _ = testing::get_claimed::Reply::default(200, &"x".to_owned());
+}
+
+#[test]
+#[should_panic(expected = "use `status_2xx`")]
+fn the_default_constructor_refuses_a_status_a_range_entry_documents() {
+    let _ = testing::get_claimed::Reply::default(250, &"x".to_owned());
+}
+
+#[test]
+fn the_default_constructor_answers_a_status_nothing_else_documents() {
+    let mock = testing::MockBackend::new()
+        .on_get_claimed(|_| testing::get_claimed::Reply::default(503, &"down".to_owned()));
+    let error = block_on(client(&mock).get_claimed()).unwrap_err();
+    assert_eq!(error.status().map(|status| status.as_u16()), Some(503));
+}
+"##;
 
 /// The switch is off by default, and nothing of the module is emitted then.
 #[test]
