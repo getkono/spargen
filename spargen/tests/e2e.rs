@@ -679,6 +679,8 @@ mod open_narrowing;
 mod open_unions;
 #[path = "e2e/roundtrip.rs"]
 mod roundtrip;
+#[path = "e2e/schemaless_bodies.rs"]
+mod schemaless_bodies;
 #[path = "e2e/shapes.rs"]
 mod shapes;
 #[path = "e2e/stream_twins.rs"]

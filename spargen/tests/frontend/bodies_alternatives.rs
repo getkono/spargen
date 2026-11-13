@@ -1,7 +1,8 @@
 //! Request and response bodies offering alternative media: the `W014` that discloses an
 //! alternative the selection passed over, and the rules under which one that decodes alike goes
 //! unreported — never for an alternative that constrains its body, decodes differently, or cannot
-//! be decoded at all.
+//! be decoded at all. Beside them, the other spelling of an entry that constrains nothing: a
+//! request entry with no `schema`, which takes any value its media carries.
 
 use super::*;
 
@@ -489,5 +490,76 @@ paths:
                  as decoding identically: {report:#?}"
             );
         }
+    }
+}
+
+/// A request body offering one media entry with no `schema`, for `media`, `required` as given.
+fn schemaless_request_body_spec(media: &str, required: bool) -> String {
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /u:
+    post:
+      operationId: postU
+      requestBody:
+        required: {required}
+        content:
+          {media}: {{}}
+      responses:
+        "204": {{ description: No Content }}
+"##
+    )
+}
+
+#[test]
+fn a_request_body_with_no_schema_is_sent_as_any_value_of_its_media() {
+    // A media entry with no `schema` constrains nothing, so the body takes any value its media
+    // carries: any JSON value (as `schema: {}` does), any text, any octets. It was lowered untyped
+    // instead, so the method took no body argument and sent none, with no diagnostic (#1339).
+    for (media, ty) in [
+        ("application/json", "serde_json::Value"),
+        ("application/merge-patch+json", "serde_json::Value"),
+        ("application/xml", "serde_json::Value"),
+        ("text/plain", "String"),
+        ("application/octet-stream", "bytes::Bytes"),
+    ] {
+        for required in [true, false] {
+            let (report, code) = generate_with_code(&schemaless_request_body_spec(media, required));
+            assert_eq!(report.outcome(), Outcome::Generated, "{media}: {report:#?}");
+            assert!(
+                code.contains(&format!("pub type PostUbody = {ty};")),
+                "{media}: the body should be typed `{ty}`: {code}"
+            );
+            let signature = code
+                .split_once("pub async fn post_u(")
+                .and_then(|(_, rest)| rest.split_once(')'))
+                .map(|(arguments, _)| arguments)
+                .unwrap_or_else(|| panic!("{media}: no `post_u` method: {code}"));
+            assert!(
+                signature.contains("body:"),
+                "{media}: `post_u` should take the body as an argument: {signature}"
+            );
+            assert!(
+                code.contains(&format!("CONTENT_TYPE, \"{media}\"")),
+                "{media}: the body should be sent under its media: {code}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_form_request_body_with_no_schema_is_still_refused() {
+    // A form or multipart body is sent field by field from an object schema's properties, so one
+    // with no schema has nothing to send: it is refused (`E009`), never typed as any value.
+    for media in ["application/x-www-form-urlencoded", "multipart/form-data"] {
+        let (report, code) = generate_with_code(&schemaless_request_body_spec(media, true));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+        assert!(
+            has_code(&report, Code::UnsupportedMediaType),
+            "{media}: {report:#?}"
+        );
+        assert!(code.is_empty(), "{media}: {code}");
     }
 }
