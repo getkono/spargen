@@ -679,6 +679,8 @@ mod open_unions;
 mod roundtrip;
 #[path = "e2e/shapes.rs"]
 mod shapes;
+#[path = "e2e/stream_twins.rs"]
+mod stream_twins;
 #[path = "e2e/testing_mock.rs"]
 mod testing_mock;
 #[path = "e2e/wire.rs"]

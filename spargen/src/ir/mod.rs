@@ -136,14 +136,25 @@ impl Api {
         })
     }
 
-    /// Whether `operation`'s success is one raw `bytes` body read whole: the body its method reads
-    /// within a default limit, and its `_stream` twin returns as a `ByteStream`.
+    /// Whether `operation`'s success holds a raw `bytes` body read whole: as its one success body,
+    /// or as an arm of its success enum ([`Api::streams_binary_arm`]). Its method reads each such
+    /// body within a default limit, and its `_stream` twin hands it over unread as a `ByteStream`.
     pub(crate) fn streams_binary_success(&self, operation: &Operation) -> bool {
         operation.responses.stream_success().is_none()
-            && matches!(
-                operation.responses.success(),
-                SuccessShape::Plain(ty) if self.is_raw_bytes(ty)
-            )
+            && match operation.responses.success() {
+                SuccessShape::Unit => false,
+                SuccessShape::Plain(ty) => self.is_raw_bytes(ty),
+                SuccessShape::Enum(entries) => {
+                    entries.iter().any(|(_, ty)| self.streams_binary_arm(*ty))
+                }
+            }
+    }
+
+    /// Whether a success enum arm carrying `body` is one the `_stream` twin's success enum hands
+    /// over as a `ByteStream`: a non-nullable raw `bytes` body. Every other arm is decoded as the
+    /// method decodes it.
+    pub(crate) fn streams_binary_arm(&self, body: Option<Ty>) -> bool {
+        body.is_some_and(|ty| self.is_raw_bytes(ty))
     }
 
     /// Whether `operation`'s typed request body is raw `bytes`, which its method takes as anything
@@ -573,6 +584,21 @@ mod tests {
         }
     }
 
+    fn no_content(api: &mut Api, status: Option<StatusSpec>) {
+        let response = Response {
+            body: None,
+            media: None,
+            stream: None,
+            accept: None,
+            headers: Vec::new(),
+        };
+        let responses = &mut api.operations[0].responses;
+        match status {
+            Some(status) => responses.by_status.push((status, response)),
+            None => responses.default = Some(response),
+        }
+    }
+
     fn check(rows: &[Row], predicate: fn(&Api) -> bool) {
         for (case, build, expected) in rows {
             let mut api = api();
@@ -750,7 +776,8 @@ mod tests {
         );
     }
 
-    /// Issue #1263: only a single raw `bytes` success body read whole is streamed by a twin.
+    /// Issues #1263 and #1306: a raw `bytes` success body read whole, alone or as an arm of a
+    /// success enum, is streamed by a twin.
     #[test]
     fn streams_binary_success_follows_the_table() {
         check(
@@ -788,6 +815,7 @@ mod tests {
                     },
                     false,
                 ),
+                // Issue #1306: a success enum with a raw-bytes arm has a twin too.
                 (
                     "a bytes success beside a second bodied success",
                     |api| {
@@ -799,6 +827,48 @@ mod tests {
                             MediaType::OctetStream,
                             ty,
                         );
+                    },
+                    true,
+                ),
+                (
+                    "a bytes success beside a bodyless success",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(api, OK, MediaType::OctetStream, ty);
+                        no_content(api, Some(StatusSpec::Exact(204)));
+                    },
+                    true,
+                ),
+                (
+                    "a JSON success beside a bytes success",
+                    |api| {
+                        let json = string(api);
+                        let ty = bytes(api);
+                        respond(api, OK, MediaType::Json, json);
+                        respond(
+                            api,
+                            Some(StatusSpec::Exact(206)),
+                            MediaType::OctetStream,
+                            ty,
+                        );
+                    },
+                    true,
+                ),
+                (
+                    "a success enum with no bytes arm",
+                    |api| {
+                        let ty = string(api);
+                        respond(api, OK, MediaType::Json, ty);
+                        no_content(api, Some(StatusSpec::Exact(204)));
+                    },
+                    false,
+                ),
+                (
+                    "a base64 bytes arm of a success enum",
+                    |api| {
+                        let ty = insert(api, TypeKind::Bytes(super::BytesEncoding::Base64));
+                        respond(api, OK, MediaType::OctetStream, ty);
+                        no_content(api, Some(StatusSpec::Exact(204)));
                     },
                     false,
                 ),

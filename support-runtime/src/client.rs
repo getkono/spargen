@@ -95,8 +95,9 @@ pub struct ClientConfig {
     /// [`RequestOptions::max_body`], set per client value with a generated client's
     /// `with_options`, replaces it. It is read each time [`crate::send`] sends a request, as
     /// [`Self::timeout`] is. An operation returning an `EventStream` is exempt: its items are
-    /// bounded by [`Self::max_stream_frame`] instead. So is a binary operation's `_stream` twin,
-    /// which returns a [`crate::ByteStream`] whose reader picks its own limit.
+    /// bounded by [`Self::max_stream_frame`] instead. So is each raw binary body a `_stream` twin
+    /// returns as a [`crate::ByteStream`], whose reader picks its own limit; any other success body
+    /// the twin of a success enum reads is read within this one.
     pub max_success_body: Option<usize>,
 }
 
@@ -104,8 +105,10 @@ impl ClientConfig {
     /// The most bytes a raw binary success body (`application/octet-stream`, `image/*`, …) read
     /// whole is allowed to hold where neither [`RequestOptions::max_body`] nor
     /// [`Self::max_success_body`] sets a limit: 64 MiB. Either of those replaces it, larger or
-    /// smaller; a body past it fails with [`Error::BodyTooLarge`]. A download it would refuse is
-    /// read through the operation's `_stream` twin instead, as a [`crate::ByteStream`].
+    /// smaller; a body past it fails with [`Error::BodyTooLarge`]. Every operation whose success
+    /// holds a raw binary body, as its one success body or as a status of its success enum, has a
+    /// `_stream` twin, which hands that body over unread as a [`crate::ByteStream`] instead: a
+    /// download this limit would refuse is read through it.
     pub const DEFAULT_MAX_BINARY_BODY: usize = 64 * 1024 * 1024;
 }
 

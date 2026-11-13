@@ -173,8 +173,9 @@ let page = client
   `with_config` sets for every call. An error body is read no further than `max_error_body` in any
   case; where `max_body` is the smaller of the two, an error body past it is `BodyTooLarge` instead
   of truncated. An operation returning an `EventStream` is exempt, its error body included:
-  `max_stream_frame` bounds its items. So is a binary operation's `_stream` twin, which returns a
-  [`ByteStream`](#binary-content).
+  `max_stream_frame` bounds its items. So is each raw binary body a `_stream` twin returns as a
+  [`ByteStream`](#binary-content); any other success body a twin of a success enum reads is
+  bounded as the method's is.
 - `extensions` are copied onto each request, where a caller-supplied `HttpBackend` reads them from
   the `http::Request` it executes. An extension type the request already carries keeps its value.
 - `headers` are added to each request, streaming operations' included. A header the request already
@@ -432,11 +433,17 @@ client.put_blob(Bytes::from(sealed)).await?;              // in memory, no copy
 client.put_blob(HttpBody::wrap(paced_upload)).await?;     // streamed as it is read
 ```
 
-An operation whose success is one whole `format: binary` body reads it within
-`ClientConfig::DEFAULT_MAX_BINARY_BODY` (64 MiB) unless `max_body` or `max_success_body` sets
-another limit, so a large or hostile download fails as `Error::BodyTooLarge` instead of growing
-without bound. Each such operation also has a `{method}_stream` twin returning
-`ResponseValue<ByteStream>`, the body handed over unread: `next()` yields it chunk by chunk,
+An operation whose success holds a whole `format: binary` body, as its one success body or as a
+status of its success enum, reads it within `ClientConfig::DEFAULT_MAX_BINARY_BODY` (64 MiB) unless
+`max_body` or `max_success_body` sets another limit, so a large or hostile download fails as
+`Error::BodyTooLarge` instead of growing without bound. Each such operation also has a
+`{method}_stream` twin. Where the binary body is the one success body, the twin returns
+`ResponseValue<ByteStream>`; where the success is an enum (a `200` and a `206` of octets, or a
+`200` download beside a bodyless `204`), it returns `ResponseValue<{Method}StreamResponse>`, the
+method's enum with each binary status's variant carrying a `ByteStream`, and every other status
+read as the method reads it, within the client's body limits. That enum has the method's enum's
+`status()`, and an `into_body()` where every bodied status is binary. A `ByteStream` is the body
+handed over unread: `next()` yields it chunk by chunk,
 `collect_bounded(limit)` reads the rest whole within a limit of the caller's choosing (a
 `Content-Length` past it refused unread), and `into_body()` hands over the `HttpBody` for a reader
 of the caller's own. `collect_bounded` is its only collector. Like an `EventStream`, the
@@ -452,14 +459,21 @@ response whole on `wasm32`, and checks its limit on what it read, or up front on
 ```rust,ignore
 let blob = client.get_blob_stream(id).await?.into_inner();
 let bytes = blob.collect_bounded(MAX_BLOB).await.map_err(Error::widen)?;
+
+match client.get_range_stream(id).await?.into_inner() {
+    GetRangeStreamResponse::Status200(whole) => store(whole).await?,
+    GetRangeStreamResponse::Status206(part) => append(part).await?,
+}
 ```
 
 The twin has its own two halves, as every operation method does: `{method}_stream_request(..)`
 builds the twin's request without sending it, which carries no total timeout where the method's
-`{method}_request` carries the client's, and `decode_{method}_stream(response)` hands a success
-body over unread as a `ByteStream` and dispatches an error status into the operation's typed error,
-as the twin does. Neither reads under the client's body limits. Where another method already spells
-either name, that method keeps it and the twin's companion takes a disambiguated name.
+`{method}_request` carries the client's, and `decode_{method}_stream(response)` hands a binary
+success body over unread as a `ByteStream` and dispatches an error status into the operation's
+typed error, as the twin does. Neither reads a binary body under the client's body limits. Where
+another method already spells either name, that method keeps it and the twin's companion takes a
+disambiguated name, as the twin's enum does where another type already spells
+`{Method}StreamResponse`.
 
 ```rust,ignore
 let request = client.get_blob_stream_request(id).await?;

@@ -502,6 +502,77 @@ fn a_binary_success_twin_has_a_request_builder_and_decoder() {
     assert_eq!(stream.decoder.as_str(), "decode_get_item_stream");
     assert_eq!(record.request_builder.as_str(), "get_item_request");
     assert_eq!(record.decoder.as_str(), "decode_get_item");
+    assert_eq!(
+        stream.success_enum, None,
+        "a single binary body is the stream itself"
+    );
+}
+
+/// Issue #1306: a success enum with a raw binary arm gets a twin, which returns a
+/// `{Method}StreamResponse` enum of its own. It is allocated after every success enum, so an
+/// operation whose own success enum spells it keeps the name, in either order.
+#[test]
+fn a_success_enum_twin_returns_an_enum_that_yields_to_a_success_enum() {
+    use crate::ir::{BytesEncoding, Response, StatusSpec};
+    for twin_first in [false, true] {
+        let mut api = api(Vec::new(), false);
+        let bytes = api.types.insert(TypeDef {
+            name_hint: "Blob".to_owned(),
+            kind: TypeKind::Bytes(BytesEncoding::Raw),
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
+        });
+        let respond = |status: u16, body: bool| {
+            (
+                StatusSpec::Exact(status),
+                Response {
+                    body: body.then_some(Ty {
+                        id: bytes,
+                        nullable: false,
+                        boxed: false,
+                    }),
+                    media: body.then_some(MediaType::OctetStream),
+                    stream: None,
+                    accept: None,
+                    headers: Vec::new(),
+                },
+            )
+        };
+        api.operations[0].responses.by_status = vec![respond(200, true), respond(206, true)];
+        // `getItemStream`'s success enum, `GetItemStreamResponse`, is what `getItem`'s twin asks
+        // for. Its `200` body beside a bodyless `204` gives it a twin as well.
+        let mut spelled = api.operations[0].clone();
+        spelled.id = OperationId("getItemStream".to_owned());
+        spelled.responses.by_status = vec![respond(200, true), respond(204, false)];
+        spelled.provenance = Provenance::new(
+            JsonPointer::root()
+                .push("paths")
+                .push("/items/{id}/stream")
+                .push("get"),
+            None,
+        );
+        if twin_first {
+            api.operations.insert(0, spelled);
+        } else {
+            api.operations.push(spelled);
+        }
+        let names = allocate(&api);
+        let record = |id: &str| &names.operations[&OperationId(id.to_owned())];
+        let item = record("getItem");
+        let stream = item.byte_stream.as_ref().expect("a binary arm has a twin");
+        assert_eq!(item.success_enum().as_str(), "GetItemResponse");
+        let spelled = record("getItemStream");
+        assert_eq!(spelled.success_enum().as_str(), "GetItemStreamResponse");
+        let yielded = stream.success_enum.as_ref().unwrap().as_str();
+        assert!(
+            yielded.len() > "GetItemStreamResponse".len()
+                && yielded.starts_with("GetItemStreamResponse"),
+            "{yielded}"
+        );
+        let own = spelled.byte_stream.as_ref().unwrap().success_enum.as_ref();
+        assert_eq!(own.unwrap().as_str(), "GetItemStreamStreamResponse");
+    }
 }
 
 /// A keyword operation's method is raw (`r#type`); its accessor is spelled from the bare
@@ -1154,9 +1225,21 @@ proptest::proptest! {
                 .iter()
                 .map(|record| &record.params_struct)
                 .chain(records.iter().map(|record| &record.error))
-                .chain(records.iter().filter_map(|record| record.success_enum.as_ref())),
+                .chain(records.iter().filter_map(|record| record.success_enum.as_ref()))
+                .chain(
+                    records
+                        .iter()
+                        .filter_map(|record| record.byte_stream.as_ref())
+                        .filter_map(|stream| stream.success_enum.as_ref()),
+                ),
             &reexported,
         )?;
+        // Issue #1306: a twin returns an enum of its own exactly where its method does.
+        for record in &records {
+            if let Some(stream) = &record.byte_stream {
+                prop_assert_eq!(stream.success_enum.is_some(), record.success_enum.is_some());
+            }
+        }
 
         for (id, def) in api.types.iter() {
             match &def.kind {

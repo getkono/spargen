@@ -868,16 +868,19 @@ mod support {
             /// [`RequestOptions::max_body`], set per client value with a generated client's
             /// `with_options`, replaces it. It is read each time [`super::send`] sends a request, as
             /// [`Self::timeout`] is. An operation returning an `EventStream` is exempt: its items are
-            /// bounded by [`Self::max_stream_frame`] instead. So is a binary operation's `_stream` twin,
-            /// which returns a [`super::ByteStream`] whose reader picks its own limit.
+            /// bounded by [`Self::max_stream_frame`] instead. So is each raw binary body a `_stream` twin
+            /// returns as a [`super::ByteStream`], whose reader picks its own limit; any other success body
+            /// the twin of a success enum reads is read within this one.
             pub max_success_body: Option<usize>,
         }
         impl ClientConfig {
             /// The most bytes a raw binary success body (`application/octet-stream`, `image/*`, …) read
             /// whole is allowed to hold where neither [`RequestOptions::max_body`] nor
             /// [`Self::max_success_body`] sets a limit: 64 MiB. Either of those replaces it, larger or
-            /// smaller; a body past it fails with [`Error::BodyTooLarge`]. A download it would refuse is
-            /// read through the operation's `_stream` twin instead, as a [`super::ByteStream`].
+            /// smaller; a body past it fails with [`Error::BodyTooLarge`]. Every operation whose success
+            /// holds a raw binary body, as its one success body or as a status of its success enum, has a
+            /// `_stream` twin, which hands that body over unread as a [`super::ByteStream`] instead: a
+            /// download this limit would refuse is read through it.
             pub const DEFAULT_MAX_BINARY_BODY: usize = 64 * 1024 * 1024;
         }
         impl Default for ClientConfig {
@@ -1544,7 +1547,9 @@ mod support {
         /// The body is read within the success-body limit the call was made under, as
         /// [`decode_success_with`] reads one, and where the call set none, within
         /// [`super::ClientConfig::DEFAULT_MAX_BINARY_BODY`]: a binary body is never read whole without a
-        /// bound. One past it is [`Error::BodyTooLarge`].
+        /// bound. One past it is [`Error::BodyTooLarge`]. A generated method reads with this its one raw
+        /// binary success body and each raw binary status of its success enum; its `_stream` twin hands
+        /// each such body over unread instead.
         pub async fn decode_success_bytes(
             core: &ClientCore,
             response: Response,
@@ -4587,7 +4592,8 @@ mod support {
             }
         }
         /// A raw binary success body read as it arrives, which a binary operation's `_stream` twin
-        /// returns in place of the whole `Bytes` its buffered method reads.
+        /// returns in place of the whole `Bytes` its buffered method reads: as the twin's success, or in
+        /// a binary status's variant of the twin's success enum.
         ///
         /// [`Self::next`] yields the body a chunk at a time, and [`Self::collect_bounded`], its only
         /// collector, reads the rest of it into one `Bytes` within a limit the caller names.
@@ -13249,6 +13255,50 @@ impl GetRawMultiResponse {
     clippy::pedantic,
     clippy::nursery
 )]
+#[derive(Debug)]
+pub enum GetRawMultiStreamResponse {
+    Status200(Box<types::ResponseBody4450a524>),
+    Status201(support::ByteStream),
+}
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
+impl GetRawMultiStreamResponse {
+    /// The HTTP status this value was dispatched on: each variant names exactly one.
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            Self::Status200(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(200u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+            Self::Status201(_) => {
+                const {
+                    match reqwest::StatusCode::from_u16(201u16) {
+                        Ok(status) => status,
+                        Err(_) => panic!("a documented status is a valid status code"),
+                    }
+                }
+            }
+        }
+    }
+}
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
 #[derive(Debug, Clone)]
 pub enum GetMaybeEmptyResponse {
     Status200(Box<types::MultiOk>),
@@ -17405,6 +17455,7 @@ Response `400`: textual failure*/
     #[inline]
     async fn prepare_get_raw_multi(
         &self,
+        streaming: bool,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
@@ -17416,7 +17467,7 @@ Response `400`: textual failure*/
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
-        let mut request = support::prepare(&self.core, request, false);
+        let mut request = support::prepare(&self.core, request, streaming);
         request.extensions_mut().insert(ops::GET_RAW_MULTI);
         Ok((request, replay))
     }
@@ -17435,7 +17486,7 @@ Response `409`: binary error*/
         support::Error<GetRawMultiError>,
     > {
         let (request, replay) = self
-            .prepare_get_raw_multi()
+            .prepare_get_raw_multi(false)
             .await
             .map_err(support::Error::widen)?;
         let response = support::execute(&self.core, request, replay, false)
@@ -17451,7 +17502,7 @@ Response `409`: binary error*/
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
     > {
-        self.prepare_get_raw_multi().await.map(|(request, _)| request)
+        self.prepare_get_raw_multi(false).await.map(|(request, _)| request)
     }
     ///Decode a response to the request `get_raw_multi` sends (`ops::GET_RAW_MULTI`), obtained however the caller sent it, exactly as `get_raw_multi` decodes its own: the same status dispatch, typed error, and body limits from this client's configuration. `get_raw_multi` itself sends its request builder's request through the client's backend, replays it once where a refreshable credential was rejected, and decodes the response with this.
     #[inline]
@@ -17537,6 +17588,109 @@ Response `409`: binary error*/
         let mut path = "/raw-multi".to_owned();
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
+    }
+    ///`get_raw_multi`, with each raw binary success body handed over unread as a `ByteStream` in its status's variant, to read as it arrives, or whole with `collect_bounded` under a limit of the caller's choosing. The request and the error branch are `get_raw_multi`'s. Like an `EventStream`, the call is exempt from the client's total timeout and its body limits; its connect and read timeouts still apply. Every other success body is read whole under the client's body limits, as `get_raw_multi` reads it. It sends its request builder's request through the client's backend, replays it once where a refreshable credential was rejected, and decodes the response with its decoder.
+    #[inline]
+    pub async fn get_raw_multi_stream(
+        &self,
+    ) -> Result<
+        support::ResponseValue<GetRawMultiStreamResponse>,
+        support::Error<GetRawMultiError>,
+    > {
+        let (request, replay) = self
+            .prepare_get_raw_multi(true)
+            .await
+            .map_err(support::Error::widen)?;
+        let response = support::execute(&self.core, request, replay, true)
+            .await
+            .map_err(support::Error::widen)?;
+        self.decode_get_raw_multi_stream(response).await
+    }
+    ///The request `get_raw_multi_stream` sends, built without sending it: `get_raw_multi`'s request, exempt from the client's total timeout as `get_raw_multi_stream`'s is, for a caller that sends it itself and hands the response to `get_raw_multi_stream`'s decoder. Nothing is replayed after a rejected refreshable credential: that is `get_raw_multi_stream`'s own send.
+    #[inline]
+    pub async fn get_raw_multi_stream_request(
+        &self,
+    ) -> Result<
+        http::Request<support::HttpBody>,
+        support::Error<std::convert::Infallible>,
+    > {
+        self.prepare_get_raw_multi(true).await.map(|(request, _)| request)
+    }
+    ///Decode a response to the request `get_raw_multi_stream` sends (`ops::GET_RAW_MULTI`), obtained however the caller sent it, exactly as `get_raw_multi_stream` decodes its own: a raw binary success body handed over unread as a `ByteStream`, exempt from the client's body limits, any other success body read whole within them, and an error status dispatched into the operation's typed error.
+    #[inline]
+    pub async fn decode_get_raw_multi_stream(
+        &self,
+        response: http::Response<support::HttpBody>,
+    ) -> Result<
+        support::ResponseValue<GetRawMultiStreamResponse>,
+        support::Error<GetRawMultiError>,
+    > {
+        if response.status().is_success() {
+            let status = response.status();
+            if support::StatusSpec::Exact(200u16).matches(status) {
+                let response = support::with_body_limits(&self.core, response);
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            support::decode_text_body::<
+                                Box<types::ResponseBody4450a524>,
+                            >(body)
+                                .map(GetRawMultiStreamResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
+            }
+            if support::StatusSpec::Exact(201u16).matches(status) {
+                return Ok(
+                    support::stream_success_bytes(
+                            response.map(support::read_as_it_arrives),
+                        )
+                        .map(GetRawMultiStreamResponse::Status201),
+                );
+            }
+            Err(
+                support::unexpected_status::<GetRawMultiError>(&self.core, response)
+                    .await,
+            )
+        } else {
+            let status = response.status();
+            if support::StatusSpec::Exact(400u16).matches(status) {
+                return Err(
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(400u16)],
+                            |body| {
+                                support::decode_text_body::<
+                                    Box<types::ResponseBody48bb7a8a>,
+                                >(body)
+                                    .map(GetRawMultiError::Status400)
+                            },
+                        )
+                        .await,
+                );
+            }
+            if support::StatusSpec::Exact(409u16).matches(status) {
+                return Err(
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| Ok::<
+                                _,
+                                String,
+                            >(GetRawMultiError::Status409(Box::new(body.clone()))),
+                        )
+                        .await,
+                );
+            }
+            Err(
+                support::unexpected_status::<GetRawMultiError>(&self.core, response)
+                    .await,
+            )
+        }
     }
     /// The request the operation method sends, credentials attached and the client's
     /// `RequestOptions` and the operation's `ops::Operation` on it, and the replay a rejected
