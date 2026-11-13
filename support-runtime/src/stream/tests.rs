@@ -220,22 +220,43 @@ fn sse_tolerates_crlf_terminators() {
     assert_eq!(items, vec![r#"{"a":1}"#, r#"{"a":2}"#]);
 }
 
+/// Issue #1330: WHATWG's "if the file ends in the middle of an event, before the final empty line,
+/// the incomplete event is not dispatched", whether its last line is terminated or not, and the
+/// `id` and `retry` it set are dropped with it. Every framing of SSE reads it the same way.
 #[test]
-fn sse_flushes_a_final_event_without_a_trailing_blank_line_at_eof() {
-    let mut buf = b"data: {\"a\":1}".to_vec();
-    // Not at EOF: the unterminated event is retained.
-    let (items, _) = drain(&mut buf, Framing::Sse, false);
-    assert!(items.is_empty());
-    // At EOF: the final event is flushed even without a closing blank line.
-    let (items, _) = drain(&mut buf, Framing::Sse, true);
-    assert_eq!(items, vec![r#"{"a":1}"#]);
+fn sse_discards_an_event_cut_off_at_eof() {
+    for framing in [Framing::Sse, Framing::SseEvent, Framing::SseJsonData] {
+        for body in [
+            &b"data: {\"a\":1}"[..],
+            b"data: {\"a\":1}\r",
+            b"data: {\"a\":1}\n",
+            b"id: 7\nretry: 10\ndata: {\"a\":1}\n",
+            b"id: 7\ndata: {\"a\":",
+        ] {
+            let mut buf = body.to_vec();
+            // Not at EOF: the unterminated event is retained.
+            let (items, _) = drain(&mut buf, framing, false);
+            assert!(items.is_empty(), "{framing:?} {body:?}");
+            assert_eq!(buf, body, "{framing:?} {body:?}");
+            // At EOF: it is dropped, and nothing of it is reported.
+            let mut framer = frame_buffer(body);
+            assert_eq!(
+                super::next_frame(&mut framer, framing, true),
+                FramePoll::NeedMore,
+                "{framing:?} {body:?}"
+            );
+            assert!(framer.is_empty(), "{framing:?} {body:?}");
+        }
+    }
 }
 
+/// The events an SSE body completed before EOF are dispatched; only the one cut off is dropped.
 #[test]
-fn sse_strips_the_trailing_cr_from_an_unterminated_last_line_at_eof() {
-    let mut buf = b"data: {\"a\":1}\r".to_vec();
-    let (items, _) = drain(&mut buf, Framing::Sse, true);
-    assert_eq!(items, vec![r#"{"a":1}"#]);
+fn sse_dispatches_every_complete_event_before_the_one_cut_off_at_eof() {
+    let mut buf = b"data: {\"a\":1}\n\ndata: {\"a\":2}\r\n\r\ndata: {\"a\":3}\n".to_vec();
+    let (items, done) = drain(&mut buf, Framing::Sse, true);
+    assert_eq!(items, vec![r#"{"a":1}"#, r#"{"a":2}"#]);
+    assert!(!done);
     assert!(buf.is_empty());
 }
 
@@ -1392,6 +1413,41 @@ fn a_body_that_fails_mid_item_yields_interrupted_body_and_ends_the_stream() {
         other => panic!("expected InterruptedBody, got {other:?}"),
     }
     assert!(poll_ready(stream.next()).is_none());
+}
+
+/// Issue #1330: an event the server cut off at EOF is never dispatched, and the `id` it carried is
+/// not committed, so the reconnect resumes from the last event the caller received and the server
+/// replays the one that was cut off.
+#[test]
+fn an_sse_event_cut_off_at_eof_is_not_dispatched_and_its_id_is_not_replayed() {
+    let backend = SequenceBackend::new([
+        Reply::status(200, "id: 7\ndata: {\"seq\":7}\n\n"),
+        Reply::status(200, ""),
+    ]);
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 1,
+        ..ImmediateReconnect::default()
+    });
+    let mut stream = reconnectable_stream(
+        "id: 6\ndata: {\"seq\":6}\n\nid: 7\ndata: {\"seq\":",
+        backend.clone(),
+        policy,
+    );
+
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 6})
+    );
+    assert_eq!(stream.last_event_id(), Some("6"));
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 7})
+    );
+    assert!(poll_ready(stream.next()).is_none());
+    assert_eq!(
+        backend.header("last-event-id"),
+        [Some("6".to_owned()), Some("7".to_owned())]
+    );
 }
 
 /// A body that yields `data`, then fails with `failure`, which keeps its class through

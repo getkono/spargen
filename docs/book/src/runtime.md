@@ -304,7 +304,9 @@ the response through ordinary HTTP drop semantics.
 For OpenAPI 3.2 SSE, spargen parses the envelope fields first. A string `data` property annotated
 with `contentMediaType: application/json` and a typed `contentSchema` yields that JSON payload type
 directly. `last_event_id()` and `reconnect_delay()` expose the latest valid `id:` and `retry:`
-metadata, including metadata-only events.
+metadata, including metadata-only events. An SSE event the body ends in the middle of, before its
+closing blank line, is not dispatched, and its `id:` and `retry:` are dropped with it, as the SSE
+specification requires; a final ndjson line or JSON Text Sequence record is still yielded.
 
 Automatic reconnect is explicit: call `with_reconnect(Arc<dyn ReconnectPolicy>)`. The caller's
 policy owns attempt limits and supplies the wait future, so the runtime introduces neither a timer
