@@ -34,6 +34,42 @@ components:
       properties:
         id: { type: string }
 paths:
+  /reports/export:
+    post:
+      operationId: exportReports
+      summary: Export reports.
+      description: |
+        A payload:
+
+        ```
+        {"id":1}
+        ```
+
+        A program:
+
+        ```
+        fn main() {}
+        ```
+
+        A command:
+
+            curl https://example.com/b
+
+        - A step, then its command:
+
+              curl https://example.com/c
+
+        ````
+        ```
+        Vec<T>
+        ```
+        ````
+
+        ```
+        an unclosed block
+      responses:
+        "204":
+          description: exported
   /reports:
     get:
       operationId: listReports

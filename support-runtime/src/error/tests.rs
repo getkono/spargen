@@ -684,6 +684,87 @@ fn a_refused_connection_is_a_transient_transport_error() {
     assert!(error.is_transient());
 }
 
+/// The query apiKey every request below carries.
+const QUERY_SECRET: &str = "SECRET123";
+
+/// A `GET` to `url` with [`QUERY_SECRET`] attached as an `apiKey` query credential, as a generated
+/// operation attaches it.
+fn with_query_secret(url: &str) -> http::Request<crate::HttpBody> {
+    let mut core = crate::tests::core();
+    core.set_credential(
+        "key",
+        crate::Credential::ApiKey(secrecy::SecretString::from(QUERY_SECRET)),
+    );
+    let request = crate::tests::poll_ready(crate::attach_auth(
+        &core,
+        crate::tests::builder(reqwest::Method::GET, url),
+        &[&[crate::AuthScheme {
+            name: "key",
+            kind: crate::AuthKind::ApiKeyQuery("api_key"),
+        }]],
+    ))
+    .expect("the credential attaches")
+    .build()
+    .expect("the request builds");
+    assert!(
+        request.uri().to_string().contains(QUERY_SECRET),
+        "the secret rides on the URL"
+    );
+    request
+}
+
+/// Neither `error` nor any error in its source chain prints [`QUERY_SECRET`], by `Display` or by
+/// `Debug`.
+fn assert_no_query_secret(error: &(dyn std::error::Error + 'static)) {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(!display.contains(QUERY_SECRET), "Display leaks: {display}");
+        assert!(!debug.contains(QUERY_SECRET), "Debug leaks: {debug}");
+        current = error.source();
+    }
+}
+
+/// Issue #1303: reqwest's error carries the URL of the request it failed, query included, so a
+/// query apiKey reached the `Debug` of the error and every `Display` of its source chain. A
+/// request reqwest refuses at execute, kept as the transport error's cause, prints no secret,
+/// and is still classified as it was.
+#[test]
+fn a_query_credential_reaches_no_text_of_a_refused_request() {
+    for (client, refused) in crate::tests::refused_at_execute() {
+        let request = with_query_secret(&refused.uri().to_string());
+        let backend = crate::ReqwestBackend::new(client);
+        let failure = crate::tests::poll_ready(crate::HttpBackend::execute(&backend, request))
+            .expect_err("reqwest refuses the request");
+        assert_no_query_secret(&failure);
+        let error = Error::<std::convert::Infallible>::from_transport(failure);
+        assert!(
+            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+            "{error:?}"
+        );
+        assert_no_query_secret(&error);
+    }
+}
+
+/// Issue #1303, over a real socket: a connection refused under a query apiKey is
+/// [`Error::Transport`], whose `Display`, `Debug` and source chain print no secret.
+#[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+#[test]
+fn a_query_credential_reaches_no_text_of_a_refused_connection() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("bind an ephemeral port")
+        .port();
+    let request = with_query_secret(&format!("http://127.0.0.1:{port}/op"));
+    let runtime = crate::BlockingRuntime::new().expect("current-thread runtime builds");
+    let error = runtime
+        .block_on(crate::send(&crate::tests::core(), request))
+        .expect_err("nothing listens on a released port");
+    assert!(matches!(error, Error::Transport(_)), "{error:?}");
+    assert_no_query_secret(&error);
+}
+
 #[test]
 fn is_transient_classifies_every_variant() {
     for error in every_variant() {

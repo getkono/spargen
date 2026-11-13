@@ -94,4 +94,27 @@ fn every_operation_declaring_the_header_sends_the_bound_value() {
     assert_eq!(requests[1].header("x-api-version"), ["2026-01-01"], "{}", requests[1].text());
     assert_eq!(requests[1].header("x-trace"), ["t-2"], "{}", requests[1].text());
 }
+
+/// Issue #1303: a bound value is held as a secret, so the request an operation builds marks it
+/// sensitive, and that request's `Debug` (what a backend or middleware logging it prints) does not
+/// carry it.
+#[test]
+fn the_built_request_marks_the_bound_value_sensitive() {
+    let client = bound_headers::Client::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_bound_header("X-Api-Version", "TENANTSECRET");
+    let mut built = std::pin::pin!(client.list_items_request("t-1"));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let std::task::Poll::Ready(request) = std::future::Future::poll(built.as_mut(), &mut cx) else {
+        panic!("a request needing no credential builds on the first poll");
+    };
+    let request = request.unwrap();
+    let value = &request.headers()["x-api-version"];
+    assert_eq!(value, "TENANTSECRET");
+    assert!(value.is_sensitive());
+    let debug = format!("{request:?}");
+    assert!(!debug.contains("TENANTSECRET"), "{debug}");
+    // The header the caller passes as an argument stays as it is.
+    assert!(!request.headers()["x-trace"].is_sensitive());
+}
 "##;

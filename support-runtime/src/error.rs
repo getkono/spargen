@@ -723,8 +723,11 @@ impl TransportError {
     /// request it was handed — a URL whose scheme is not `http`/`https`, plain `http` on an
     /// `https_only` client, or a URI that is not a URL. Re-sending it is refused again, so it is
     /// not transient.
+    ///
+    /// The query is taken off the URL the error carries, so neither the error's `Display` nor
+    /// its `Debug` prints an `apiKey` query credential; the scheme, host and path stay.
     pub fn from_reqwest(error: reqwest::Error) -> Self {
-        Self::new(TransportClass::of(&error), error)
+        Self::new(TransportClass::of(&error), without_query(error))
     }
 
     /// Classify a `reqwest::Error` from reading the body of a response that has already
@@ -741,7 +744,8 @@ impl TransportError {
     /// first, and everything else is a protocol failure, so a body that is malformed rather than
     /// cut short stays [`Error::Protocol`]. On `wasm32`, reqwest's `fetch` backend reports a
     /// failed read over a JavaScript error, with neither an I/O error nor a body-kind error in
-    /// its chain, so every such failure there is [`Error::Protocol`].
+    /// its chain, so every such failure there is [`Error::Protocol`]. The query is taken off the
+    /// URL the error carries, as for [`Self::from_reqwest`].
     pub(crate) fn from_reqwest_body(error: reqwest::Error) -> Self {
         let class = if error.is_timeout() {
             TransportClass::of(&error)
@@ -750,7 +754,7 @@ impl TransportError {
         } else {
             TransportClass::Protocol
         };
-        Self::new(class, error)
+        Self::new(class, without_query(error))
     }
 
     /// The error a body source failed with: a [`TransportError`] keeps its own class, and any
@@ -767,6 +771,16 @@ impl TransportError {
     pub(crate) fn is_transient(&self) -> bool {
         self.class.is_transient()
     }
+}
+
+/// `error` with the query taken off the URL it carries, so the error's `Display` and `Debug`
+/// print the request's scheme, host and path but none of its query: an `apiKey` query credential
+/// rides there, and the runtime keeps a reqwest error as the cause of the error a caller logs. Its class is read before this, so it classifies as before.
+pub(crate) fn without_query(mut error: reqwest::Error) -> reqwest::Error {
+    if let Some(url) = error.url_mut() {
+        url.set_query(None);
+    }
+    error
 }
 
 /// The boxed cause a [`TransportError`] carries.

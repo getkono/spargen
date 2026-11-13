@@ -20,6 +20,40 @@ fn encoded(form: MultipartForm) -> (String, String) {
     )
 }
 
+/// Issue #1303: a value added with `sensitive_header` is marked sensitive, so the built request's
+/// `Debug` does not print it, and it is appended in order like any other; `header` leaves a value
+/// as it was given, a value already marked sensitive included.
+#[test]
+fn a_sensitive_header_is_appended_marked_and_left_out_of_the_request_debug() {
+    let mut given = HeaderValue::from_static("GIVENSECRET");
+    given.set_sensitive(true);
+    let request = RequestBuilder::new(Method::GET, url("https://example.com/op"))
+        .header("x-tenant", "plain")
+        .sensitive_header("x-tenant", "TENANTSECRET")
+        .header("x-given", given)
+        .build()
+        .unwrap();
+    let tenants: Vec<_> = request.headers().get_all("x-tenant").iter().collect();
+    assert_eq!(tenants, ["plain", "TENANTSECRET"]);
+    assert!(!tenants[0].is_sensitive());
+    assert!(tenants[1].is_sensitive());
+    assert!(request.headers()["x-given"].is_sensitive());
+    let debug = format!("{request:?}");
+    assert!(!debug.contains("TENANTSECRET"), "{debug}");
+    assert!(!debug.contains("GIVENSECRET"), "{debug}");
+    assert!(debug.contains("plain"), "{debug}");
+}
+
+/// A name or value `sensitive_header` cannot convert fails the builder, as `header`'s does.
+#[test]
+fn a_sensitive_header_that_does_not_convert_fails_the_builder() {
+    let error = RequestBuilder::new(Method::GET, url("https://example.com/op"))
+        .sensitive_header("x-tenant", "line\nbreak")
+        .build()
+        .unwrap_err();
+    assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
+}
+
 /// A builder yields the request it was given: method, URL, every header value in order, and the
 /// body, in memory.
 #[test]

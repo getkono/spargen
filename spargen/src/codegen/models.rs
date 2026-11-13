@@ -191,7 +191,7 @@ fn emit_closed_string_enum(
             type Err = super::support::UnknownVariant;
 
             /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-            fn from_str(value: &str) -> Result<Self, Self::Err> {
+            fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
                 match value {
                     #(#parse_arms)*
                     _ => Err(super::support::UnknownVariant::new(#type_name, value)),

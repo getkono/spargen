@@ -307,10 +307,16 @@ impl Spec {
     /// crate (``[`crate::serve`]``, `[Store]`), which no path from the generated module reaches:
     /// each such link becomes its text, so ``[`crate::serve`]`` renders as `` `crate::serve` ``. A
     /// bare `http(s)://` URL is wrapped in `<…>`, and an HTML tag nothing closes (`Vec<T>`'s
-    /// `<T>`) has its `<` escaped. Links to URLs, code spans and code blocks are kept as written.
+    /// `<T>`) has its `<` escaped. Links to URLs, code spans and code blocks are kept as written,
+    /// except that a code block rustdoc would run as a doctest of the consuming crate (an untagged
+    /// fence, or an indented block) is fenced and tagged `text`, and a fence the prose leaves open
+    /// is closed at its end.
     ///
-    /// With this on, the prose is left as the spec wrote it, and the `include!` site answers for
-    /// `rustdoc::broken_intra_doc_links`, `rustdoc::bare_urls` and `rustdoc::invalid_html_tags`.
+    /// With this on, the prose is left as the spec wrote it (a fence it leaves open still closes
+    /// before the text spargen adds after it, such as an operation's response list), and the
+    /// `include!` site answers for `rustdoc::broken_intra_doc_links`, `rustdoc::bare_urls` and
+    /// `rustdoc::invalid_html_tags`, and its `cargo test --doc` for the prose's untagged code
+    /// blocks.
     pub fn verbatim_docs(mut self, enabled: bool) -> Self {
         self.verbatim_docs = enabled;
         self

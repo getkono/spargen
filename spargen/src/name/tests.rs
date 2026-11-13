@@ -771,7 +771,8 @@ fn assert_scope<'a>(
 
 /// A name hint biased to collide: two letters around an optional separator in either case, so
 /// distinct hints often case to one spelling, plus the keywords, prelude names and generator
-/// bindings every scope reserves or escapes.
+/// bindings every scope reserves or escapes, and `err`, which cases to the associated type a
+/// string enum's `FromStr` impl declares.
 fn hint() -> impl proptest::strategy::Strategy<Value = String> {
     use proptest::prelude::*;
     prop_oneof![
@@ -780,7 +781,7 @@ fn hint() -> impl proptest::strategy::Strategy<Value = String> {
             "", "type", "self", "Self", "super", "crate", "String", "Box", "Option", "Vec",
             "Default", "default", "Into", "new", "core", "inner", "with_credential", "params",
             "body", "path", "query", "url", "request", "cookies", "replay", "additional", "other",
-            "Other", "unknown", "Unknown", "1a", "-", "requestOperation", "getV2", "get_v_2",
+            "Other", "unknown", "Unknown", "err", "1a", "-", "requestOperation", "getV2", "get_v_2",
             "a_l_l",
         ])
         .prop_map(str::to_owned),

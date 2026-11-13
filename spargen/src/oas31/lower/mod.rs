@@ -396,9 +396,17 @@ fn api_description(document: &Document) -> Option<String> {
     api_description
 }
 
+/// Append `text` to `target` as a paragraph of its own, closing a code fence `target` leaves open
+/// first, so `text` is not read as code.
 fn append_text(target: &mut Option<String>, text: String) {
     match target {
         Some(target) if !target.is_empty() => {
+            if let Some(closing) = crate::ir::unclosed_fence(target) {
+                if !target.ends_with('\n') {
+                    target.push('\n');
+                }
+                target.push_str(&closing);
+            }
             target.push_str("\n\n");
             target.push_str(&text);
         }

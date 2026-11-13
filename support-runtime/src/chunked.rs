@@ -31,7 +31,8 @@ pub fn read_as_it_arrives(body: HttpBody) -> HttpBody {
 }
 
 /// A `fetch` response body read chunk by chunk. A failed read is yielded as reqwest reported it,
-/// which `HttpBody::wrap` reads as an interruption whatever its kind.
+/// the query taken off the URL it carries, which `HttpBody::wrap` reads as an interruption
+/// whatever its kind.
 // Mutation testing: replacing `FetchChunks`'s `poll_frame` survives the native suite and is
 // declared rather than killed. It is compiled only for `wasm32`, so no native test reaches it; on
 // `wasm32` the runtime is compile-checked, not tested.
@@ -47,10 +48,13 @@ impl http_body::Body for FetchChunks {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Bytes>, reqwest::Error>>> {
-        self.0
-            .as_mut()
-            .poll_next(cx)
-            .map(|chunk| chunk.map(|chunk| chunk.map(http_body::Frame::data)))
+        self.0.as_mut().poll_next(cx).map(|chunk| {
+            chunk.map(|chunk| {
+                chunk
+                    .map(http_body::Frame::data)
+                    .map_err(crate::error::without_query)
+            })
+        })
     }
 }
 

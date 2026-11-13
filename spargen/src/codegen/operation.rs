@@ -426,7 +426,8 @@ fn stream_decoder_doc(twin: &crate::name::Ident, operation_const: &proc_macro2::
 }
 
 /// The statements sending each of `operation`'s bound headers ([`Operation::bound_headers`]) from
-/// the value the client binds to it, as written: a required one fails the call before anything is
+/// the value the client binds to it, as written and marked sensitive, since the client holds it as
+/// a secret: a required one fails the call before anything is
 /// sent, as `RequestError::MissingBoundParameter`, while no value is bound; an optional one is
 /// left off.
 fn bound_header_statements(
@@ -442,7 +443,7 @@ fn bound_header_statements(
                 quote! {
                     match self.core.bound_header(#name) {
                         Some(value) => {
-                            #request_binding = #request_binding.header(#name, value);
+                            #request_binding = #request_binding.sensitive_header(#name, value);
                         }
                         None => {
                             return Err(support::Error::RequestConstruction(
@@ -454,7 +455,7 @@ fn bound_header_statements(
             } else {
                 quote! {
                     if let Some(value) = self.core.bound_header(#name) {
-                        #request_binding = #request_binding.header(#name, value);
+                        #request_binding = #request_binding.sensitive_header(#name, value);
                     }
                 }
             }

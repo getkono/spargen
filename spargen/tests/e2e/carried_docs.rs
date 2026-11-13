@@ -7,7 +7,9 @@ use super::*;
 
 /// Every place spec prose reaches rustdoc: `info`, a server and its variable, a security scheme,
 /// a schema (beside a fenced block and a definition to a path), an operation's summary and
-/// description, and a response header.
+/// description, and a response header; and the code blocks rustdoc would run as doctests (#1300):
+/// untagged fences, indented code blocks in and out of a list, a fence nesting a shorter one, and
+/// a fence the description leaves open.
 const CARRIED_DOCS_SPEC: &str = include_str!("specs/carried_docs.yaml");
 
 /// A crate root that denies the lints the generated module answers for, and `include!`s it into a
@@ -102,6 +104,11 @@ fn the_include_site_needs_no_lint_attribute() {
         "Reads the store and returns <b>every</b> report",
         "limit \\</b> set in the config. Details at\n<https://example.com/reports>.",
         "The limit `crate::limits::Rate` applies.",
+        "```text\nfn main() {}\n```",
+        "```text\ncurl https://example.com/b\n```",
+        "  ```text\n  curl https://example.com/c\n  ```",
+        "````text\n```\nVec<T>\n```\n````",
+        "```text\nan unclosed block\n```\n\nResponse `204`: exported",
     ] {
         assert!(
             generated.contains(rewritten),
@@ -125,6 +132,16 @@ fn the_include_site_needs_no_lint_attribute() {
     assert!(
         output.status.success(),
         "the strict consumer must document with every rustdoc warning denied:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = fixture_cargo(&out)
+        .args(["test", "--doc", "--all-features"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "no carried code block may become a doctest of the strict consumer:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -160,7 +177,8 @@ fn a_description_without_operations_passes_the_strict_consumer() {
 }
 
 /// `verbatim_docs(true)` carries the prose as written, so the same consumer's documentation fails
-/// on the links the default rewrites: the rewrite, not something else, is what keeps rustdoc quiet.
+/// on the links the default rewrites, and its doctests on the code blocks the default tags: the
+/// rewrite, not something else, is what keeps rustdoc quiet.
 #[test]
 fn verbatim_docs_leaves_the_links_for_rustdoc_to_report() {
     let temp = tempfile::tempdir().unwrap();
@@ -187,4 +205,17 @@ fn verbatim_docs_leaves_the_links_for_rustdoc_to_report() {
             "rustdoc must report `{lint}`:\n{stderr}"
         );
     }
+
+    // The untagged fences stay untagged, so rustdoc runs the JSON payload as a doctest and fails:
+    // the `text` tag is what keeps the default's doctests passing.
+    let output = fixture_cargo(&out)
+        .args(["test", "--doc", "--all-features"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("export_reports"),
+        "the failing doctest is the exported operation's:\n{stdout}"
+    );
 }

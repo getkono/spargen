@@ -1062,7 +1062,9 @@ mod support {
             /// Bind `value` to the header `name`, matched in any letter case, replacing any value already
             /// bound to it. An operation of a generated client whose header parameter the build bound
             /// (`Spec::bind_header`) sends this value, as written, instead of taking an argument for it.
-            /// `ClientCore`'s `Debug` prints the bound name and redacts the value.
+            /// `ClientCore`'s `Debug` prints the bound name and redacts the value, and the operation sends
+            /// it through [`super::RequestBuilder::sensitive_header`], so the request's `Debug` redacts it
+            /// too.
             pub fn bind_header(&mut self, name: &str, value: impl Into<String>) {
                 self.bound_headers
                     .insert(name.to_ascii_lowercase(), SecretString::from(value.into()));
@@ -2500,8 +2502,11 @@ mod support {
             /// request it was handed — a URL whose scheme is not `http`/`https`, plain `http` on an
             /// `https_only` client, or a URI that is not a URL. Re-sending it is refused again, so it is
             /// not transient.
+            ///
+            /// The query is taken off the URL the error carries, so neither the error's `Display` nor
+            /// its `Debug` prints an `apiKey` query credential; the scheme, host and path stay.
             pub fn from_reqwest(error: reqwest::Error) -> Self {
-                Self::new(TransportClass::of(&error), error)
+                Self::new(TransportClass::of(&error), without_query(error))
             }
             /// Classify a `reqwest::Error` from reading the body of a response that has already
             /// arrived, the same way `EventStream` classifies one mid-stream: the connection giving out
@@ -2517,7 +2522,8 @@ mod support {
             /// first, and everything else is a protocol failure, so a body that is malformed rather than
             /// cut short stays [`Error::Protocol`]. On `wasm32`, reqwest's `fetch` backend reports a
             /// failed read over a JavaScript error, with neither an I/O error nor a body-kind error in
-            /// its chain, so every such failure there is [`Error::Protocol`].
+            /// its chain, so every such failure there is [`Error::Protocol`]. The query is taken off the
+            /// URL the error carries, as for [`Self::from_reqwest`].
             pub(crate) fn from_reqwest_body(error: reqwest::Error) -> Self {
                 let class = if error.is_timeout() {
                     TransportClass::of(&error)
@@ -2526,7 +2532,7 @@ mod support {
                 } else {
                     TransportClass::Protocol
                 };
-                Self::new(class, error)
+                Self::new(class, without_query(error))
             }
             /// The error a body source failed with: a [`TransportError`] keeps its own class, and any
             /// other error is an interruption.
@@ -2541,6 +2547,15 @@ mod support {
             pub(crate) fn is_transient(&self) -> bool {
                 self.class.is_transient()
             }
+        }
+        /// `error` with the query taken off the URL it carries, so the error's `Display` and `Debug`
+        /// print the request's scheme, host and path but none of its query: an `apiKey` query credential
+        /// rides there, and the runtime keeps a reqwest error as the cause of the error a caller logs. Its class is read before this, so it classifies as before.
+        pub(crate) fn without_query(mut error: reqwest::Error) -> reqwest::Error {
+            if let Some(url) = error.url_mut() {
+                url.set_query(None);
+            }
+            error
         }
         /// The boxed cause a [`TransportError`] carries.
         type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -4211,7 +4226,30 @@ mod support {
             }
             /// Add a header, after any value the request already carries under `name`. A name or value
             /// that does not convert fails the builder.
-            pub fn header<K, V>(mut self, name: K, value: V) -> Self
+            pub fn header<K, V>(self, name: K, value: V) -> Self
+            where
+                HeaderName: TryFrom<K>,
+                <HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+                HeaderValue: TryFrom<V>,
+                <HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
+            {
+                self.append_header(name, value, false)
+            }
+            /// Add a header as [`Self::header`] does, its value marked sensitive
+            /// (`HeaderValue::set_sensitive`), so the `Debug` of the built request prints it redacted: for
+            /// a value the client holds as a secret, such as one bound with `ClientCore::bind_header`.
+            pub fn sensitive_header<K, V>(self, name: K, value: V) -> Self
+            where
+                HeaderName: TryFrom<K>,
+                <HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+                HeaderValue: TryFrom<V>,
+                <HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
+            {
+                self.append_header(name, value, true)
+            }
+            /// Append `name: value`, marked sensitive when `sensitive` is set, after any value the request
+            /// already carries under `name`; a name or value that does not convert fails the builder.
+            fn append_header<K, V>(mut self, name: K, value: V, sensitive: bool) -> Self
             where
                 HeaderName: TryFrom<K>,
                 <HeaderName as TryFrom<K>>::Error: Into<http::Error>,
@@ -4227,7 +4265,10 @@ mod support {
                                 .map(|value| (name, value))
                         });
                     match header {
-                        Ok((name, value)) => {
+                        Ok((name, mut value)) => {
+                            if sensitive {
+                                value.set_sensitive(true);
+                            }
                             parts.headers.append(name, value);
                         }
                         Err(error) => {
@@ -5692,7 +5733,8 @@ mod support {
             #[cfg(not(target_arch = "wasm32"))] body
         }
         /// A `fetch` response body read chunk by chunk. A failed read is yielded as reqwest reported it,
-        /// which `HttpBody::wrap` reads as an interruption whatever its kind.
+        /// the query taken off the URL it carries, which `HttpBody::wrap` reads as an interruption
+        /// whatever its kind.
         #[cfg(target_arch = "wasm32")]
         struct FetchChunks(Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>);
         #[cfg(target_arch = "wasm32")]
@@ -5706,7 +5748,14 @@ mod support {
                 self.0
                     .as_mut()
                     .poll_next(cx)
-                    .map(|chunk| chunk.map(|chunk| chunk.map(http_body::Frame::data)))
+                    .map(|chunk| {
+                        chunk
+                            .map(|chunk| {
+                                chunk
+                                    .map(http_body::Frame::data)
+                                    .map_err(super::error::without_query)
+                            })
+                    })
             }
         }
     }
@@ -7218,7 +7267,7 @@ pub mod types {
     impl std::str::FromStr for RefinedMember1Status {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "queued" => Ok(RefinedMember1Status::Queued),
                 "complete" => Ok(RefinedMember1Status::Complete),
@@ -7600,7 +7649,7 @@ pub mod types {
     impl std::str::FromStr for NarrowDefaultEnumValid {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "a" => Ok(NarrowDefaultEnumValid::A),
                 "b" => Ok(NarrowDefaultEnumValid::B),
@@ -7644,7 +7693,7 @@ pub mod types {
     impl std::str::FromStr for NarrowDefaultEnumBad {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "a" => Ok(NarrowDefaultEnumBad::A),
                 "b" => Ok(NarrowDefaultEnumBad::B),
@@ -7857,7 +7906,7 @@ pub mod types {
     impl std::str::FromStr for NarrowDefaultSiblingConstraintValid {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "a" => Ok(NarrowDefaultSiblingConstraintValid::A),
                 "b" => Ok(NarrowDefaultSiblingConstraintValid::B),
@@ -7901,7 +7950,7 @@ pub mod types {
     impl std::str::FromStr for NarrowDefaultSiblingConstraintBad {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "a" => Ok(NarrowDefaultSiblingConstraintBad::A),
                 "b" => Ok(NarrowDefaultSiblingConstraintBad::B),
@@ -8384,7 +8433,7 @@ pub mod types {
     impl std::str::FromStr for Mode {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "auto" => Ok(Mode::Auto),
                 "manual" => Ok(Mode::Manual),
@@ -8463,7 +8512,7 @@ pub mod types {
     impl std::str::FromStr for StringLiteral {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "special" => Ok(StringLiteral::Special),
                 _ => Err(super::support::UnknownVariant::new("StringLiteral", value)),
@@ -8863,7 +8912,7 @@ pub mod types {
     impl std::str::FromStr for ContentFileType {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "file" => Ok(ContentFileType::File),
                 _ => Err(super::support::UnknownVariant::new("ContentFileType", value)),
@@ -8908,7 +8957,7 @@ pub mod types {
     impl std::str::FromStr for ContentLinkType {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "symlink" => Ok(ContentLinkType::Symlink),
                 _ => Err(super::support::UnknownVariant::new("ContentLinkType", value)),
@@ -9425,7 +9474,7 @@ pub mod types {
     impl std::str::FromStr for Priority {
         type Err = super::support::UnknownVariant;
         /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, Self::Err> {
+        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
             match value {
                 "low" => Ok(Priority::Low),
                 "medium" => Ok(Priority::Medium),
