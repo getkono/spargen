@@ -1,15 +1,8 @@
 # spargen
 
-> Status (Alpha): If it compiles, it should work. Currently being adopted by a few projects by author. Issues will be reviewed promptly.
+> **Alpha.** If it compiles, it should work. Issues are reviewed promptly.
 
 A compile-time-correct Rust client generator for OpenAPI 3.1.x and 3.2.x. Nothing older.
-
-<!-- ANCHOR: name -->
-The name: a *spar* is the single load-bearing beam of an aircraft wing — sized on the drawing
-board, carrying the entire span in flight with nothing propping it up. That is the product:
-everything structural is decided at generation time; nothing is interpreted at runtime. Spec in,
-spar out.
-<!-- ANCHOR_END: name -->
 
 ## Why
 
@@ -27,289 +20,45 @@ does not support, and treats dependency hygiene as a first-class constraint. 3.0
 rejected with a diagnostic, never converted.
 <!-- ANCHOR_END: why -->
 
-## What it does
+## Usage
 
-Spargen consumes an OpenAPI 3.1.x or 3.2.x document (JSON or YAML, plus local relative-file
-`$ref`s) at generation time and produces idiomatic, deterministic Rust: typed models, a `Client`,
-one method per operation, and typed errors. Generated code compiles or generation fails — with a
-diagnostic that names the exact spec construct, its JSON Pointer, and a remedy. Schemas must be
-vendored into the source tree before compilation. There are exactly two supported generation paths:
-
-| Mode | How | Generated code |
-| --- | --- | --- |
-| **`build.rs`** | `spargen` in `[build-dependencies]` | write to `OUT_DIR` or a committed module path |
-| **Macro** | [`spargen-macro`](spargen-macro): `generate_api!("spec.yaml")` | inline (use `cargo expand` to inspect) |
-
-Both modes run as part of Rust compilation. Spargen is host/build-time only and **never enters your
-runtime dependency tree**. The CLI is tooling for `lock`, `check`, `deps`, `diff`, and
-`explain`; it has no `generate` subcommand. The [CLI reference](docs/book/src/cli.md) covers each
-subcommand, its options, and its exit statuses.
-
-`spargen lock` (the `remote-fetch` feature) is the generator's only networked step. It fetches
-over reqwest's rustls stack with rustls's defaults and the bundled Mozilla roots, and spargen
-holds no TLS position of its own: it interoperates with exactly the peers that rustls release
-accepts, and refuses the rest as `E025` with rustls's reason. Protocol conformance is rustls's,
-so a rustls upgrade may refuse a non-conformant server that an older one accepted. The one
-behaviour pinned here is the strictness an advisory named: `spargen/tests/tls_strictness.rs`
-drives a deliberately non-conformant peer (RUSTSEC-2026-0285) and fails on a rustls that accepts
-it again.
+Vendor the spec into your source tree, then generate from `build.rs` (`spargen` in
+`[build-dependencies]`) or inline with the [`spargen-macro`](spargen-macro) proc macro. Either way,
+spargen runs at build time only and never enters your runtime dependency tree.
 
 ```rust
-// build.rs — spargen appears only in [build-dependencies].
+// build.rs
 let out_dir = std::env::var("OUT_DIR").unwrap();
-let report = spargen::generate(
-    &spargen::Spec::new("api/openapi.yaml").build(format!("{out_dir}/api.rs")),
-);
-// `Generated` on a cold build, `Cached` on a warm one — `expect_success` accepts both.
-report.expect_success();
+spargen::generate(&spargen::Spec::new("api/openapi.yaml").build(format!("{out_dir}/api.rs")))
+    .expect_success();
 ```
 
 ```rust
-// Or generate inline, no build.rs — see examples/petstore-macro.
+// or, with no build.rs
 mod api {
     spargen_macro::generate_api!("openapi.yaml");
 }
 ```
 
-See [`examples/petstore`](examples/petstore) (build.rs) and
-[`examples/petstore-macro`](examples/petstore-macro) (macro) for complete, runnable loops against
-a local mock server; each README lists what its example exercises. To review and commit the
-generated client, see [Getting Started](docs/book/src/getting-started.md#buildrs-mode).
-
-Generating a client from a spec that a Rust server framework emits (utoipa, aide, poem-openapi)?
-The [framework round-trip recipes](docs/recipes.md) cover how each exports its OpenAPI document,
-the version it emits, and the idioms spargen handles.
-
-### Generated surface
-
-- `Client::new(base_url)` / `Client::with_client(reqwest::Client, base_url)` — the injected
-  client is the extension point for TLS choice, proxies, and timeouts. `Client` is `Debug` and
-  `Clone`. `Client::with_timeout(Option<Duration>)` gives a derived client value its own total
-  timeout (`client.clone().with_timeout(Some(UPLOAD))`), elapsing as
-  `Error::Timeout(TimeoutKind::Total)`; an `EventStream` operation is exempt from it.
-  `Client::with_options(RequestOptions)` gives a derived client value per-call options: a
-  response body limit (`max_body`, refused as `Error::BodyTooLarge`), extensions a transport
-  backend reads off each request, and headers added where a request lacks them.
-- One `async` method per operation: required parameters positional, optional parameters in a
-  per-operation `…Params` struct deriving `Default`, `Result<ResponseValue<T>, Error<E>>` out.
-  String parameters and the params bundle take `impl Into<…>`, so `client.get_pet("1")` and
-  `client.list_pets(params)` need no `to_owned()` or `Some`. An operation whose method name
-  would spell one of `Client`'s or `BlockingClient`'s fixed methods (`new`, `with_credential`,
-  …) takes a disambiguated name instead. Both clients emit `with_default_server` when the
-  description declares a server, and only `BlockingClient` emits `inner`; both names are reserved
-  on both clients regardless, so declaring a server never renames an operation.
-- Beside each operation method, a `{method}_url` accessor on both clients returns, as
-  `Result<url::Url, Error<Infallible>>`, the URL that method sends its request to, less any
-  `apiKey` query credential, without sending it: the same path-parameter and query encoding,
-  resolved against the base URL or the operation's server override. It takes the required path,
-  query and `querystring` parameters and, where it holds one of those, the `…Params` bundle; it
-  attaches no credential. This is for a URL handed to a fetcher of its own, such as a media player
-  or a browser (`client.stream_file_url(id)`). Where another operation's method already spells
-  `{method}_url`, that method keeps it and the accessor takes a disambiguated name.
-- Each operation is also its two halves, on both clients: `{method}_request` takes the method's
-  arguments and returns, as `Result<http::Request<HttpBody>, Error<Infallible>>`, exactly the
-  request the method sends — URL, headers, credentials, body, and the client's `RequestOptions` —
-  without sending it, and `decode_{method}` decodes an `http::Response<HttpBody>` the caller
-  obtained into the method's own `Result`, with the same status dispatch, typed error and body
-  limits. A caller that signs the exact request, paces or retries its own sends, or uses another
-  transport keeps the typed surface. Only the method itself replays a call a refreshable
-  credential was rejected on. Where another method already spells either name, that method keeps
-  it and the companion takes a disambiguated name.
-- An `ops` module holds one `ops::Operation` constant per operation (`ops::GET_PET`, its method
-  name upper-cased) with its `id` (the `operationId`), HTTP `method` token and `path_template`, so
-  a caller names an operation without copying its path. Every request an operation builds carries
-  its `Operation` in its extensions, a replay or stream reconnect included, so a transport backend
-  can sign, route or meter by operation.
-- A `format: binary` request body is taken as `impl Into<HttpBody>`: `Bytes` or `Vec<u8>` move in
-  without a copy, and `HttpBody::wrap` streams an upload as it is read. A `format: binary` success
-  body read whole, as the one success body or as a status of a success enum, is bounded (64 MiB
-  unless `max_body` or `max_success_body` says otherwise), and the operation gains a
-  `{method}_stream` twin on `Client`. Where the binary body is the one success body, the twin
-  returns `ResponseValue<ByteStream>`; where the success is an enum (a `200` and a `206` of
-  octets, or a `200` download beside a bodyless `204`), it returns
-  `ResponseValue<{Method}StreamResponse>`, the method's enum with each binary status's variant
-  carrying a `ByteStream` and every other status read as the method reads it. A `ByteStream` is
-  read chunk by chunk with `next()` or whole with `collect_bounded(limit)`. The twin is its two
-  halves too: `{method}_stream_request` builds its request, without the total timeout, and
-  `decode_{method}_stream` hands a response's binary success body over as a `ByteStream`. Where
-  another method already spells `{method}_stream` or either of its halves, that method keeps it
-  and the twin's name takes a disambiguated one, as the twin's enum does where another type
-  already spells `{Method}StreamResponse`.
-- Every object struct in `types` derives `PartialEq`, as does every type it can hold, so a test
-  compares a decoded value with an expected one by `assert_eq!`. `Type::new(..)` takes the
-  required members by value in declaration order and sets each optional member as decoding an
-  absent one does (its schema `default`, else `None`); a consuming `with_<member>(value)` per
-  optional member, and per typed `additionalProperties` map, sets the rest, so a new optional
-  member leaves code built that way compiling. A struct with no required member implements
-  `Default` as `new()`.
-- `Client::with_credential(scheme, credential)` registers static secrets (via
-  [`secrecy`](https://docs.rs/secrecy)) or async token providers; operation `security`
-  requirements pick the first satisfiable alternative and attach bearer/basic/apiKey credentials.
-  A missing required credential is a request-construction error — typed as
-  `RequestError::MissingCredential`, listing for each security alternative the schemes with no
-  registered credential; a credential of a kind its scheme cannot carry as
-  `RequestError::CredentialMismatch`; and a failed token provider as
-  `RequestError::CredentialProvider` — never a silent 401. A failure inside the selected
-  alternative never falls through to a later one; `Client::without_credential(scheme)`
-  unregisters a scheme, so a client derived with it (`client.clone().without_credential("oauth")`)
-  selects the next fully registered alternative. A `Credential::Refreshable` adds the reactive
-  case: when its check reads a failed response as a rejection of the token it carried, the
-  runtime asks it for a fresh token and sends the call once more, returning the original response
-  when the body cannot be cloned, the refresh fails, or the replay is rejected again.
-- A header every operation repeats (an API version, a tenant) can be bound once on the client:
-  `Spec::bind_header("X-Api-Version")` drops it from every operation's arguments, and
-  `Client::with_bound_header(name, value)` sets the value each operation declaring it sends. An
-  operation that requires it while no value is bound fails before anything is sent, as
-  `RequestError::MissingBoundParameter`.
-- A closed error taxonomy, identical across all spargen output: request-construction
-  (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
-  above, the missing bound header above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
-  (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
-  error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
-  preserved), decode failure (`Error::Decode`: status, headers, serde path + body, capped except
-  on the one path the emitted `ClientConfig::max_error_body` doc names), interrupted body
-  (`Error::InterruptedBody`: the connection dropped partway through a streamed response
-  body, or on native targets any other response body, and transient), pagination cycle (`Error::PaginationCycle`: a `LinkPaginator`
-  `next` link back to a page it already fetched), oversized body (`Error::BodyTooLarge`: a
-  non-streaming response body past the `max_body` or `max_success_body` limit the call was made
-  under, or a raw binary one past the 64 MiB `ClientConfig::DEFAULT_MAX_BINARY_BODY` where neither
-  is set, or a `ByteStream` past the limit its `collect_bounded` was given, refused unread from its
-  `Content-Length` or abandoned where it crossed). Every generated error
-  type is `Display` + `std::error::Error`, so `Error<E>` drops straight into `?`, `anyhow`, or
-  `thiserror`. `Error::is_transient()` classifies retry-worthy failures. An error enum whose
-  bodied statuses carry the same body type (one schema, or schemas that generate the same Rust
-  type) gets `body()` and an owning `into_body()`, and it, the single-body newtype,
-  and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()` and the owning
-  `Error::into_api_body()` hand that body back whichever status carried it (`Error::status()`
-  reports that status, the same value as `ResponseValue::status()` on `Error::Api`, and
-  `Error::headers()` the response's headers on every class that keeps them); an enum mixing
-  body types is matched by variant instead. A multi-status success enum gets `body()` and
-  `into_body()` the same way when its bodied statuses share one type (bare, with no `Option`, when
-  every status carries a non-null body), and every status enum, and the single-body newtype,
-  whose statuses are all exact codes gets `status()`. Every error shape implements `ApiErrorProblem`, so `Error::problem()` reads the RFC 9457
-  members (`type`, `title`, `status`, `detail`, `instance`) of whichever error body a failure
-  carried, across every operation and body type: the typed body on `Error::Api`, and the raw body
-  of a `4xx`/`5xx` `Error::Decode` or `Error::UnexpectedStatus`. The opt-in `open_narrowing`
-  decodes a problem type the description does not list into `Error::Api`; see
-  [problem details](docs/book/src/runtime.md#problem-details).
-- Beyond the request/response path, the embedded runtime carries a swappable transport seam
-  (`HttpBackend`) with composable retry and middleware adapters, `Link:`-header pagination, typed
-  SSE/NDJSON/JSON-sequence streams, an opt-in `blocking` client, and `wasm32-unknown-unknown`
-  support. Streams and XML are emitted only when the spec uses them; the blocking client is
-  opt-in. The [runtime reference](docs/book/src/runtime.md) lists what each capability adds to the
-  runtime dependency set. Spargen ships no retry *policy* and no async timer — the caller supplies
-  both.
-- Each schema becomes a model in the generated `types` module. A model whose name would spell one
-  of the ten names that module itself uses (`Date`, `DateTime`, `Serialize`, `Deserialize`,
-  `BTreeMap`, `String`, `Option`, `Vec`, `Box`, `Result`) takes a disambiguated name instead.
-  All ten are reserved whether or not the module writes them, so starting to use a date type never
-  renames a model. Likewise, a server builder or server-variable enum in the generated `servers`
-  module whose name would spell one of the three names that module uses (`Default`, `Into`,
-  `String`) takes a disambiguated name; all three are reserved whether or not the module writes
-  them, so adding a free-form server variable never renames a server. A disambiguated name's
-  suffix is a hash of the item's JSON Pointer with the type and subtype of each media key on it
-  lowercased, so respelling a media key's type or subtype in another letter case renames nothing;
-  its parameters are hashed as written, so a respelled parameter (`Charset` for `charset`) does.
-- Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
-
-### Design guarantees
-
-- **Freestanding output.** The runtime support code is embedded into the generated module; no
-  spargen crate ever appears in a consumer's runtime dependency tree. The runtime dependency set,
-  and what each capability adds to it only when the compiled API uses it, is stated in the
-  [runtime reference](docs/book/src/runtime.md), and `spargen deps <spec>` prints it for one spec.
-  Generation audits the consumer manifest against the tested floors and feature set before
-  Cargo/rustc compile the emitted client; see the
-  [runtime dependency contract](docs/book/src/getting-started.md#runtime-dependency-contract).
-- **Deterministic.** Same spargen version + spec + config ⇒ byte-identical output, enforced by
-  test. Item order follows the document's order; nothing depends on hash-map iteration.
-- **Edition-independent output.** The generated module is `include!`d into the consumer's crate and
-  compiles under *that* crate's edition, so identifiers are escaped against the union of Rust's
-  reserved words across editions 2015-2024: a spec that names a field `type` or `gen` emits
-  `r#type` / `r#gen` rather than code only some editions accept. Wire names are unaffected — they
-  ride on an explicit `serde(rename)`.
-- **`include!`-friendly output.** Generated code carries no crate-level inner attributes, so it
-  drops into a module or an `OUT_DIR` file consumed with `include!`.
-- **Every construct has a disposition.** Supported, warned, or rejected — never a fourth, silent
-  behavior; a typed schema is never silently degraded to `serde_json::Value`. The
-  [support matrix](docs/support-matrix.md) and [diagnostic index](docs/errors.md) are the
-  operational contract; the index gives each code's severity and title, and
-  `spargen explain E013` prints its full explanation.
-- **No `serde(untagged)`.** First-match-wins deserialization can silently misparse; undiscriminated
-  unions are rejected instead.
-- **`#[forbid(unsafe_code)]` on the embedded `support` module, the `types` module, `impl Client`,
-  and `impl BlockingClient`**, `Debug`-redacted
-  secrets, and a 64 KiB (configurable) cap on error-body retention, whose reach the emitted
-  `ClientConfig::max_error_body` doc states.
-
-## Status
-
-The full pipeline, from a vendored 3.1 or 3.2 description to a compiled client, is implemented
-for the constructs the [support matrix](docs/support-matrix.md) lists as supported. The
-[OpenAPI 3.2 scope](docs/openapi-3.2.md) gives the exact delta from 3.1.
-
-Anything outside the documented surface is rejected or warned loudly, never silent; see the
-[support matrix](docs/support-matrix.md) for the exact boundary. Every diagnostic carries the
-JSON Pointer of the construct it names, and where that location is known, the file it lies in (a
-`$ref`'d file included) with its line and column. The pinned GitHub OpenAPI 3.1 description
-generates and its
-full emitted crate is compile-checked in CI; the remaining [corpus](corpus/README.md) pins both
-generating and intentionally rejecting real-world cases.
-
-## Documentation
-
-The full documentation site is an [mdBook](https://rust-lang.github.io/mdBook/) under
-[`docs/book/`](docs/book) — an Introduction, Getting Started, and CLI/runtime references, wired
-together with the [OpenAPI 3.2 scope](docs/openapi-3.2.md), [support matrix](docs/support-matrix.md),
-[diagnostic index](docs/errors.md), [compatibility](docs/compatibility.md), and
-[recipes](docs/recipes.md) docs (included, not duplicated).
-Build it locally:
-
-```bash
-mise install                # one-time: the mdBook version mise.toml pins
-mise run docs               # mdbook build docs/book, then the link check
-```
-
-The rendered HTML lands in the git-ignored `docs/book/book/`; open `index.html` from there. CI
-builds the book and checks its internal links on every pull request and every push to `master`.
-
-## Prerequisites
-
-- [Rust](https://rustup.rs) (the release `rust-toolchain.toml` pins; rustup installs it on first use)
-- [mise](https://github.com/jdx/mise) — dev tool provisioning and task runner
-- [hk](https://hk.jdx.dev) — git hooks (installed via mise)
+The [book](docs/book/src/SUMMARY.md) covers the generated API, the CLI, and the runtime;
+[`docs/support-matrix.md`](docs/support-matrix.md) and [`docs/errors.md`](docs/errors.md) list what
+is supported and every diagnostic. Runnable examples live in [`examples/`](examples).
 
 ## Development
 
+Requires [Rust](https://rustup.rs) (the toolchain `rust-toolchain.toml` pins) and
+[mise](https://github.com/jdx/mise).
+
 ```bash
-mise install          # provision every tool mise.toml's [tools] pins, at those versions
-mise run hooks        # install git hooks
-mise tasks            # list every task with its description
+mise install      # pinned tools
+mise run hooks    # git hooks
+mise run check    # build
+mise run test     # tests
+mise tasks        # every other task
 ```
 
-[`AGENTS.md`](AGENTS.md#quality) lists every task with the command it runs and which of them the
-git hooks and CI run, and documents the validation strategy
-[per subsystem](AGENTS.md#testing-strategy-by-subsystem).
-Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/), enforced by
-`convco` at commit time, pre-push, and in CI.
-
-## Architecture
-
-`spargen` is partitioned into subsystems with a declared dependency DAG, which the crate root
-([`spargen/src/lib.rs`](spargen/src/lib.rs)) lays out; the runtime embedded into generated output
-is the standalone `support-runtime` workspace member.
-
-## Releases
-
-Releases are automated via [release-plz](https://release-plz.dev): a standing pull request
-tracks the next version bump; merging it tags the release and publishes to crates.io. Never bump
-the version or tag manually. The semver surface is the public API of generated output: changes
-that alter generated signatures, type shapes, or variant sets are major; output changes invisible
-to that API are minor; generator-internal fixes are patch.
-
-Publishing runs strictly in CI via crates.io [Trusted Publishing](https://crates.io/docs/trusted-publishing)
-(OIDC) — no `CARGO_REGISTRY_TOKEN` secret; `release-plz.yml` publishes `spargen` before its
-dependent `spargen-macro`. The maintainer release rules are in [`AGENTS.md`](AGENTS.md#releases).
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`,
+`fix:`, `docs:`, …); hooks and CI enforce it.
 
 ## License
 
