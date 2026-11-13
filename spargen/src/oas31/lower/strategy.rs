@@ -96,7 +96,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(TypeKind::Null) => 3_000,
             Some(TypeKind::Never) => 4_000,
             Some(TypeKind::Struct(object)) => {
-                let required = object.fields.iter().filter(|field| field.required).count() as u32;
+                // A member counts as required where decoding requires it: a `required` `readOnly`
+                // or `writeOnly` one may be absent (`Field::decodes_optional`).
+                let required = object
+                    .fields
+                    .iter()
+                    .filter(|field| !field.decodes_optional())
+                    .count() as u32;
                 1_000 + required * 20 + object.fields.len() as u32
             }
             Some(TypeKind::Tuple(items)) => 900 + items.len() as u32,
@@ -193,10 +199,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .filter(|(other, _)| *other != index)
                 .flat_map(|(_, s)| s.fields.iter().map(|f| f.name.wire.as_str()))
                 .collect();
-            let key = structure
-                .fields
-                .iter()
-                .find(|field| field.required && !others.contains(field.name.wire.as_str()))?;
+            // Only a key every decoded payload of the variant carries proves it: a `required`
+            // `readOnly` or `writeOnly` member may be absent (`Field::decodes_optional`).
+            let key = structure.fields.iter().find(|field| {
+                !field.decodes_optional() && !others.contains(field.name.wire.as_str())
+            })?;
             keys.push(key.name.wire.clone());
         }
         Some(keys)

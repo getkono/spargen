@@ -300,6 +300,7 @@ fn variant_name(code: Code) -> &'static str {
         Code::CargoIntegrationDegraded => "CargoIntegrationDegraded",
         Code::CargoIntegrationRequired => "CargoIntegrationRequired",
         Code::BoundHeaderNotDeclared => "BoundHeaderNotDeclared",
+        Code::ReadWriteOnlyRequirednessRelaxed => "ReadWriteOnlyRequirednessRelaxed",
     }
 }
 
@@ -401,7 +402,7 @@ fn a_comment_or_an_absence_is_not_a_fixture() {
 /// and this fails until `all()` lists it too.
 #[test]
 fn all_lists_every_declared_variant() {
-    const DECLARED: usize = 34;
+    const DECLARED: usize = 35;
 
     assert_eq!(
         Code::all().len(),

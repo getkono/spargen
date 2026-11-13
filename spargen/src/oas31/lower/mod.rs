@@ -46,6 +46,7 @@ use super::{Document, PathItem, Resolver, Schema};
 use combine::{Gathering, RecordedContribution};
 use cycle::{MemberOrder, MemberOrders, Opening};
 use defaults::retype_field_defaults;
+use object::warn_relaxed_requiredness;
 use operation::lower_operation;
 use reference::resolve_path_item;
 use refiner::CategoryMask;
@@ -348,6 +349,10 @@ fn lower_pass(
     // An intersection narrows a field's type after its `default` was checked against the type the
     // declaring member gave it, so the applied defaults are checked again against the final graph.
     retype_field_defaults(&mut ctx.graph, &ctx.meet_locations, ctx.diags);
+
+    // Every merge is made, so a field's `required` and `readOnly`/`writeOnly` are final: report
+    // each `required` the generated struct relaxes.
+    warn_relaxed_requiredness(&ctx.graph, ctx.diags);
 
     // A field's `xml.name`/`xml.attribute` become a format-agnostic serde `rename`, so they may only
     // be applied to a schema used *exclusively* as an XML body — otherwise the rename would corrupt

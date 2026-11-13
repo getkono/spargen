@@ -113,17 +113,27 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                         .as_str()
                         .to_owned();
                     // An optional nullable field is a `Nullable<T>`, where a required one is the
-                    // `Option<T>` `canon_ty` renders.
-                    let ty = if !field.required && field.ty.nullable {
+                    // `Option<T>` `canon_ty` renders. A member is `required` here exactly when
+                    // `new` takes it, so a property gaining `readOnly` leaves `new` as a required
+                    // field turning optional does. A `writeOnly` one `new` still takes is an
+                    // optional member read back, so its type is spelled with the `Option` (or
+                    // `Nullable`) the struct declares.
+                    let ty = if field.decodes_optional() && field.ty.nullable {
                         nullable_canon_ty(field.ty, api, names, settings)
                     } else {
                         canon_ty(field.ty, api, names, settings)
                     };
+                    let ty =
+                        if field.constructed() && field.decodes_optional() && !field.ty.nullable {
+                            format!("Option<{ty}>")
+                        } else {
+                            ty
+                        };
                     fields.insert(
                         field_name,
                         MemberSurface {
                             ty,
-                            required: field.required,
+                            required: field.constructed(),
                         },
                     );
                 }

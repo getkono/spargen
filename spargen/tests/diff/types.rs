@@ -134,6 +134,53 @@ fn flipping_a_field_between_required_and_optional_is_major_both_ways() {
 }
 
 #[test]
+fn a_required_field_gaining_read_only_leaves_new_and_is_major() {
+    // A `required` `readOnly` member is an `Option<T>` `new` no longer takes (#1326), so gaining
+    // the keyword is the requiredness flip a consumer's constructor call sees.
+    let plain = base();
+    let read_only = spec(
+        "",
+        "id",
+        "        id: { type: integer, readOnly: true }\n        name: { type: string }\n",
+        "",
+    );
+
+    for (old, new) in [(&plain, &read_only), (&read_only, &plain)] {
+        let report = diff(old, new);
+        assert_eq!(
+            kinds(&report),
+            vec![ChangeKind::FieldRequirednessChanged],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
+#[test]
+fn a_required_field_gaining_write_only_changes_its_type_and_is_major() {
+    // A `required` `writeOnly` member stays a `new` argument but is read back as an `Option<T>`.
+    let plain = base();
+    let write_only = spec(
+        "",
+        "id",
+        "        id: { type: integer, writeOnly: true }\n        name: { type: string }\n",
+        "",
+    );
+
+    for (old, new) in [(&plain, &write_only), (&write_only, &plain)] {
+        let report = diff(old, new);
+        assert_eq!(
+            kinds(&report),
+            vec![ChangeKind::FieldTypeChanged],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
+#[test]
 fn an_optional_field_becoming_nullable_or_no_longer_nullable_is_major_both_ways() {
     // `Option<T>` ↔ `Nullable<T>` on a public struct field.
     let optional_name = base();

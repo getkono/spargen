@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, Provenance};
-use crate::ir::{AdditionalProps, Docs, Field, PropertyName, Ty, TypeKind, XmlField};
+use crate::ir::{AdditionalProps, Docs, Field, PropertyName, Ty, TypeGraph, TypeKind, XmlField};
 use crate::name::hint_segment;
 use crate::oas31::{Schema, SchemaOr};
 
@@ -30,9 +30,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.claim_field_xml(child);
             let ty = self.lower_schema_or(child, &format!("{hint}{}", hint_segment(name)))?;
             let is_required = required.contains(name);
-            let default = self.field_default(child, ty, is_required);
-            let xml = field_xml(child);
             let (deprecated, read_only, write_only) = field_flags(child);
+            // A `required` `readOnly` or `writeOnly` member decodes as optional
+            // (`Field::decodes_optional`), so it takes its default as an optional one does.
+            let decodes_required = is_required && !read_only && !write_only;
+            let default = self.field_default(child, ty, decodes_required);
+            let xml = field_xml(child);
             fields.push(Field {
                 name: PropertyName { wire: name.clone() },
                 ty,
@@ -220,6 +223,49 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if rejected {
                 reject_heterogeneous_map_values(provenance, self.diags);
             }
+        }
+    }
+}
+
+/// `W015` for every member of an emitted struct whose `required` is relaxed because the property is
+/// also `readOnly` or `writeOnly` ([`Field::requiredness_relaxed`]). Read from the final graph, so
+/// a property an `allOf` member requires and another marks `readOnly` is reported as the merged
+/// struct generates it, once, located at that struct.
+pub(super) fn warn_relaxed_requiredness(graph: &TypeGraph, diags: &mut Diagnostics) {
+    for (_, def) in graph.emitted() {
+        let TypeKind::Struct(object) = &def.kind else {
+            continue;
+        };
+        for field in object
+            .fields
+            .iter()
+            .filter(|field| field.requiredness_relaxed())
+        {
+            let (keyword, reason) = if field.read_only {
+                (
+                    "readOnly",
+                    "a request leaves it out, so its member may be absent, is never serialized, \
+                     and is not a `new` argument",
+                )
+            } else {
+                (
+                    "writeOnly",
+                    "a response leaves it out, so its member may be absent when decoded, and \
+                     `new` still takes it",
+                )
+            };
+            Diagnostic::warning(
+                Code::ReadWriteOnlyRequirednessRelaxed,
+                def.provenance.clone(),
+            )
+            .message(format!(
+                "property `{}` of `{}` is `required` and `{keyword}`: {reason}",
+                field.name.wire, def.name_hint
+            ))
+            .remedy(format!(
+                "drop `{keyword}` to keep the property strictly required in both directions"
+            ))
+            .emit(diags);
         }
     }
 }

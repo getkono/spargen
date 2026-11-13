@@ -64,6 +64,7 @@ mod open_narrowing;
 mod parameters;
 mod pattern_properties;
 mod placement;
+mod read_write_only;
 mod recursion_aliases;
 mod recursion_cycle_closing;
 mod recursion_cycles;

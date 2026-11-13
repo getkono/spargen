@@ -15,12 +15,14 @@ use super::LowerCtx;
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Give a property's `default` its single explicit disposition. Returns `None` when the
     /// property declared no `default`; otherwise a [`FieldDefault`] whose `applied` is set only for
-    /// a representable scalar on a plain optional field. A non-representable default emits `W005`.
+    /// a representable scalar on a plain optional field: `decodes_required` is whether the field
+    /// decodes as required, which a `required` `readOnly` or `writeOnly` one does not. A
+    /// non-representable default emits `W005`.
     pub(super) fn field_default(
         &mut self,
         child: &SchemaOr,
         ty: Ty,
-        required: bool,
+        decodes_required: bool,
     ) -> Option<FieldDefault> {
         let SchemaOr::Schema(schema) = child else {
             return None;
@@ -33,10 +35,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(value) => {
                 let display = default_display(&value);
                 // A serde default only fires for an absent field on deserialization, so it is wired
-                // only for a plain optional (non-required, non-nullable) scalar. A required field is
-                // always present, and a nullable field already carries `Option`; both are documented
-                // in rustdoc instead of silently ignored.
-                let applied = (!required && !ty.nullable).then_some(value);
+                // only for a plain optional (decoded as not required, non-nullable) scalar. A field
+                // decoded as required is always present, and a nullable field already carries
+                // `Option`; both are documented in rustdoc instead of silently ignored.
+                let applied = (!decodes_required && !ty.nullable).then_some(value);
                 Some(FieldDefault {
                     doc_note: format!("Default: `{display}`."),
                     applied,
@@ -529,7 +531,7 @@ components:
   schemas:
     Pet:
       type: object
-      required: [req]
+      required: [req, read_only, write_only]
       properties:
         i32: { type: integer, format: int32, default: 10 }
         wide: { type: integer, format: int32, default: 3000000000 }
@@ -544,6 +546,8 @@ components:
         color: { type: string, enum: [red, blue], default: blue }
         off_color: { type: string, enum: [red], default: green }
         req: { type: string, default: r }
+        read_only: { type: string, readOnly: true, default: ro }
+        write_only: { type: string, writeOnly: true, default: wo }
         maybe: { type: [string, 'null'], default: m }
         obj: { type: object, default: { k: [1, null, 2.5, true, -3, 18446744073709551615] } }
         list: { type: array, items: { type: string, default: x } }
@@ -555,7 +559,9 @@ components:
             kept: { type: string, default: a }
             dropped: { type: string, default: c }
             whole: { type: number, default: 3 }
+            relaxed: { type: string, readOnly: true, default: r }
         - type: object
+          required: [relaxed]
           properties:
             kept: { enum: [a, b] }
             dropped: { enum: [a, b] }
@@ -609,6 +615,15 @@ components:
                 documented("Default (not applied): `\"green\"`."),
             ),
             ("req", documented("Default: `r`.")),
+            // `required` relaxed by `readOnly`/`writeOnly`: the member decodes as optional.
+            (
+                "read_only",
+                applied("Default: `ro`.", DefaultValue::Str("ro".to_owned())),
+            ),
+            (
+                "write_only",
+                applied("Default: `wo`.", DefaultValue::Str("wo".to_owned())),
+            ),
             ("maybe", documented("Default: `m`.")),
             (
                 "obj",
@@ -683,6 +698,13 @@ components:
                     "whole".to_owned(),
                     Some("Default: `3`.".to_owned()),
                     Some(DefaultValue::Int(3)),
+                ),
+                // Required by the other member, but `readOnly`: it decodes as optional, so the
+                // requirement leaves its default applied.
+                (
+                    "relaxed".to_owned(),
+                    Some("Default: `r`.".to_owned()),
+                    Some(DefaultValue::Str("r".to_owned())),
                 ),
             ]
         );
