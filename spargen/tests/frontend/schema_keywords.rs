@@ -204,6 +204,44 @@ fn an_openapi_3_0_nullable_is_warned_and_not_reinterpreted() {
     }
 }
 
+// W001 case: oas30-nullable
+#[test]
+fn an_openapi_3_0_nullable_remedy_fits_the_schema_carrying_it() {
+    // Beside a `$ref`, `type: [T, 'null']` is intersected with the target's non-null `type` and
+    // still admits no `null`, so that schema is pointed at the `oneOf` form instead.
+    let spec = single_component_document(
+        "      type: object\n      properties:\n        \
+         name: { type: string, nullable: true }\n        \
+         base: { $ref: '#/components/schemas/Base', nullable: true }",
+    );
+    let report = generate(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let mut remedies: Vec<(&str, Option<&str>)> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::ValidationKeywordIgnored)
+        .map(|d| (d.pointer.as_str(), d.remedy.as_deref()))
+        .collect();
+    remedies.sort_unstable();
+    assert_eq!(
+        remedies,
+        [
+            (
+                "/components/schemas/U/properties/base",
+                Some(
+                    "replace the `$ref` with `oneOf: [{type: 'null'}, {$ref: …}]`: a `type` \
+                     beside it is intersected with the target's and still excludes `null`"
+                )
+            ),
+            (
+                "/components/schemas/U/properties/name",
+                Some("list `null` in the schema's `type` instead, as `type: [T, 'null']`")
+            ),
+        ],
+        "{report:#?}"
+    );
+}
+
 #[test]
 fn well_typed_value_keywords_generate_cleanly() {
     let spec = single_component_document(
