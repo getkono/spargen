@@ -503,6 +503,11 @@ fn replay_headers(backend: &SequenceBackend) -> Vec<(Option<String>, Option<Stri
         .collect()
 }
 
+/// An SSE reconnect response: `status` and `body`, as `text/event-stream`.
+fn sse_reply(status: u16, body: &str) -> Reply {
+    Reply::status(status, body).header("content-type", "text/event-stream")
+}
+
 /// Accepts a reconnect while `attempt` is below `max_attempts`, recording what each call saw. Its
 /// wait is ready at once, or, with `pending_wait`, answers `Pending` once first.
 #[derive(Default)]
@@ -580,7 +585,7 @@ fn reconnectable_stream_over(
 
 #[test]
 fn reconnect_replays_last_event_id_and_preserves_cookie_headers() {
-    let backend = SequenceBackend::new([Reply::status(200, "data: {\"seq\":2}\n\n")]);
+    let backend = SequenceBackend::new([sse_reply(200, "data: {\"seq\":2}\n\n")]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         ..ImmediateReconnect::default()
@@ -629,7 +634,14 @@ impl crate::HttpBackend for OptionRecorder {
                 .map(|value| value.to_str().unwrap().to_owned()),
             request.extensions().get::<Tag>().copied(),
         ));
-        Box::pin(async { Ok(response("data: {\"seq\":2}\n\n")) })
+        Box::pin(async {
+            Ok(crate::tests::from_http(
+                http::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body("data: {\"seq\":2}\n\n".to_owned())
+                    .expect("valid synthetic response"),
+            ))
+        })
     }
 }
 
@@ -677,7 +689,7 @@ fn a_reconnect_carries_the_cores_option_headers_and_extensions() {
 /// is stripped as the first connection's was, and its first event still decodes.
 #[test]
 fn a_reconnected_body_opening_with_a_bom_has_it_stripped() {
-    let backend = SequenceBackend::new([Reply::status(200, "\u{FEFF}data: {\"seq\":2}\n\n")]);
+    let backend = SequenceBackend::new([sse_reply(200, "\u{FEFF}data: {\"seq\":2}\n\n")]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         ..ImmediateReconnect::default()
@@ -709,7 +721,7 @@ fn a_reconnected_body_opening_with_a_bom_has_it_stripped() {
 /// server; `last_event_id` keeps reporting the id the server sent.
 #[test]
 fn an_unsendable_sse_id_reconnects_without_last_event_id() {
-    let backend = SequenceBackend::new([Reply::status(200, "data: {\"seq\":2}\n\n")]);
+    let backend = SequenceBackend::new([sse_reply(200, "data: {\"seq\":2}\n\n")]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         ..ImmediateReconnect::default()
@@ -751,7 +763,7 @@ fn an_unsendable_sse_id_reconnects_without_last_event_id() {
 /// empty header, nor the server's earlier id, nor the one the original request carried.
 #[test]
 fn an_empty_sse_id_reconnects_without_last_event_id() {
-    let backend = SequenceBackend::new([Reply::status(200, "data: {\"seq\":3}\n\n")]);
+    let backend = SequenceBackend::new([sse_reply(200, "data: {\"seq\":3}\n\n")]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         ..ImmediateReconnect::default()
@@ -814,6 +826,131 @@ fn declined_reconnect_failure_preserves_the_original_error_variant() {
             .map(|(_, reason, _)| *reason)
             .collect::<Vec<_>>(),
         vec!["eof", "failure"]
+    );
+}
+
+/// The policy calls `stream` saw, as `(attempt, reason)`.
+fn reasons(policy: &ImmediateReconnect) -> Vec<(u32, &'static str)> {
+    policy
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(attempt, reason, _)| (*attempt, *reason))
+        .collect()
+}
+
+/// Issue #1330: a `204` answering a reconnect is the server's "stop reconnecting", whatever the
+/// framing: the stream ends cleanly, and nothing is resent however many attempts the policy would
+/// still allow.
+#[test]
+fn a_204_reconnect_response_ends_the_stream() {
+    for framing in [Framing::SseJsonData, Framing::Ndjson] {
+        let backend = SequenceBackend::new([Reply::status(204, "")]);
+        let policy = Arc::new(ImmediateReconnect {
+            max_attempts: 5,
+            ..ImmediateReconnect::default()
+        });
+        let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
+        let request = crate::tests::builder(Method::GET, "https://example.com/events")
+            .build()
+            .unwrap();
+        let initial = match framing {
+            Framing::Ndjson => "{\"seq\":1}\n",
+            _ => "data: {\"seq\":1}\n\n",
+        };
+        let mut stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
+            response(initial),
+            framing,
+            &core,
+            prepared(&core, request),
+        )
+        .with_reconnect(policy.clone())
+        .unwrap();
+
+        assert_eq!(
+            poll_ready(stream.next()).unwrap().unwrap(),
+            serde_json::json!({"seq": 1}),
+            "{framing:?}"
+        );
+        assert!(poll_ready(stream.next()).is_none(), "{framing:?}");
+        assert!(poll_ready(stream.next()).is_none(), "{framing:?}");
+        assert_eq!(backend.calls(), 1, "{framing:?}");
+        assert_eq!(reasons(&policy), [(0, "eof")], "{framing:?}");
+    }
+}
+
+/// Issue #1330: an SSE reconnect answered with a body that is not `text/event-stream` (a proxy's
+/// HTML page, or no `Content-Type` at all) is not framed as events: the stream yields a `Decode`
+/// error carrying that response's status, headers and capped body, and ends without consulting
+/// the policy again.
+#[test]
+fn an_sse_reconnect_response_that_is_not_an_event_stream_ends_the_stream() {
+    for (reply, content_type) in [
+        (
+            Reply::status(200, "<html>maintenance</html>").header("content-type", "text/html"),
+            Some("text/html"),
+        ),
+        (Reply::status(200, "data: {\"seq\":2}\n\n"), None),
+    ] {
+        let backend = SequenceBackend::new([reply]);
+        let policy = Arc::new(ImmediateReconnect {
+            max_attempts: 5,
+            ..ImmediateReconnect::default()
+        });
+        let mut stream =
+            reconnectable_stream("data: {\"seq\":1}\n\n", backend.clone(), policy.clone());
+
+        assert_eq!(
+            poll_ready(stream.next()).unwrap().unwrap(),
+            serde_json::json!({"seq": 1})
+        );
+        match poll_ready(stream.next()) {
+            Some(Err(
+                ref error @ Error::Decode {
+                    status,
+                    ref headers,
+                    ref path,
+                    ref body,
+                    truncated,
+                },
+            )) => {
+                assert_eq!(status, 200);
+                assert_eq!(headers.get("x-response").unwrap(), "backend");
+                assert!(path.contains("text/event-stream"), "{path}");
+                assert!(!truncated);
+                assert!(!body.is_empty());
+                assert!(!error.is_transient());
+                if let Some(content_type) = content_type {
+                    assert!(path.contains(content_type), "{path}");
+                }
+            }
+            other => panic!("expected a Decode error, got {other:?}"),
+        }
+        assert!(poll_ready(stream.next()).is_none());
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(reasons(&policy), [(0, "eof")]);
+    }
+}
+
+/// The `Content-Type` an SSE reconnect is held to is the media type alone: its case and its
+/// parameters do not matter.
+#[test]
+fn an_sse_reconnect_accepts_event_stream_with_parameters_in_any_case() {
+    let backend = SequenceBackend::new([Reply::status(200, "data: {\"seq\":2}\n\n")
+        .header("content-type", "Text/Event-Stream; charset=utf-8")]);
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 1,
+        ..ImmediateReconnect::default()
+    });
+    let mut stream = reconnectable_stream("data: {\"seq\":1}\n\n", backend, policy);
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 1})
+    );
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 2})
     );
 }
 
@@ -892,7 +1029,7 @@ fn next_yields_a_decode_error_for_a_malformed_item() {
 /// not the initial one's: the frame was read from the new body.
 #[test]
 fn a_decode_error_after_a_reconnect_reports_the_reconnected_status_and_headers() {
-    let backend = SequenceBackend::new([Reply::status(203, "data: not json\n\n")]);
+    let backend = SequenceBackend::new([sse_reply(203, "data: not json\n\n")]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         ..ImmediateReconnect::default()
@@ -936,9 +1073,9 @@ fn next_resumes_after_a_decode_error() {
 #[test]
 fn the_reconnect_attempt_resets_after_a_decoded_item_and_not_after_a_decode_error() {
     let backend = SequenceBackend::new([
-        Reply::status(200, "data: {\"seq\":2}\n\n"),
-        Reply::status(200, "data: not json\n\n"),
-        Reply::status(200, ""),
+        sse_reply(200, "data: {\"seq\":2}\n\n"),
+        sse_reply(200, "data: not json\n\n"),
+        sse_reply(200, ""),
     ]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 2,
@@ -1421,8 +1558,8 @@ fn a_body_that_fails_mid_item_yields_interrupted_body_and_ends_the_stream() {
 #[test]
 fn an_sse_event_cut_off_at_eof_is_not_dispatched_and_its_id_is_not_replayed() {
     let backend = SequenceBackend::new([
-        Reply::status(200, "id: 7\ndata: {\"seq\":7}\n\n"),
-        Reply::status(200, ""),
+        sse_reply(200, "id: 7\ndata: {\"seq\":7}\n\n"),
+        sse_reply(200, ""),
     ]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
@@ -1517,10 +1654,8 @@ fn a_mid_stream_read_failure_surfaces_as_its_transport_class() {
 /// stream from the last event ID.
 #[test]
 fn a_mid_stream_timeout_is_offered_to_the_reconnect_policy() {
-    let backend = SequenceBackend::new([
-        Reply::status(200, "data: {\"seq\":2}\n\n"),
-        Reply::status(200, ""),
-    ]);
+    let backend =
+        SequenceBackend::new([sse_reply(200, "data: {\"seq\":2}\n\n"), sse_reply(200, "")]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         ..ImmediateReconnect::default()
@@ -1559,8 +1694,8 @@ fn a_mid_stream_timeout_is_offered_to_the_reconnect_policy() {
 #[test]
 fn a_reconnect_after_an_interrupted_body_discards_the_partial_event() {
     let backend = SequenceBackend::new([
-        Reply::status(200, "2}\n\ndata: {\"seq\":3}\n\n"),
-        Reply::status(200, ""),
+        sse_reply(200, "2}\n\ndata: {\"seq\":3}\n\n"),
+        sse_reply(200, ""),
     ]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
@@ -1620,7 +1755,7 @@ fn a_pending_body_chunk_resumes_framing() {
 /// server's `retry:` delay is still reported.
 #[test]
 fn a_pending_reconnect_wait_resumes_without_losing_state() {
-    let backend = SequenceBackend::new([Reply::status(200, "data: {\"seq\":2}\n\n").pending()]);
+    let backend = SequenceBackend::new([sse_reply(200, "data: {\"seq\":2}\n\n").pending()]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         pending_wait: true,

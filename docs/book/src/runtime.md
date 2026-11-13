@@ -312,7 +312,10 @@ Automatic reconnect is explicit: call `with_reconnect(Arc<dyn ReconnectPolicy>)`
 policy owns attempt limits and supplies the wait future, so the runtime introduces neither a timer
 nor a retry default. A replayable prepared request is cloned, its cookies and other headers are
 preserved, and the latest event ID is sent as `Last-Event-ID`. Declining a reconnect yields the
-original typed stream error unchanged. On `wasm32`, `ReqwestBackend`'s `fetch` response is read
+original typed stream error unchanged. A mid-stream read failure is reported by its class, as any
+other body read's is (a stalled read is `Error::Timeout`), and is offered to the policy. A `204`
+answering a reconnect ends the stream cleanly, and an SSE reconnect whose response is not
+`text/event-stream` yields `Error::Decode` and ends it; neither asks the policy again. On `wasm32`, `ReqwestBackend`'s `fetch` response is read
 chunk by chunk as the browser delivers it, through reqwest's `stream` feature; the stream API and
 framing are the same as natively.
 

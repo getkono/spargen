@@ -24,7 +24,7 @@ use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 
 use crate::chunked::read_as_it_arrives;
-use crate::dispatch::{cap_body, send_on, unexpected_status_capped};
+use crate::dispatch::{cap_body, read_prefix, send_on, unexpected_status_capped};
 use crate::transport::try_clone_request;
 use crate::wasm::BoxFuture;
 use crate::{ClientConfig, ClientCore, Error, HttpBackend, HttpBody, MaybeSend, MaybeSync};
@@ -39,7 +39,21 @@ type Response = http::Response<HttpBody>;
 /// it, as the `wasm` module explains.
 pub type ReconnectWait = BoxFuture<'static, ()>;
 
-type ReconnectFuture = BoxFuture<'static, Result<Response, StreamError>>;
+type ReconnectFuture = BoxFuture<'static, Reconnected>;
+
+/// How a reconnect request was answered.
+enum Reconnected {
+    /// A response whose body is framed in place of the closed one.
+    Opened(Response),
+    /// A failure the reconnect policy is asked about, as one reading the body is.
+    Failed(StreamError),
+    /// A `204`: the server's request to stop reconnecting. The stream ends cleanly.
+    NoContent,
+    /// A response the stream cannot frame (an SSE reconnect answered with a body that is not
+    /// `text/event-stream`). It is yielded, and the stream ends without asking the policy again,
+    /// since resending the request would be answered the same way.
+    Refused(StreamError),
+}
 
 /// Why an automatic SSE reconnect is being considered.
 #[derive(Debug)]
@@ -56,6 +70,11 @@ pub enum ReconnectReason<'a> {
 /// attempt limits and timing. `attempt` starts at zero, increases after each accepted reconnect,
 /// and resets after a successfully decoded item. `server_delay` is the latest valid SSE `retry:`
 /// value, when present.
+///
+/// A reconnect answered with a non-success status, or failing in transit, is offered to the
+/// policy again. Two answers end the stream without asking it: a `204`, the server's request to
+/// stop reconnecting, ends it cleanly; and an SSE reconnect whose response is not
+/// `text/event-stream` yields an [`Error::Decode`] carrying that response, then ends it.
 pub trait ReconnectPolicy: MaybeSend + MaybeSync {
     /// Decide whether to reconnect and provide the future that waits until the next attempt.
     fn reconnect(
@@ -358,19 +377,23 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                         this.state = StreamState::Connecting(future);
                         return Poll::Pending;
                     }
-                    Poll::Ready(Ok(response)) => {
+                    Poll::Ready(Reconnected::Opened(response)) => {
                         let (parts, body) = response.into_parts();
                         this.status = parts.status;
                         this.headers = parts.headers;
                         this.bom_pending = is_sse(this.framing);
                         this.state = StreamState::Body(read_as_it_arrives(body));
                     }
-                    Poll::Ready(Err(error)) => {
+                    Poll::Ready(Reconnected::Failed(error)) => {
                         if let Some(error) =
                             this.schedule_reconnect(OwnedReconnectReason::Failure(error))
                         {
                             return Poll::Ready(Some(Err(error)));
                         }
+                    }
+                    Poll::Ready(Reconnected::NoContent) => return Poll::Ready(None),
+                    Poll::Ready(Reconnected::Refused(error)) => {
+                        return Poll::Ready(Some(Err(error)));
                     }
                 },
                 StreamState::Done => return Poll::Ready(None),
@@ -463,14 +486,62 @@ impl<T> EventStream<T> {
                 }
             }
         }
+        let sse = is_sse(self.framing);
         Some(Box::pin(async move {
-            let response = send_on(backend.as_ref(), request).await?;
-            if response.status().is_success() {
-                Ok(response)
-            } else {
-                Err(unexpected_status_capped(max_error_body, response).await)
+            let response = match send_on(backend.as_ref(), request).await {
+                Ok(response) => response,
+                Err(error) => return Reconnected::Failed(error),
+            };
+            if !response.status().is_success() {
+                return Reconnected::Failed(
+                    unexpected_status_capped(max_error_body, response).await,
+                );
             }
+            if response.status() == StatusCode::NO_CONTENT {
+                return Reconnected::NoContent;
+            }
+            if sse && !is_event_stream(response.headers()) {
+                return Reconnected::Refused(not_an_event_stream(max_error_body, response).await);
+            }
+            Reconnected::Opened(response)
         }))
+    }
+}
+
+/// Whether `headers` declare a `text/event-stream` body: the media type alone decides, in any case
+/// and whatever parameters follow it.
+fn is_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("text/event-stream"))
+}
+
+/// The `Decode` error an SSE reconnect answered with a body that is not `text/event-stream` is
+/// reported as: its status and headers, and its body capped at `max_error_body`. A failure while
+/// reading that body is reported instead, by its transport class.
+async fn not_an_event_stream(max_error_body: usize, response: Response) -> StreamError {
+    let (parts, body) = response.into_parts();
+    let path = match parts.headers.get(reqwest::header::CONTENT_TYPE) {
+        Some(value) => format!(
+            "reconnect response Content-Type is {:?}, not text/event-stream",
+            String::from_utf8_lossy(value.as_bytes())
+        ),
+        None => "reconnect response has no Content-Type, not text/event-stream".to_owned(),
+    };
+    match read_prefix(max_error_body, body).await {
+        Ok(prefix) => {
+            let (body, truncated) = cap_body(prefix, max_error_body);
+            Error::Decode {
+                status: parts.status,
+                headers: parts.headers,
+                path,
+                body,
+                truncated,
+            }
+        }
+        Err(error) => Error::from_transport(error),
     }
 }
 
