@@ -1012,12 +1012,13 @@ fn an_integral_float_default_is_the_integer_it_equals() {
         4,
         "`size`, `narrow`, `level` and `ratio` apply their defaults: {code}"
     );
-    // Each provider returns the literal its field's type takes: an integer for the three `integer`
-    // fields, a float for the `number` one.
+    // Each provider returns the literal its field's type takes: an integer for the two plain
+    // `integer` fields, the checked newtype over one for the `enum` (#1327), a float for the
+    // `number` one.
     for (field, literal) in [
         ("size", "Some(3)"),
         ("narrow", "Some(7)"),
-        ("level", "Some(2)"),
+        ("level", "Some(PageLevel(2))"),
         ("ratio", "Some(4.0)"),
     ] {
         let start = code

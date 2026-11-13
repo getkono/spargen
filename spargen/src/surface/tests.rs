@@ -490,9 +490,10 @@ struct Node {
 #[derive(Debug, Clone)]
 enum Shape {
     Primitive(crate::ir::Prim),
-    /// A struct, string enum, union, uninhabited or base64 type: rendered by its allocated name.
+    /// A struct, string enum, checked integer set, union, uninhabited or base64 type: rendered by
+    /// its allocated name.
     Nominal(NominalKind),
-    IntEnum,
+    /// A boolean set listing both values: the `bool` alias.
     BoolEnum,
     Bytes,
     Null,
@@ -505,6 +506,7 @@ enum Shape {
 enum NominalKind {
     Struct,
     StringEnum,
+    IntSet,
     Union,
     Never,
     Base64,
@@ -532,12 +534,12 @@ fn node() -> impl proptest::strategy::Strategy<Value = Node> {
         proptest::sample::select(vec![
             NominalKind::Struct,
             NominalKind::StringEnum,
+            NominalKind::IntSet,
             NominalKind::Union,
             NominalKind::Never,
             NominalKind::Base64,
         ])
         .prop_map(Shape::Nominal),
-        Just(Shape::IntEnum),
         Just(Shape::BoolEnum),
         Just(Shape::Bytes),
         Just(Shape::Null),
@@ -581,13 +583,14 @@ fn settings() -> impl proptest::strategy::Strategy<Value = super::Settings> {
 /// how a graph is built without naming `crate::diag` (a layer this subsystem does not take).
 fn insert(node: &Node, api: &mut crate::ir::Api, names: &mut crate::name::Names) -> crate::ir::Ty {
     use crate::ir::{
-        AdditionalProps, Openness, ScalarEnum, ScalarRepr, Struct, TypeKind, Union, UnionMode,
-        UnionStrategy,
+        AdditionalProps, Openness, Prim, ScalarEnum, ScalarRepr, ScalarValue, Struct, TypeKind,
+        Union, UnionMode, UnionStrategy,
     };
-    let scalar_enum = |repr| {
+    let scalar_enum = |repr, variants, width| {
         TypeKind::Enum(ScalarEnum {
             repr,
-            variants: Vec::new(),
+            variants,
+            width,
             openness: Openness::Closed,
         })
     };
@@ -597,7 +600,12 @@ fn insert(node: &Node, api: &mut crate::ir::Api, names: &mut crate::name::Names)
             fields: Vec::new(),
             additional: AdditionalProps::Allow,
         }),
-        Shape::Nominal(NominalKind::StringEnum) => scalar_enum(ScalarRepr::String),
+        Shape::Nominal(NominalKind::StringEnum) => {
+            scalar_enum(ScalarRepr::String, Vec::new(), Prim::String)
+        }
+        Shape::Nominal(NominalKind::IntSet) => {
+            scalar_enum(ScalarRepr::Int, vec![ScalarValue::Int(1)], Prim::I32)
+        }
         Shape::Nominal(NominalKind::Union) => TypeKind::Union(Union {
             variants: Vec::new(),
             strategy: UnionStrategy::Trial {
@@ -606,8 +614,11 @@ fn insert(node: &Node, api: &mut crate::ir::Api, names: &mut crate::name::Names)
         }),
         Shape::Nominal(NominalKind::Never) => TypeKind::Never,
         Shape::Nominal(NominalKind::Base64) => TypeKind::Bytes(crate::ir::BytesEncoding::Base64),
-        Shape::IntEnum => scalar_enum(ScalarRepr::Int),
-        Shape::BoolEnum => scalar_enum(ScalarRepr::Bool),
+        Shape::BoolEnum => scalar_enum(
+            ScalarRepr::Bool,
+            vec![ScalarValue::Bool(true), ScalarValue::Bool(false)],
+            Prim::Bool,
+        ),
         Shape::Bytes => TypeKind::Bytes(crate::ir::BytesEncoding::Raw),
         Shape::Null => TypeKind::Null,
         Shape::Any => TypeKind::Any,
@@ -736,7 +747,6 @@ fn check(
             return Ok(());
         }
         Shape::Nominal(_) => names.types[&ty.id].as_str().to_owned(),
-        Shape::IntEnum => "i64".to_owned(),
         Shape::BoolEnum => "bool".to_owned(),
         Shape::Bytes => "Bytes".to_owned(),
         Shape::Any => "Value".to_owned(),

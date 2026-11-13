@@ -416,14 +416,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(JsonType::Integer) => self.insert_schema_type(
                 schema,
                 hint,
-                TypeKind::Primitive(match schema.format.as_deref() {
-                    Some("int32") => Prim::I32,
-                    Some("uint8") => Prim::U8,
-                    Some("uint16") => Prim::U16,
-                    Some("uint32") => Prim::U32,
-                    Some("uint64") => Prim::U64,
-                    _ => Prim::I64,
-                }),
+                TypeKind::Primitive(Prim::integer_format(schema.format.as_deref())),
             ),
             Some(JsonType::Number) => {
                 self.insert_schema_type(schema, hint, TypeKind::Primitive(Prim::F64))
@@ -626,8 +619,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate
         // (last-insert invariant: `lower_into_reservation`).
         let repr = repr.unwrap_or(ScalarRepr::String);
+        // An integer set is held in the width its `format` names, as a plain `integer` is, so a
+        // member that width cannot hold satisfies `enum` and never `format`: no value the schema
+        // admits is that member, and a set keeping it would not compile.
+        let width = match repr {
+            ScalarRepr::String => Prim::String,
+            ScalarRepr::Bool => Prim::Bool,
+            ScalarRepr::Int => Prim::integer_format(schema.format.as_deref()),
+        };
+        if let Some(outside) = variants.iter().find_map(|value| match value {
+            ScalarValue::Int(int) if !width.holds_integer(*int) => Some(*int),
+            _ => None,
+        }) {
+            Diagnostic::error(Code::NonScalarEnum, schema.provenance.clone())
+                .message(format!(
+                    "enum/const value {outside} is outside the range of `format: {}`, so no \
+                     integer that format admits is that value",
+                    schema.format.as_deref().unwrap_or_default()
+                ))
+                .remedy("remove the value from the set, or widen the schema's `format`")
+                .emit(self.diags);
+            return None;
+        }
         // A string set whose own schema names a `uuid` or date format is narrowed against that
-        // format exactly as an `allOf` member declaring it would narrow it (`narrowed_string`).
+        // format exactly as an `allOf` member declaring it would narrow it (`narrowed_set`).
         let formatted = matches!(
             schema.format.as_deref(),
             Some("uuid" | "date" | "date-time")
@@ -643,10 +658,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             TypeKind::Enum(ScalarEnum {
                 repr,
                 variants,
+                width,
                 openness,
             }),
         );
-        if self.narrowing_opens && repr == ScalarRepr::String {
+        if self.narrowing_opens {
             self.open_candidates.insert(ty.id);
         }
         ty.nullable = has_null;

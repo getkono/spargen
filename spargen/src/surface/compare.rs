@@ -545,6 +545,21 @@ fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec
             diff_variant_set(name, old_variants, new_variants, changes);
             diff_open_variant(name, old_open.as_deref(), new_open.as_deref(), changes);
         }
+        (
+            TypeSurface::Checked(old_scalar, old_values),
+            TypeSurface::Checked(new_scalar, new_values),
+        ) => {
+            // `get` returns the scalar and `TryFrom` takes it, so a new width breaks both, as a
+            // field type change breaks its reads.
+            if old_scalar != new_scalar {
+                changes.push(Change::new(
+                    ChangeKind::FieldTypeChanged,
+                    format!("{name}.get()"),
+                    format!("checked scalar `{old_scalar}` -> `{new_scalar}`"),
+                ));
+            }
+            diff_variant_set(name, old_values, new_values, changes);
+        }
         (TypeSurface::Union(old_variants), TypeSurface::Union(new_variants)) => {
             diff_union(name, old_variants, new_variants, changes);
         }

@@ -268,14 +268,18 @@ path above. The opt-in `open_narrowing` (`Spec::with_open_narrowing(Narrowing::O
 `spargen.toml`, `--open-narrowing`, or `open_narrowing` in `generate_api!`) lowers that narrowing,
 in a response body's own schema, to an open enum instead: each listed value keeps its variant, one
 more (`Other(String)`, renamed when a listed value takes that name) holds any other string, and
-the response decodes into `Error::Api`, where `problem()` reads it like any other.
+the response decodes into `Error::Api`, where `problem()` reads it like any other. An integer or
+boolean `enum`/`const` narrowing a plain `integer` or `boolean` there opens the same way: its
+checked newtype decodes any value of its width, while its `TryFrom` still accepts only the listed
+values.
 
 Only that position opens. A narrowing written inside a `$ref` target (a component, a sub-file
 schema) or inside a `oneOf`/`anyOf` stays closed, because a target is shared by every use and a
 union's variants are told apart by what each refuses. A narrowing whose value set is itself a
 `$ref` target opens a copy and leaves the target closed. Request bodies, parameters, and a
-non-`string` or formatted (`uuid`, date) base stay closed. `spargen diff` reads the catch-all as a
-variant: `variant-added` when a set opens, `variant-removed` when it closes or is renamed.
+formatted (`uuid`, date) string base stay closed. `spargen diff` reads a string set's catch-all as
+a variant: `variant-added` when a set opens, `variant-removed` when it closes or is renamed. An
+integer or boolean set opening or closing changes what it decodes, not its API.
 
 ## Middleware
 

@@ -666,6 +666,8 @@ mod basic_errors;
 mod bound_headers;
 #[path = "e2e/carried_docs.rs"]
 mod carried_docs;
+#[path = "e2e/checked_sets.rs"]
+mod checked_sets;
 #[path = "e2e/collisions.rs"]
 mod collisions;
 #[path = "e2e/dependencies.rs"]

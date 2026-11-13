@@ -212,11 +212,11 @@ struct MemberSurface {
 type ParamKey = (String, &'static str);
 
 /// A public model type's surface, by generation kind. Only nominal types with real distinct
-/// structure are modelled: structs, string `enum`s, unions, cycle-member newtypes, and uninhabited
-/// empty enums.
-/// Integer/boolean enums and other alias-only components carry no structure beyond a scalar the
-/// consumer already sees at every use site, so they are compared structurally there rather than as
-/// standalone entries.
+/// structure are modelled: structs, string `enum`s, integer and boolean sets' checked newtypes,
+/// unions, cycle-member newtypes, and uninhabited empty enums.
+/// A boolean set listing both values and other alias-only components carry no structure beyond a
+/// scalar the consumer already sees at every use site, so they are compared structurally there
+/// rather than as standalone entries.
 enum TypeSurface {
     /// A `struct`: fields keyed by generated field name, and its typed `additionalProperties` map,
     /// when it has one.
@@ -224,6 +224,10 @@ enum TypeSurface {
     /// A string `enum`: the set of variant wire values, and for an open enum (`open_narrowing`)
     /// the generated name of the variant holding any other string.
     Enum(BTreeSet<String>, Option<String>),
+    /// An integer or boolean set's checked newtype (#1327): the scalar it holds (what `get`
+    /// returns and `TryFrom` takes), and the listed values, each an associated `const`. Whether it
+    /// is open changes what it decodes, not its API.
+    Checked(String, BTreeSet<String>),
     /// A union enum: variants keyed by generated variant name → canonical payload type.
     Union(BTreeMap<String, String>),
     /// An array or tuple that closes an alias cycle, or a `contentEncoding: base64` schema (`T` is
@@ -241,6 +245,7 @@ impl TypeSurface {
         match self {
             TypeSurface::Struct(..) => "struct",
             TypeSurface::Enum(..) => "enum",
+            TypeSurface::Checked(..) => "checked newtype",
             TypeSurface::Union(_) => "union",
             TypeSurface::Newtype(_) => "newtype",
             TypeSurface::Never => "empty enum",
@@ -351,15 +356,17 @@ pub enum ChangeKind {
     RequiredFieldAdded,
     /// A struct field was removed. **Major**.
     FieldRemoved,
-    /// A struct field's type changed, or the type a cycle-member newtype wraps in its public `.0`
-    /// field. **Major**.
+    /// A struct field's type changed, the type a cycle-member newtype wraps in its public `.0`
+    /// field, or the scalar a checked newtype holds (its `get`). **Major**.
     FieldTypeChanged,
     /// A struct field's required-ness flipped. **Major** — `T` ↔ `Option<T>`.
     FieldRequirednessChanged,
-    /// A new variant was added to an enum/union. **Minor** — the documented additive rule (a value a
-    /// consumer may now receive), consistent for string enums and unions alike.
+    /// A new variant was added to an enum/union, or a listed value (its associated `const`) to a
+    /// checked newtype. **Minor** — the documented additive rule (a value a consumer may now
+    /// receive), consistent for string enums, checked newtypes and unions alike.
     VariantAdded,
-    /// A variant was removed from an enum/union. **Major**.
+    /// A variant was removed from an enum/union, or a listed value from a checked newtype.
+    /// **Major**.
     VariantRemoved,
     /// A union variant's payload type changed. **Major**.
     VariantTypeChanged,

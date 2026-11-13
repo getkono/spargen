@@ -84,15 +84,36 @@ components:
     assert!(has_code(&report, Code::PatternPropertiesRejected));
 }
 
-/// `patternProperties` values whose integer `enum`s (or an integer `enum` beside `format: int64`)
-/// all emit `i64` share one typed map: an integer enum is a transparent `i64` alias (#733).
+/// An integer `enum` is a checked newtype (#1327), a Rust item of its own, so two distinct ones,
+/// or one beside `format: int64`, are two types one map cannot hold (`E005`), as two string enums
+/// are; values referring to one integer `enum` share it. Two boolean `enum`s listing both values
+/// are both `bool`, and share one map (#733).
 #[test]
 fn pattern_properties_integer_enum_values() {
-    for (label, second) in [
-        ("two integer enums", "{ type: integer, enum: [3, 4] }"),
+    for (label, first, second, shared) in [
+        (
+            "two integer enums",
+            "{ type: integer, enum: [1, 2] }",
+            "{ type: integer, enum: [3, 4] }",
+            None,
+        ),
         (
             "an integer enum beside int64",
+            "{ type: integer, enum: [1, 2] }",
             "{ type: integer, format: int64 }",
+            None,
+        ),
+        (
+            "one integer enum referred to twice",
+            "{ $ref: '#/components/schemas/Level' }",
+            "{ $ref: '#/components/schemas/Level' }",
+            Some("BTreeMap<String, Level>"),
+        ),
+        (
+            "two boolean enums listing both values",
+            "{ type: boolean, enum: [true, false] }",
+            "{ enum: [false, true] }",
+            Some("BTreeMap<String, ThingValue>"),
         ),
     ] {
         let spec = format!(
@@ -102,24 +123,29 @@ info: {{ title: T, version: 1.0.0 }}
 paths: {{}}
 components:
   schemas:
+    Level: {{ type: integer, enum: [1, 2] }}
     Thing:
       type: object
       patternProperties:
-        "^a-": {{ type: integer, enum: [1, 2] }}
+        "^a-": {first}
         "^b-": {second}
 "##
         );
         let (report, code) = generate_with_code(&spec);
+        let Some(map) = shared else {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+            assert!(
+                has_code(&report, Code::PatternPropertiesRejected),
+                "{label}: {report:#?}"
+            );
+            continue;
+        };
         assert_ne!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
         assert!(
             !has_code(&report, Code::PatternPropertiesRejected),
             "{label}: {report:#?}"
         );
-        assert!(
-            code.contains("BTreeMap<String, ThingValue>")
-                && code.contains("pub type ThingValue = i64;"),
-            "{label}: {code}"
-        );
+        assert!(code.contains(map), "{label}: {code}");
     }
 }
 

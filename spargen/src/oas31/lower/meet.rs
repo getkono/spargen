@@ -11,6 +11,7 @@ use crate::ir::{
 use crate::name::hint_segment;
 
 use super::defaults::reclassify_default;
+use super::narrowing::held_values;
 use super::nullability::{non_nullable, type_accepts_null};
 use super::{LowerCtx, Refiner, ScopeReach};
 
@@ -209,23 +210,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
             // A set's variants are the values the description lists, open or not: `open` says only
-            // that the lowering also holds an unlisted string, because a plain `string` was met
-            // (`narrowed_string`). So two sets meet in the values both list, open when either is.
-            // Both parts are order-independent (an intersection and a disjunction), so an `allOf`
-            // lowers to the same set whichever order its members are written in; keeping the
-            // closed side whole instead would admit values the open side's description forbids.
-            // Where `open_narrowing` is out of effect (inside a union, which `intersect_union`
-            // reaches with a set the response already opened) the meet is closed: two variants
-            // that each held an unlisted string would both match it, and the trial union would
-            // refuse every value. A locked set (one narrowed against a `uuid` or date string) locks
-            // the meet, open side or not, which is again order-independent: the format's domain
-            // holds no unlisted string for the open side to keep.
+            // that the lowering also holds an unlisted value, because a plain `string`, `integer`
+            // or `boolean` was met (`narrowed_set`). So two sets meet in the values both list,
+            // open when either is. Both parts are order-independent (an intersection and a
+            // disjunction), so an `allOf` lowers to the same set whichever order its members are
+            // written in; keeping the closed side whole instead would admit values the open side's
+            // description forbids. Where `open_narrowing` is out of effect (inside a union, which
+            // `intersect_union` reaches with a set the response already opened) the meet is
+            // closed: two variants that each held an unlisted value would both match it, and the
+            // trial union would refuse every value. A locked set (one narrowed against a `uuid` or
+            // date string) locks the meet, open side or not, which is again order-independent: the
+            // format's domain holds no unlisted string for the open side to keep. Two integer sets
+            // meet at the narrower of their widths, keeping the shared members it holds.
             (TypeKind::Enum(left), TypeKind::Enum(right)) if left.repr == right.repr => {
-                let variants: Vec<ScalarValue> = left
-                    .variants
-                    .iter()
+                let width = intersect_primitives(left.width, right.width).unwrap_or(left.width);
+                let variants: Vec<ScalarValue> = held_values(&left.variants, width)
+                    .into_iter()
                     .filter(|value| right.variants.contains(value))
-                    .cloned()
                     .collect();
                 let openness =
                     if left.openness == Openness::Locked || right.openness == Openness::Locked {
@@ -235,16 +236,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     } else {
                         Openness::Closed
                     };
+                let keeps = |set: &ScalarEnum| set.variants == variants && set.width == width;
                 if variants.is_empty() {
                     // Both value sets are finite and listed in full, so sharing no value is proof.
                     Err(NoMeet::Empty)
-                } else if variants == left.variants && openness == left.openness {
+                } else if keeps(left) && openness == left.openness {
                     Ok(non_nullable(a))
-                } else if variants == right.variants && openness == right.openness {
+                } else if keeps(right) && openness == right.openness {
                     Ok(non_nullable(b))
-                } else if variants == left.variants {
+                } else if keeps(left) {
                     Ok(self.reopened_set(a, left, openness, hint))
-                } else if variants == right.variants {
+                } else if keeps(right) {
                     Ok(self.reopened_set(b, right, openness, hint))
                 } else {
                     Ok(self.insert_type(
@@ -252,6 +254,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         TypeKind::Enum(ScalarEnum {
                             repr: left.repr,
                             variants,
+                            width,
                             openness,
                         }),
                         Docs::default(),
@@ -262,12 +265,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (TypeKind::Enum(enumeration), TypeKind::Primitive(primitive))
                 if enum_matches_primitive(enumeration.repr, *primitive) =>
             {
-                Ok(self.narrowed_string(a, enumeration, *primitive, hint))
+                self.narrowed_set(a, enumeration, *primitive, hint)
             }
             (TypeKind::Primitive(primitive), TypeKind::Enum(enumeration))
                 if enum_matches_primitive(enumeration.repr, *primitive) =>
             {
-                Ok(self.narrowed_string(b, enumeration, *primitive, hint))
+                self.narrowed_set(b, enumeration, *primitive, hint)
             }
             (TypeKind::Array(left), TypeKind::Array(right)) => {
                 let item_hint = format!("{hint}Item");
@@ -625,7 +628,7 @@ pub(super) fn same_ty(left: Ty, right: Ty) -> bool {
     left.id == right.id && left.nullable == right.nullable && left.boxed == right.boxed
 }
 
-fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
+pub(super) fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
     use Prim::{Bool, Date, DateTime, String, Uuid, F64, I32, I64, U16, U32, U64, U8};
     Some(match (left, right) {
         (Bool, Bool) => Bool,
