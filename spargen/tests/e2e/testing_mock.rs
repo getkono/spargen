@@ -97,7 +97,7 @@ fn the_testing_module_routes_records_and_answers_typed_replies() {
     let spec = write_spec(temp.path(), "pets.yaml", MOCK_SPEC);
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "mock_client", "2021", |spec| {
-        spec.testing(true)
+        spec.with_testing(spargen::TestingModule::Emitted)
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
@@ -128,7 +128,7 @@ fn the_basic_spec_testing_module_compiles_and_lints_clean() {
     let spec = write_spec(temp.path(), "basic.yaml", BASIC_SPEC);
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "basic_testing", "2021", |spec| {
-        spec.testing(true)
+        spec.with_testing(spargen::TestingModule::Emitted)
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
@@ -265,7 +265,7 @@ fn a_reply_module_named_for_a_crate_does_not_shadow_it() {
     let spec = write_spec(temp.path(), "shadows.yaml", SHADOWING_SPEC);
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "shadow_client", "2021", |spec| {
-        spec.testing(true)
+        spec.with_testing(spargen::TestingModule::Emitted)
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
@@ -394,7 +394,9 @@ fn no_testing_module_is_emitted_by_default() {
     let off = generate_text(MOCK_SPEC, |spec| spec);
     assert!(!off.contains("pub mod testing"), "{off}");
     assert!(!off.contains("MockBackend"), "{off}");
-    let on = generate_text(MOCK_SPEC, |spec| spec.testing(true));
+    let on = generate_text(MOCK_SPEC, |spec| {
+        spec.with_testing(spargen::TestingModule::Emitted)
+    });
     assert!(on.contains("pub mod testing"), "{on}");
 }
 

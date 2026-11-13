@@ -59,6 +59,7 @@ mod support {
         use http::header::{HeaderValue, AUTHORIZATION, COOKIE};
         use super::wasm::{BoxFuture, MaybeSend, MaybeSync};
         use super::{ClientCore, Error, HttpBody, RequestBuilder, RequestError};
+        use secrecy::zeroize::Zeroizing;
         pub use secrecy::{ExposeSecret, SecretString};
         /// A failure from an async token provider.
         #[derive(Debug)]
@@ -622,14 +623,17 @@ mod support {
             match scheme.kind {
                 AuthKind::Basic => {
                     match credential {
+                        Credential::Basic { username, .. } if username.contains(':') => {
+                            Err(
+                                credential_mismatch(scheme.name, "http basic", credential),
+                            )
+                        }
                         Credential::Basic { username, password } => {
-                            let credentials = format!(
-                                "{username}:{}", password.expose_secret()
+                            let value = basic_authorization(
+                                username.as_bytes(),
+                                password.expose_secret().as_bytes(),
                             );
-                            let value = format!(
-                                "Basic {}", base64_encode(credentials.as_bytes())
-                            );
-                            Ok(request.header(AUTHORIZATION, sensitive_value(&value)?))
+                            set_authorization(request, &value)
                         }
                         _ => {
                             Err(
@@ -641,8 +645,13 @@ mod support {
                 AuthKind::Bearer => {
                     match token {
                         Some(token) => {
-                            let value = format!("Bearer {}", token.expose_secret());
-                            Ok(request.header(AUTHORIZATION, sensitive_value(&value)?))
+                            let token = token.expose_secret();
+                            let mut value = Zeroizing::new(
+                                String::with_capacity("Bearer ".len() + token.len()),
+                            );
+                            value.push_str("Bearer ");
+                            value.push_str(token);
+                            set_authorization(request, &value)
                         }
                         None => {
                             Err(credential_mismatch(scheme.name, "bearer", credential))
@@ -732,12 +741,46 @@ mod support {
             value.set_sensitive(true);
             Ok(value)
         }
-        /// `bytes` in the padded standard base64 alphabet of RFC 4648 §4, as an `http basic` credential
-        /// is sent (RFC 7617 §2). The `contentEncoding: base64` codec is embedded only into a client
-        /// whose models use it, so `http basic` carries this encoder of its own.
-        pub(crate) fn base64_encode(bytes: &[u8]) -> String {
+        /// Set the request's one `Authorization` header to `value`, marked sensitive, replacing any value
+        /// it already carries: the field is a singleton, and a request built from a URL with userinfo
+        /// already carries one (`RequestBuilder::new`), which the scheme's credential supersedes. A value
+        /// that does not convert fails the call before anything is sent; a builder that already failed is
+        /// left as it is, for `build` to report its failure.
+        fn set_authorization(
+            mut request: RequestBuilder,
+            value: &str,
+        ) -> Result<RequestBuilder, Error<Infallible>> {
+            let value = sensitive_value(value)?;
+            if let Some(headers) = request.headers_mut() {
+                headers.insert(AUTHORIZATION, value);
+            }
+            Ok(request)
+        }
+        /// The `Authorization` value `Basic <base64(username:password)>` (RFC 7617 §2). The joined
+        /// credentials and the value are each built at their exact length in a buffer zeroed when dropped,
+        /// so neither growth nor drop leaves a plaintext copy behind. A caller refuses a username holding
+        /// `:` first. The `contentEncoding: base64` codec is embedded only into a client whose models use
+        /// it, so `http basic` carries this encoder of its own.
+        pub(crate) fn basic_authorization(
+            username: &[u8],
+            password: &[u8],
+        ) -> Zeroizing<String> {
+            let mut credentials = Zeroizing::new(
+                Vec::with_capacity(username.len() + 1 + password.len()),
+            );
+            credentials.extend_from_slice(username);
+            credentials.push(b':');
+            credentials.extend_from_slice(password);
+            let mut value = Zeroizing::new(
+                String::with_capacity("Basic ".len() + credentials.len().div_ceil(3) * 4),
+            );
+            value.push_str("Basic ");
+            base64_encode_into(&credentials, &mut value);
+            value
+        }
+        /// Append `bytes` to `encoded` in the padded standard base64 alphabet of RFC 4648 §4.
+        fn base64_encode_into(bytes: &[u8], encoded: &mut String) {
             const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
             for chunk in bytes.chunks(3) {
                 let group = chunk
                     .iter()
@@ -757,7 +800,6 @@ mod support {
                     }
                 }
             }
-            encoded
         }
         fn credential_mismatch(
             scheme: &'static str,
@@ -2441,7 +2483,9 @@ mod support {
             },
             /// The selected alternative has a credential registered under one of its schemes, but of a
             /// kind that scheme cannot carry — a `Credential::Basic` under a bearer or `apiKey` scheme, or
-            /// anything but `Credential::Basic` under an `http basic` one. Raised before anything is sent,
+            /// anything but `Credential::Basic` under an `http basic` one, or a `Credential::Basic` whose
+            /// username holds `:`, which RFC 7617 §2 forbids (the one case `registered` is `"Basic"` and
+            /// `required` is `"http basic"`). Raised before anything is sent,
             /// and before a registered token provider is asked for a token. The payload is the whole cause,
             /// so `source()` is `None`.
             ///
@@ -2798,6 +2842,17 @@ mod support {
                         }
                         f.write_str(")")
                     }
+                    RequestError::CredentialMismatch {
+                        scheme,
+                        required: "http basic",
+                        registered: "Basic",
+                    } => {
+                        write!(
+                            f,
+                            "the `Credential::Basic` registered for security scheme `{scheme}` has a username \
+                 holding `:`, which `http basic` cannot carry (RFC 7617 §2)"
+                        )
+                    }
                     RequestError::CredentialMismatch { scheme, required, registered } => {
                         write!(
                             f,
@@ -2873,11 +2928,12 @@ mod support {
         pub enum HeaderShape {
             /// A single scalar.
             Scalar,
-            /// A comma-separated list.
+            /// A comma-separated list, read by RFC 9110 §5.6.1's list rule: the optional whitespace (SP
+            /// or HTAB) around each element is not part of it, and an empty element is skipped.
             Array,
-            /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set. A pair that is
-            /// incomplete (a trailing key with no value, or an exploded member without `=`) is dropped
-            /// without an error.
+            /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set, split into
+            /// elements as [`HeaderShape::Array`] is. A pair that is incomplete (a trailing key with no
+            /// value, or an exploded member without `=`) is dropped without an error.
             Object,
             /// A `content`-typed header carrying JSON.
             Json,
@@ -2951,7 +3007,11 @@ mod support {
             }
             let mut parts: Vec<&str> = Vec::new();
             for value in values {
-                parts.push(value.to_str().map_err(|_| HeaderError::NotUtf8 { name })?);
+                parts
+                    .push(
+                        std::str::from_utf8(value.as_bytes())
+                            .map_err(|_| HeaderError::NotUtf8 { name })?,
+                    );
             }
             let raw = || parts.join(",");
             match shape {
@@ -2979,7 +3039,7 @@ mod support {
                         name,
                         |scalars| {
                             Value::Array(
-                                raw.split(',').map(|part| scalar(part, scalars)).collect(),
+                                elements(&raw).map(|part| scalar(part, scalars)).collect(),
                             )
                         },
                     )
@@ -3037,13 +3097,13 @@ mod support {
         fn object(raw: &str, explode: bool, scalars: Scalars) -> Value {
             let mut members = serde_json::Map::new();
             if explode {
-                for pair in raw.split(',') {
+                for pair in elements(raw) {
                     if let Some((key, value)) = pair.split_once('=') {
                         members.insert(key.to_owned(), scalar(value, scalars));
                     }
                 }
             } else {
-                let parts: Vec<&str> = raw.split(',').collect();
+                let parts: Vec<&str> = elements(raw).collect();
                 for pair in parts.chunks(2) {
                     if let [key, value] = pair {
                         members.insert((*key).to_owned(), scalar(value, scalars));
@@ -3051,6 +3111,13 @@ mod support {
                 }
             }
             Value::Object(members)
+        }
+        /// The elements of the comma-separated list `raw`, by RFC 9110 §5.6.1: each without the optional
+        /// whitespace (SP or HTAB) around it, and an empty one skipped, as a recipient must.
+        fn elements(raw: &str) -> impl Iterator<Item = &str> {
+            raw.split(',')
+                .map(|element| element.trim_matches([' ', '\t']))
+                .filter(|element| !element.is_empty())
         }
         /// Interpret one header token.
         fn scalar(raw: &str, scalars: Scalars) -> Value {
@@ -4301,6 +4368,7 @@ mod support {
             HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE,
         };
         use http::Method;
+        use secrecy::zeroize::Zeroizing;
         use url::Url;
         use super::{Error, HttpBody};
         /// A request under construction: a method, an absolute URL, headers and a body, built into an
@@ -4325,24 +4393,28 @@ mod support {
             /// Start a `method` request to `url`, with an empty body and no headers, except where `url`
             /// carries `user:pass@` userinfo: that is taken off the URL and sent as an
             /// `Authorization: Basic` header (RFC 7617), percent-decoded and marked sensitive, as
-            /// reqwest's own builder sends it, so the password reaches no backend's URI or error text.
+            /// reqwest's own builder sends it, so the password reaches no backend's URI or error text. A
+            /// username that percent-decodes to one holding `:` fails the builder, since RFC 7617 §2
+            /// forbids it: the server would split the credentials at that colon. A security scheme that
+            /// attaches its own `Authorization` replaces this one.
             pub fn new(method: Method, mut url: Url) -> Self {
                 let mut headers = HeaderMap::new();
-                if let Some(credentials) = take_userinfo(&mut url) {
-                    let value = format!(
-                        "Basic {}", super::auth::base64_encode(& credentials)
-                    );
-                    match HeaderValue::try_from(value) {
-                        Ok(mut value) => {
-                            value.set_sensitive(true);
-                            headers.insert(AUTHORIZATION, value);
-                        }
-                        Err(error) => {
-                            return Self {
-                                request: Err(Error::request_construction(error)),
-                            };
+                match take_userinfo(&mut url) {
+                    Ok(None) => {}
+                    Ok(Some(value)) => {
+                        match HeaderValue::from_str(&value) {
+                            Ok(mut value) => {
+                                value.set_sensitive(true);
+                                headers.insert(AUTHORIZATION, value);
+                            }
+                            Err(error) => {
+                                return Self {
+                                    request: Err(Error::request_construction(error)),
+                                };
+                            }
                         }
                     }
+                    Err(error) => return Self { request: Err(error) },
                 }
                 Self {
                     request: Ok(Parts {
@@ -4468,19 +4540,33 @@ mod support {
                 Ok(request)
             }
         }
-        /// Take `url`'s userinfo off it, returning its `username:password` credentials, percent-decoded,
-        /// a missing password as empty; `None`, leaving `url` as it is, where it carries neither.
-        fn take_userinfo(url: &mut Url) -> Option<Vec<u8>> {
-            let password = url.password().map(percent_decode);
+        /// Take `url`'s userinfo off it, returning the `Basic` `Authorization` value of its
+        /// `username:password` credentials, percent-decoded, a missing password as empty; `None`, leaving
+        /// `url` as it is, where it carries neither. The decoded credentials are held in buffers zeroed
+        /// when dropped. A username that decodes to one holding `:` is refused (RFC 7617 §2), with an
+        /// error that names neither the username nor the password.
+        fn take_userinfo(
+            url: &mut Url,
+        ) -> Result<Option<Zeroizing<String>>, Error<Infallible>> {
+            let password = url
+                .password()
+                .map(|text| Zeroizing::new(percent_decode(text)));
             if url.username().is_empty() && password.is_none() {
-                return None;
+                return Ok(None);
             }
-            let mut credentials = percent_decode(url.username());
-            credentials.push(b':');
-            credentials.extend(password.unwrap_or_default());
+            let username = Zeroizing::new(percent_decode(url.username()));
             let _ = url.set_username("");
             let _ = url.set_password(None);
-            Some(credentials)
+            if username.contains(&b':') {
+                return Err(
+                    Error::request_message(
+                        "the URL's userinfo username percent-decodes to one holding `:`, which \
+             `Authorization: Basic` cannot carry (RFC 7617 §2)",
+                    ),
+                );
+            }
+            let password = password.as_deref().map_or(&[][..], Vec::as_slice);
+            Ok(Some(super::auth::basic_authorization(&username, password)))
         }
         /// `text` with each `%XX` escape replaced by the byte it encodes; a `%` not followed by two
         /// hexadecimal digits is kept as it is.

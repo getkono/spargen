@@ -855,6 +855,13 @@ fn every_spec_subcommand_exits_three_on_an_unreadable_config() {
             "missing.toml",
         );
     }
+    // A read failure's I/O error is the `ConfigError`'s source, written once after its message.
+    let (_, _, stderr) = spargen(temp.path(), &["check", &spec, "--config", "missing.toml"]);
+    let io = std::fs::read("missing.toml-spargen-1328").unwrap_err();
+    assert_eq!(
+        stderr.trim_end(),
+        format!("error: cannot read config file `missing.toml`: {io}"),
+    );
     assert_usage(
         &["diff", &spec, &spec, "--config", "missing.toml"],
         "missing.toml",

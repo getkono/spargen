@@ -26,7 +26,7 @@ fn set_cookie_is_never_comma_joined() {
 
 /// The same headers under the ordinary list rule, which `SetCookie` exists to avoid: joined,
 /// then split back apart on every comma, so two cookies come back as three fragments, the first
-/// cut inside its `Expires` date.
+/// cut inside its `Expires` date and the second losing the space after that comma.
 #[test]
 fn the_array_shape_splits_set_cookie_values_on_every_comma() {
     let mut map = HeaderMap::new();
@@ -42,7 +42,7 @@ fn the_array_shape_splits_set_cookie_values_on_every_comma() {
         split,
         [
             "lang=en; Expires=Wed",
-            " 09 Jun 2021 10:18:14 GMT",
+            "09 Jun 2021 10:18:14 GMT",
             "sessionId=38afes7a8"
         ]
     );
@@ -185,6 +185,129 @@ fn non_utf8_bytes_are_reported_as_such() {
     );
 }
 
+/// The header with `name` holding `raw`'s bytes, which need not be visible ASCII.
+fn raw_header(name: &'static str, raw: &[u8]) -> HeaderMap {
+    let mut map = HeaderMap::new();
+    map.append(name, reqwest::header::HeaderValue::from_bytes(raw).unwrap());
+    map
+}
+
+/// #1331: a field value is bytes, and `HeaderValue::to_str` accepts visible ASCII only; a value
+/// that is valid UTF-8 beyond ASCII is text, read as such in every shape that reads text.
+#[test]
+fn a_non_ascii_utf8_value_is_read_as_text() {
+    let map = raw_header("x-title", "Café".as_bytes());
+    let title: String = require_header(&map, "x-title", HeaderShape::Scalar, false).unwrap();
+    assert_eq!(title, "Café");
+
+    let map = raw_header("x-tags", "Café,thé".as_bytes());
+    let tags: Vec<String> = require_header(&map, "x-tags", HeaderShape::Array, false).unwrap();
+    assert_eq!(tags, ["Café", "thé"]);
+
+    let map = raw_header("x-meta", "nom=Café".as_bytes());
+    let meta: std::collections::BTreeMap<String, String> =
+        require_header(&map, "x-meta", HeaderShape::Object, true).unwrap();
+    assert_eq!(meta["nom"], "Café");
+
+    let map = raw_header("x-payload", r#"{"nom":"Café"}"#.as_bytes());
+    let payload: std::collections::BTreeMap<String, String> =
+        require_header(&map, "x-payload", HeaderShape::Json, false).unwrap();
+    assert_eq!(payload["nom"], "Café");
+
+    let map = raw_header("set-cookie", "nom=Café".as_bytes());
+    let cookies: Vec<String> =
+        require_header(&map, "set-cookie", HeaderShape::SetCookie, false).unwrap();
+    assert_eq!(cookies, ["nom=Café"]);
+}
+
+/// A documented string enum with two members, for list elements that must match exactly.
+#[derive(Debug, PartialEq, serde::Deserialize)]
+enum Tag {
+    #[serde(rename = "a")]
+    A,
+    #[serde(rename = "b")]
+    B,
+}
+
+/// #1331: RFC 9110 §5.6.1 lets a list carry optional whitespace (SP or HTAB) around each comma,
+/// and a proxy folding repeated fields writes `, `; each element is read without it, as a string,
+/// an enum member, an integer and an object member alike.
+#[test]
+fn list_elements_drop_the_optional_whitespace_around_commas() {
+    for raw in ["a, b", "a ,b", "a \t, \tb", "a,\tb"] {
+        let map = headers(&[("x-tags", raw)]);
+        let strings: Vec<String> =
+            require_header(&map, "x-tags", HeaderShape::Array, false).unwrap();
+        assert_eq!(strings, ["a", "b"], "{raw:?}");
+        let tags: Vec<Tag> = require_header(&map, "x-tags", HeaderShape::Array, false).unwrap();
+        assert_eq!(tags, [Tag::A, Tag::B], "{raw:?}");
+    }
+
+    let map = headers(&[("x-ids", "1, 2 ,3")]);
+    let ids: Vec<i64> = require_header(&map, "x-ids", HeaderShape::Array, false).unwrap();
+    assert_eq!(ids, [1, 2, 3]);
+
+    let map = headers(&[("x-meta", "k=v, k2=v2")]);
+    let exploded: std::collections::BTreeMap<String, String> =
+        require_header(&map, "x-meta", HeaderShape::Object, true).unwrap();
+    assert_eq!(exploded["k"], "v");
+    assert_eq!(exploded["k2"], "v2");
+
+    let map = headers(&[("x-meta", "k, 1 ,k2,\t2")]);
+    let unexploded: std::collections::BTreeMap<String, u8> =
+        require_header(&map, "x-meta", HeaderShape::Object, false).unwrap();
+    assert_eq!(unexploded["k"], 1);
+    assert_eq!(unexploded["k2"], 2);
+}
+
+/// #1331: RFC 9110 §5.6.1 has a recipient ignore an empty list element, as `a,,b`, a leading or
+/// trailing comma, or an empty repeated occurrence produce; a list skips them rather than reading
+/// an empty string, which no enum member or integer matches.
+#[test]
+fn empty_list_elements_are_skipped() {
+    for (raw, expected) in [
+        ("a,,b", &["a", "b"][..]),
+        (",a,", &["a"]),
+        ("a, ,b", &["a", "b"]),
+        ("", &[]),
+        (" , ", &[]),
+    ] {
+        let map = headers(&[("x-tags", raw)]);
+        let strings: Vec<String> =
+            require_header(&map, "x-tags", HeaderShape::Array, false).unwrap();
+        assert_eq!(strings, expected, "{raw:?}");
+    }
+
+    let map = headers(&[("x-tags", "a"), ("x-tags", ""), ("x-tags", "b")]);
+    let tags: Vec<Tag> = require_header(&map, "x-tags", HeaderShape::Array, false).unwrap();
+    assert_eq!(tags, [Tag::A, Tag::B]);
+
+    let map = headers(&[("x-ids", "1,,2,")]);
+    let ids: Vec<i64> = require_header(&map, "x-ids", HeaderShape::Array, false).unwrap();
+    assert_eq!(ids, [1, 2]);
+
+    let map = headers(&[("x-meta", "k=v,,k2=v2,")]);
+    let exploded: std::collections::BTreeMap<String, String> =
+        require_header(&map, "x-meta", HeaderShape::Object, true).unwrap();
+    assert_eq!(exploded.len(), 2);
+    assert_eq!(exploded["k2"], "v2");
+
+    let map = headers(&[("x-meta", ",k,,v,k2, ,v2")]);
+    let unexploded: std::collections::BTreeMap<String, String> =
+        require_header(&map, "x-meta", HeaderShape::Object, false).unwrap();
+    assert_eq!(unexploded.len(), 2);
+    assert_eq!(unexploded["k"], "v");
+    assert_eq!(unexploded["k2"], "v2");
+}
+
+/// A scalar is one value, not a list: its commas and the whitespace beside them are text.
+#[test]
+fn a_scalar_keeps_its_commas_and_their_whitespace() {
+    let map = headers(&[("x-title", "a, b ,c")]);
+    let title: String = require_header(&map, "x-title", HeaderShape::Scalar, false).unwrap();
+    assert_eq!(title, "a, b ,c");
+}
+
 /// Each variant's message names the header and says which way it failed; a `Parse` error also
 /// carries serde's message, which is the only detail of what the value looked like.
 #[test]
@@ -320,6 +443,13 @@ fn token(excluded: &'static [u8]) -> impl proptest::strategy::Strategy<Value = S
     })
 }
 
+/// As [`token`], but never empty: the list rule skips an empty element, so only a non-empty
+/// one survives as a list element or an unexploded object's key or value.
+fn element(excluded: &'static [u8]) -> impl proptest::strategy::Strategy<Value = String> {
+    use proptest::strategy::Strategy;
+    token(excluded).prop_filter("a list element is non-empty", |text| !text.is_empty())
+}
+
 /// Write `value` with `serialize_simple` under `explode`, then read it back with
 /// `require_header` under `shape` and the same `explode`.
 fn round_trip<T: serde::Serialize + DeserializeOwned>(
@@ -344,9 +474,10 @@ fn finite() -> proptest::num::f64::Any {
 
 proptest::proptest! {
     /// The module's stated law: parsing is the inverse of `serialize_simple`, for every value
-    /// `simple` can carry losslessly — a scalar of each JSON type, a non-empty array whose
-    /// strings hold no `,`, and an object of up to four members whose keys and values hold
-    /// neither `,` nor `=` — under both `explode` settings. A string spelling a number or a
+    /// `simple` can carry losslessly — a scalar of each JSON type, an array of up to four
+    /// elements whose strings are non-empty and hold no `,`, and an object of up to four members
+    /// whose keys and values are non-empty and hold neither `,` nor `=` — under both `explode`
+    /// settings. A string spelling a number or a
     /// boolean stays a string. A finite float, alone or in an array, reads back as itself.
     #[test]
     fn require_header_inverts_serialize_simple(
@@ -355,10 +486,10 @@ proptest::proptest! {
         signed in proptest::num::i64::ANY,
         real in finite(),
         flag in proptest::bool::ANY,
-        texts in proptest::collection::vec(token(b""), 1..5),
-        numbers in proptest::collection::vec(proptest::num::i64::ANY, 1..5),
-        reals in proptest::collection::vec(finite(), 1..5),
-        members in proptest::collection::btree_map(token(b"="), token(b"="), 0..5),
+        texts in proptest::collection::vec(element(b""), 0..5),
+        numbers in proptest::collection::vec(proptest::num::i64::ANY, 0..5),
+        reals in proptest::collection::vec(finite(), 0..5),
+        members in proptest::collection::btree_map(element(b"="), element(b"="), 0..5),
         explode in proptest::bool::ANY,
     ) {
         proptest::prop_assert_eq!(round_trip(&text, HeaderShape::Scalar, explode).unwrap(), text);
@@ -388,15 +519,20 @@ proptest::proptest! {
     }
 }
 
-/// Why the law above holds only for a non-empty array: `simple` writes an empty array and an
-/// array of one empty string alike, as the empty value, and that reads back as the latter.
+/// Why the law above holds only for non-empty strings in a list: `simple` writes an empty array
+/// and an array of one empty string alike, as the empty value, and the list rule skips an empty
+/// element, so both read back as the former.
 #[test]
-fn an_empty_array_reads_back_as_one_empty_string() {
+fn an_array_of_one_empty_string_reads_back_empty() {
     for explode in [false, true] {
         let empty: Vec<String> = Vec::new();
         assert_eq!(
             round_trip(&empty, HeaderShape::Array, explode).unwrap(),
-            [""]
+            empty
+        );
+        assert_eq!(
+            round_trip(&vec![String::new()], HeaderShape::Array, explode).unwrap(),
+            empty
         );
     }
 }

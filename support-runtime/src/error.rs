@@ -594,7 +594,9 @@ pub enum RequestError {
     },
     /// The selected alternative has a credential registered under one of its schemes, but of a
     /// kind that scheme cannot carry — a `Credential::Basic` under a bearer or `apiKey` scheme, or
-    /// anything but `Credential::Basic` under an `http basic` one. Raised before anything is sent,
+    /// anything but `Credential::Basic` under an `http basic` one, or a `Credential::Basic` whose
+    /// username holds `:`, which RFC 7617 §2 forbids (the one case `registered` is `"Basic"` and
+    /// `required` is `"http basic"`). Raised before anything is sent,
     /// and before a registered token provider is asked for a token. The payload is the whole cause,
     /// so `source()` is `None`.
     ///
@@ -985,6 +987,15 @@ impl std::fmt::Display for RequestError {
                 }
                 f.write_str(")")
             }
+            RequestError::CredentialMismatch {
+                scheme,
+                required: "http basic",
+                registered: "Basic",
+            } => write!(
+                f,
+                "the `Credential::Basic` registered for security scheme `{scheme}` has a username \
+                 holding `:`, which `http basic` cannot carry (RFC 7617 §2)"
+            ),
             RequestError::CredentialMismatch {
                 scheme,
                 required,

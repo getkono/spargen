@@ -97,7 +97,7 @@ mod xml_ref_elements;
 /// explicitly off: no rebuild triggers to emit, no consumer manifest to audit, and — the reason it
 /// matters here — no `W013` polluting the diagnostics a fixture is asserting on.
 fn build(spec: Utf8PathBuf, out: Utf8PathBuf) -> Build {
-    Spec::new(spec).build(out).cargo(CargoIntegration::Off)
+    Spec::new(spec).build(out).with_cargo(CargoIntegration::Off)
 }
 
 /// `spargen::generate`, then [`hold_run`] on the report and on the module a `Generated` run wrote,
@@ -627,7 +627,7 @@ fn generate_and_check_dir(dir: &camino::Utf8Path, root: &str) -> (Report, Report
 fn generate_and_check_spec(spec: Spec) -> (Report, Report, String) {
     let out = spec.path().with_file_name("client.rs");
     let (generated, checked) =
-        run_generate_and_check(&spec.build(out.clone()).cargo(CargoIntegration::Off));
+        run_generate_and_check(&spec.build(out.clone()).with_cargo(CargoIntegration::Off));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
     (generated, checked, code)
 }
