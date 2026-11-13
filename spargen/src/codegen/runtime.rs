@@ -13,7 +13,8 @@ use crate::ir::DateTimeBackend;
 /// make the output unusable via `include!`. When `features.xml` is set (the API has an
 /// `application/xml` / `text/xml` body), the XML codec module is embedded and its helpers
 /// re-exported; otherwise it is omitted entirely, so a non-XML output carries no `quick-xml`
-/// reference. `features.streams` embeds the sequential-response `stream` module,
+/// reference. `features.chunked_reads` embeds the `chunked` module, the `wasm32` read of a body as
+/// it arrives, `features.streams` the sequential-response `stream` module, which reads through it,
 /// `features.datetime` the RFC 3339 `DateTime`/`Date` newtypes over the selected backend's crate
 /// (with the shared `rfc3339` codec for `jiff` and `chrono`), and `features.base64` the
 /// `contentEncoding: base64` codec, on the same terms.
@@ -21,6 +22,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
     let crate::ir::RuntimeFeatures {
         xml: uses_xml,
         streams: uses_streams,
+        chunked_reads,
         datetime,
         base64: uses_base64,
     } = features;
@@ -46,6 +48,11 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
         }
     };
     let modules = crate::support::runtime_files().iter().map(embed);
+    // The chunked `wasm32` read is embedded for every reader of a body as it arrives, an
+    // `EventStream` or a binary `_stream` twin's `ByteStream`; only then does the audit require
+    // `futures-core` and reqwest's `stream` feature, through which it reads.
+    let chunked_module = chunked_reads.then(|| embed(&crate::support::chunked_runtime_file()));
+    let chunked_reexport = chunked_reads.then(|| quote! { pub use chunked::read_as_it_arrives; });
     let stream_module = uses_streams.then(|| embed(&crate::support::stream_runtime_file()));
     let stream_reexport = uses_streams.then(|| {
         quote! {
@@ -113,6 +120,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
         #[allow(dead_code, unexpected_cfgs, unused_imports, clippy::result_large_err)]
         mod support {
             #(#modules)*
+            #chunked_module
             #stream_module
             #xml_module
             #datetime_module
@@ -132,6 +140,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
             pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
             pub use transport::{try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend, TotalTimeout};
             pub use wasm::{MaybeSend, MaybeSync};
+            #chunked_reexport
             #stream_reexport
             #xml_reexport
             #datetime_reexport

@@ -62,6 +62,10 @@ impl<T> ResponseValue<T> {
 /// collector, reads the rest of it into one `Bytes` within a limit the caller names.
 /// [`Self::into_body`] hands the body over as an [`HttpBody`], an `http_body::Body`, for a reader
 /// of the caller's own. Dropping it abandons the rest of the body.
+///
+/// On `wasm32` too, `ReqwestBackend`'s `fetch` response is read chunk by chunk as the browser
+/// delivers it, so a limit stops the read at the chunk that crosses it rather than after the
+/// whole body is in memory.
 pub struct ByteStream {
     body: HttpBody,
     status: StatusCode,
@@ -120,7 +124,8 @@ impl std::fmt::Debug for ByteStream {
 }
 
 /// Wrap a raw binary success response as a [`ByteStream`] beside its status and headers, reading
-/// none of its body: the success branch of a binary operation's `_stream` twin.
+/// none of its body: the success branch of a binary operation's `_stream` twin, which hands it the
+/// response with its body read as it arrives (the `chunked` module's `read_as_it_arrives`).
 pub fn stream_success_bytes(response: http::Response<HttpBody>) -> ResponseValue<ByteStream> {
     let (parts, body) = response.into_parts();
     let declared = crate::dispatch::declared_length(&parts.headers);

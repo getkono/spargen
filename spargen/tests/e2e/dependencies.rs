@@ -58,6 +58,79 @@ fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
     );
 }
 
+/// Issue #1305: an API whose only streaming construct is a binary `_stream` twin embeds the
+/// chunked `wasm32` read without the sequential-response `stream` module, and compiles, natively
+/// and for `wasm32`, against exactly the block `spargen deps` prints for it, which carries the
+/// `futures-core` and reqwest `stream` feature that read goes through.
+#[test]
+fn a_binary_stream_twin_alone_compiles_against_its_dependencies_natively_and_for_wasm32() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = Spec::new(write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /blob:
+    get:
+      operationId: getBlob
+      responses:
+        "200":
+          description: ok
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+"#,
+    ));
+
+    let (requirements, _) = spargen::requirements(&spec).expect("spec lowers");
+    let block = requirements.manifest_block();
+    assert!(block.contains("futures-core = "), "{block}");
+    let out = temp.path().join("client");
+    std::fs::create_dir_all(out.join("src")).unwrap();
+    std::fs::write(
+        out.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"deps_byte_stream\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n{block}"
+        ),
+    )
+    .unwrap();
+
+    let report = spargen::generate(
+        &spec
+            .clone()
+            .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
+            .cargo(CargoIntegration::Off),
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        generated.contains("mod chunked {"),
+        "the chunked read is embedded"
+    );
+    assert!(
+        !generated.contains("mod stream {"),
+        "no sequential response, so no `stream` module"
+    );
+
+    let status = fixture_cargo(&out).arg("check").status().unwrap();
+    assert!(
+        status.success(),
+        "the twin-only client must compile natively"
+    );
+    if wasm32_target_installed() {
+        let status = fixture_cargo(&out)
+            .args(["check", "--target", "wasm32-unknown-unknown"])
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "the twin-only client must compile for wasm32, its chunked read included"
+        );
+    }
+}
+
 #[test]
 fn cargo_build_rejects_a_runtime_requirement_below_the_supported_floor() {
     let temp = tempfile::tempdir().unwrap();

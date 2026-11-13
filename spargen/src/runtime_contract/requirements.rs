@@ -63,6 +63,9 @@ impl Dependency {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RuntimeRequirements {
     pub(crate) bytes_serde: bool,
+    /// The module reads a body as it arrives, through a sequential response or a binary `_stream`
+    /// twin ([`crate::ir::RuntimeFeatures::chunked_reads`]): `futures-core` and reqwest's `stream`
+    /// feature, which the `wasm32` chunked read of a `fetch` response needs.
     pub(crate) streams: bool,
     pub(crate) xml: bool,
     pub(crate) uuid: bool,
@@ -75,7 +78,7 @@ impl RuntimeRequirements {
         let features = api.runtime_features(spec.datetime);
         Self {
             bytes_serde: api.uses_bytes_serde(),
-            streams: features.streams,
+            streams: features.chunked_reads,
             xml: features.xml,
             uuid: spec.uuid
                 && api.types.emitted().any(|(_, definition)| {
@@ -155,7 +158,9 @@ pub(super) fn requirement_table(requirements: &RuntimeRequirements) -> Vec<Requi
     push(HTTP, NONE, false);
     push(HTTP_BODY, NONE, false);
     // The default backend. A `multipart/form-data` body is encoded by the runtime itself, so only
-    // a sequential response needs a feature of it (`stream`, which `EventStream` reads through).
+    // a body read as it arrives needs a feature of it (`stream`, through which a `wasm32` `fetch`
+    // response is read chunk by chunk, for an `EventStream` or a binary `_stream` twin's
+    // `ByteStream`).
     push(
         REQWEST,
         if requirements.streams {

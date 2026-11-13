@@ -245,6 +245,36 @@ fn a_runtime_crate_declared_only_as_a_dev_or_build_dependency_is_missing() {
     }
 }
 
+/// Issue #1305: an API whose only streaming construct is a binary `_stream` twin reads its
+/// `ByteStream` chunk by chunk on `wasm32`, so it requires `futures-core` and reqwest's `stream`
+/// feature, as an API with a sequential response does.
+#[test]
+fn a_binary_stream_twin_alone_requires_the_chunked_read_dependencies() {
+    let sandbox = Sandbox::new();
+    let path = sandbox.path().join("openapi.yaml");
+    std::fs::write(
+        &path,
+        "openapi: 3.1.0\ninfo: { title: Blobs, version: 1.0.0 }\npaths:\n  /blob:\n    get:\n      \
+         operationId: getBlob\n      responses:\n        \"200\":\n          description: OK\n          \
+         content:\n            application/octet-stream: {}\n",
+    )
+    .unwrap();
+    let spec = crate::Spec::new(camino::Utf8PathBuf::from_path_buf(path).unwrap());
+    let (requirements, _) = crate::requirements(&spec).expect("the spec lowers");
+    let dependency = |name: &str| {
+        requirements
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.name == name)
+    };
+    assert!(dependency("futures-core").is_some(), "{requirements}");
+    assert_eq!(
+        dependency("reqwest").map(|reqwest| reqwest.features.clone()),
+        Some(vec!["stream"]),
+        "{requirements}"
+    );
+}
+
 #[test]
 fn conditional_dependencies_and_features_are_required_only_when_used() {
     assert!(audit_manifest(

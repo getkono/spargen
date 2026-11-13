@@ -919,6 +919,42 @@ paths:
     assert!(!String::from_utf8_lossy(&untyped.stdout).contains("uuid = {"));
 }
 
+/// Issue #1305: an API whose only streaming construct is a binary `_stream` twin reads its
+/// `ByteStream` chunk by chunk on `wasm32`, through reqwest's `stream` feature and `futures-core`,
+/// so `deps` prints both.
+#[cfg(feature = "cli")]
+#[test]
+fn deps_prints_the_chunked_read_dependencies_for_a_binary_stream_twin() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec,
+        r##"
+openapi: 3.1.0
+info: { title: Blobs, version: 1.0.0 }
+paths:
+  /blob:
+    get:
+      operationId: getBlob
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: {}
+"##,
+    )
+    .unwrap();
+    let output = deps(temp.path(), &spec, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("futures-core = "), "{stdout}");
+    assert!(
+        stdout.lines().any(|line| line.starts_with("reqwest = ")
+            && line.contains(r#"features = ["stream"]"#)),
+        "{stdout}"
+    );
+}
+
 #[cfg(feature = "cli")]
 #[test]
 fn deps_reports_a_rejection_instead_of_a_block() {
