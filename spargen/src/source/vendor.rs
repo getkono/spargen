@@ -29,6 +29,11 @@ pub(crate) trait RemoteFetch {
     fn fetch(&self, url: &str) -> Result<Fetched, String>;
 }
 
+/// The file-writing seam used by [`vendor`]: write every `(path, bytes)` pair in order, or report
+/// the path whose write failed.
+pub(crate) type WriteAll =
+    dyn Fn(&[(Utf8PathBuf, Vec<u8>)]) -> Result<(), (Utf8PathBuf, std::io::Error)>;
+
 /// A fetched remote document.
 pub(crate) struct Fetched {
     /// The raw bytes.
@@ -190,9 +195,15 @@ impl Scanned {
 ///
 /// A fetch that fails is `E025`, and the lock is still written: every document fetched is pinned
 /// at what it served, and every pin of the earlier lock for a URL this run left unpinned is kept.
+///
+/// Nothing is written until the walk ends. Then every vendored copy, and `spargen.lock` last, go
+/// to `write_all` in one batch; the facade passes `output::atomic_write_all`, which stages every
+/// file before it replaces any, so a file that cannot be written leaves the earlier lock and
+/// copies in place.
 pub(crate) fn vendor(
     spec: &Utf8Path,
     fetcher: &dyn RemoteFetch,
+    write_all: &WriteAll,
     diags: &mut Diagnostics,
 ) -> Result<VendorReport, Aborted> {
     let spec_dir = spec.parent().unwrap_or_else(|| Utf8Path::new(""));
@@ -214,6 +225,7 @@ pub(crate) fn vendor(
     diags.register_file(crate::diag::FileId(0), spec.to_path_buf());
 
     let mut lock = Lock::default();
+    let mut files: Vec<(Utf8PathBuf, Vec<u8>)> = Vec::new();
     let mut fetch_failed = false;
     let mut refs: Vec<VendoredRef> = Vec::new();
     let mut scanned = Scanned {
@@ -317,22 +329,6 @@ pub(crate) fn vendor(
                     let sha256 = sha256_hex(&bytes);
                     let rel_path = vendor_path_for_url(&url);
                     let target = vendor_dir.join(&rel_path);
-                    if let Some(parent) = target.parent() {
-                        if let Err(error) = std::fs::create_dir_all(parent) {
-                            input_error(
-                                diags,
-                                format!("failed to create vendor directory `{parent}`: {error}"),
-                            );
-                            continue;
-                        }
-                    }
-                    if let Err(error) = std::fs::write(&target, &bytes) {
-                        input_error(
-                            diags,
-                            format!("failed to write vendored file `{target}`: {error}"),
-                        );
-                        continue;
-                    }
                     // The pin stays keyed by the URL the spec names, which is what a build looks
                     // up; a redirect's end is recorded beside it, because it is the base the
                     // document's own relative references resolve against.
@@ -347,16 +343,19 @@ pub(crate) fn vendor(
                         path: rel_path,
                         sha256,
                     });
-                    if let Ok(text) = String::from_utf8(bytes) {
-                        if let Some(value) = parse_scratch_remote(&url, &text) {
-                            let next = scanned.docs.len();
-                            scanned.remote_docs.insert(url.clone(), next);
-                            scanned.remote_docs.entry(retrieved.clone()).or_insert(next);
-                            // Its relative references resolve from its `$self`, resolved against
-                            // where it was retrieved, or from that retrieval URL where it has none.
-                            let loaded = scanned.add(value, Base::Remote(retrieved));
-                            queue.push_back((loaded, JsonPointer::root()));
-                        }
+                    let parsed = std::str::from_utf8(&bytes)
+                        .ok()
+                        .and_then(|text| parse_scratch_remote(&url, text));
+                    // Written with the lock once the walk ends, never before it.
+                    files.push((target, bytes));
+                    if let Some(value) = parsed {
+                        let next = scanned.docs.len();
+                        scanned.remote_docs.insert(url.clone(), next);
+                        scanned.remote_docs.entry(retrieved.clone()).or_insert(next);
+                        // Its relative references resolve from its `$self`, resolved against
+                        // where it was retrieved, or from that retrieval URL where it has none.
+                        let loaded = scanned.add(value, Base::Remote(retrieved));
+                        queue.push_back((loaded, JsonPointer::root()));
                     }
                 }
             }
@@ -404,8 +403,10 @@ pub(crate) fn vendor(
             .unwrap_or_default();
         lock.keep_unpinned_from(earlier);
     }
-    std::fs::write(&lock_path, lock.to_toml()).map_err(|error| {
-        input_error(diags, format!("failed to write `{lock_path}`: {error}"));
+    // The lock goes last: it pins the copies, so every copy is in place before it names them.
+    files.push((lock_path.clone(), lock.to_toml().into_bytes()));
+    write_all(&files).map_err(|(path, error)| {
+        input_error(diags, format!("failed to write `{path}`: {error}"));
         Aborted
     })?;
 
@@ -471,8 +472,12 @@ impl RemoteFetch for ReqwestFetcher {
 /// builder. The builder is the trust seam — the TLS test in this module adds its self-signed root
 /// to it and otherwise runs exactly the path `spargen lock` runs, so the handshake, the root
 /// store, and ALPN under the linked reqwest/rustls stack are reached by a test.
+///
+/// It follows at most [`MAX_REDIRECTS`] redirects and refuses one that downgrades `https` to
+/// `http` ([`refuses_downgrade`]), and it reads at most [`MAX_REMOTE_BODY`] bytes.
 fn fetch_with(builder: reqwest::blocking::ClientBuilder, url: &str) -> Result<Fetched, String> {
-    let response = builder
+    let mut response = builder
+        .redirect(redirect_policy())
         .build()
         .and_then(|client| client.get(url).send())
         .and_then(reqwest::blocking::Response::error_for_status)
@@ -485,15 +490,78 @@ fn fetch_with(builder: reqwest::blocking::ClientBuilder, url: &str) -> Result<Fe
     } else {
         response.url().to_string()
     };
-    let bytes = response
-        .bytes()
-        .map(|bytes| bytes.to_vec())
-        .map_err(|error| with_causes(&error))?;
+    let bytes = read_bounded(&mut response, MAX_REMOTE_BODY)?;
     Ok(Fetched {
         bytes,
         url: retrieved,
     })
 }
+
+/// The most bytes [`fetch_with`] reads of one remote document: 64 MiB, about five times the 13 MB
+/// GitHub description in the corpus, so a hostile or misconfigured server cannot stream unbounded
+/// data into memory.
+const MAX_REMOTE_BODY: u64 = 64 * 1024 * 1024;
+
+/// The most redirects [`fetch_with`] follows for one fetch, reqwest's own default.
+const MAX_REDIRECTS: usize = 10;
+
+/// The body of `response`, refused once it declares or delivers more than `limit` bytes.
+fn read_bounded(response: &mut reqwest::blocking::Response, limit: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let over = || format!("the response body is larger than the {limit}-byte limit");
+    if response
+        .content_length()
+        .is_some_and(|declared| declared > limit)
+    {
+        return Err(over());
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| with_causes(&error))?;
+    if bytes.len() as u64 > limit {
+        return Err(over());
+    }
+    Ok(bytes)
+}
+
+/// Follow up to [`MAX_REDIRECTS`] redirects, refusing any [`refuses_downgrade`] names.
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() > MAX_REDIRECTS {
+            let error = RedirectRefused(format!("more than {MAX_REDIRECTS} redirects"));
+            attempt.error(error)
+        } else if refuses_downgrade(attempt.previous(), attempt.url()) {
+            let error = RedirectRefused(format!(
+                "refused a redirect from https to `{}`: a document fetched over https is never \
+                 fetched over plaintext, where it could be substituted before it is pinned",
+                attempt.url()
+            ));
+            attempt.error(error)
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+/// Whether a redirect to `next` downgrades the fetch: once any URL of the chain so far
+/// (`previous`, the requested URL first) was `https`, every later hop must be too.
+fn refuses_downgrade(previous: &[reqwest::Url], next: &reqwest::Url) -> bool {
+    next.scheme() != "https" && previous.iter().any(|url| url.scheme() == "https")
+}
+
+/// Why [`redirect_policy`] stopped following a redirect.
+#[derive(Debug)]
+struct RedirectRefused(String);
+
+impl std::fmt::Display for RedirectRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RedirectRefused {}
 
 /// `error` followed by each error in its `source()` chain, `: `-separated.
 ///
