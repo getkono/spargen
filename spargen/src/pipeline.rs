@@ -128,6 +128,8 @@ fn generate_rereading(
         if let Err(message) = output::write_output(&build.output, &contents) {
             return with_leading(pipeline_error_report(message), cargo_diagnostics);
         }
+        // The module is written, so a record that cannot be written costs only the next build's
+        // replay: a warning on a generating run, never a rejection of the module it wrote.
         if let Some(path) = &cache_path {
             if let Err(message) = cache::write_cache(
                 path,
@@ -136,7 +138,15 @@ fn generate_rereading(
                 &preview.report,
                 requirements,
             ) {
-                return pipeline_error_report(message);
+                preview.report.diagnostics.push(
+                    Diagnostic::at_root(
+                        Code::CacheWriteFailed,
+                        format!(
+                            "{message}; the module was written, and the next build regenerates it"
+                        ),
+                    )
+                    .build(),
+                );
             }
         }
         return with_leading(preview.report, cargo_diagnostics);
@@ -658,6 +668,30 @@ components:
             Code::CargoIntegrationDegraded,
             "{report:#?}"
         );
+    }
+
+    /// A cache record that cannot be written once the module is leaves the run generating: the
+    /// module stands, and the report carries a `W016` after the build-environment warning, and no
+    /// error.
+    #[test]
+    fn a_cache_write_failure_after_the_output_is_written_is_a_warning() {
+        let (temp, build) = auto_integration_fixture("api.rs");
+        // A regular file where the cache directory should be, so the record cannot land.
+        let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
+        std::fs::write(&cache_dir, "").unwrap();
+
+        let report = generate_with_cache_dir(&build, Some(&cache_dir));
+        assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+        assert_eq!(codes(&report), ["W013", "W016"], "{report:#?}");
+        let warning = &report.diagnostics()[1];
+        assert_eq!(warning.code, Code::CacheWriteFailed, "{report:#?}");
+        assert!(
+            warning.message.contains("failed to write cache")
+                && warning.message.ends_with("the next build regenerates it"),
+            "{report:#?}"
+        );
+        let module = std::fs::read_to_string(&build.output).unwrap();
+        assert!(module.contains("pub struct Pet"), "{module}");
     }
 
     /// Inputs that keep changing reject the run with the build-environment warning it opened with

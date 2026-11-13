@@ -301,6 +301,7 @@ fn variant_name(code: Code) -> &'static str {
         Code::CargoIntegrationRequired => "CargoIntegrationRequired",
         Code::BoundHeaderNotDeclared => "BoundHeaderNotDeclared",
         Code::ReadWriteOnlyRequirednessRelaxed => "ReadWriteOnlyRequirednessRelaxed",
+        Code::CacheWriteFailed => "CacheWriteFailed",
     }
 }
 
@@ -402,7 +403,7 @@ fn a_comment_or_an_absence_is_not_a_fixture() {
 /// and this fails until `all()` lists it too.
 #[test]
 fn all_lists_every_declared_variant() {
-    const DECLARED: usize = 35;
+    const DECLARED: usize = 36;
 
     assert_eq!(
         Code::all().len(),
@@ -1081,6 +1082,8 @@ const OWNED_ELSEWHERE: &[(&str, &str)] = &[
     // The runtime-dependency contract needs a real consumer manifest to audit.
     ("RuntimeDependencyContract", "e2e/manifest_audit.rs"),
     ("RuntimeAuditSkipped", "e2e/manifest_audit.rs"),
+    // The build cache lives under `OUT_DIR`, which only a real build script has.
+    ("CacheWriteFailed", "e2e/manifest_audit.rs"),
     // The Cargo-integration policy is a property of the build environment, not of the
     // spec; `frontend/` deliberately runs every fixture with the integration off.
     ("CargoIntegrationDegraded", "config.rs"),

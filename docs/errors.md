@@ -40,3 +40,4 @@ the library API.
 | `W013` | Warning | cargo integration degraded |
 | `W014` | Warning | alternative media type not generated |
 | `W015` | Warning | read-only or write-only property's requiredness relaxed |
+| `W016` | Warning | build cache record not written |
