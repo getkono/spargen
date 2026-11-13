@@ -198,7 +198,8 @@ pub mod __private {
 ///
 /// Generated output is freestanding, so the consuming package declares its own runtime
 /// dependencies. Which ones depends on the API: `format: uuid` pulls in `uuid`, sequential
-/// responses pull in `futures-core` and a `reqwest` feature. This returns the
+/// responses and binary `_stream` twins pull in `futures-core` and a `reqwest` feature. This
+/// returns the
 /// whole set before a build, rather than leaving `E023` to report what the consuming package
 /// lacks.
 ///
