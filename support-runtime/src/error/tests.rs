@@ -6,12 +6,16 @@ use crate::{AuthError, ResponseValue, TransportError};
 
 use super::{Error, RequestError, TimeoutKind, TransportClass};
 
+/// The message is the cause `RequestError::Other` hands over, so it is the third level of the
+/// chain: `Error`, then `RequestError`, which displays its own label, then the message.
 #[test]
 fn request_message_source_displays_the_message() {
     let error = Error::<std::convert::Infallible>::request_message("no credential for `token`");
     assert!(matches!(error, Error::RequestConstruction(_)));
     let source = std::error::Error::source(&error).expect("request errors carry a source");
-    assert_eq!(source.to_string(), "no credential for `token`");
+    assert_eq!(source.to_string(), "the request could not be built or sent");
+    let message = std::error::Error::source(source).expect("the message is the cause");
+    assert_eq!(message.to_string(), "no credential for `token`");
 }
 
 /// The missing-credential cause is the payload itself, so the chain ends at `RequestError`:
@@ -37,8 +41,9 @@ fn a_missing_credential_is_typed_and_ends_the_cause_chain() {
     assert!(std::error::Error::source(source).is_none());
 }
 
-/// Any other cause is opaque: it cannot be moved out of `Other`, but it renders as itself and
-/// `source()` reaches the cause (not its wrapper) at the same depth, so it still downcasts.
+/// Any other cause is opaque: it cannot be moved out of `Other`, but the wrapper renders as the
+/// cause, `Other` itself renders its label, and `source()` reaches the cause (not its wrapper),
+/// so it still downcasts.
 #[test]
 fn an_other_cause_is_opaque_and_reachable_through_source() {
     #[derive(Debug)]
@@ -58,8 +63,9 @@ fn an_other_cause_is_opaque_and_reachable_through_source() {
     };
     assert_eq!(cause.to_string(), "cause");
     let source = std::error::Error::source(&error).expect("the request error is the source");
-    assert_eq!(source.to_string(), "cause");
+    assert_eq!(source.to_string(), "the request could not be built or sent");
     let inner = std::error::Error::source(source).expect("the cause is reachable");
+    assert_eq!(inner.to_string(), "cause");
     assert!(inner.downcast_ref::<Cause>().is_some());
     assert!(std::error::Error::source(inner).is_none());
 }
@@ -214,7 +220,8 @@ fn every_request_variant_displays_exactly_what_names_its_cause() {
             RequestError::CredentialProvider { .. } => {
                 "the token provider registered for security scheme `token` failed"
             }
-            RequestError::Other(_) => "bad path segment",
+            // The label alone: the cause, `"bad path segment"`, is one level further out.
+            RequestError::Other(_) => "the request could not be built or sent",
             RequestError::CredentialMismatch { .. } => {
                 "the `Credential::Provider` registered for security scheme `login` cannot \
                  satisfy its `http basic` type"
@@ -1523,3 +1530,5 @@ fn an_unknown_variant_reads_back_its_text_and_type() {
         r#""" is not a value of Empty"#
     );
 }
+
+mod render;

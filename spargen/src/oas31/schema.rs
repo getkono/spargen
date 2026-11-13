@@ -65,6 +65,11 @@ pub(crate) struct Schema {
     pub(crate) xml: Option<XmlHints>,
     /// Retained validation-only keywords (W-class).
     pub(crate) validation: ValidationKeywords,
+    /// `nullable: true`, OpenAPI 3.0's admission of `null`, which documents converted to 3.1
+    /// often keep. JSON Schema 2020-12 has no such keyword, so it is not read as one: the
+    /// [`audit`](fn@super::audit) reports it as `W001`, and the schema means what it means
+    /// without it.
+    pub(crate) oas30_nullable: bool,
     /// `deprecated`.
     pub(crate) deprecated: bool,
     /// `readOnly`: documented on the field, not enforced.
@@ -183,6 +188,7 @@ impl Schema {
             validation,
             // Annotation-only: documented or reported, never typed.
             default: _,
+            oas30_nullable: _,
             deprecated: _,
             read_only: _,
             write_only: _,

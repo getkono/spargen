@@ -148,6 +148,7 @@ fn the_dot_segment_refusal_escapes_the_segments_tab_lf_and_cr() {
         let error =
             build_url_on(&core, None, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
         let cause = std::error::Error::source(&error)
+            .and_then(std::error::Error::source)
             .map(ToString::to_string)
             .expect("a refusal carries its message");
         assert!(
@@ -228,7 +229,9 @@ fn build_url_refuses_a_path_value_that_forms_a_dot_segment() {
             matches!(error, Error::RequestConstruction(RequestError::Other(_))),
             "{segment}: {error:?}"
         );
-        let cause = std::error::Error::source(&error).map(ToString::to_string);
+        let cause = std::error::Error::source(&error)
+            .and_then(std::error::Error::source)
+            .map(ToString::to_string);
         assert!(
             cause.as_deref().is_some_and(|c| c.contains("dot segment")),
             "{cause:?}"
@@ -389,6 +392,41 @@ fn textual_codec_uses_raw_utf8_as_a_typed_json_string() {
     ))
     .unwrap();
     assert_eq!(value.into_inner(), "<p>raw</p>");
+}
+
+/// A `text/*` body whose schema is an integer, number or boolean decodes from its plain text
+/// (#1323): the text is read as a string first, then as a JSON scalar, so `T` decides which
+/// reading it takes, as header values do.
+#[test]
+fn text_codec_reads_a_numeric_or_boolean_body_as_a_json_scalar() {
+    assert_eq!(decode_text_body::<i64>(b"42").unwrap(), 42);
+    assert_eq!(decode_text_body::<i64>(b"42\n").unwrap(), 42);
+    assert_eq!(decode_text_body::<u8>(b"255").unwrap(), 255);
+    assert_eq!(decode_text_body::<f64>(b"1.5").unwrap(), 1.5);
+    // Correctly rounded, as `serialize_simple` wrote it.
+    assert_eq!(
+        decode_text_body::<f64>(b"0.30000000000000004").unwrap(),
+        0.1 + 0.2
+    );
+    assert!(decode_text_body::<bool>(b"true").unwrap());
+    assert!(!decode_text_body::<bool>(b"false").unwrap());
+    assert_eq!(decode_text_body::<Option<i64>>(b"null").unwrap(), None);
+
+    // The string reading wins wherever `T` takes it.
+    assert_eq!(decode_text_body::<String>(b"42").unwrap(), "42");
+    assert_eq!(
+        decode_text_body::<serde_json::Value>(b"true").unwrap(),
+        serde_json::Value::String("true".to_owned())
+    );
+
+    // Only a scalar is read as JSON: a document, or text no scalar spells, still fails.
+    assert!(decode_text_body::<i64>(b"forty-two").is_err());
+    assert!(decode_text_body::<i64>(b"").is_err());
+    assert!(decode_text_body::<Vec<i64>>(b"[1]").is_err());
+    assert!(decode_text_body::<bool>(b"1").is_err());
+
+    let value = poll_ready(decode_success_text::<i64>(&core(), json_response(200, "7"))).unwrap();
+    assert_eq!(value.into_inner(), 7);
 }
 
 #[test]

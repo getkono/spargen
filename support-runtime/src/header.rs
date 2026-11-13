@@ -213,6 +213,12 @@ fn object(raw: &str, explode: bool, scalars: Scalars) -> Value {
     Value::Object(members)
 }
 
+/// `raw` as the JSON number, boolean or `null` it spells, or as the string it is where it spells
+/// none: the JSON reading of a header token, which a `text/*` body shares (`decode_text_body`).
+pub(crate) fn json_scalar(raw: &str) -> Value {
+    scalar(raw, Scalars::Json)
+}
+
 /// The elements of the comma-separated list `raw`, by RFC 9110 §5.6.1: each without the optional
 /// whitespace (SP or HTAB) around it, and an empty one skipped, as a recipient must.
 fn elements(raw: &str) -> impl Iterator<Item = &str> {

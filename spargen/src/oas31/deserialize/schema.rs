@@ -11,7 +11,9 @@ use super::super::schema::DiscriminatorTarget;
 use super::super::{
     is_xml_name, Discriminator, RefOr, Schema, SchemaOr, TypeSet, ValidationKeywords, XmlHints,
 };
-use super::keywords::{parse_required, parse_type_set, parse_validation, SUBSCHEMA_KEYWORDS};
+use super::keywords::{
+    oas30_nullable, parse_required, parse_type_set, parse_validation, SUBSCHEMA_KEYWORDS,
+};
 use super::{
     expect_array, expect_bool, expect_string, is_oas_dialect, object, provenance, reference_object,
     require_object, required,
@@ -97,6 +99,7 @@ fn boolean_schema(value: bool, provenance: Provenance) -> Schema {
         content_schema: None,
         xml: None,
         validation: ValidationKeywords::default(),
+        oas30_nullable: false,
         deprecated: false,
         read_only: false,
         write_only: false,
@@ -192,6 +195,7 @@ fn parse_schema_or(
             .get("xml")
             .and_then(|value| parse_xml(value, &pointer.push("xml"), diags)),
         validation: parse_validation(map, pointer, diags),
+        oas30_nullable: oas30_nullable(map),
         deprecated: bool_keyword(map, "deprecated", pointer, diags),
         read_only: bool_keyword(map, "readOnly", pointer, diags),
         write_only: bool_keyword(map, "writeOnly", pointer, diags),

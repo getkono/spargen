@@ -467,6 +467,11 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                 reserved_wording: None,
             },
             Case {
+                tag: "oas30-nullable",
+                stated_as: "OpenAPI 3.0's `nullable: true` written in a 3.1 or 3.2 document",
+                reserved_wording: None,
+            },
+            Case {
                 tag: "content-annotation",
                 stated_as: "`contentMediaType`/`contentSchema` are consumed without this \
                                 warning only on the string `data` property",

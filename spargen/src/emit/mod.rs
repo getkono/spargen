@@ -9,7 +9,8 @@ use crate::codegen::GeneratedCode;
 /// Identity of the source spec, stamped into the provenance header.
 #[derive(Debug, Clone)]
 pub(crate) struct SpecMeta {
-    /// A description of the source spec (path or URL as vendored).
+    /// A description of the source spec: its file name, never a path that names the checkout,
+    /// followed by the omit profile's fingerprint when there is one.
     pub(crate) source: String,
     /// The spargen version that produced the output.
     pub(crate) spargen_version: String,

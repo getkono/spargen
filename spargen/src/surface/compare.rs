@@ -15,6 +15,7 @@ pub(crate) fn diff(old: &Surface, new: &Surface) -> DiffReport {
     diff_operations(old, new, &mut changes);
     diff_types(old, new, &mut changes);
     diff_servers(old, new, &mut changes);
+    diff_testing(old, new, &mut changes);
 
     // Deterministic order: most-severe first, then by location, then by machine code, then detail.
     changes.sort_by(|a, b| {
@@ -32,6 +33,23 @@ pub(crate) fn diff(old: &Surface, new: &Surface) -> DiffReport {
         .max()
         .unwrap_or(Impact::Patch);
     DiffReport { changes, bump }
+}
+
+/// The `testing` module appearing or disappearing.
+fn diff_testing(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
+    match (old.testing, new.testing) {
+        (false, true) => changes.push(Change::new(
+            ChangeKind::TestingModuleAdded,
+            "testing",
+            "`testing` module added",
+        )),
+        (true, false) => changes.push(Change::new(
+            ChangeKind::TestingModuleRemoved,
+            "testing",
+            "`testing` module removed",
+        )),
+        (false, false) | (true, true) => {}
+    }
 }
 
 fn diff_operations(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {

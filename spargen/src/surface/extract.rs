@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     ByteStreamSurface, HeadersSurface, MemberSurface, OpSurface, OverflowSurface, ServerSurface,
-    ServerVariableSurface, Surface, TypeSurface, UrlArgSurface,
+    ServerVariableSurface, Settings, Surface, TypeSurface, UrlArgSurface,
 };
 use crate::ir::{
     AdditionalProps, Api, ApiErrorBodyImpl, Emission, ErrorShape, Prim, ScalarRepr, ScalarValue,
@@ -13,9 +13,9 @@ use crate::ir::{
 };
 use crate::name::Names;
 
-/// Build the consumer-visible [`Surface`] of the client generated from `api`, using `names` for the
-/// generated identifiers a consumer actually sees.
-pub(crate) fn build(api: &Api, names: &Names) -> Surface {
+/// Build the consumer-visible [`Surface`] of the client generated from `api` under `settings`, using
+/// `names` for the generated identifiers a consumer actually sees.
+pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
     let mut operations = BTreeMap::new();
     for operation in &api.operations {
         let key = format!("{} {}", method_label(&operation.method), operation.path.raw);
@@ -40,9 +40,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             // A param that sends an explicit `null` is set through `Nullable<T>`, so the same
             // nullable type behind another serialization is a different surface.
             let ty = if param.sends_explicit_null() {
-                nullable_canon_ty(param.ty, api, names)
+                nullable_canon_ty(param.ty, api, names, settings)
             } else {
-                canon_ty(param.ty, api, names)
+                canon_ty(param.ty, api, names, settings)
             };
             params.insert(
                 (param.name.clone(), param.location.as_openapi_in()),
@@ -54,7 +54,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         }
 
         let request_body = operation.typed_body().map(|(body, ty)| MemberSurface {
-            ty: canon_ty(ty, api, names),
+            ty: canon_ty(ty, api, names, settings),
             required: body.required,
         });
         let error = operation.responses.error();
@@ -78,15 +78,16 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                             stream.success_enum.as_ref(),
                             api,
                             names,
+                            settings,
                         ),
                     }),
                 url_args,
                 params,
                 request_body,
-                success: success_sig(&operation.responses.success(), api, names),
-                error: error_sig(&error, api, names),
-                error_body: error_body_sig(&error, api, names),
-                response_headers: response_headers(operation, api, names),
+                success: success_sig(&operation.responses.success(), api, names, settings),
+                error: error_sig(&error, api, names, settings),
+                error_body: error_body_sig(&error, api, names, settings),
+                response_headers: response_headers(operation, api, names, settings),
             },
         );
     }
@@ -114,9 +115,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                     // An optional nullable field is a `Nullable<T>`, where a required one is the
                     // `Option<T>` `canon_ty` renders.
                     let ty = if !field.required && field.ty.nullable {
-                        nullable_canon_ty(field.ty, api, names)
+                        nullable_canon_ty(field.ty, api, names, settings)
                     } else {
-                        canon_ty(field.ty, api, names)
+                        canon_ty(field.ty, api, names, settings)
                     };
                     fields.insert(
                         field_name,
@@ -135,7 +136,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                             .expect("overflow field name allocated")
                             .as_str()
                             .to_owned(),
-                        ty: canon_ty(**ty, api, names),
+                        ty: canon_ty(**ty, api, names, settings),
                     }),
                     AdditionalProps::Allow | AdditionalProps::Deny => None,
                 };
@@ -161,7 +162,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                         .expect("union variant name allocated")
                         .as_str()
                         .to_owned();
-                    variants.insert(variant_name, canon_ty(variant.ty, api, names));
+                    variants.insert(variant_name, canon_ty(variant.ty, api, names, settings));
                 }
                 // An open union's `Unknown` variant is surface too: turning `open_unions` on adds
                 // a variant every exhaustive `match` must name.
@@ -176,7 +177,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             // A cycle-member array or tuple is a nominal newtype whose wrapped type is the public
             // `.0` field (#648); every use site renders it by name, so its structure is compared
             // here, one level deep, or a change to what it wraps would go unreported (#654).
-            Emission::Newtype => TypeSurface::Newtype(canon_container(&def.kind, api, names)),
+            Emission::Newtype => {
+                TypeSurface::Newtype(canon_container(&def.kind, api, names, settings))
+            }
             // An uninhabited schema is emitted as an empty `pub enum`, not as an alias, and every
             // use site renders it by name, so it is listed here like any other nominal type (#661).
             Emission::Never => TypeSurface::Never,
@@ -196,6 +199,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         types,
         aliases,
         servers: servers(api, names),
+        testing: settings.testing,
     }
 }
 
@@ -252,6 +256,7 @@ fn response_headers(
     operation: &crate::ir::Operation,
     api: &Api,
     names: &Names,
+    settings: Settings,
 ) -> BTreeMap<String, HeadersSurface> {
     let mut structs = BTreeMap::new();
     for (status, response) in operation.responses.entries() {
@@ -267,7 +272,7 @@ fn response_headers(
             .map(|header| {
                 let field = header_names.field(&header.name).as_str().to_owned();
                 let surface = MemberSurface {
-                    ty: canon_ty(header.ty, api, names),
+                    ty: canon_ty(header.ty, api, names, settings),
                     required: header.required,
                 };
                 (field, surface)
@@ -280,7 +285,7 @@ fn response_headers(
 
 /// Render a nullable [`Ty`] that a member carries as `Nullable<T>` (an optional nullable field, or a
 /// parameter that sends an explicit `null`): the [`canon_ty`] of its non-nullable type, wrapped.
-fn nullable_canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
+fn nullable_canon_ty(ty: Ty, api: &Api, names: &Names, settings: Settings) -> String {
     let inner = canon_ty(
         Ty {
             nullable: false,
@@ -288,13 +293,14 @@ fn nullable_canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
         },
         api,
         names,
+        settings,
     );
     format!("Nullable<{inner}>")
 }
 
 /// Render a [`Ty`] to its stable structural string (see the module docs). Nominal types render by
 /// their generated name, so recursion always terminates at a nominal boundary or a primitive.
-pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
+pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names, settings: Settings) -> String {
     let Some(def) = api.types.get(ty.id) else {
         return "Value".to_owned();
     };
@@ -314,8 +320,10 @@ pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
             unreachable!("a string enum is emitted as a `pub enum`")
         }
         Emission::Alias => match &def.kind {
-            TypeKind::Primitive(prim) => prim_label(*prim).to_owned(),
-            kind @ (TypeKind::Array(_) | TypeKind::Tuple(_)) => canon_container(kind, api, names),
+            TypeKind::Primitive(prim) => prim_label(*prim, settings),
+            kind @ (TypeKind::Array(_) | TypeKind::Tuple(_)) => {
+                canon_container(kind, api, names, settings)
+            }
             TypeKind::Bytes(crate::ir::BytesEncoding::Raw) => "Bytes".to_owned(),
             TypeKind::Null => "()".to_owned(),
             TypeKind::Any => "Value".to_owned(),
@@ -337,13 +345,13 @@ pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
 /// Render an array's or tuple's own structure one level deep: `Vec<item>` or `(a, b, …)`, each
 /// item through [`canon_ty`]. The structural form of an alias at a use site, and the wrapped type
 /// of a cycle-member newtype in its own surface entry.
-fn canon_container(kind: &TypeKind, api: &Api, names: &Names) -> String {
+fn canon_container(kind: &TypeKind, api: &Api, names: &Names, settings: Settings) -> String {
     match kind {
-        TypeKind::Array(inner) => format!("Vec<{}>", canon_ty(**inner, api, names)),
+        TypeKind::Array(inner) => format!("Vec<{}>", canon_ty(**inner, api, names, settings)),
         TypeKind::Tuple(items) => {
             let rendered: Vec<String> = items
                 .iter()
-                .map(|item| canon_ty(*item, api, names))
+                .map(|item| canon_ty(*item, api, names, settings))
                 .collect();
             // A one-position tuple keeps its trailing comma, as codegen declares it: `(T)` would
             // name a parenthesized `T`, not the `(T,)` the generated client has.
@@ -371,11 +379,11 @@ fn nominal_name(ty: Ty, names: &Names) -> String {
 }
 
 /// Render an operation's success shape to a stable string.
-fn success_sig(shape: &SuccessShape, api: &Api, names: &Names) -> String {
+fn success_sig(shape: &SuccessShape, api: &Api, names: &Names, settings: Settings) -> String {
     match shape {
         SuccessShape::Unit => "()".to_owned(),
-        SuccessShape::Plain(ty) => canon_ty(*ty, api, names),
-        SuccessShape::Enum(entries) => status_enum_sig("Success", entries, api, names),
+        SuccessShape::Plain(ty) => canon_ty(*ty, api, names, settings),
+        SuccessShape::Enum(entries) => status_enum_sig("Success", entries, api, names, settings),
     }
 }
 
@@ -388,6 +396,7 @@ fn stream_success_sig(
     enum_name: Option<&crate::name::Ident>,
     api: &Api,
     names: &Names,
+    settings: Settings,
 ) -> String {
     match (shape, enum_name) {
         (SuccessShape::Enum(entries), Some(enum_name)) => {
@@ -396,7 +405,7 @@ fn stream_success_sig(
                 .map(|(status, body)| {
                     let ty = match body {
                         _ if api.streams_binary_arm(*body) => "ByteStream".to_owned(),
-                        Some(ty) => canon_ty(*ty, api, names),
+                        Some(ty) => canon_ty(*ty, api, names, settings),
                         None => "()".to_owned(),
                     };
                     format!("{}:{ty}", status.display_label())
@@ -409,11 +418,11 @@ fn stream_success_sig(
 }
 
 /// Render an operation's error shape to a stable string.
-fn error_sig(shape: &ErrorShape, api: &Api, names: &Names) -> String {
+fn error_sig(shape: &ErrorShape, api: &Api, names: &Names, settings: Settings) -> String {
     match shape {
         ErrorShape::None => "None".to_owned(),
-        ErrorShape::Single(ty) => canon_ty(*ty, api, names),
-        ErrorShape::Enum(entries) => status_enum_sig("Error", entries, api, names),
+        ErrorShape::Single(ty) => canon_ty(*ty, api, names, settings),
+        ErrorShape::Enum(entries) => status_enum_sig("Error", entries, api, names, settings),
     }
 }
 
@@ -421,12 +430,17 @@ fn error_sig(shape: &ErrorShape, api: &Api, names: &Names) -> String {
 /// does not implement `ApiErrorBody`. Recorded directly rather than derived from [`error_sig`]:
 /// the rendered signature cannot see every change in whether the trait is implemented (a tuple
 /// item's `Box` is not rendered at all).
-fn error_body_sig(shape: &ErrorShape, api: &Api, names: &Names) -> Option<String> {
+fn error_body_sig(
+    shape: &ErrorShape,
+    api: &Api,
+    names: &Names,
+    settings: Settings,
+) -> Option<String> {
     shape
         .api_error_body(&api.types)
         .map(|implementation| match implementation {
             ApiErrorBodyImpl::Uninhabited => "Infallible".to_owned(),
-            ApiErrorBodyImpl::Body(ty) => canon_ty(ty, api, names),
+            ApiErrorBodyImpl::Body(ty) => canon_ty(ty, api, names, settings),
         })
 }
 
@@ -438,12 +452,13 @@ fn status_enum_sig(
     entries: &[(StatusSpec, Option<Ty>)],
     api: &Api,
     names: &Names,
+    settings: Settings,
 ) -> String {
     let rendered: Vec<String> = entries
         .iter()
         .map(|(status, body)| {
             let ty = match body {
-                Some(ty) => canon_ty(*ty, api, names),
+                Some(ty) => canon_ty(*ty, api, names, settings),
                 None => "()".to_owned(),
             };
             format!("{}:{ty}", status.display_label())
@@ -452,8 +467,12 @@ fn status_enum_sig(
     format!("{tag}{{{}}}", rendered.join(", "))
 }
 
-pub(super) fn prim_label(prim: Prim) -> &'static str {
-    match prim {
+/// A primitive's canonical label under `settings`: the scalar it is, or, for the formats a setting
+/// maps, what that mapping emits. `Uuid` or `String` by the `uuid` mapping; and by the `datetime`
+/// backend, `DateTime<backend>`/`Date<backend>` (each backend's newtypes wrap its own crate's types,
+/// so one backend's are not another's), or `String`.
+pub(super) fn prim_label(prim: Prim, settings: Settings) -> String {
+    let scalar = match prim {
         Prim::Bool => "bool",
         Prim::String => "String",
         Prim::I32 => "i32",
@@ -463,10 +482,16 @@ pub(super) fn prim_label(prim: Prim) -> &'static str {
         Prim::U32 => "u32",
         Prim::U64 => "u64",
         Prim::F64 => "f64",
-        Prim::Uuid => "Uuid",
-        Prim::DateTime => "DateTime",
-        Prim::Date => "Date",
-    }
+        Prim::Uuid if settings.uuid => "Uuid",
+        Prim::DateTime if settings.datetime.is_typed() => {
+            return format!("DateTime<{}>", settings.datetime.as_str());
+        }
+        Prim::Date if settings.datetime.is_typed() => {
+            return format!("Date<{}>", settings.datetime.as_str());
+        }
+        Prim::Uuid | Prim::DateTime | Prim::Date => "String",
+    };
+    scalar.to_owned()
 }
 
 /// The method half of an operation's `"METHOD /path"` key. A fixed-field method is upper-cased, as
