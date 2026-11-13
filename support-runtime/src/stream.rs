@@ -318,11 +318,11 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                             this.bom_pending = this.buffer.strip_leading_bom();
                         }
                     }
-                    // Whatever class the read failure carries, the connection is gone partway
-                    // through the body, so it is the interruption a reconnect policy is asked
-                    // about.
+                    // The read failure surfaces as the variant its transport class names, as
+                    // `ByteStream` reports it (a stalled read is `Timeout`, a corrupt body
+                    // `Protocol`), and whatever its class, a reconnect policy is asked about it.
                     Poll::Ready(Err(error)) => {
-                        let error = Error::InterruptedBody(error);
+                        let error = Error::from_transport(error);
                         if let Some(error) =
                             this.schedule_reconnect(OwnedReconnectReason::Failure(error))
                         {

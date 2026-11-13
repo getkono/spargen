@@ -1376,8 +1376,9 @@ fn a_per_frame_decode_error_retains_the_whole_frame_past_max_error_body() {
     }
 }
 
-/// A body read that fails partway through an item yields `InterruptedBody`, a transient
-/// failure, and with no reconnect policy ends the stream: the partial item is never yielded.
+/// A body read the connection cuts short partway through an item yields `InterruptedBody`, a
+/// transient failure, and with no reconnect policy ends the stream: the partial item is never
+/// yielded.
 #[test]
 fn a_body_that_fails_mid_item_yields_interrupted_body_and_ends_the_stream() {
     let initial = Chunks::new([Chunk::data("{\"a\":1}\n{\"b\":"), Chunk::Fail]).into_response(200);
@@ -1391,6 +1392,109 @@ fn a_body_that_fails_mid_item_yields_interrupted_body_and_ends_the_stream() {
         other => panic!("expected InterruptedBody, got {other:?}"),
     }
     assert!(poll_ready(stream.next()).is_none());
+}
+
+/// A body that yields `data`, then fails with `failure`, which keeps its class through
+/// [`HttpBody::wrap`].
+struct FailsAfter {
+    data: Option<bytes::Bytes>,
+    failure: Option<crate::TransportError>,
+}
+
+impl http_body::Body for FailsAfter {
+    type Data = bytes::Bytes;
+    type Error = crate::TransportError;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<bytes::Bytes>, crate::TransportError>>>
+    {
+        let this = &mut *self;
+        std::task::Poll::Ready(match this.data.take() {
+            Some(data) => Some(Ok(http_body::Frame::data(data))),
+            None => this.failure.take().map(Err),
+        })
+    }
+}
+
+/// A `200` response whose body yields `data`, then fails with `failure`.
+fn failing_response(data: &str, failure: crate::TransportError) -> crate::tests::Response {
+    http::Response::builder()
+        .status(200)
+        .body(HttpBody::wrap(FailsAfter {
+            data: Some(bytes::Bytes::copy_from_slice(data.as_bytes())),
+            failure: Some(failure),
+        }))
+        .expect("valid synthetic response")
+}
+
+/// Issue #1330: a mid-stream read failure surfaces as the variant its transport class names, as
+/// `ByteStream` reports it: a stalled read is `Timeout`, as `ClientConfig::read_timeout` promises,
+/// and a corrupt body is a `Protocol` failure, which is not transient.
+#[test]
+fn a_mid_stream_read_failure_surfaces_as_its_transport_class() {
+    let timeout = crate::TransportError::timeout(crate::TimeoutKind::Total, "read timed out");
+    let mut stream: EventStream<serde_json::Value> =
+        EventStream::new(failing_response("{\"a\":1}\n", timeout), Framing::Ndjson);
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"a": 1})
+    );
+    match poll_ready(stream.next()) {
+        Some(Err(Error::Timeout(crate::TimeoutKind::Total))) => {}
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+    assert!(poll_ready(stream.next()).is_none());
+
+    let corrupt = crate::TransportError::protocol("corrupt gzip frame");
+    let mut stream: EventStream<serde_json::Value> =
+        EventStream::new(failing_response("{\"a\":", corrupt), Framing::Ndjson);
+    match poll_ready(stream.next()) {
+        Some(Err(error @ Error::Protocol(_))) => assert!(!error.is_transient()),
+        other => panic!("expected Protocol, got {other:?}"),
+    }
+    assert!(poll_ready(stream.next()).is_none());
+}
+
+/// Issue #1330: a mid-stream timeout is still offered to the reconnect policy, which resumes the
+/// stream from the last event ID.
+#[test]
+fn a_mid_stream_timeout_is_offered_to_the_reconnect_policy() {
+    let backend = SequenceBackend::new([
+        Reply::status(200, "data: {\"seq\":2}\n\n"),
+        Reply::status(200, ""),
+    ]);
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 1,
+        ..ImmediateReconnect::default()
+    });
+    let timeout = crate::TransportError::timeout(crate::TimeoutKind::Total, "read timed out");
+    let initial = failing_response("id: 1\ndata: {\"seq\":1}\n\n", timeout);
+    let mut stream = reconnectable_stream_over(initial, backend.clone(), policy.clone());
+
+    let mut items = Vec::new();
+    while let Some(item) = poll_ready(stream.next()) {
+        items.push(item.unwrap());
+    }
+    assert_eq!(
+        items,
+        [serde_json::json!({"seq": 1}), serde_json::json!({"seq": 2})]
+    );
+    assert_eq!(
+        backend.header("last-event-id"),
+        [Some("1".to_owned()), Some("1".to_owned())]
+    );
+    assert_eq!(
+        policy
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(attempt, reason, _)| (*attempt, *reason))
+            .collect::<Vec<_>>(),
+        [(0, "failure"), (0, "eof"), (1, "eof")]
+    );
 }
 
 /// The bytes of an event the failed connection left unfinished are dropped before the replay's
