@@ -22,13 +22,14 @@ operational surface — read them before non-trivial changes.
   generated output. `publish = false`; its unconditional dependencies are exactly `reqwest` /
   `http` / `http-body` / `url` / `serde` / `serde_json` / `bytes` / `secrecy` (`http` and
   `http-body` carry the transport seam's request, response and body, and `url` the URL a request
-  is built on), plus optional ones for the
-  conditionally embedded modules: `futures-core` and reqwest's `stream` feature (`stream`, emitted only for APIs with
-  sequential responses), `quick-xml` (`xml`), `tokio` (`blocking`), and the date-time backends'
-  `time`, `jiff` and `chrono` (each behind the feature of its name: the RFC 3339 date newtypes the
-  `datetime` backend selects). Each source file keeps its `#[cfg(test)]` module last — inline, or `mod
-  tests;` reading `<stem>/tests.rs` — and everything above that marker is embedded into generated
-  code and must compile there.
+  is built on), plus optional ones for the conditionally embedded modules: `futures-core` and
+  reqwest's `stream` feature (`chunked`, emitted for APIs with sequential responses or a binary
+  `_stream` twin, and `stream`, emitted only for APIs with sequential responses), `quick-xml`
+  (`xml`), `tokio` (`blocking`), and the date-time backends' `time`, `jiff` and `chrono` (each
+  behind the feature of its name: the RFC 3339 date newtypes the `datetime` backend selects). Each
+  source file keeps its `#[cfg(test)]` module last — inline, or `mod tests;` reading
+  `<stem>/tests.rs` — and everything above that marker is embedded into generated code and must
+  compile there.
 - `examples/` — each its own workspace, so a consumer's crate layout is what is tested:
   `petstore/` (build.rs path) and `petstore-macro/` (macro path) over real HTTP (`mise run
   example`), and `github-api/`, the pinned 12.9 MB GitHub 3.1 description compile-checked natively
