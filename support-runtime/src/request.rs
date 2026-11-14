@@ -75,6 +75,7 @@ impl RequestBuilder {
 
     /// Add a header, after any value the request already carries under `name`. A name or value
     /// that does not convert fails the builder.
+    #[must_use]
     pub fn header<K, V>(self, name: K, value: V) -> Self
     where
         HeaderName: TryFrom<K>,
@@ -88,6 +89,7 @@ impl RequestBuilder {
     /// Add a header as [`Self::header`] does, its value marked sensitive
     /// (`HeaderValue::set_sensitive`), so the `Debug` of the built request prints it redacted: for
     /// a value the client holds as a secret, such as one bound with `ClientCore::bind_header`.
+    #[must_use]
     pub fn sensitive_header<K, V>(self, name: K, value: V) -> Self
     where
         HeaderName: TryFrom<K>,
@@ -129,6 +131,7 @@ impl RequestBuilder {
     }
 
     /// Set the body, replacing any set before.
+    #[must_use]
     pub fn body(mut self, body: impl Into<HttpBody>) -> Self {
         if let Ok(parts) = &mut self.request {
             parts.body = body.into();
@@ -139,6 +142,7 @@ impl RequestBuilder {
     /// Set a `multipart/form-data` body encoded from `form`, and the `Content-Type` naming its
     /// boundary, replacing any `Content-Type` set before. The body is held in memory, so the
     /// request clones for a retry, a credential refresh or a reconnect.
+    #[must_use]
     pub fn multipart(mut self, form: MultipartForm) -> Self {
         if let Ok(parts) = &mut self.request {
             let (content_type, body) = form.encode();
@@ -268,6 +272,7 @@ impl MultipartForm {
     }
 
     /// Add a part named `name`, after every part added before; a name may repeat.
+    #[must_use]
     pub fn part(mut self, name: impl Into<String>, part: MultipartPart) -> Self {
         self.parts.push((name.into(), part));
         self
@@ -363,6 +368,7 @@ impl MultipartPart {
     /// Set the `filename` parameter of the part's `Content-Disposition`, replacing any set before.
     /// RFC 7578 §4.2 says a part holding a file's content should carry one, and many servers read
     /// a part without it as a plain field rather than a file. It is escaped as the part's name is.
+    #[must_use]
     pub fn file_name(mut self, file_name: impl Into<String>) -> Self {
         self.file_name = Some(file_name.into());
         self

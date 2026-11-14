@@ -379,6 +379,7 @@ impl ClientCore {
 
     /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
     /// See the `paginate` module's docs for the full pattern and the authentication caveat.
+    #[must_use]
     pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
         LinkPaginator::new(self.clone(), first)
     }
