@@ -6,7 +6,7 @@ use std::borrow::Cow;
 
 use super::glob::{has_glob_meta, unescape_glob, Glob};
 use crate::diag::{FileId, JsonPointer};
-use crate::source::{FileLookupError, InputBundle, Node, SpannedValue};
+use crate::source::{canonical_pointer, FileLookupError, InputBundle, Node, SpannedValue};
 
 /// One compatibility omission (exact or glob).
 /// Strings are `Cow` so a rule can be written as a literal in [`omit!`](crate::omit) with no allocation and
@@ -340,9 +340,13 @@ impl OmitRule {
                         pointers,
                     }
                 } else {
+                    // The bundle is looked up by plain pointer, so a percent-encoded token is
+                    // decoded here, as it always has been read; a pointer that is no valid
+                    // fragment (a literal `%`) is read as written.
+                    let written = JsonPointer::from(unescape_glob(pointer));
                     RuleMatch::Exact {
                         file: file_id,
-                        pointer: JsonPointer::from(unescape_glob(pointer)),
+                        pointer: canonical_pointer(&written).unwrap_or(written),
                     }
                 }
             }

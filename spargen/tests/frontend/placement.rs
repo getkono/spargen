@@ -292,6 +292,16 @@ fn placement_twins(value: &serde_json::Value) -> Vec<Twin> {
                 serde_json::json!({ "shared": { "an item/b": value.clone() } }),
             )],
         ),
+        // A key holding a literal `%` is `%25` in the fragment: decoded once, to the `100%` the
+        // walk spells. Decoded twice, it is a malformed escape and the target is never validated.
+        (
+            "a JSON Pointer whose token holds a literal percent sign",
+            "./fragment.json#/shared/100%25".to_owned(),
+            vec![(
+                "fragment.json",
+                serde_json::json!({ "shared": { "100%": value.clone() } }),
+            )],
+        ),
         // A pointer into the root's own specification extension: the one place in the root the
         // whole-document validation admits anything at all, so the target must be validated at
         // the position its reference implies there too. The root rewrite below moves the value in.
