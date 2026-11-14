@@ -1635,7 +1635,7 @@ fn a_ref_to_a_null_only_type_beside_an_all_of_is_its_type_or_null_where_composed
 /// value, standalone or with the `const` as an `allOf` member: `E013` (`pub type Pick = ();` at
 /// 0.5.0). The message names the construct written, not a `oneOf`, and with no composition
 /// written the remedy names the keywords that disagree rather than a composition.
-// E013 case: null-only-left
+// E013 case: own-keywords-empty
 #[test]
 fn a_type_refusing_the_only_null_its_enum_or_const_leaves_is_rejected() {
     let (own, add, e013) = (

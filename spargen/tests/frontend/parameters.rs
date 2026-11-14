@@ -1493,6 +1493,13 @@ paths:
             )),
             "{field}: {code}"
         );
+        // Issue #1414: `Nullable` has no `From<Option<T>>`, so the `null` has a setter of its own.
+        assert!(
+            flat.contains(&format!(
+                "pub fn {field}_null(mut self) -> Self {{ self.{field} = support::Nullable::Null;"
+            )),
+            "{field}: {code}"
+        );
     }
     for (field, ty) in [("x_th", "XTh"), ("sq", "Sq")] {
         assert!(
@@ -1512,7 +1519,8 @@ paths:
     // only there: one of each per JSON parameter above, none for the text, styled or required one.
     for sentence in [
         "`Nullable::Null` sends the JSON `null`; `Nullable::Absent` omits the parameter.",
-        "`None` sends the JSON `null`; leaving the parameter unset omits it.",
+        "A value, or `Nullable::Null` to send the JSON `null`; leaving the parameter unset omits \
+         it.",
     ] {
         assert_eq!(flat.matches(sentence).count(), 4, "{sentence}: {code}");
     }

@@ -945,7 +945,7 @@ fn every_variant_displays_something_that_names_its_class() {
             Error::Transport(_) => "transport failed",
             Error::Timeout(_) => "timeout elapsed",
             Error::Protocol(_) => "protocol error",
-            Error::Redirect(_) => "redirect policy exhausted",
+            Error::Redirect(_) => "redirect not followed",
             Error::Api(_) => "documented API error",
             Error::UnexpectedStatus { .. } => "unexpected response status",
             Error::Decode { .. } => "response decode failed",

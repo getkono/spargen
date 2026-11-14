@@ -13,6 +13,9 @@ mod generate;
 
 use generate::write_spec;
 
+#[path = "shared/repo.rs"]
+mod repo;
+
 fn spargen_bin() -> &'static str {
     env!("CARGO_BIN_EXE_spargen")
 }
@@ -70,6 +73,101 @@ fn the_cli_reference_quotes_the_help_output_verbatim() {
         "{} quotes stale `spargen --help` output; paste the binary's output",
         path.display()
     );
+}
+
+/// The `Option<bool>` keys of `spargen.toml`, as `FileConfig` in `spargen/src/config.rs` declares
+/// them: the switches every other surface must spell.
+fn file_config_switches() -> Vec<String> {
+    let source = repo::read("spargen/src/config.rs");
+    let (_, rest) = source
+        .split_once("struct FileConfig {\n")
+        .expect("spargen/src/config.rs declares `struct FileConfig`");
+    let (body, _) = rest
+        .split_once("\n}")
+        .expect("`FileConfig`'s body is closed");
+    body.lines()
+        .filter_map(|line| line.trim().strip_suffix(": Option<bool>,"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The names in `generate_api!`'s `SWITCHES` array, in `spargen-macro/src/lib.rs`.
+fn macro_switches() -> Vec<String> {
+    let source = repo::read("spargen-macro/src/lib.rs");
+    let (_, rest) = source
+        .split_once("const SWITCHES: [&str; ")
+        .expect("spargen-macro/src/lib.rs declares `const SWITCHES`");
+    let (_, rest) = rest.split_once("= [").expect("`SWITCHES` is an array");
+    let (body, _) = rest.split_once("];").expect("`SWITCHES` is closed");
+    body.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.trim_matches('"').to_owned())
+        .collect()
+}
+
+/// Every long flag the `subcommand`'s `--help` lists.
+fn long_flags(subcommand: &str) -> Vec<String> {
+    let output = Command::new(spargen_bin())
+        .args([subcommand, "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{subcommand} --help");
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|word| word.starts_with("--"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Every boolean `spargen.toml` key is a switch on each surface that configures a spec: a
+/// `--X`/`--no-X` pair on every subcommand that reads one, an entry in `generate_api!`'s
+/// `SWITCHES`, and a `Spec::with_X` setter; and every `--no-X` flag names such a key. The set is
+/// read from `FileConfig`, so a switch added there fails here until each surface spells it.
+#[test]
+fn every_config_switch_is_spelled_on_every_surface() {
+    let switches = file_config_switches();
+    assert!(
+        switches.iter().any(|switch| switch == "testing"),
+        "the reader finds FileConfig's switches: {switches:?}"
+    );
+
+    let mut sorted = switches.clone();
+    sorted.sort();
+    let mut in_macro = macro_switches();
+    in_macro.sort();
+    assert_eq!(
+        in_macro, sorted,
+        "generate_api!'s SWITCHES are exactly spargen.toml's boolean keys"
+    );
+
+    let setters = repo::read("spargen/src/config.rs");
+    for switch in &switches {
+        assert!(
+            setters.contains(&format!("    pub fn with_{switch}(")),
+            "`Spec` has no `with_{switch}` setter for the `{switch}` key"
+        );
+    }
+
+    for subcommand in ["check", "deps", "lock", "diff"] {
+        let flags = long_flags(subcommand);
+        for switch in &switches {
+            let flag = switch.replace('_', "-");
+            for spelled in [format!("--{flag}"), format!("--no-{flag}")] {
+                assert!(
+                    flags.contains(&spelled),
+                    "`spargen {subcommand}` has no `{spelled}` for the `{switch}` key: {flags:?}"
+                );
+            }
+        }
+        for negated in flags.iter().filter_map(|flag| flag.strip_prefix("--no-")) {
+            assert!(
+                switches.contains(&negated.replace('-', "_")),
+                "`spargen {subcommand}`'s `--no-{negated}` names no spargen.toml switch"
+            );
+        }
+    }
 }
 
 #[test]

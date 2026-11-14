@@ -90,6 +90,13 @@ pub(crate) struct SpecArgs {
     /// escaped), overriding `verbatim_docs = true` in `spargen.toml`.
     #[arg(long)]
     pub(crate) no_verbatim_docs: bool,
+    /// Emit the `testing` module and its typed `MockBackend`, overriding `testing = false` in
+    /// `spargen.toml`.
+    #[arg(long, conflicts_with = "no_testing")]
+    pub(crate) testing: bool,
+    /// Emit no `testing` module, overriding `testing = true` in `spargen.toml`.
+    #[arg(long)]
+    pub(crate) no_testing: bool,
     /// Omit a path item and every operation under it (repeatable), e.g. `--omit-path /pets/{id}`.
     #[arg(long = "omit-path", value_name = "PATH")]
     pub(crate) omit_path: Vec<String>,
@@ -136,6 +143,8 @@ impl SpecArgs {
             no_open_unions,
             verbatim_docs,
             no_verbatim_docs,
+            testing,
+            no_testing,
             omit_path,
             omit_operation,
             omit_component,
@@ -156,6 +165,8 @@ impl SpecArgs {
             (*no_open_unions, "--no-open-unions"),
             (*verbatim_docs, "--verbatim-docs"),
             (*no_verbatim_docs, "--no-verbatim-docs"),
+            (*testing, "--testing"),
+            (*no_testing, "--no-testing"),
             (!omit_path.is_empty(), "--omit-path"),
             (!omit_operation.is_empty(), "--omit-operation"),
             (!omit_component.is_empty(), "--omit-component"),
