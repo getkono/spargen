@@ -15,7 +15,7 @@ beside the spec is always discovered and applied first; the six switches overrid
 direction, `datetime` and the two caps replace its values, `omit { ... }` adds rules to its
 `[[omit]]` rules, and `keep { ... }` adds operations to its `[[keep]]` allow-list (once any is
 kept, every other operation, and every component the kept ones do not reach, is omitted), and each
-`bind_header = "..."` adds a header to its `bind_headers`, bound once on the client rather than
+`bound_header = "..."` adds a header to its `bound_headers`, bound once on the client rather than
 taken at every call.
 
 Each switch — `uuid`, `carve`, `open_narrowing`, `open_unions`, `verbatim_docs`, `testing` — is
@@ -29,7 +29,7 @@ Repetition:
   A second one is a compile error, and a switch's two spellings count as the same switch, so
   `carve, no_carve` is an error too.
 - `omit { ... }` and `keep { ... }` may be repeated; their entries merge, in the order written.
-- `bind_header = "..."` may be repeated; each binds one more header, in the order written.
+- `bound_header = "..."` may be repeated; each binds one more header, in the order written.
 
 An argument the macro is not given leaves the file's value.
 
@@ -60,7 +60,7 @@ spargen_macro::generate_api!(
         get "/pets";
         post "/pets";
     },
-    bind_header = "X-Api-Version",
+    bound_header = "X-Api-Version",
 );
 ```
 

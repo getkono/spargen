@@ -88,7 +88,7 @@ const EVERY_CONTROL: &str = r#"spec = "openapi.yaml", no_uuid, datetime = "jiff"
                    file("shared.yaml") { pointers { "/Legacy"; } }
                },
                keep { get "/pets"; post "/pets"; },
-               bind_header = "X-Api-Version", bind_header = "X-Tenant""#;
+               bound_header = "X-Api-Version", bound_header = "X-Tenant""#;
 
 /// The operations [`EVERY_CONTROL`]'s `keep` block names, in the order it names them.
 fn every_kept_operation() -> Vec<(OmitMethod, String)> {
@@ -125,7 +125,7 @@ fn parses_every_build_configuration_control() {
     assert_eq!(args.batch_cap, Some(7));
     assert_eq!(args.omit.rules, every_omit_rule());
     assert_eq!(args.keep, every_kept_operation());
-    assert_eq!(args.bind_headers, ["X-Api-Version", "X-Tenant"]);
+    assert_eq!(args.bound_headers, ["X-Api-Version", "X-Tenant"]);
 }
 
 #[test]
@@ -144,7 +144,7 @@ fn a_bare_spec_path_sets_no_control() {
     assert_eq!(args.batch_cap, None);
     assert_eq!(args.omit.rules, Vec::new());
     assert_eq!(args.keep, Vec::new());
-    assert!(args.bind_headers.is_empty());
+    assert!(args.bound_headers.is_empty());
 }
 
 /// Each argument reaches the `Spec` field it names, and nothing else changes.
@@ -162,14 +162,14 @@ fn every_argument_maps_onto_its_spec_field() {
         .with_error_body_cap(4096)
         .with_batch_cap(7);
     for rule in every_omit_rule() {
-        expected = expected.omit_rule(rule);
+        expected = expected.add_omit_rule(rule);
     }
     for (method, path) in every_kept_operation() {
-        expected = expected.keep_operation(method, path);
+        expected = expected.add_keep_operation(method, path);
     }
     expected = expected
-        .bind_header("X-Api-Version")
-        .bind_header("X-Tenant");
+        .add_bound_header("X-Api-Version")
+        .add_bound_header("X-Tenant");
     assert_eq!(config(&args, Spec::new("openapi.yaml")), expected);
 }
 
@@ -187,16 +187,16 @@ fn an_absent_argument_keeps_the_config_files_value() {
         .with_testing(spargen::TestingModule::Emitted)
         .with_error_body_cap(1024)
         .with_batch_cap(3)
-        .omit_rule(OmitRule::path("/from-file"))
-        .keep_operation(OmitMethod::Get, "/from-file")
-        .bind_header("X-From-File");
+        .add_omit_rule(OmitRule::path("/from-file"))
+        .add_keep_operation(OmitMethod::Get, "/from-file")
+        .add_bound_header("X-From-File");
 
     let bare: Args = syn::parse_str(r#""openapi.yaml""#).unwrap();
     assert_eq!(config(&bare, discovered.clone()), discovered);
 
     let capped: Args = syn::parse_str(
         r#""openapi.yaml", batch_cap = 9, omit { paths { "/from-macro"; } },
-           keep { put "/from-macro"; }, bind_header = "X-From-Macro""#,
+           keep { put "/from-macro"; }, bound_header = "X-From-Macro""#,
     )
     .unwrap();
     let configured = config(&capped, discovered.clone());
@@ -204,9 +204,9 @@ fn an_absent_argument_keeps_the_config_files_value() {
         configured,
         discovered
             .with_batch_cap(9)
-            .omit_rule(OmitRule::path("/from-macro"))
-            .keep_operation(OmitMethod::Put, "/from-macro")
-            .bind_header("X-From-Macro")
+            .add_omit_rule(OmitRule::path("/from-macro"))
+            .add_keep_operation(OmitMethod::Put, "/from-macro")
+            .add_bound_header("X-From-Macro")
     );
     assert_eq!(
         configured.bound_headers(),
@@ -844,14 +844,14 @@ fn every_argument_parse_error_names_what_was_wrong() {
             "unknown argument `uuids`; expected a spec path, a switch (uuid, carve, \
                  open_narrowing, open_unions, verbatim_docs, testing, each also as \
                  `no_<switch>`), or one of: datetime, error_body_cap, batch_cap, omit, keep, \
-                 bind_header",
+                 bound_header",
         ),
         (
             r#""a.yaml", no_datetime"#,
             "unknown argument `no_datetime`; expected a spec path, a switch (uuid, carve, \
                  open_narrowing, open_unions, verbatim_docs, testing, each also as \
                  `no_<switch>`), or one of: datetime, error_body_cap, batch_cap, omit, keep, \
-                 bind_header",
+                 bound_header",
         ),
         (r#""a.yaml", uuid = 1"#, "expected boolean literal"),
         (r#""a.yaml", carve = "yes""#, "expected boolean literal"),
@@ -910,8 +910,8 @@ fn every_argument_parse_error_names_what_was_wrong() {
             "number too large to fit in target type",
         ),
         (r#""a.yaml", batch_cap 3"#, "expected `=`"),
-        (r#""a.yaml", bind_header "X-A""#, "expected `=`"),
-        (r#""a.yaml", bind_header = X"#, "expected string literal"),
+        (r#""a.yaml", bound_header "X-A""#, "expected `=`"),
+        (r#""a.yaml", bound_header = X"#, "expected string literal"),
         (
             r#""a.yaml", batch_cap = -1"#,
             "invalid digit found in string",

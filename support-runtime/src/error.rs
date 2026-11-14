@@ -736,7 +736,7 @@ pub enum RequestError {
         source: AuthError,
     },
     /// The operation declares a required header that the generated client binds once, as a
-    /// `Spec::bind_header` build option named it, and no value is bound to it on the client
+    /// `Spec::add_bound_header` build option named it, and no value is bound to it on the client
     /// (`with_bound_header`). Raised before anything is sent. The payload is the whole cause, so
     /// `source()` is `None`.
     MissingBoundParameter {

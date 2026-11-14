@@ -22,7 +22,7 @@ use super::args::SpecArgs;
 /// The config file is either the explicit `--config` path or, when that is absent, `spargen.toml`
 /// beside the spec (a missing auto-discovered file is fine). Flags are applied last so they win,
 /// each switch pair in either direction and only when one of its flags was given, and omit, keep
-/// and bind-header flags are unioned with the file's `[[omit]]`, `[[keep]]` and `bind_headers`
+/// and bound-header flags are unioned with the file's `[[omit]]`, `[[keep]]` and `bound_headers`
 /// rather than replacing them.
 pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, ConfigError> {
     let mut spec = match &args.config {
@@ -82,23 +82,23 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
         spec = spec.with_testing(module);
     }
     for path in &args.omit_path {
-        spec = spec.omit_rule(OmitRule::path(path.clone()));
+        spec = spec.add_omit_rule(OmitRule::path(path.clone()));
     }
     for value in &args.omit_operation {
-        spec = spec.omit_rule(parse_operation_flag(value)?);
+        spec = spec.add_omit_rule(parse_operation_flag(value)?);
     }
     for value in &args.omit_component {
-        spec = spec.omit_rule(parse_component_flag(value)?);
+        spec = spec.add_omit_rule(parse_component_flag(value)?);
     }
     for value in &args.omit_pointer {
-        spec = spec.omit_rule(parse_pointer_flag(value));
+        spec = spec.add_omit_rule(parse_pointer_flag(value));
     }
     for value in &args.keep_operation {
         let (method, path) = parse_method_and_path("--keep-operation", value)?;
-        spec = spec.keep_operation(method, path);
+        spec = spec.add_keep_operation(method, path);
     }
-    for name in &args.bind_header {
-        spec = spec.bind_header(name.clone());
+    for name in &args.bound_header {
+        spec = spec.add_bound_header(name.clone());
     }
     Ok(spec)
 }
@@ -431,7 +431,7 @@ mod tests {
             ("--omit-component", "schema:Pet"),
             ("--omit-pointer", "/paths"),
             ("--keep-operation", "get /pets"),
-            ("--bind-header", "X-Api-Version"),
+            ("--bound-header", "X-Api-Version"),
         ] {
             assert_eq!(ignored(&[flag, value]), [flag]);
         }
@@ -529,7 +529,7 @@ mod tests {
             Spec::new(dir.join("openapi.yaml"))
                 .config_file(dir.join("spargen.toml"))
                 .unwrap()
-                .keep_operation(OmitMethod::Delete, "/from-flag")
+                .add_keep_operation(OmitMethod::Delete, "/from-flag")
         );
         assert_eq!(
             resolved(&dir, &["--keep-operation", "delete /from-flag"])
@@ -541,17 +541,17 @@ mod tests {
         );
     }
 
-    /// `--bind-header` is repeatable, and its names follow the config file's `bind_headers`, a name
+    /// `--bound-header` is repeatable, and its names follow the config file's `bound_headers`, a name
     /// the file already binds in another letter case not bound twice.
     #[test]
     fn the_bind_header_flag_appends_after_the_config_file() {
-        let (_temp, dir) = with_config("bind_headers = [\"X-Tenant\"]\n");
+        let (_temp, dir) = with_config("bound_headers = [\"X-Tenant\"]\n");
         let spec = resolved(
             &dir,
             &[
-                "--bind-header",
+                "--bound-header",
                 "X-Api-Version",
-                "--bind-header",
+                "--bound-header",
                 "x-tenant",
             ],
         );

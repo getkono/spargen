@@ -1,4 +1,4 @@
-//! Header bindings (`Spec::bind_header`): a bound header parameter leaves every operation's
+//! Header bindings (`Spec::add_bound_header`): a bound header parameter leaves every operation's
 //! arguments, and a binding no operation's header parameter matches is `E026`.
 
 use super::*;
@@ -41,7 +41,7 @@ fn versioned_spec(temp: &tempfile::TempDir) -> Spec {
 fn a_bound_header_leaves_every_operations_arguments() {
     let temp = tempfile::tempdir().unwrap();
     let (report, code) =
-        generate_spec_with_code(versioned_spec(&temp).bind_header("X-API-VERSION"));
+        generate_spec_with_code(versioned_spec(&temp).add_bound_header("X-API-VERSION"));
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(report.diagnostics().is_empty(), "{report:#?}");
 
@@ -108,9 +108,9 @@ fn an_unbound_header_stays_an_argument() {
 fn a_binding_no_operation_declares_is_rejected() {
     let temp = tempfile::tempdir().unwrap();
     let spec = versioned_spec(&temp)
-        .bind_header("tenant")
-        .bind_header("X-Api-Version")
-        .bind_header("X-Missing");
+        .add_bound_header("tenant")
+        .add_bound_header("X-Api-Version")
+        .add_bound_header("X-Missing");
     let (generated, checked, code) = generate_and_check_spec(spec);
     for report in [&generated, &checked] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
@@ -136,20 +136,20 @@ fn a_binding_no_operation_declares_is_rejected() {
 #[test]
 fn a_binding_only_an_omitted_or_unkept_operation_declares_is_rejected() {
     let bound = tempfile::tempdir().unwrap();
-    let (report, _) = generate_spec_with_code(versioned_spec(&bound).bind_header("X-Trace"));
+    let (report, _) = generate_spec_with_code(versioned_spec(&bound).add_bound_header("X-Trace"));
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     // Each rejected run gets a directory of its own, so no earlier run's output is read back.
     let (omitted_dir, unkept_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let omitted = versioned_spec(&omitted_dir)
-        .bind_header("X-Trace")
-        .omit_rule(spargen::OmitRule::operation(
+        .add_bound_header("X-Trace")
+        .add_omit_rule(spargen::OmitRule::operation(
             spargen::OmitMethod::Get,
             "/items",
         ));
     let unkept = versioned_spec(&unkept_dir)
-        .bind_header("X-Trace")
-        .keep_operation(spargen::OmitMethod::Get, "/status");
+        .add_bound_header("X-Trace")
+        .add_keep_operation(spargen::OmitMethod::Get, "/status");
     for spec in [omitted, unkept] {
         let (generated, checked, code) = generate_and_check_spec(spec);
         for report in [&generated, &checked] {
@@ -182,7 +182,7 @@ paths:
 "##;
     let temp = tempfile::tempdir().unwrap();
     let (report, _) = generate_spec_with_code(
-        Spec::new(write_spec(temp.path(), "openapi.yaml", spec)).bind_header("authorization"),
+        Spec::new(write_spec(temp.path(), "openapi.yaml", spec)).add_bound_header("authorization"),
     );
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert_eq!(codes(&report), ["E026", "W011"], "{report:#?}");
