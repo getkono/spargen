@@ -735,6 +735,12 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                 stated_as: "sibling keywords that leave the union with no branch at all",
                 reserved_wording: None,
             },
+            Case {
+                tag: "optional-discriminator-property",
+                stated_as: "a discriminator whose `propertyName` a member the tag selects leaves \
+                            optional",
+                reserved_wording: Some("is optional in"),
+            },
         ],
     ),
     (
