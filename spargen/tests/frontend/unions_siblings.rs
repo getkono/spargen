@@ -101,7 +101,7 @@ fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
         (
             "prefixItems",
             "{ type: array }",
-            "prefixItems: [{ type: integer }]",
+            "prefixItems: [{ type: integer }]\n      items: false",
             false,
         ),
     ] {
@@ -140,7 +140,10 @@ fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
             "items: { type: integer }",
             "{ type: array, items: { type: number } }",
         ),
-        ("prefixItems: [{ type: integer }]", "{ type: array }"),
+        (
+            "prefixItems: [{ type: integer }]\n      items: false",
+            "{ type: array }",
+        ),
     ] {
         let bare = generates(&format!(
             "{HEAD}    U:\n      oneOf: [{{ type: string }}, {branch}]\n"
