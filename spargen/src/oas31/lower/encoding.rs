@@ -536,7 +536,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// through `const`, or `default` in its absence, read through a `$ref` to the Header Object or
     /// in its schema ([`Self::literal_header_value`]) — gives a client something to send. A
     /// `Content-Type` entry is skipped (`contentType` describes it), `headers` on a body that is
-    /// not multipart is inert (`W011`), and so is a header that pins no value (`W011`); a
+    /// not multipart is inert (`W011`), and so are a header that pins no value and a pinned
+    /// `Content-Disposition`, which the part writes from its property's name (`W011`); a
     /// reference that resolves to nothing is reported where it is resolved (`E004`) and nothing
     /// more is said of that header.
     ///
@@ -592,6 +593,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(HeaderLiteral::Unreadable) => continue,
             };
             match literal {
+                // The part's `Content-Disposition` is the client's own: OpenAPI 3.2 § Encoding
+                // Object maps each `multipart` part to the `name` its property gives, and the
+                // runtime refuses a second one as request construction, so every call would fail.
+                Some(_) if header_name.eq_ignore_ascii_case("content-disposition") => {
+                    // W011 case: encoding-header-content-disposition
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.headers.{header_name}` has no effect: the client \
+                             writes the part's `Content-Disposition` itself, naming the part \
+                             after its property"
+                        ))
+                        .remedy("remove the header from the Encoding Object")
+                        .emit(self.diags);
+                }
                 // The pair is sent verbatim as a part header, so a name or value the HTTP field
                 // grammar refuses would otherwise generate and fail, or be dropped, only when a
                 // request is built.
