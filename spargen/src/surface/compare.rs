@@ -409,7 +409,8 @@ fn diff_response_headers(
     }
 }
 
-/// The changes between the fields of one status's response-header struct on both sides.
+/// The changes between the fields of one status's response-header struct on both sides, and each
+/// field present on both that now reads another header.
 fn diff_header_fields(
     key: &str,
     status: &str,
@@ -425,6 +426,19 @@ fn diff_header_fields(
             new.fields.get(field),
             changes,
         );
+    }
+    // A field binds its header by a case-insensitive name, so only another name is a rebinding.
+    for (field, old_header) in &old.bindings {
+        match new.bindings.get(field) {
+            Some(new_header) if !new_header.eq_ignore_ascii_case(old_header) => {
+                changes.push(Change::new(
+                    ChangeKind::IdentifierRebound,
+                    format!("{key} {status} header `{field}`"),
+                    format!("`{field}` now reads `{new_header}` (was `{old_header}`)"),
+                ));
+            }
+            _ => {}
+        }
     }
 }
 

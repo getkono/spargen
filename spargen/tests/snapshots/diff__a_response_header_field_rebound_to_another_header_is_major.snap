@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|identifier-rebound|GET /pets 200 header `x_rate_limit`|`x_rate_limit` now reads `X-Rate-Limit` (was `X_Rate_Limit`)
+minor|response-header-added|GET /pets 200 header `x_rate_limit_57b5d5ce`|optional response header added: `i64`
+bump=major
