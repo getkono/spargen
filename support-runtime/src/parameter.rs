@@ -84,7 +84,7 @@ pub enum ParameterError {
     /// A style defined only for arrays and objects (`spaceDelimited`, `pipeDelimited`) received a
     /// scalar or undefined value.
     ExpectedComposite,
-    /// A cookie parameter's serialized pair holds a byte its [`CookieValue`] rule refuses
+    /// A cookie parameter's serialized pair holds a byte its `CookieValue` rule refuses
     /// (`cookie_pair`). It names the parameter and never the value, which may be a secret.
     InvalidCookie {
         /// The parameter's declared name.
