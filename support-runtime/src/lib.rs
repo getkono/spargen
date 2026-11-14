@@ -302,9 +302,7 @@ mod tests {
     pub(crate) enum Chunk {
         /// A chunk of body bytes.
         Data(Bytes),
-        /// One poll that answers `Pending`; the next poll moves on to the following step. Only the
-        /// `stream` module's tests script one, so it is unused without that feature.
-        #[cfg_attr(not(feature = "stream"), allow(dead_code))]
+        /// One poll that answers `Pending`; the next poll moves on to the following step.
         Pending,
         /// A failed read, as a dropped connection reports it.
         Fail,
@@ -433,9 +431,7 @@ mod tests {
             self
         }
 
-        /// Answer the first poll of the execute future with `Pending`. Only the `stream` module's
-        /// tests ask for it, so it is unused without that feature.
-        #[cfg_attr(not(feature = "stream"), allow(dead_code))]
+        /// Answer the first poll of the execute future with `Pending`.
         pub(crate) fn pending(mut self) -> Self {
             self.pending = true;
             self
