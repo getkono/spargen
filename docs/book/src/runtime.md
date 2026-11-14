@@ -115,7 +115,10 @@ assert_eq!(mock.calls(ops::GET_PET).len(), 1);
   `status_4xx(status, &body)` for a range, `default(status, &body)` for `default`, and no body
   argument for a bodyless response. Each encodes its body with the codec the client decodes that
   status with (JSON, `text/plain`, XML, or raw octets), so the client reads it as the typed success
-  or the typed `Error::Api`, never as `Error::Decode`. A streamed body, or a response the
+  or the typed `Error::Api`, never as `Error::Decode`. The body is written as a server writes it,
+  at any depth: each `readOnly` member that is set is sent, and each `writeOnly` member is left
+  out, while a model serialized anywhere else, a request body included, keeps the request
+  direction. A streamed body, or a response the
   description does not document, is built with `Reply::from_reply(testing::Reply::new(status)…)`.
 - **Recording.** Every request is recorded as a `testing::Call` (its operation, method, URI,
   headers and body, with `json::<T>()` to decode the body) before it is routed; `calls(op)` and
@@ -335,8 +338,12 @@ specification requires; a final ndjson line or JSON Text Sequence record is stil
 
 Automatic reconnect is explicit: call `with_reconnect(Arc<dyn ReconnectPolicy>)`. The caller's
 policy owns attempt limits and supplies the wait future, so the runtime introduces neither a timer
-nor a retry default. A replayable prepared request is cloned, its cookies and other headers are
-preserved, and the latest event ID is sent as `Last-Event-ID`. Declining a reconnect yields the
+nor a retry default. Each reconnect rebuilds the operation's request from a copy taken before its
+credentials were attached, its cookies and other headers preserved, and signs it afresh with the
+client's credentials as they were registered when the call was made: a `Credential::Provider` or
+`Credential::Refreshable` is asked for a token again, and a reconnect whose refreshable token is
+rejected is refreshed and replayed once, as a call is. The latest event ID is sent as
+`Last-Event-ID`. Declining a reconnect yields the
 original typed stream error unchanged. A mid-stream read failure is reported by its class, as any
 other body read's is (a stalled read is `Error::Timeout`), and is offered to the policy. A `204`
 answering a reconnect ends the stream cleanly, and an SSE reconnect whose response is not

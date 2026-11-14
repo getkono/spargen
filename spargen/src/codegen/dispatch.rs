@@ -17,13 +17,19 @@ use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 /// `security` alternative whose schemes are all registered is attached through
 /// `support::attach_auth_replayable`, and `support::execute` spends the replay. An operation with
 /// no `security` requirement attaches nothing and has no replay.
+///
+/// With `resend_binding` (a streaming operation's), they attach through `support::Resend::attach`
+/// instead, which also binds it to the request as it stood before any credential was attached and
+/// the operation's requirement, empty where it has none, so the operation's stream signs each
+/// reconnect afresh.
 pub(super) fn attach_auth_tokens(
     operation: &Operation,
     api: &Api,
     request_binding: &crate::name::Ident,
     replay_binding: &crate::name::Ident,
+    resend_binding: Option<&crate::name::Ident>,
 ) -> TokenStream {
-    if operation.security.is_empty() {
+    if operation.security.is_empty() && resend_binding.is_none() {
         quote! { let #replay_binding: Option<support::Replay> = None; }
     } else {
         let alternatives = operation.security.iter().map(|requirement| {
@@ -51,6 +57,19 @@ pub(super) fn attach_auth_tokens(
             });
             quote! { &[#(#schemes),*][..] }
         });
+        if let Some(resend_binding) = resend_binding {
+            return quote! {
+                let #replay_binding;
+                let #resend_binding;
+                (#request_binding, #replay_binding, #resend_binding) = support::Resend::attach(
+                    &self.core,
+                    #request_binding,
+                    &[#(#alternatives),*],
+                )
+                    .await
+                    .map_err(support::Error::widen)?;
+            };
+        }
         quote! {
             let #replay_binding;
             (#request_binding, #replay_binding) = support::attach_auth_replayable(

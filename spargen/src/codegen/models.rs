@@ -254,7 +254,7 @@ fn emit_type_def(
             let fields = object
                 .fields
                 .iter()
-                .map(|field| emit_field(id, field, names));
+                .map(|field| emit_field(id, field, names, options.testing));
             let providers = object
                 .fields
                 .iter()
@@ -552,8 +552,10 @@ fn emit_base64_newtype(
 }
 
 /// One struct field: its rustdoc notes, its serde attribute (wire name, default, and the
-/// present-value decode an optional non-nullable field takes), and its declaration.
-fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names) -> TokenStream {
+/// present-value decode an optional non-nullable field takes), and its declaration. `testing` is
+/// whether the `testing` module is emitted, whose typed replies serialize a `readOnly` or
+/// `writeOnly` member in the response direction.
+fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool) -> TokenStream {
     let ident = names
         .fields
         .get(&(id, field.name.wire.clone()))
@@ -576,11 +578,31 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names) -> TokenStrea
     } else {
         "Option::is_none"
     };
-    // A `readOnly` member is never serialized: a request leaves it out, `required` or not.
-    let skip = if field.read_only {
-        quote! { skip_serializing, }
-    } else {
-        quote! { skip_serializing_if = #skip, }
+    // A request leaves a `readOnly` member out, `required` or not. Under `testing`, a typed reply
+    // encodes in the response direction, which writes a present `readOnly` member and leaves a
+    // `writeOnly` one out, so each such member asks the `testing` module which direction it is
+    // serializing in. A member marked both is never written in either.
+    let nullable = field.ty.nullable;
+    let skip = match (field.read_only, field.write_only) {
+        (true, true) => quote! { skip_serializing, },
+        (true, false) if testing => {
+            let path = if nullable {
+                "super::testing::skip_read_only_nullable"
+            } else {
+                "super::testing::skip_read_only"
+            };
+            quote! { skip_serializing_if = #path, }
+        }
+        (true, false) => quote! { skip_serializing, },
+        (false, true) if testing => {
+            let path = if nullable {
+                "super::testing::skip_write_only_nullable"
+            } else {
+                "super::testing::skip_write_only"
+            };
+            quote! { skip_serializing_if = #path, }
+        }
+        _ => quote! { skip_serializing_if = #skip, },
     };
     let serde_default = if !field.decodes_optional() {
         quote! {}

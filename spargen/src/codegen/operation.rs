@@ -27,8 +27,9 @@ use super::ty::{reqwest_method, ty_tokens};
 /// its extensions. The `#[inline] pub async fn` operation method sends what the preparer built
 /// through `support::execute`, which replays it once after a rejected refreshable credential, and
 /// hands the response to the decoder, which dispatches it by status into the operation's typed
-/// success value or typed error; a streaming success's stream is then handed the request it sent,
-/// to reconnect. The request builder is the preparer without its replay. The wire work itself —
+/// success value or typed error; a streaming success's stream is then handed the `support::Resend`
+/// the preparer kept of the request before its credentials were attached, to sign afresh and
+/// resend on each reconnect. The request builder is the preparer without its replay. The wire work itself —
 /// encoding, sending, and decoding — is done by `support` routines, most of them generic over the
 /// body or error type.
 ///
@@ -104,7 +105,18 @@ pub(super) fn emit_operation(
     let body_send = body_send_tokens(operation, api, names, bindings);
     let streaming = operation.responses.stream_success().is_some();
     let replay_binding = &bindings.replay;
-    let attach_auth = attach_auth_tokens(operation, api, request_binding, replay_binding);
+    // A streaming success keeps what its stream signs afresh and resends to reconnect: the request
+    // as it stood before its credentials were attached, which the preparer returns beside the
+    // request and its replay, carrying what the request the method sends carries. The decoder
+    // alone, which never saw the request, has none to give it.
+    let reconnect_request_binding = &bindings.reconnect_request;
+    let attach_auth = attach_auth_tokens(
+        operation,
+        api,
+        request_binding,
+        replay_binding,
+        streaming.then_some(reconnect_request_binding),
+    );
     let error_branch = error_branch_tokens(operation, api, names, error_ident);
     let success_decode = success_decode_tokens(operation, api, names, success_ty, error_ident);
     let url_accessor = emit_operation_url(operation_names, sig, &url_building);
@@ -137,20 +149,36 @@ pub(super) fn emit_operation(
             .collect()
     };
     let forwards = forwards_streaming(streaming);
-    // A streaming success keeps a clone of the request it sent, which its stream resends to
-    // reconnect; the decoder alone, which never saw the request, has none to give it.
-    let reconnect_request_binding = &bindings.reconnect_request;
-    let (reconnect_request_init, resend) = if streaming {
+    let (prepared, prepared_ty, reconnect_request_init, resend) = if streaming {
         (
+            quote! { (#request_binding, #replay_binding, #reconnect_request_binding) },
+            quote! {
+                (
+                    http::Request<support::HttpBody>,
+                    Option<support::Replay>,
+                    Option<support::Resend>,
+                )
+            },
             Some(quote! {
-                let #reconnect_request_binding = support::try_clone_request(&#request_binding);
+                let #reconnect_request_binding = #reconnect_request_binding
+                    .map(|resend| resend.carrying(&#request_binding));
             }),
             Some(quote! {
                 .map(|stream| stream.resending(&self.core, #reconnect_request_binding))
             }),
         )
     } else {
-        (None, None)
+        (
+            quote! { (#request_binding, #replay_binding) },
+            quote! { (http::Request<support::HttpBody>, Option<support::Replay>) },
+            None,
+            None,
+        )
+    };
+    let request_only = if streaming {
+        quote! { (#request_binding, ..) }
+    } else {
+        quote! { (#request_binding, _) }
     };
     // A non-streaming response is read under the client's body limits, which `execute` gives the
     // responses it returns; a response the caller obtained some other way is given them here.
@@ -258,7 +286,7 @@ pub(super) fn emit_operation(
             &self,
             #(#preparer_decls),*
         ) -> Result<
-            (http::Request<support::HttpBody>, Option<support::Replay>),
+            #prepared_ty,
             support::Error<std::convert::Infallible>,
         > {
             #(#normalizations)*
@@ -277,7 +305,7 @@ pub(super) fn emit_operation(
             let #request_binding = #request_binding.build()?;
             let mut #request_binding = support::prepare(&self.core, #request_binding, #streaming_arg);
             #request_binding.extensions_mut().insert(ops::#operation_const);
-            Ok((#request_binding, #replay_binding))
+            Ok(#prepared)
         }
 
         #attrs
@@ -286,7 +314,7 @@ pub(super) fn emit_operation(
             &self,
             #(#decls),*
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
-            let (#request_binding, #replay_binding) = self
+            let #prepared = self
                 .#preparer(#(#forwards),*)
                 .await
                 .map_err(support::Error::widen)?;
@@ -311,7 +339,7 @@ pub(super) fn emit_operation(
         ) -> Result<http::Request<support::HttpBody>, support::Error<std::convert::Infallible>> {
             self.#preparer(#(#forwards),*)
                 .await
-                .map(|(#request_binding, _)| #request_binding)
+                .map(|#request_only| #request_binding)
         }
 
         #[doc = #decoder_doc]
