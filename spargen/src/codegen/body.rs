@@ -233,6 +233,9 @@ fn merged_file_parts(api: &Api) -> Vec<MultipartFileParts<'_>> {
             continue;
         };
         let into = &mut merged[at];
+        // Mutation testing: `|=` as `&=` is equivalent. `overflow` reads only the body type and
+        // whether its encoding has an `additional` mode, which lowering sets exactly when the type
+        // has a typed overflow, so every operation sending one type agrees on it.
         into.overflow |= parts.overflow;
         for field in parts.fields {
             if !into
@@ -583,3 +586,6 @@ fn set_part_type_tokens(mode: Option<&crate::ir::EncodingMode>) -> Option<TokenS
             .map_err(support::Error::widen)?;
     })
 }
+
+#[cfg(test)]
+mod tests;
