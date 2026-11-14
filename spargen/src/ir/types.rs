@@ -150,8 +150,11 @@ pub(crate) enum UnionStrategy {
     /// A `discriminator` → a custom `Deserialize`/`Serialize` that reads/writes the tag field on a
     /// buffered `serde_json::Value` (NOT serde's `#[serde(tag = ...)]`, which would consume the tag
     /// out of the buffer and break variants that declare the discriminator as a required property).
-    /// Object variants carry the tag values that select them. A non-object variant may coexist
-    /// when its JSON category is unique (for example an array beside tagged objects).
+    /// Variants that can carry the tag property (objects, untyped members, and unions of such)
+    /// carry the tag values that select them, and the selected variant's own `Deserialize` reads
+    /// the payload. A variant that cannot is selected by its JSON category where that is unique
+    /// among such variants (for example an array beside tagged objects), and is otherwise tried
+    /// by its own schema as an `untagged` variant.
     Discriminated {
         /// The discriminator `propertyName` — the tag field read from / written into the object.
         tag_field: String,
@@ -204,18 +207,19 @@ pub(crate) enum VariantDispatch {
         /// `mapping` key claims that value, or, for a member with neither, the one string its
         /// required tag property pins, unless something else claims it. Deserialization accepts
         /// every entry; serialization writes the first. Empty for a variant routed by `category`,
-        /// for an object variant reached only as the `default_variant` fallback, and for an
-        /// `untagged` variant.
-        tags: Vec<String>,
-        /// The JSON category of a non-object variant, which selects it; `None` for an object
+        /// for a variant reached only as the `default_variant` fallback, and for an `untagged`
         /// variant.
+        tags: Vec<String>,
+        /// The JSON category of a variant that cannot carry the tag property, which selects it
+        /// where no other such variant shares it; `None` for every other variant.
         category: Option<JsonCategory>,
-        /// The trial priority of an object variant that no tag selects and that is not the
-        /// `default_variant`; `None` for every other variant. Such a variant (inline, or a pointer
-        /// into another schema, that no `mapping` entry names) has no discriminator value, so it
-        /// is tried against the buffered value, with the strategy's `mode` semantics, only when
-        /// the tag is absent or selects no tagged variant; a tag that does select one dispatches
-        /// to it alone. Serialization writes no tag for it.
+        /// The trial priority of a variant no tag or category selects and that is not the
+        /// `default_variant`; `None` for every other variant. Such a variant (an object inline,
+        /// or a pointer into another schema, that no `mapping` entry names, or a variant that
+        /// cannot carry the tag property and shares its JSON category, or has none) has no
+        /// discriminator value, so it is tried against the buffered value, with the strategy's
+        /// `mode` semantics, only when the tag is absent or selects no tagged variant; a tag that
+        /// does select one dispatches to it alone. Serialization writes no tag for it.
         untagged: Option<u32>,
     },
     /// A variant of a [`UnionStrategy::Disjoint`] union: the feature that selects it.

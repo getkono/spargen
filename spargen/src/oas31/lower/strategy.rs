@@ -159,8 +159,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // This arm is **live** on documents that generate cleanly. `lower_union` refuses a
             // member that is *this* union's own reservation, but not one that is another open
             // component's: `Tree: {type: array, items: {oneOf: [{$ref: Tree}, {type: string}]}}`
-            // lowers the items union while `Tree` is still reserved, and both `disjoint_strategy`
-            // and `discriminated_strategy` ask for the back edge's category. Guessing one (a
+            // lowers the items union while `Tree` is still reserved, and `disjoint_strategy` asks
+            // for the back edge's category (a discriminated union defers its whole decision until
+            // the reservation is filled, `LowerCtx::awaits_reservation`). Guessing one (a
             // reservation is usually an object) would emit a disjoint `Deserialize` that routes the
             // back edge by `value.is_object()`, and a `Tree` — an array — would then match no
             // variant at runtime. `None` sends the union to trial matching, which decodes it.

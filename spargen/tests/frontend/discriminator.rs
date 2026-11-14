@@ -1429,37 +1429,53 @@ fn a_union_or_untyped_member_is_dispatched_by_its_tag() {
     }
 }
 
-/// A `mapping` entry naming a member that cannot carry the tag property (#1400): a payload of
-/// that member is a string, so no tag is ever read from it, and the entry routed its tag nowhere
-/// with no diagnostic. It is `E007` at the entry. The same member unmapped is still selected by
-/// its JSON category, beside the tagged members.
-// E007 case: unrepresentable-applicators
+/// A `mapping` entry naming a member that cannot carry the tag property (#1400), as GitHub's
+/// `repos/get-content` maps `array` to its directory listing: no payload of that member holds a
+/// tag, so the entry selects nothing, and it did so with no diagnostic. It is `W011` at the entry,
+/// and the member is decoded exactly as it is unmapped: by its JSON category, beside the tagged
+/// members.
+// W011 case: uncarried-mapping-entry
 #[test]
-fn a_mapping_entry_naming_a_member_that_cannot_carry_the_tag_is_e007_at_the_entry() {
+fn a_mapping_entry_naming_a_member_that_cannot_carry_the_tag_is_w011_at_the_entry() {
     let spec = |mapping: &str| {
         discriminated_pet(
             "3.1.0",
             "        - { $ref: '#/components/schemas/Cat' }\n        \
-             - { $ref: '#/components/schemas/Name' }\n",
-            &format!("        propertyName: kind\n{mapping}    Name: {{ type: string }}\n"),
+             - { $ref: '#/components/schemas/Listing' }\n",
+            &format!(
+                "        propertyName: kind\n{mapping}    \
+                 Listing: {{ type: array, items: {{ type: string }} }}\n"
+            ),
         )
     };
-    let report = generate(&spec("        mapping: { name: Name }\n"));
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|d| d.code == Code::NonDisjointUnion
-                && d.pointer.as_str() == "/components/schemas/Pet/discriminator/mapping/name"
-                && d.message
-                    .contains("cannot carry the discriminator property `kind`")),
-        "{report:#?}"
+    let (mapped, mapped_code) = generate_with_code(&spec("        mapping: { array: Listing }\n"));
+    assert_ne!(mapped.outcome(), Outcome::Rejected, "{mapped:#?}");
+    let w011: Vec<_> = mapped
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::DeclarationHasNoEffect)
+        .collect();
+    assert_eq!(w011.len(), 1, "{mapped:#?}");
+    assert_eq!(
+        w011[0].pointer.as_str(),
+        "/components/schemas/Pet/discriminator/mapping/array"
     );
-    let (report, code) = generate_with_code(&spec(""));
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        w011[0].message.contains(
+            "`discriminator.mapping` entry `array` names `Listing`, union member 1, which cannot \
+             carry the discriminator property `kind`"
+        ),
+        "{}",
+        w011[0].message
+    );
+    let (unmapped, code) = generate_with_code(&spec(""));
+    assert!(
+        !has_code(&unmapped, Code::DeclarationHasNoEffect),
+        "{unmapped:#?}"
+    );
     let pet = deserialize_impl(&code, "Pet");
-    assert!(pet.contains("if value.is_string()"), "{pet}");
+    assert!(pet.contains("if value.is_array()"), "{pet}");
+    assert_eq!(pet, deserialize_impl(&mapped_code, "Pet"));
     assert_eq!(
         discriminated_arms(&code, "Pet").decode,
         vec![("Cat".to_owned(), vec!["Cat".to_owned()])],

@@ -11,7 +11,7 @@ use crate::oas31::discriminator::is_schema_component_name;
 use crate::oas31::{Schema, SchemaOr};
 
 use super::discriminator::member_component_name;
-use super::discriminator::{DiscriminatorMembers, PinnedMembers};
+use super::discriminator::{DeferredDiscriminator, DiscriminatorMembers, PinnedMembers};
 use super::meet::NoMeet;
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::prune::{kind_edges, reachable_types};
@@ -720,11 +720,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             );
         }
 
-        let UnionDispatch {
-            strategy,
-            variants: dispatches,
-        } = self.union_strategy(schema, &variants, mode, discriminator_members.as_ref())?;
-        if let UnionStrategy::Discriminated { tag_field, .. } = &strategy {
+        let (
+            UnionDispatch {
+                strategy,
+                variants: dispatches,
+            },
+            deferred,
+        ) = self.union_strategy(
+            schema,
+            &variants,
+            mode,
+            discriminator_members.as_ref(),
+            true,
+        )?;
+        let fresh = self.fresh_member_ids(&member_lowerings, &meet_inserts);
+        // A dispatch waiting on a reservation is decided, with its pinned names, once lowering
+        // has filled it ([`Self::decide_deferred_discriminators`]).
+        let deferred = deferred.then(|| DeferredDiscriminator {
+            schema: schema.clone(),
+            hint: hint.to_owned(),
+            mode,
+            lowered: variants.clone(),
+            discriminator: discriminator_members
+                .expect("only a discriminated union's dispatch is deferred"),
+            real: real_members
+                .iter()
+                .map(|member| (*member).clone())
+                .collect(),
+            fresh: fresh.clone(),
+            reports_untyped: !self.is_unmerged_union(&schema.provenance),
+        });
+        if let (UnionStrategy::Discriminated { tag_field, .. }, None) = (&strategy, &deferred) {
             self.name_pinned_variants(
                 hint,
                 tag_field,
@@ -732,8 +758,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 &dispatches,
                 &PinnedMembers {
                     real: real_members,
-                    member_lowerings: &member_lowerings,
-                    meet_inserts: &meet_inserts,
+                    fresh: &fresh,
                 },
             );
         }
@@ -763,6 +788,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         }
         let mut ty = self.insert_schema_type(schema, hint, TypeKind::Union(union));
+        self.deferred_discriminators.extend(deferred);
         self.union_variant_members.insert(ty.id, merged_members);
         if held_for_scalar_meet {
             self.scalar_meet_unmerged.insert(ty.id);
@@ -1061,19 +1087,51 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// that dispatches them (`discriminator_members` is its resolution against the members),
     /// then by JSON category or a unique required key where they are disjoint, and otherwise by
     /// trial matching under `mode`. Rejected (`E007`) where a `defaultMapping` names a member the
-    /// sibling keywords excluded, or a component member's own name selects another member.
-    fn union_strategy(
+    /// sibling keywords excluded, or a component member's own name selects another member. A
+    /// `mapping` entry naming a member that cannot carry the tag property is `W011` at the entry.
+    ///
+    /// Where `may_defer` holds and a variant of a discriminated union reaches a reservation still
+    /// being lowered ([`Self::awaits_reservation`]), nothing about that variant is known yet, so
+    /// the decision waits until every reservation is filled: the dispatch returned is a
+    /// provisional one, every variant untagged, and the `bool` beside it says so; the caller
+    /// records the union for [`Self::decide_deferred_discriminators`]. Deciding it now would
+    /// make the order components are declared in choose the dispatch.
+    pub(super) fn union_strategy(
         &mut self,
         schema: &Schema,
         lowered: &[LoweredVariant],
         mode: UnionMode,
         discriminator_members: Option<&DiscriminatorMembers>,
-    ) -> Option<UnionDispatch> {
+        may_defer: bool,
+    ) -> Option<(UnionDispatch, bool)> {
         let types: Vec<Ty> = lowered.iter().map(|variant| variant.ty).collect();
         let types = types.as_slice();
         let dispatch = if let (Some(discriminator), Some(resolved)) =
             (&schema.discriminator, discriminator_members)
         {
+            if may_defer
+                && types
+                    .iter()
+                    .any(|ty| self.awaits_reservation(*ty, &mut HashSet::new()))
+            {
+                let provisional = UnionDispatch {
+                    strategy: UnionStrategy::Discriminated {
+                        tag_field: discriminator.property_name.clone(),
+                        default_variant: None,
+                        mode,
+                        open: false,
+                    },
+                    variants: types
+                        .iter()
+                        .map(|_| VariantDispatch::Discriminated {
+                            tags: Vec::new(),
+                            category: None,
+                            untagged: Some(0),
+                        })
+                        .collect(),
+                };
+                return Some((provisional, true));
+            }
             // `discriminator_members` already refused a `defaultMapping` naming a non-member. A
             // member the enclosing schema's sibling keywords excluded (`W011`) is the one way left
             // for it to have no variant, and a fallback to a branch the enum does not have cannot
@@ -1095,13 +1153,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     Some(variant)
                 }
             };
-            let mut discriminated = self.discriminated_strategy(
+            for uncarried in self.uncarried_mapping_entries(lowered, resolved) {
+                self.warn_uncarried_tag(schema, discriminator, &uncarried);
+            }
+            let mut discriminated = Some(self.discriminated_strategy(
                 lowered,
                 &discriminator.property_name,
                 resolved,
                 default_variant,
                 mode,
-            );
+            ));
             if let Some(UnionDispatch {
                 variants: variant_dispatch,
                 ..
@@ -1111,12 +1172,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .iter()
                     .enumerate()
                     .filter(|&(index, dispatch)| {
+                        // A variant that cannot carry the tag is already tried by its own schema.
                         matches!(
                             dispatch,
                             VariantDispatch::Discriminated {
                                 tags,
                                 category: None,
-                                ..
+                                untagged: None,
                             } if tags.is_empty()
                         ) && default_variant != Some(index)
                     })
@@ -1180,6 +1242,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                 }
             }
+            // `None` only where no variant carries a tag, which the `W011` above has said.
             discriminated
                 .or_else(|| self.disjoint_strategy(types))
                 .unwrap_or_else(|| self.trial_strategy(types, mode))
@@ -1187,7 +1250,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.disjoint_strategy(types)
                 .unwrap_or_else(|| self.trial_strategy(types, mode))
         };
-        Some(dispatch)
+        Some((dispatch, false))
     }
 
     /// Report, as `W001` at `provenance`, the variants of a trial-matched `oneOf` (one whose decode
@@ -1221,7 +1284,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The variants [`Self::warn_untyped_one_of_variants`] reports of `union`, each variant's hint
     /// beside its label from `labels`: those that lower to `serde_json::Value`, in a trial-matched
     /// `oneOf` of two or more variants. Empty for any other union.
-    fn untyped_one_of_variants(&self, union: &Union, labels: &[usize]) -> Vec<(String, usize)> {
+    pub(super) fn untyped_one_of_variants(
+        &self,
+        union: &Union,
+        labels: &[usize],
+    ) -> Vec<(String, usize)> {
         if union.variants.len() < 2
             || !matches!(
                 union.strategy,
@@ -1416,6 +1483,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// dispatch and its reports read of the members it came from. Sibling keywords can exclude a
 /// member, and a merge folds several into one variant, so a variant's position is not its
 /// member's.
+#[derive(Clone)]
 pub(super) struct LoweredVariant {
     /// The variant's name hint, as [`UnionVariant::name_hint`] carries it.
     pub(super) name_hint: String,
