@@ -1220,3 +1220,66 @@ fn a_failed_stdout_write_exits_one_and_says_so_on_stderr() {
         "{stderr}"
     );
 }
+
+/// A stderr that fails for a reason other than a closed reader is a failed run too: `check` on a
+/// clean spec, which would exit `0`, exits `1` with its report lost. Nothing is left to name the
+/// failed write, so stdout stays empty.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_stderr_write_exits_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let good = spec_arg(temp.path(), "good.yaml", ONE_OPERATION);
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let output = Command::new(spargen_bin())
+        .args(["check", good.as_str()])
+        .stderr(full)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.is_empty(), "{stdout}");
+}
+
+/// `write_line` (`cli/run.rs`) is the CLI's one writer, because the std print macros panic on a
+/// failed write (#1429). No source under `spargen/src/cli/` or `spargen/src/bin/` calls one;
+/// comments are skipped, since `write_line`'s doc names them.
+#[test]
+fn the_cli_writes_only_through_write_line() {
+    const PRINT_MACROS: [&str; 4] = ["println!", "eprintln!", "print!", "eprint!"];
+    let root = repo::workspace_root();
+    let mut offenders = Vec::new();
+    for dir in ["spargen/src/cli", "spargen/src/bin"] {
+        let mut sources: Vec<_> = std::fs::read_dir(root.join(dir))
+            .unwrap_or_else(|error| panic!("{dir} must be readable: {error}"))
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+            .collect();
+        sources.sort();
+        assert!(!sources.is_empty(), "{dir} holds no Rust source");
+        for path in sources {
+            let source = repo::read_file(&path);
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or_default();
+                let calls = PRINT_MACROS.iter().any(|name| {
+                    code.match_indices(name).any(|(at, _)| {
+                        !code[..at]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    })
+                });
+                if calls {
+                    offenders.push(format!("{}:{}: {line}", path.display(), index + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "write through `write_line`, not a print macro:\n{}",
+        offenders.join("\n")
+    );
+}
