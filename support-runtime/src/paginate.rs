@@ -168,65 +168,75 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
     ///
     /// When a `2xx` page carries no `rel="next"` link, the page is yielded and the following call
     /// returns `None`.
+    ///
+    /// Dropping the returned future before it resolves leaves the paginator as it was: still
+    /// armed at the same URL, which the next call fetches again.
     pub async fn next_page(&mut self) -> Option<Result<ResponseValue<T>, Error<Infallible>>> {
-        // Take the pending URL: the paginator is now disarmed and only re-armed on a successful
-        // decode, so any error path below leaves `next` as `None` and terminates the chain.
-        let url = self.next.take()?;
-        match &self.first {
-            Some(first) if !same_origin(first, &url) => {
+        // The checks before the request change the state only to end the chain, and nothing is
+        // committed across an await: a future dropped while the request or its body is in flight
+        // (a timeout, a losing `select!` branch) leaves the paginator armed at the same URL.
+        let url = self.next.clone()?;
+        if let Some(first) = &self.first {
+            if !same_origin(first, &url) {
+                self.next = None;
                 return Some(Err(Error::PaginationOriginChanged {
                     from: without_credentials(first.clone()),
                     to: without_credentials(url),
                 }));
             }
-            Some(_) => {}
-            None => self.first = Some(url.clone()),
         }
         let mut key = url.clone();
         key.set_fragment(None);
-        if !self.fetched.insert(key) {
+        if self.fetched.contains(&key) {
+            self.next = None;
             return Some(Err(Error::PaginationCycle {
                 url: without_credentials(url),
             }));
         }
         let request = match RequestBuilder::new(http::Method::GET, url.clone()).build() {
             Ok(request) => request,
-            Err(error) => return Some(Err(error)),
+            Err(error) => {
+                self.next = None;
+                return Some(Err(error));
+            }
         };
-        let response = match send(&self.core, request).await {
-            Ok(response) => response,
-            Err(error) => return Some(Err(error)),
+        let outcome = match send(&self.core, request).await {
+            Ok(response) => Self::read_page(&self.core, &url, response).await,
+            Err(error) => Err(error),
         };
-        self.handle_response(url, response).await
+        // The pull has resolved: commit the fetch. Only a decoded page re-arms the paginator, with
+        // the link it carried; every error leaves `next` as `None` and terminates the chain.
+        self.next = match &outcome {
+            Ok((_, next)) => next.clone(),
+            Err(_) => None,
+        };
+        self.fetched.insert(key);
+        if self.first.is_none() {
+            self.first = Some(url);
+        }
+        Some(outcome.map(|(page, _)| page))
     }
 
-    /// The post-`send` half of [`Self::next_page`]: gate on status, follow the `Link` header, decode.
-    /// On entry `self.next` has already been taken (is `None`), so every non-success path here
-    /// leaves the paginator disarmed; only a successful decode re-arms it.
-    async fn handle_response(
-        &mut self,
-        url: Url,
+    /// The post-`send` half of [`Self::next_page`]: gate on status, follow the `Link` header,
+    /// decode. It reads no paginator state, so a future dropped here changes nothing; the page
+    /// comes back with the `rel="next"` target it carried, which the caller arms.
+    async fn read_page(
+        core: &ClientCore,
+        url: &Url,
         response: http::Response<HttpBody>,
-    ) -> Option<Result<ResponseValue<T>, Error<Infallible>>> {
+    ) -> Result<(ResponseValue<T>, Option<Url>), Error<Infallible>> {
         // `send` returns `Ok` for 4xx/5xx too (only transport failures error), so gate on status
         // exactly as every generated operation does: a non-2xx page is NOT decoded as `T`, it
         // terminates the chain as an unexpected-status error (the generic paginator carries no per-op
         // error taxonomy). This is the natural terminal for e.g. a 401 on an unauthenticated page 2.
         if !response.status().is_success() {
-            return Some(Err(
-                unexpected_status::<Infallible>(&self.core, response).await
-            ));
+            return Err(unexpected_status::<Infallible>(core, response).await);
         }
         // Capture the next-page link before the body is consumed, resolving a relative URI-reference
         // against the URL just fetched (RFC 8288 permits relative targets; GitHub uses absolute ones).
         let next = next_link_target(response.headers()).and_then(|target| url.join(&target).ok());
-        match decode_success::<T>(&self.core, response).await {
-            Ok(value) => {
-                self.next = next;
-                Some(Ok(value))
-            }
-            Err(error) => Some(Err(error)),
-        }
+        let page = decode_success::<T>(core, response).await?;
+        Ok((page, next))
     }
 }
 

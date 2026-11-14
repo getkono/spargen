@@ -4,7 +4,10 @@
 //! The optional analysis binary. It is not a `mod` of the library: `src/bin/spargen.rs` pulls these
 //! files in with `#[path]`, so the CLI reaches only spargen's `pub` items, as any consumer does.
 
+use std::fmt::Display;
+use std::io::{self, Write as _};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use spargen::{check, explain, ConfigError, Report, Spec};
 
@@ -15,8 +18,20 @@ use super::exit::ExitStatus;
 /// Execute a parsed CLI invocation and return the process exit code.
 ///
 /// Delegates to the crate facade, renders diagnostics in the requested [`Format`],
-/// and maps the outcome onto the [`ExitStatus`] contract.
+/// and maps the outcome onto the [`ExitStatus`] contract. A write that meets a closed stream
+/// leaves that contract alone (see [`write_line`]); any other failed write exits with
+/// [`ExitStatus::Diagnostics`], as the command's output was not delivered.
 pub(crate) fn run(cli: Cli) -> ExitCode {
+    let status = dispatch(cli);
+    if WRITE_FAILED.load(Ordering::Relaxed) {
+        ExitStatus::Diagnostics.into()
+    } else {
+        status
+    }
+}
+
+/// Run the command `cli` names and return the status its outcome maps to.
+fn dispatch(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Check(args) => with_spec(args.spec, &args.options, |spec| {
             let report = check(&spec);
@@ -70,16 +85,16 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
         Command::Explain(args) => match explain(&args.code) {
             Ok(text) => {
                 match args.format {
-                    Format::Human => println!("{text}"),
-                    Format::Json => println!(
-                        "{}",
-                        serde_json::json!({ "code": args.code, "explain": text })
+                    Format::Human => write_line(Fd::Stdout, text),
+                    Format::Json => write_line(
+                        Fd::Stdout,
+                        serde_json::json!({ "code": args.code, "explain": text }),
                     ),
                 }
                 ExitStatus::Ok.into()
             }
             Err(error) => {
-                eprintln!("error: {error}");
+                write_line(Fd::Stderr, format_args!("error: {error}"));
                 ExitStatus::Usage.into()
             }
         },
@@ -143,10 +158,10 @@ fn warn_ignored(flags: &[&str], format: Format) {
         flags.join(", ")
     );
     match format {
-        Format::Human => eprintln!("warning: {warning}"),
-        Format::Json => eprintln!(
-            "{}",
-            serde_json::json!({ "warning": warning, "ignored": flags })
+        Format::Human => write_line(Fd::Stderr, format_args!("warning: {warning}")),
+        Format::Json => write_line(
+            Fd::Stderr,
+            serde_json::json!({ "warning": warning, "ignored": flags }),
         ),
     }
 }
@@ -160,7 +175,7 @@ fn config_error(error: ConfigError) -> ExitCode {
         rendered.push_str(&format!(": {cause}"));
         source = cause.source();
     }
-    eprintln!("error: {rendered}");
+    write_line(Fd::Stderr, format_args!("error: {rendered}"));
     ExitStatus::Usage.into()
 }
 
@@ -197,13 +212,56 @@ fn emit<T: std::fmt::Display + serde::Serialize>(value: &T, format: Format, stre
                 format!("{{\"error\":\"failed to render JSON: {error}\"}}")
             });
             match stream {
-                Stream::Stdout | Stream::Stderr => println!("{rendered}"),
-                Stream::Aside => eprintln!("{rendered}"),
+                Stream::Stdout | Stream::Stderr => write_line(Fd::Stdout, rendered),
+                Stream::Aside => write_line(Fd::Stderr, rendered),
             }
         }
         Format::Human => match stream {
-            Stream::Stdout => println!("{value}"),
-            Stream::Stderr | Stream::Aside => eprintln!("{value}"),
+            Stream::Stdout => write_line(Fd::Stdout, value),
+            Stream::Stderr | Stream::Aside => write_line(Fd::Stderr, value),
         },
+    }
+}
+
+/// Set by [`write_line`] when a write fails for a reason other than a closed stream; [`run`]
+/// then exits with [`ExitStatus::Diagnostics`] whatever the command's outcome was.
+static WRITE_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// One of the process's two output streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fd {
+    Stdout,
+    Stderr,
+}
+
+/// Write `line` and a newline to `fd` through its locked handle, and flush it.
+///
+/// Every CLI write goes through here rather than `println!`/`eprintln!`, which panic (exit 101)
+/// when the write fails. A stream whose reader has gone (`spargen … | head -1`) fails with
+/// [`io::ErrorKind::BrokenPipe`]: that write is dropped quietly, and the command keeps the status
+/// its outcome maps to, as nothing is left to read what it would have printed. Any other failure
+/// (a full disk, say) sets [`WRITE_FAILED`], and a failed stdout write is reported on stderr.
+fn write_line(fd: Fd, line: impl Display) {
+    let written = match fd {
+        Fd::Stdout => {
+            let mut out = io::stdout().lock();
+            writeln!(out, "{line}").and_then(|()| out.flush())
+        }
+        Fd::Stderr => {
+            let mut err = io::stderr().lock();
+            writeln!(err, "{line}").and_then(|()| err.flush())
+        }
+    };
+    let Err(error) = written else { return };
+    if error.kind() == io::ErrorKind::BrokenPipe {
+        return;
+    }
+    WRITE_FAILED.store(true, Ordering::Relaxed);
+    if fd == Fd::Stdout {
+        // Best effort: a stderr that fails too has nowhere left to report to.
+        let _ = writeln!(
+            io::stderr().lock(),
+            "error: failed writing to stdout: {error}"
+        );
     }
 }
