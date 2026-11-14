@@ -32,9 +32,7 @@ use check::{
 use integration::cargo_home;
 #[cfg(test)]
 pub(crate) use integration::rerun_if_changed_lines;
-pub(crate) use integration::{
-    build_script_manifest, cargo_environment, print_rerun, under_build_script,
-};
+pub(crate) use integration::{cargo_environment, check_environment, print_rerun};
 use requirements::requirement_table;
 pub(crate) use requirements::RuntimeRequirements;
 pub use requirements::{RequiredDependency, Requirements};

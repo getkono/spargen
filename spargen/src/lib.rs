@@ -120,16 +120,42 @@ pub fn generate(build: &Build) -> Report {
 /// for its inputs: the spec, every file it references, `spargen.lock` and the applied config files
 /// (or, when they fail to load, every file the attempt read, the one that failed it included),
 /// and the manifests and lockfile the audit read.
+///
+/// This is [`check_with`] under [`CargoIntegration::Auto`]; a build script that checks a spec its
+/// own package does not consume (a CI gate crate whose client lives elsewhere) passes
+/// [`CargoIntegration::Off`] there to skip the audit and the directives.
 #[must_use = "the report carries the outcome and every diagnostic; a rejection is lost unless it is read, e.g. with `.expect_success()`"]
 pub fn check(spec: &Spec) -> Report {
-    if runtime_contract::under_build_script() {
+    check_with(spec, CargoIntegration::Auto)
+}
+
+/// [`check`] under an explicit [`CargoIntegration`] policy, the one [`Build::with_cargo`] sets for
+/// [`generate`]:
+///
+/// - [`Auto`](CargoIntegration::Auto) is [`check`]: from a build script, the audit and the
+///   directives; elsewhere, neither, with no diagnostic about it.
+/// - [`Off`](CargoIntegration::Off) audits no manifest and prints no directive, wherever it runs.
+/// - [`Required`](CargoIntegration::Required) audits and prints as `Auto` does from a build script
+///   that names its manifest, and anywhere else rejects with `E024` before reading the spec.
+///
+/// ```no_run
+/// // build.rs of a gate crate that is not the client's consumer.
+/// let spec = spargen::Spec::new("../api/openapi.yaml");
+/// spargen::check_with(&spec, spargen::CargoIntegration::Off).expect_success();
+/// ```
+#[must_use = "the report carries the outcome and every diagnostic; a rejection is lost unless it is read, e.g. with `.expect_success()`"]
+pub fn check_with(spec: &Spec, cargo: CargoIntegration) -> Report {
+    let cargo = runtime_contract::check_environment(cargo);
+    if cargo.fatal {
+        return Report::rejected(cargo.diagnostics, false);
+    }
+    if cargo.directives {
         let read = pipeline::run_on_frontend_stack(|| cache::read_paths(spec));
         runtime_contract::print_rerun(&cache::rerun_paths(spec, &read, None));
     }
     let result = pipeline::run_mode(spec, pipeline::PipelineMode::Requirements);
     let mut report = result.report;
-    let manifest = runtime_contract::build_script_manifest();
-    if let (Some(manifest), Some(requirements)) = (manifest, result.requirements) {
+    if let (Some(manifest), Some(requirements)) = (cargo.manifest, result.requirements) {
         let manifests = pipeline::apply_audit(&mut report, &manifest, &requirements);
         runtime_contract::print_rerun(&manifests);
     }

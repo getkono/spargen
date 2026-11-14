@@ -45,6 +45,27 @@ pub(crate) fn cargo_environment(build: &Build) -> CargoEnvironment {
     resolve_cargo_environment(build.cargo, under_build_script(), build_script_manifest())
 }
 
+/// Resolve the Cargo integration policy of a `check` against the actual process environment.
+pub(crate) fn check_environment(integration: CargoIntegration) -> CargoEnvironment {
+    resolve_check_environment(integration, under_build_script(), build_script_manifest())
+}
+
+/// [`resolve_cargo_environment`] for a `check`, which `Off` and `Required` drive exactly as they
+/// drive a generation. Under `Auto` a `check` degrades silently: `W013` and `W012` describe a
+/// generation's rebuild triggers and audit, and `check` is as often run outside a build script, as
+/// `spargen check`, where neither applies.
+pub(super) fn resolve_check_environment(
+    integration: CargoIntegration,
+    under_build_script: bool,
+    manifest: Option<Utf8PathBuf>,
+) -> CargoEnvironment {
+    let mut environment = resolve_cargo_environment(integration, under_build_script, manifest);
+    if integration == CargoIntegration::Auto {
+        environment.diagnostics.clear();
+    }
+    environment
+}
+
 /// The policy decision itself, as a pure function of what the environment affords — so every
 /// branch is reachable in a test without mutating process-global state.
 ///
@@ -98,7 +119,7 @@ pub(super) fn resolve_cargo_environment(
             diagnostics: vec![Diagnostic::at_root(
                 Code::CargoIntegrationRequired,
                 "cargo integration is required, but this is not a build-script process; \
-                 call `generate` from a `build.rs`, or relax to `CargoIntegration::Auto`",
+                 call spargen from a `build.rs`, or relax to `CargoIntegration::Auto`",
             )
             .build()],
             fatal: true,
