@@ -148,8 +148,9 @@ pub enum Credential {
     /// response, unless the replay is rejected again. In every other case — a body that cannot be
     /// cloned, `on_rejected` failing, the replay failing to send, or the replay rejected again —
     /// the call returns the original response, which decodes as the operation's typed error as
-    /// it would have without a refresh. A streaming response's reconnect resends the token the
-    /// first request carried.
+    /// it would have without a refresh. A streaming response's reconnect is signed afresh, as a
+    /// call is: `token` is asked for a token again, and a rejected reconnect is refreshed and
+    /// replayed once in the same way.
     Refreshable {
         /// Yields the token each call attaches.
         token: TokenProvider,

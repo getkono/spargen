@@ -457,7 +457,8 @@ pub(crate) struct OperationBindings {
     pub(crate) url: Ident,
     /// Mutable request builder, then the built request.
     pub(crate) request: Ident,
-    /// Clone of a streaming request retained for opt-in SSE reconnects.
+    /// A streaming request's `Option<support::Resend>`: the request before credentials were
+    /// attached, which an opt-in SSE reconnect signs afresh.
     pub(crate) reconnect_request: Ident,
     /// Mutable cookie-fragment collection.
     pub(crate) cookies: Ident,
