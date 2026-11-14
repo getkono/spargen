@@ -1188,3 +1188,63 @@ fn a_recursive_discriminated_member_keeps_tag_dispatch_in_either_declaration_ord
     }
     assert_eq!(bodies[0], bodies[1], "the declaration order changed `U`");
 }
+
+/// A `$ref` with siblings met with a deferred discriminated union (#1400): `C` refines `U`, whose
+/// member `A` holds a `U`, so the meet copies `U`'s variants while `U`'s dispatch still waits for
+/// `A`'s reservation to fill. The copy takes the decision `U` takes, so whichever of `A` and `U`
+/// is declared first, `C` dispatches by tag too: `{"kind": "B", "extra": "x"}` matched both
+/// variants of an all-untagged copy and failed to decode, though its tag names `B`.
+#[test]
+fn a_meet_copy_of_a_deferred_discriminated_union_keeps_tag_dispatch_in_either_order() {
+    let a = "    A: { type: object, required: [kind], properties: { kind: { type: string }, \
+             next: { $ref: '#/components/schemas/U' } } }\n";
+    let b = "    B: { type: object, required: [kind], properties: { kind: { type: string } } }\n";
+    let u = "    U: { oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: \
+             '#/components/schemas/B' }], discriminator: { propertyName: kind } }\n";
+    let c = "    C: { $ref: '#/components/schemas/U', required: [extra], properties: { extra: { \
+             type: string } } }\n";
+    let spec = |schemas: [&str; 4]| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /u:\n    \
+             get:\n      \
+             operationId: getU\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json: {{ schema: {{ $ref: '#/components/schemas/U' }} }}\n  \
+             /c:\n    \
+             get:\n      \
+             operationId: getC\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json: {{ schema: {{ $ref: '#/components/schemas/C' }} }}\n\
+             components:\n  \
+             schemas:\n{}",
+            schemas.concat()
+        )
+    };
+    let mut arms = Vec::new();
+    for (order, schemas) in [("U first", [u, a, b, c]), ("A first", [a, b, u, c])] {
+        let (report, code) = generate_with_code(&spec(schemas));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{order}: {report:#?}");
+        let found = super::discriminator::discriminated_arms(&code, "C");
+        let tags: Vec<Vec<String>> = found.decode.iter().map(|(_, tags)| tags.clone()).collect();
+        assert_eq!(
+            tags,
+            vec![vec!["A".to_owned()], vec!["B".to_owned()]],
+            "{order}: {code}"
+        );
+        arms.push((found.decode, found.encode));
+    }
+    assert_eq!(
+        arms[0], arms[1],
+        "the declaration order changed `C`'s dispatch"
+    );
+}
