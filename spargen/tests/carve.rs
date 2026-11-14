@@ -60,7 +60,7 @@ fn omit_of(rules: Vec<spargen::OmitRule>) -> spargen::Omit {
 
 /// As [`config`], but with an explicit omit profile.
 fn omitting(spec: &Utf8Path, out: &Path, omit: spargen::Omit) -> Build {
-    build(Spec::new(spec.to_owned()).omit(omit), out)
+    build(Spec::new(spec.to_owned()).add_omit(omit), out)
 }
 
 fn build(spec: Spec, out: &Path) -> Build {
@@ -1327,7 +1327,7 @@ fn a_generated_client_carries_only_the_kept_operations() {
     let out = temp.path().join("client.rs");
 
     let report = spargen::generate(&build(
-        Spec::new(spec).keep_operation(spargen::OmitMethod::Get, "/pets"),
+        Spec::new(spec).add_keep_operation(spargen::OmitMethod::Get, "/pets"),
         &out,
     ));
 
@@ -1359,8 +1359,8 @@ fn a_keep_rule_naming_an_undeclared_operation_is_e019() {
 
     let report = spargen::check(
         &Spec::new(spec)
-            .keep_operation(spargen::OmitMethod::Get, "/pets")
-            .keep_operation(spargen::OmitMethod::Post, "/pets"),
+            .add_keep_operation(spargen::OmitMethod::Get, "/pets")
+            .add_keep_operation(spargen::OmitMethod::Post, "/pets"),
     );
 
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");

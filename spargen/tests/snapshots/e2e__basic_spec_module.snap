@@ -1170,10 +1170,10 @@ mod support {
             }
             /// Bind `value` to the header `name`, matched in any letter case, replacing any value already
             /// bound to it. An operation of a generated client whose header parameter the build bound
-            /// (`Spec::bind_header`) sends this value, as written, instead of taking an argument for it.
-            /// `ClientCore`'s `Debug` prints the bound name and redacts the value, and the operation sends
-            /// it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts it
-            /// too.
+            /// (`Spec::add_bound_header`) sends this value, as written, instead of taking an argument for
+            /// it. `ClientCore`'s `Debug` prints the bound name and redacts the value, and the operation
+            /// sends it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts
+            /// it too.
             ///
             /// Returns a request-construction error, leaving any value already bound to `name` in place,
             /// if `value` is not a valid header value: it holds a control character other than a tab,
@@ -1214,6 +1214,7 @@ mod support {
             }
             /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
             /// See the `paginate` module's docs for the full pattern and the authentication caveat.
+            #[must_use]
             pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
                 LinkPaginator::new(self.clone(), first)
             }
@@ -2751,7 +2752,7 @@ mod support {
                 source: AuthError,
             },
             /// The operation declares a required header that the generated client binds once, as a
-            /// `Spec::bind_header` build option named it, and no value is bound to it on the client
+            /// `Spec::add_bound_header` build option named it, and no value is bound to it on the client
             /// (`with_bound_header`). Raised before anything is sent. The payload is the whole cause, so
             /// `source()` is `None`.
             MissingBoundParameter {
@@ -4926,6 +4927,7 @@ mod support {
             }
             /// Add a header, after any value the request already carries under `name`. A name or value
             /// that does not convert fails the builder.
+            #[must_use]
             pub fn header<K, V>(self, name: K, value: V) -> Self
             where
                 HeaderName: TryFrom<K>,
@@ -4938,6 +4940,7 @@ mod support {
             /// Add a header as [`Self::header`] does, its value marked sensitive
             /// (`HeaderValue::set_sensitive`), so the `Debug` of the built request prints it redacted: for
             /// a value the client holds as a secret, such as one bound with `ClientCore::bind_header`.
+            #[must_use]
             pub fn sensitive_header<K, V>(self, name: K, value: V) -> Self
             where
                 HeaderName: TryFrom<K>,
@@ -4979,6 +4982,7 @@ mod support {
                 self
             }
             /// Set the body, replacing any set before.
+            #[must_use]
             pub fn body(mut self, body: impl Into<HttpBody>) -> Self {
                 if let Ok(parts) = &mut self.request {
                     parts.body = body.into();
@@ -4988,6 +4992,7 @@ mod support {
             /// Set a `multipart/form-data` body encoded from `form`, and the `Content-Type` naming its
             /// boundary, replacing any `Content-Type` set before. The body is held in memory, so the
             /// request clones for a retry, a credential refresh or a reconnect.
+            #[must_use]
             pub fn multipart(mut self, form: MultipartForm) -> Self {
                 if let Ok(parts) = &mut self.request {
                     let (content_type, body) = form.encode();
@@ -5107,6 +5112,7 @@ mod support {
                 Self::default()
             }
             /// Add a part named `name`, after every part added before; a name may repeat.
+            #[must_use]
             pub fn part(mut self, name: impl Into<String>, part: MultipartPart) -> Self {
                 self.parts.push((name.into(), part));
                 self
@@ -5204,6 +5210,7 @@ mod support {
             /// Set the `filename` parameter of the part's `Content-Disposition`, replacing any set before.
             /// RFC 7578 §4.2 says a part holding a file's content should carry one, and many servers read
             /// a part without it as a plain field rather than a file. It is escaped as the part's name is.
+            #[must_use]
             pub fn file_name(mut self, file_name: impl Into<String>) -> Self {
                 self.file_name = Some(file_name.into());
                 self
@@ -8300,6 +8307,7 @@ pub mod types {
     impl DeepFilter {
         ///A `DeepFilter` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(kind: DeepFilterKind) -> Self {
             Self { kind, limit: None }
         }
@@ -8376,6 +8384,7 @@ pub mod types {
     impl Refined {
         ///A `Refined` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(
             run_id: RefinedMember1RunId,
             status: RefinedMember1Status,
@@ -8451,6 +8460,7 @@ pub mod types {
     impl RefinedStepsIntersectionItem {
         ///A `RefinedStepsIntersectionItem` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(name: RefinedMember1StepsItemName) -> Self {
             Self { name }
         }
@@ -8497,6 +8507,7 @@ pub mod types {
     impl ConflictDefaultTarget {
         ///A `ConflictDefaultTarget` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self { x: self::default_35_x() }
         }
@@ -8530,6 +8541,7 @@ pub mod types {
     impl ConflictDefault {
         ///A `ConflictDefault` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self { x: None }
         }
@@ -8580,6 +8592,7 @@ pub mod types {
     impl ConflictDefaultSibling {
         ///A `ConflictDefaultSibling` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self { x: None }
         }
@@ -8657,6 +8670,7 @@ pub mod types {
     impl NarrowDefaultBase {
         ///A `NarrowDefaultBase` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 valid: self::default_46_valid(),
@@ -8745,6 +8759,7 @@ pub mod types {
     impl NarrowDefaultEnum {
         ///A `NarrowDefaultEnum` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 valid: None,
@@ -8906,6 +8921,7 @@ pub mod types {
     impl NarrowDefault {
         ///A `NarrowDefault` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 valid: self::default_56_valid(),
@@ -8988,6 +9004,7 @@ pub mod types {
     impl NarrowDefaultSibling {
         ///A `NarrowDefaultSibling` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 valid: self::default_57_valid(),
@@ -9138,6 +9155,7 @@ pub mod types {
     impl MergedDefaultNarrow {
         ///A `MergedDefaultNarrow` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self { p: None }
         }
@@ -9163,6 +9181,7 @@ pub mod types {
     impl MergedDefaultBase {
         ///A `MergedDefaultBase` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self { p: self::default_65_p() }
         }
@@ -9196,6 +9215,7 @@ pub mod types {
     impl MergedDefaultOther {
         ///A `MergedDefaultOther` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self { p: self::default_67_p() }
         }
@@ -9229,6 +9249,7 @@ pub mod types {
     impl MergedDefault {
         ///A `MergedDefault` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self { p: self::default_69_p() }
         }
@@ -9261,6 +9282,7 @@ pub mod types {
     impl MergedDefaultSibling {
         ///A `MergedDefaultSibling` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self { p: self::default_70_p() }
         }
@@ -9293,6 +9315,7 @@ pub mod types {
     impl MergedDefaultClash {
         ///A `MergedDefaultClash` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self { p: self::default_73_p() }
         }
@@ -9324,6 +9347,7 @@ pub mod types {
     impl ForbiddenProperty {
         ///A `ForbiddenProperty` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self { x: None }
         }
@@ -9372,6 +9396,7 @@ pub mod types {
     impl NullOnlyProperty {
         ///A `NullOnlyProperty` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 x: super::support::Nullable::Absent,
@@ -9495,6 +9520,7 @@ pub mod types {
     impl OptionalFields {
         ///A `OptionalFields` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 name: None,
@@ -9987,6 +10013,7 @@ pub mod types {
     impl BroadOwner {
         ///A `BroadOwner` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {}
         }
@@ -9999,6 +10026,7 @@ pub mod types {
     impl DetailedOwner {
         ///A `DetailedOwner` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(id: DetailedOwnerId) -> Self {
             Self { id }
         }
@@ -10103,6 +10131,7 @@ pub mod types {
     impl ContentFile {
         ///A `ContentFile` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(r#type: ContentFileType, content: ContentFileContent) -> Self {
             Self { r#type, content }
         }
@@ -10148,6 +10177,7 @@ pub mod types {
     impl ContentLink {
         ///A `ContentLink` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(r#type: ContentLinkType, target: ContentLinkTarget) -> Self {
             Self { r#type, target }
         }
@@ -10433,6 +10463,7 @@ pub mod types {
     impl User {
         ///A `User` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(id: UserId, name: UserName) -> Self {
             Self {
                 id,
@@ -10603,6 +10634,7 @@ pub mod types {
     impl TreeNode {
         ///A `TreeNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(value: TreeNodeValue) -> Self {
             Self {
                 value,
@@ -10640,6 +10672,7 @@ pub mod types {
     impl Category {
         ///A `Category` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(name: CategoryName) -> Self {
             Self { name, item: None }
         }
@@ -10666,6 +10699,7 @@ pub mod types {
     impl Item {
         ///A `Item` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(label: ItemLabel) -> Self {
             Self { label, category: None }
         }
@@ -10685,6 +10719,7 @@ pub mod types {
     impl Dict {
         ///A `Dict` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 additional: BTreeMap::new(),
@@ -10711,6 +10746,7 @@ pub mod types {
     impl AliasNode {
         ///A `AliasNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(value: AliasNodeValue) -> Self {
             Self {
                 value,
@@ -10890,6 +10926,7 @@ pub mod types {
     impl Cat {
         ///A `Cat` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(pet_type: CatPetType, name: CatName) -> Self {
             Self { pet_type, name }
         }
@@ -10904,6 +10941,7 @@ pub mod types {
     impl Dog {
         ///A `Dog` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(bark: DogBark) -> Self {
             Self { bark }
         }
@@ -11102,6 +11140,7 @@ pub mod types {
     impl LooseAnimalVariant2 {
         ///A `LooseAnimalVariant2` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(
             pet_type: LooseAnimalVariant2PetType,
             fins: LooseAnimalVariant2Fins,
@@ -11310,6 +11349,7 @@ pub mod types {
     impl ChannelWebhook {
         ///A `ChannelWebhook` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(url: ChannelWebhookUrl) -> Self {
             Self { url }
         }
@@ -11323,6 +11363,7 @@ pub mod types {
     impl ChannelApprise {
         ///A `ChannelApprise` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(url: ChannelAppriseUrl) -> Self {
             Self { url }
         }
@@ -11341,6 +11382,7 @@ pub mod types {
     impl MaybeAliasNode {
         ///A `MaybeAliasNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(value: AliasNodeValue) -> Self {
             Self {
                 value,
@@ -11373,6 +11415,7 @@ pub mod types {
     impl Ticket {
         ///A `Ticket` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(priority: Option<Priority>, history: TicketHistory) -> Self {
             Self { priority, history }
         }
@@ -11427,6 +11470,7 @@ pub mod types {
     impl Settings {
         ///A `Settings` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(retries: SettingsRetries) -> Self {
             Self {
                 color: self::default_157_color(),
@@ -11500,6 +11544,7 @@ pub mod types {
     impl Headers {
         ///A `Headers` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 host: None,
@@ -11529,6 +11574,7 @@ pub mod types {
     impl Tags {
         ///A `Tags` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 additional: BTreeMap::new(),
@@ -11557,6 +11603,7 @@ pub mod types {
     impl Bag {
         ///A `Bag` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 additional: None,
@@ -11589,6 +11636,7 @@ pub mod types {
     impl AccountBase {
         ///A `AccountBase` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(id: AccountBaseId) -> Self {
             Self { id }
         }
@@ -11611,6 +11659,7 @@ pub mod types {
     impl Account {
         ///A `Account` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(id: AccountBaseId, label: AccountMember1Label) -> Self {
             Self { id, label, owner: None }
         }
@@ -11631,6 +11680,7 @@ pub mod types {
     impl MultiOk {
         ///A `MultiOk` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(ok: MultiOkOk) -> Self {
             Self { ok }
         }
@@ -11644,6 +11694,7 @@ pub mod types {
     impl MultiCreated {
         ///A `MultiCreated` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(id: MultiCreatedId) -> Self {
             Self { id }
         }
@@ -11657,6 +11708,7 @@ pub mod types {
     impl NotFoundError {
         ///A `NotFoundError` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(reason: NotFoundErrorReason) -> Self {
             Self { reason }
         }
@@ -11670,6 +11722,7 @@ pub mod types {
     impl ConflictError {
         ///A `ConflictError` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(detail: ConflictErrorDetail) -> Self {
             Self { detail }
         }
@@ -11685,6 +11738,7 @@ pub mod types {
     impl Problem {
         ///A `Problem` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(title: ProblemTitle, detail: ProblemDetail) -> Self {
             Self { title, detail }
         }
@@ -11699,6 +11753,7 @@ pub mod types {
     impl MaybeProblem {
         ///A `MaybeProblem` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(title: MaybeProblemTitle) -> Self {
             Self { title }
         }
@@ -11713,6 +11768,7 @@ pub mod types {
     impl ChatChunk {
         ///A `ChatChunk` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(delta: ChatChunkDelta) -> Self {
             Self { delta }
         }
@@ -11729,6 +11785,7 @@ pub mod types {
     impl XmlOrder {
         ///A `XmlOrder` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(id: XmlOrderId, sku: XmlOrderSku) -> Self {
             Self { id, sku }
         }
@@ -11751,6 +11808,7 @@ pub mod types {
     impl XmlReceipt {
         ///A `XmlReceipt` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(code: XmlReceiptCode) -> Self {
             Self { code, note: None }
         }
@@ -11781,6 +11839,7 @@ pub mod types {
     impl JsonMeta {
         ///A `JsonMeta` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(id: JsonMetaId, sku: JsonMetaSku) -> Self {
             Self { id, sku, note: None }
         }
@@ -11847,6 +11906,7 @@ pub mod types {
     impl UploadFileBody {
         ///A `UploadFileBody` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(file: UploadFileBodyFile, caption: UploadFileBodyCaption) -> Self {
             Self {
                 file,
@@ -11952,6 +12012,7 @@ pub mod types {
     impl PostNullableBytesBody {
         ///A `PostNullableBytesBody` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(
             digest: Option<PostNullableBytesBodyDigest>,
             previous: Option<PostNullableBytesBodyPrevious>,
@@ -12001,6 +12062,7 @@ pub mod types {
     impl ResponseBody8899a140 {
         ///A `ResponseBody8899a140` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(digest: Option<ResponseBodyDigest>) -> Self {
             Self { digest }
         }
@@ -12021,6 +12083,7 @@ pub mod types {
     impl PostNullablePartsBody {
         ///A `PostNullablePartsBody` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(file: Option<PostNullablePartsBodyFile>) -> Self {
             Self {
                 file,
@@ -12088,6 +12151,7 @@ pub mod types {
     impl SubmitFormBody {
         ///A `SubmitFormBody` holding every member given, in declaration order.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(
             name: SubmitFormBodyName,
             tags: SubmitFormBodyTags,
@@ -12108,6 +12172,7 @@ pub mod types {
     impl SubmitFormAdditionalBody {
         ///A `SubmitFormAdditionalBody` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(a: SubmitFormAdditionalBodyA) -> Self {
             Self {
                 a,
@@ -12141,6 +12206,7 @@ pub mod types {
     impl SubmitNullableFormAdditionalBody {
         ///A `SubmitNullableFormAdditionalBody` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 a: None,
@@ -12176,6 +12242,7 @@ pub mod types {
     impl UploadAdditionalBody {
         ///A `UploadAdditionalBody` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
         #[allow(clippy::too_many_arguments)]
+        #[must_use]
         pub fn new(caption: UploadAdditionalBodyCaption) -> Self {
             Self {
                 caption,
@@ -15119,10 +15186,12 @@ pub mod servers {
     pub struct Server0 {}
     impl Server0 {
         /// Every server variable at its declared default.
+        #[must_use]
         pub fn new() -> Self {
             Self::default()
         }
         /// The server URL with every variable substituted.
+        #[must_use]
         pub fn url(&self) -> String {
             let mut url = String::new();
             url.push_str("https://example.com/api");
@@ -15163,6 +15232,7 @@ pub mod servers {
     }
     impl Server1 {
         /// Every server variable at its declared default.
+        #[must_use]
         pub fn new() -> Self {
             Self::default()
         }
@@ -15185,6 +15255,7 @@ pub mod servers {
             self
         }
         /// The server URL with every variable substituted.
+        #[must_use]
         pub fn url(&self) -> String {
             let mut url = String::new();
             url.push_str("https://");
@@ -15197,6 +15268,7 @@ pub mod servers {
         }
     }
     /// The first declared server, with every server variable at its declared default.
+    #[must_use]
     pub fn default_url() -> String {
         Server0::new().url()
     }

@@ -111,8 +111,8 @@ pub enum Code {
     CargoIntegrationDegraded,
     /// Cargo integration was required by the caller but is not available in this process.
     CargoIntegrationRequired,
-    /// A header binding (`Spec::bind_header`) names a header no operation declares as a header
-    /// parameter, so it would bind nothing.
+    /// A header binding (`Spec::add_bound_header`) names a header no operation declares as a
+    /// header parameter, so it would bind nothing.
     BoundHeaderNotDeclared,
     /// A property both `required` and `readOnly` or `writeOnly` is generated as a member that may
     /// be absent when decoded, since `required` holds for it in one direction only.
@@ -337,7 +337,7 @@ impl Code {
                 "The caller set `CargoIntegration::Required` — through `Build::with_cargo` for `generate`, or as `check_with`'s argument for a `check` — declaring that this run must be wired into Cargo, with rebuild triggers emitted and the consumer manifest audited, and it is not: either the process is not a build script, or no consumer manifest could be found. This is an error rather than a warning purely because the caller asked for it: `Required` exists for builds where a missed rebuild trigger would ship a client generated from a stale spec, or a skipped audit would pass a gate that checked nothing. Move the call into a `build.rs`, or relax to `CargoIntegration::Auto` or `CargoIntegration::Off`. Under `Auto`, a generation degrades with `W013`/`W012` and a `check` degrades silently; under `Off`, both degrade silently."
             }
             Code::BoundHeaderNotDeclared => {
-                "A header binding — `Spec::bind_header`, `bind_headers` in `spargen.toml`, `--bind-header`, or `bind_header` in `generate_api!` — must name a header parameter at least one operation declares, matched in any letter case and read after every omit and keep rule applies. A binding that matches none would bind nothing: the generated client's `with_bound_header` would accept a value no operation sends. A parameter of that name in another location (`in: query`, `in: cookie`) does not count, and neither does a response header, nor an `Accept`, `Content-Type` or `Authorization` header parameter, which the specification says to ignore (`W011`). Fix the name, or remove the binding."
+                "A header binding — `Spec::add_bound_header`, `bound_headers` in `spargen.toml`, `--bound-header`, or `bound_header` in `generate_api!` — must name a header parameter at least one operation declares, matched in any letter case and read after every omit and keep rule applies. A binding that matches none would bind nothing: the generated client's `with_bound_header` would accept a value no operation sends. A parameter of that name in another location (`in: query`, `in: cookie`) does not count, and neither does a response header, nor an `Accept`, `Content-Type` or `Authorization` header parameter, which the specification says to ignore (`W011`). Fix the name, or remove the binding."
             }
             Code::ReadWriteOnlyRequirednessRelaxed => {
                 "OpenAPI applies a property's `required` in one direction only when the property is `readOnly` or `writeOnly`: a `readOnly` property is required in a response and is not sent in a request, and a `writeOnly` property is required in a request and is not returned in a response. Spargen generates one struct for both directions, so such a property is a member that may be absent when decoded — `Option<T>`, or `Nullable<T>` where the schema admits `null` — and decoding a response or request that leaves it out succeeds instead of failing on a missing field. A `readOnly` member is never serialized, so a request never carries it, and it is not an argument of the struct's `new`; it is set through its `with_` setter like an optional member. A `required` `writeOnly` member stays an argument of `new`, which stores the value given, because every request must carry it. This warning names each property whose `required` was relaxed this way, so a consumer reading the member knows its absence is the specification's, not a decode default. To keep the property strictly required in both directions, drop `readOnly`/`writeOnly` from it."
@@ -430,6 +430,20 @@ impl std::str::FromStr for Code {
             .iter()
             .copied()
             .find(|code| code.as_str() == s)
+            .ok_or_else(|| UnknownCode(s.to_owned()))
+    }
+}
+
+impl Code {
+    /// Look a code up as a person types it: surrounding whitespace trimmed and matched in any ASCII
+    /// case, so `" w009 "` names [`Code::OmittedConstruct`]. The `FromStr` impl stays exact. A
+    /// string naming no code comes back in the [`UnknownCode`] as it was given, untrimmed.
+    pub(crate) fn from_str_any_case(s: &str) -> Result<Self, UnknownCode> {
+        let trimmed = s.trim();
+        Code::all()
+            .iter()
+            .copied()
+            .find(|code| code.as_str().eq_ignore_ascii_case(trimmed))
             .ok_or_else(|| UnknownCode(s.to_owned()))
     }
 }

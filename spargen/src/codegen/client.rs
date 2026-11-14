@@ -660,6 +660,7 @@ fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStre
 
             impl #ident {
                 /// Every server variable at its declared default.
+                #[must_use]
                 pub fn new() -> Self {
                     Self::default()
                 }
@@ -667,6 +668,7 @@ fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStre
                 #(#setters)*
 
                 /// The server URL with every variable substituted.
+                #[must_use]
                 pub fn url(&self) -> String {
                     let mut url = String::new();
                     #(#pieces)*
@@ -683,6 +685,7 @@ fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStre
             #(#builders)*
 
             /// The first declared server, with every server variable at its declared default.
+            #[must_use]
             pub fn default_url() -> String {
                 #first::new().url()
             }

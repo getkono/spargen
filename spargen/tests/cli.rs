@@ -170,6 +170,126 @@ fn every_config_switch_is_spelled_on_every_surface() {
     }
 }
 
+/// The list keys of `spargen.toml` (its `Vec` fields, as `FileConfig` declares them) in the
+/// singular, the stem every other surface spells them by: `omit`, `keep`, `bound_header`.
+fn file_config_list_stems() -> Vec<String> {
+    let source = repo::read("spargen/src/config.rs");
+    let (_, rest) = source
+        .split_once("struct FileConfig {\n")
+        .expect("spargen/src/config.rs declares `struct FileConfig`");
+    let (body, _) = rest
+        .split_once("\n}")
+        .expect("`FileConfig`'s body is closed");
+    body.lines()
+        .filter_map(|line| {
+            let (key, ty) = line.trim().split_once(": ")?;
+            ty.starts_with("Vec<")
+                .then(|| key.strip_suffix('s').unwrap_or(key).to_owned())
+        })
+        .collect()
+}
+
+/// The names in `generate_api!`'s `LIST_ARGUMENTS` array, in `spargen-macro/src/lib.rs`.
+fn macro_list_arguments() -> Vec<String> {
+    let source = repo::read("spargen-macro/src/lib.rs");
+    let (_, rest) = source
+        .split_once("const LIST_ARGUMENTS: [&str; ")
+        .expect("spargen-macro/src/lib.rs declares `const LIST_ARGUMENTS`");
+    let (_, rest) = rest
+        .split_once("= [")
+        .expect("`LIST_ARGUMENTS` is an array");
+    let (body, _) = rest.split_once("];").expect("`LIST_ARGUMENTS` is closed");
+    body.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.trim_matches('"').to_owned())
+        .collect()
+}
+
+/// Every `pub fn` of `impl Spec` that takes `mut self` and returns `Self`: its chained setters.
+fn spec_chained_setters() -> Vec<String> {
+    let source = repo::read("spargen/src/config.rs");
+    let (_, rest) = source
+        .split_once("\nimpl Spec {\n")
+        .expect("spargen/src/config.rs declares `impl Spec`");
+    let (body, _) = rest.split_once("\n}\n").expect("`impl Spec` is closed");
+    body.split("    pub fn ")
+        .skip(1)
+        .filter_map(|item| {
+            let (name, rest) = item.split_once('(')?;
+            let (signature, _) = rest.split_once('{')?;
+            (signature.contains("mut self") && signature.trim_end().ends_with("-> Self"))
+                .then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// Every list key of `spargen.toml` is spelled by one stem on each surface that configures a
+/// spec: the key in the singular is an entry of `generate_api!`'s `LIST_ARGUMENTS`, the prefix of
+/// a `Spec::add_<stem>…` setter, and a `--<stem>` or `--<stem>-…` flag of every subcommand that
+/// reads one. Every chained `Spec` setter is a `with_` setter, an `add_` setter of such a stem, or
+/// `clear_omissions`, so a list setter cannot keep a spelling of its own.
+#[test]
+fn every_list_knob_is_spelled_on_every_surface() {
+    let stems = file_config_list_stems();
+    assert!(
+        ["omit", "keep", "bound_header"]
+            .iter()
+            .all(|stem| stems.iter().any(|found| found == stem)),
+        "the reader finds FileConfig's list keys: {stems:?}"
+    );
+
+    let mut sorted = stems.clone();
+    sorted.sort();
+    let mut in_macro = macro_list_arguments();
+    in_macro.sort();
+    assert_eq!(
+        in_macro, sorted,
+        "generate_api!'s LIST_ARGUMENTS are exactly spargen.toml's list keys in the singular"
+    );
+
+    let setters = spec_chained_setters();
+    assert!(
+        setters.iter().any(|setter| setter == "with_uuid"),
+        "the reader finds Spec's chained setters: {setters:?}"
+    );
+    for stem in &stems {
+        assert!(
+            setters
+                .iter()
+                .any(|setter| setter.starts_with(&format!("add_{stem}"))),
+            "`Spec` has no `add_{stem}…` setter for the `{stem}` list: {setters:?}"
+        );
+    }
+    for setter in &setters {
+        let named = setter.starts_with("with_")
+            || setter == "clear_omissions"
+            || setter.strip_prefix("add_").is_some_and(|rest| {
+                stems
+                    .iter()
+                    .any(|stem| rest == stem || rest.starts_with(&format!("{stem}_")))
+            });
+        assert!(
+            named,
+            "`Spec::{setter}` is neither a `with_` setter nor an `add_` setter of a spargen.toml \
+             list key ({stems:?})"
+        );
+    }
+
+    for subcommand in ["check", "deps", "lock", "diff"] {
+        let flags = long_flags(subcommand);
+        for stem in &stems {
+            let flag = format!("--{}", stem.replace('_', "-"));
+            assert!(
+                flags
+                    .iter()
+                    .any(|given| *given == flag || given.starts_with(&format!("{flag}-"))),
+                "`spargen {subcommand}` has no `{flag}` flag for the `{stem}` list: {flags:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn generate_is_rejected_as_an_unknown_command() {
     let output = Command::new(spargen_bin())
@@ -334,6 +454,58 @@ fn explain_json_carries_the_code_and_its_explain_text() {
         "two distinct codes must not explain to the same text, or this branch could not tell \
          resolution from a constant"
     );
+}
+
+/// A code is matched with surrounding whitespace trimmed and in any ASCII case: each spelling
+/// prints exactly what its canonical upper-case form prints, and `--format json` echoes the
+/// canonical form rather than the spelling given.
+#[test]
+fn explain_accepts_a_code_in_any_case_with_surrounding_whitespace() {
+    for (given, canonical) in [("e001", "E001"), (" W009 ", "W009"), ("\tw009\n", "W009")] {
+        let human = Command::new(spargen_bin())
+            .args(["explain", given])
+            .output()
+            .unwrap();
+        assert_eq!(
+            human.status.code(),
+            Some(0),
+            "explaining {given:?} must succeed: {}",
+            String::from_utf8_lossy(&human.stderr)
+        );
+        let canonical_human = Command::new(spargen_bin())
+            .args(["explain", canonical])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(human.stdout).unwrap(),
+            String::from_utf8(canonical_human.stdout).unwrap(),
+            "{given:?} must print what {canonical:?} prints"
+        );
+
+        let json = Command::new(spargen_bin())
+            .args(["explain", given, "--format", "json"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            json.status.code(),
+            Some(0),
+            "explaining {given:?} as JSON must succeed: {}",
+            String::from_utf8_lossy(&json.stderr)
+        );
+        let stdout = String::from_utf8(json.stdout).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|error| panic!("--format json must emit JSON: {error}: {stdout}"));
+        assert_eq!(
+            value.get("code").and_then(serde_json::Value::as_str),
+            Some(canonical),
+            "`code` must echo the canonical code, not the spelling given: {stdout}"
+        );
+        assert_eq!(
+            value.get("explain").and_then(serde_json::Value::as_str),
+            spargen::explain(canonical).ok(),
+            "`explain` must carry the canonical code's explain text: {stdout}"
+        );
+    }
 }
 
 #[test]

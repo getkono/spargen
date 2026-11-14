@@ -359,10 +359,10 @@ impl ClientCore {
 
     /// Bind `value` to the header `name`, matched in any letter case, replacing any value already
     /// bound to it. An operation of a generated client whose header parameter the build bound
-    /// (`Spec::bind_header`) sends this value, as written, instead of taking an argument for it.
-    /// `ClientCore`'s `Debug` prints the bound name and redacts the value, and the operation sends
-    /// it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts it
-    /// too.
+    /// (`Spec::add_bound_header`) sends this value, as written, instead of taking an argument for
+    /// it. `ClientCore`'s `Debug` prints the bound name and redacts the value, and the operation
+    /// sends it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts
+    /// it too.
     ///
     /// Returns a request-construction error, leaving any value already bound to `name` in place,
     /// if `value` is not a valid header value: it holds a control character other than a tab,
@@ -402,6 +402,7 @@ impl ClientCore {
 
     /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
     /// See the `paginate` module's docs for the full pattern and the authentication caveat.
+    #[must_use]
     pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
         LinkPaginator::new(self.clone(), first)
     }

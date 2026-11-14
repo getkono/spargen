@@ -92,7 +92,7 @@ pub(crate) struct Operation {
     pub(crate) server: Option<String>,
     /// Where the operation came from.
     pub(crate) provenance: Provenance,
-    /// The header parameters the build bound once on the client (`Spec::bind_header`), in
+    /// The header parameters the build bound once on the client (`Spec::add_bound_header`), in
     /// declaration order. Lowering takes each out of [`Self::params`]: it is sent from the client's
     /// bound value rather than taken as an argument.
     pub(crate) bound_headers: Vec<BoundHeader>,
