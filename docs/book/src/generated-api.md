@@ -222,4 +222,7 @@ use.
 The semver surface is the public API of generated output: changes that alter generated
 signatures, type shapes, or variant sets are major; output changes invisible to that API are
 minor; generator-internal fixes are patch. [`spargen diff`](./cli.md#spargen-diff) classifies a
-spec change the same way.
+spec change the same way. Generated enums and unions are exhaustive, an open enum included, and
+model, `…Params` and response-header fields are `pub`, so a spec adding a variant, a field (an
+optional one or an `additionalProperties` map included), an optional parameter or an optional
+response header breaks a consumer's exhaustive `match` or struct literal: `major`.

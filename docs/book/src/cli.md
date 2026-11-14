@@ -243,6 +243,12 @@ setting that only one side's config file changes is classified like a spec chang
 retypes is a type change (`major`), and the `testing` module appearing is `minor`, disappearing
 `major`.
 
+Adding a variant (to a closed or an open enum, a union, or a checked newtype's listed values), a
+struct field (optional, or a typed `additionalProperties` map), an optional parameter, or an
+optional response header is `major`: generated enums and unions are exhaustive and those fields are
+`pub`, so a consumer's exhaustive `match` or struct literal stops compiling. A new operation, type,
+server, server variable or `testing` module is `minor`.
+
 `--format json` prints one object: `changes`, an array of `{ kind, impact, location, detail }`
 sorted most-severe first, plus the top-level `bump`. `kind` is the stable kebab-case change code
 (`operation-added`, `method-renamed`, …) and `impact`/`bump` are the lowercase semver labels
