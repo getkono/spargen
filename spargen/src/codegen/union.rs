@@ -453,7 +453,9 @@ pub(super) fn emit_union(
                     VariantDispatch::Disjoint(DisjointFeature::RequiredKey(key)) => {
                         quote! { value.get(#key).is_some() }
                     }
-                    VariantDispatch::Discriminated { .. } | VariantDispatch::Trial { .. } => {
+                    VariantDispatch::Discriminated { .. }
+                    | VariantDispatch::Trial { .. }
+                    | VariantDispatch::Deferred { .. } => {
                         unreachable!("{MISMATCHED_DISPATCH}")
                     }
                 };
@@ -657,7 +659,9 @@ fn discriminated_dispatch(variant: &UnionVariant) -> Discriminated<'_> {
             category: *category,
             untagged: *untagged,
         },
-        VariantDispatch::Disjoint(_) | VariantDispatch::Trial { .. } => {
+        VariantDispatch::Disjoint(_)
+        | VariantDispatch::Trial { .. }
+        | VariantDispatch::Deferred { .. } => {
             unreachable!("{MISMATCHED_DISPATCH}")
         }
     }
@@ -772,15 +776,17 @@ fn json_category_predicate(category: &JsonCategory) -> TokenStream {
 fn trial_dispatch(variant: &UnionVariant) -> (u32, Option<JsonCategory>) {
     match variant.dispatch {
         VariantDispatch::Trial { priority, category } => (priority, category),
-        VariantDispatch::Discriminated { .. } | VariantDispatch::Disjoint(_) => {
+        VariantDispatch::Discriminated { .. }
+        | VariantDispatch::Disjoint(_)
+        | VariantDispatch::Deferred { .. } => {
             unreachable!("{MISMATCHED_DISPATCH}")
         }
     }
 }
 
-/// The JSON category of an untagged variant of a [`UnionStrategy::Discriminated`] union, whose
-/// type `ty` is an object struct wherever lowering gives a variant no tag; `None`, trying it on
-/// every payload, for any other type, a reservation included.
+/// The JSON category of an untagged variant of a [`UnionStrategy::Discriminated`] union: `Object`
+/// for an object struct; `None`, trying it on every payload, for any other type (a variant that
+/// cannot carry the tag property and shares its JSON category, say), a reservation included.
 fn untagged_category(types: &TypeGraph, ty: Ty) -> Option<JsonCategory> {
     let definition = types.get(ty.id)?;
     matches!(definition.kind, TypeKind::Struct(_)).then_some(JsonCategory::Object)

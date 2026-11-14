@@ -923,8 +923,12 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
             },
             Case {
                 tag: "untagged-discriminated-member",
-                stated_as: "a `discriminator` beside a union member that is no schema \
-                                component",
+                stated_as: "a `discriminator` beside a union member that is no schema component",
+                reserved_wording: None,
+            },
+            Case {
+                tag: "uncarried-mapping-entry",
+                stated_as: "naming a union member that cannot carry the discriminator property",
                 reserved_wording: None,
             },
             Case {

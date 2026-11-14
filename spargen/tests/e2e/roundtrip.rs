@@ -313,6 +313,43 @@ fn a_default_mapping_payload_an_untagged_variant_claims_does_not_serialize() {
     assert!(matches!(back, types::Ride::RideOther(_)), "{back:?}");
 }
 
+// `Chain` is lowered while `Node`, which holds one, is still being lowered: its dispatch is decided
+// once `Node` is, so a tagged payload both members' schemas accept decodes as the member its tag
+// names, at every depth (#1400). Trial-matched, `{"kind": "Leaf"}` matched both and failed.
+#[test]
+fn a_recursive_discriminated_union_decodes_by_its_tag() {
+    let leaf: types::Chain = serde_json::from_value(serde_json::json!({ "kind": "Leaf" })).unwrap();
+    assert!(matches!(leaf, types::Chain::Leaf(_)), "{leaf:?}");
+    let payload = serde_json::json!({ "kind": "Node", "next": { "kind": "Leaf" } });
+    let node: types::Chain = serde_json::from_value(payload.clone()).unwrap();
+    let types::Chain::Node(node) = node else {
+        panic!("{node:?}");
+    };
+    // Whether the cycle is boxed at `next` is the cycle's business; `Debug` reads through a box.
+    let next = format!("{:?}", node.next);
+    assert!(next.starts_with("Some(Leaf("), "{node:?}");
+    let written = serde_json::to_value(types::Chain::Node(node)).unwrap();
+    assert_eq!(written, payload);
+}
+
+// A union member is selected by the outer tag and decoded by its own dispatch; two string members,
+// which no category tells apart, are tried by their own schemas on a payload with no tag (#1400).
+#[test]
+fn a_discriminated_union_dispatches_to_a_union_member_and_tries_its_string_members() {
+    let wolf = serde_json::json!({ "kind": "wolf", "pack": 3 });
+    let creature: types::Creature = serde_json::from_value(wolf.clone()).unwrap();
+    let debug = format!("{creature:?}");
+    assert!(debug.starts_with("Canid(Wolf("), "{debug}");
+    assert_eq!(serde_json::to_value(&creature).unwrap(), wolf);
+    let bird: types::Creature = serde_json::from_value(serde_json::json!({ "kind": "Bird" })).unwrap();
+    assert!(matches!(bird, types::Creature::Bird(_)), "{bird:?}");
+    let phase: types::Creature = serde_json::from_value(serde_json::json!("queued")).unwrap();
+    assert!(matches!(phase, types::Creature::Phase(_)), "{phase:?}");
+    let text: types::Creature = serde_json::from_value(serde_json::json!("hello")).unwrap();
+    assert!(matches!(text, types::Creature::CreatureVariant3(_)), "{text:?}");
+    assert_eq!(serde_json::to_value(&text).unwrap(), serde_json::json!("hello"));
+}
+
 // A unit string-enum variant refuses the one-key object serde_json would otherwise read as that
 // variant, so the `anyOf` takes only strings.
 #[test]
@@ -331,7 +368,9 @@ fn a_trial_string_variant_refuses_a_one_key_object() {
 /// category must not satisfy: two open objects and an array as a `oneOf` (`Mixed`) and an `anyOf`
 /// (`MixedAny`), a string enum beside a string (`Status`), and a discriminated union with an
 /// untagged object member (`Vehicle`), and one whose `defaultMapping` member overlaps an untagged
-/// one (`Ride`). One operation references `User` so every type is emitted.
+/// one (`Ride`); a discriminated union lowered while its member `Node` is still being lowered
+/// (`Chain`), and one with a union member and two string members (`Creature`). One operation
+/// references `User` so every type is emitted.
 const ROUNDTRIP_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: Roundtrip, version: 1.0.0 }
@@ -365,6 +404,57 @@ components:
         status: { $ref: "#/components/schemas/Status" }
         vehicle: { $ref: "#/components/schemas/Vehicle" }
         ride: { $ref: "#/components/schemas/Ride" }
+        node: { $ref: "#/components/schemas/Node" }
+        creature: { $ref: "#/components/schemas/Creature" }
+    Bird:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+    Wolf:
+      type: object
+      required: [kind, pack]
+      properties:
+        kind: { type: string }
+        pack: { type: integer }
+    Fox:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+    Canid:
+      oneOf:
+        - $ref: "#/components/schemas/Wolf"
+        - $ref: "#/components/schemas/Fox"
+      discriminator:
+        propertyName: kind
+        mapping: { wolf: Wolf, fox: Fox }
+    Creature:
+      anyOf:
+        - $ref: "#/components/schemas/Bird"
+        - $ref: "#/components/schemas/Canid"
+        - $ref: "#/components/schemas/Phase"
+        - type: string
+      discriminator:
+        propertyName: kind
+        mapping: { wolf: Canid, fox: Canid }
+    Node:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+        next: { $ref: "#/components/schemas/Chain" }
+    Leaf:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+    Chain:
+      oneOf:
+        - $ref: "#/components/schemas/Node"
+        - $ref: "#/components/schemas/Leaf"
+      discriminator:
+        propertyName: kind
     Labelled:
       type: object
       properties:
