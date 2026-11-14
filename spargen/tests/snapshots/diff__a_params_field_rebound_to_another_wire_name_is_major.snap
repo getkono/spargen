@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|identifier-rebound|GET /pets params field `page_size`|`page_size` now binds `page-size` (query) (was `pageSize` (query))
+minor|optional-param-added|GET /pets param `page-size` (query)|optional parameter added: `i64`
+bump=major

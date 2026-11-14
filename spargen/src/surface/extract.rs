@@ -24,6 +24,16 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
         let url_accessor_name = operation_names.url_accessor.as_str().to_owned();
 
         let mut params = BTreeMap::new();
+        let param_fields = operation_names
+            .params(operation)
+            .filter(|(param, _)| !param.is_positional())
+            .map(|(param, ident)| {
+                (
+                    ident.as_str().to_owned(),
+                    (param.name.clone(), param.location.as_openapi_in()),
+                )
+            })
+            .collect();
         // The accessor takes the method's path arguments, in URL template order, then the bundle
         // when one of its parameters shapes the URL. Codegen's `OperationSig::url_args` reads the
         // same `ir` predicates and order.
@@ -122,6 +132,7 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                 url_args,
                 positional_args,
                 params,
+                param_fields,
                 request_body,
                 file_name_setters,
                 success: success_sig(&operation.responses.success(), api, names, settings),
@@ -145,6 +156,7 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
         let surface = match api.types.emission(id, def) {
             Emission::Struct(object) => {
                 let mut fields = BTreeMap::new();
+                let mut bindings = BTreeMap::new();
                 for field in &object.fields {
                     let field_name = names
                         .fields
@@ -152,6 +164,7 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                         .expect("field name allocated")
                         .as_str()
                         .to_owned();
+                    bindings.insert(field_name.clone(), field.name.wire.clone());
                     // An optional nullable field is a `Nullable<T>`, where a required one is the
                     // `Option<T>` `canon_ty` renders. A member is `required` here exactly when
                     // `new` takes it, so a property gaining `readOnly` leaves `new` as a required
@@ -190,7 +203,7 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                     }),
                     AdditionalProps::Allow | AdditionalProps::Deny => None,
                 };
-                TypeSurface::Struct(fields, overflow)
+                TypeSurface::Struct(fields, overflow, bindings)
             }
             // A string enum generates a real `pub enum` whose variants are surface; an integer or
             // boolean set a checked newtype whose scalar and associated `const`s are. A boolean set
@@ -205,7 +218,21 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                     .open_variants
                     .get(&id)
                     .map(|ident| ident.as_str().to_owned());
-                TypeSurface::Enum(variants, open)
+                let bindings = enumeration
+                    .variants
+                    .iter()
+                    .map(|variant| {
+                        let value = variant.wire();
+                        let ident = names
+                            .variants
+                            .get(&(id, value.clone()))
+                            .expect("variant name allocated")
+                            .as_str()
+                            .to_owned();
+                        (ident, value)
+                    })
+                    .collect();
+                TypeSurface::Enum(variants, open, bindings)
             }
             Emission::Union(union) => {
                 let mut variants = BTreeMap::new();

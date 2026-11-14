@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|identifier-rebound|GET /pets params field `id`|`id` now binds `id` (header) (was `id` (cookie))
+minor|optional-param-added|GET /pets param `id` (header)|optional parameter added: `i64`
+bump=major

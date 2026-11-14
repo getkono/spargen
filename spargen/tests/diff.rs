@@ -665,6 +665,8 @@ mod labels;
 mod narrowing;
 #[path = "diff/operations.rs"]
 mod operations;
+#[path = "diff/rebinding.rs"]
+mod rebinding;
 #[path = "diff/servers.rs"]
 mod servers;
 #[path = "diff/settings.rs"]

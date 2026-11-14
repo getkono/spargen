@@ -7,6 +7,8 @@ use crate::ir::{
 };
 use indexmap::IndexMap;
 
+mod members;
+
 fn parameter(name: &str, location: ParamLoc, required: bool) -> Parameter {
     Parameter {
         name: name.to_owned(),
