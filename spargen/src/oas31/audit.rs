@@ -373,6 +373,9 @@ impl Audit<'_, '_> {
             self.pending
                 .push((reference.clone(), schema.provenance.clone()));
         }
+        if !self.document.is_oas32 {
+            reject_oas32_schema_fields(schema, self.diags);
+        }
         let diags = &mut *self.diags;
         if !schema.validation.constrains_nothing() {
             // W001 case: validation-keyword
@@ -555,6 +558,38 @@ impl Audit<'_, '_> {
                 self.resolve_unlowered(&target);
             }
         }
+    }
+}
+
+/// Reject, as `E011` at each field, the Schema Object fields only OpenAPI 3.2 defines, in a
+/// document declaring 3.1: a Discriminator Object's `defaultMapping` and an XML Object's
+/// `nodeType`. Either changes what is generated (a fallback variant, the XML node an element is
+/// written as), so a 3.1 document carrying one is held to the version it declares, as its Path Item
+/// `query` and `additionalOperations` fields are by the 3.1 document schema, which does not look
+/// inside a Schema Object. The parser does not know the document version, so the gate is here,
+/// where every schema the document reaches is walked once, in whichever file it is written.
+fn reject_oas32_schema_fields(schema: &Schema, diags: &mut Diagnostics) {
+    let fields = [
+        schema
+            .discriminator
+            .as_ref()
+            .and_then(|discriminator| discriminator.default_mapping.as_ref())
+            .map(|target| ("defaultMapping", "Discriminator", &target.provenance)),
+        schema
+            .xml
+            .as_ref()
+            .and_then(|hints| hints.node_type_provenance.as_ref())
+            .map(|at| ("nodeType", "XML", at)),
+    ];
+    for (field, object, at) in fields.into_iter().flatten() {
+        Diagnostic::error(Code::InvalidInput, at.clone())
+            .message(format!(
+                "`{field}` is an OpenAPI 3.2 {object} Object field, and this document declares 3.1"
+            ))
+            .remedy(format!(
+                "declare `openapi: 3.2.0` (or a later 3.2 release), or remove `{field}`"
+            ))
+            .emit(diags);
     }
 }
 

@@ -278,6 +278,44 @@ fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
     let back: oas32_client::types::CacheOutcome = serde_json::from_value(written).unwrap();
     assert_eq!(back, unknown);
 }
+
+// The `defaultMapping` variant holding an unclaimed tag decodes through the untagged variants'
+// trial before the fallback, so a payload the untagged variant's schema accepts would come back as
+// that variant (#1376): it is refused. One no untagged variant accepts, or holding its own tag,
+// decodes back as itself.
+#[test]
+fn a_default_mapping_payload_an_untagged_variant_claims_does_not_serialize() {
+    use oas32_client::types;
+    let claimed = types::Ride::RideOther(Box::new(types::RideOther {
+        kind: Some("bus".to_owned()),
+        label: Some("x".to_owned()),
+        note: None,
+    }));
+    let error = serde_json::to_value(&claimed).expect_err("claimed by the untagged variant");
+    let error = error.to_string();
+    assert!(error.contains("Ride::RideOther"), "{error}");
+    assert!(error.contains("Ride::RideVariant1"), "{error}");
+    for (kind, label) in [(Some("bus"), None), (Some("RideOther"), Some("x"))] {
+        let ride = types::Ride::RideOther(Box::new(types::RideOther {
+            kind: kind.map(str::to_owned),
+            label: label.map(str::to_owned),
+            note: Some("n".to_owned()),
+        }));
+        let written = serde_json::to_value(&ride).expect("unclaimed by any untagged variant");
+        let back: types::Ride = serde_json::from_value(written).expect("decodes back");
+        assert_eq!(back, ride);
+    }
+    // Holding no tag, the variant is written with its own, which routes it back by tag.
+    let untagged = types::Ride::RideOther(Box::new(types::RideOther {
+        kind: None,
+        label: Some("x".to_owned()),
+        note: None,
+    }));
+    let written = serde_json::to_value(&untagged).expect("its own tag is inserted");
+    assert_eq!(written["kind"], "RideOther", "{written}");
+    let back: types::Ride = serde_json::from_value(written).expect("decodes back");
+    assert!(matches!(back, types::Ride::RideOther(_)), "{back:?}");
+}
 "##,
     );
 
