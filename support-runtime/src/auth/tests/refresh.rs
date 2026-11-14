@@ -10,7 +10,7 @@ use crate::{ClientCore, Error, MultipartForm, MultipartPart, RequestBuilder, Req
 
 use super::super::{
     attach_auth, attach_auth_replayable, replay_rejected, token_provider, AuthError, AuthKind,
-    AuthScheme, Credential,
+    AuthScheme, Credential, CredentialKind, SchemeCarrier,
 };
 use super::{get, request_to, BEARER};
 use crate::tests::{core, poll_ready, Reply, SequenceBackend};
@@ -507,8 +507,8 @@ fn a_refreshable_credential_attaches_as_a_provider_does() {
         matches!(
             error,
             Error::RequestConstruction(RequestError::CredentialMismatch {
-                registered: "Refreshable",
-                required: "http basic",
+                registered: CredentialKind::Refreshable,
+                required: SchemeCarrier::HttpBasic,
                 ..
             })
         ),
