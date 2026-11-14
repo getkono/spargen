@@ -134,6 +134,12 @@ same path is the diagnostic's `file`, beside its `span`. When spawned from a bui
 environment it inherits, it also audits the consuming package's `Cargo.toml` (`E023`); elsewhere
 there is no consuming package, and `spargen deps` covers that ground instead.
 
+From Rust, `spargen::check(&spec)` runs the same check in-process, with the same audit from a build
+script. `spargen::check_with(&spec, CargoIntegration::Off)` skips that audit and the
+`cargo:rerun-if-changed` lines, for a build script whose package is not the client's consumer (a
+CI gate crate checking a spec another crate generates from); `CargoIntegration::Required` turns a
+run outside a build script into `E024`, as it does for `generate`.
+
 ## `spargen deps`
 
 Print the exact `[dependencies]` block generated output from this spec needs. Generated output is

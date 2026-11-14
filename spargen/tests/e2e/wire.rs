@@ -1,8 +1,8 @@
 //! Values on the wire: dates, a per-operation server override, an operation's URL accessor against
 //! the request it describes, RFC 6570 multipart parts, CBOR bodies, `contentEncoding: base64`
 //! content, an explicit `null` content parameter, cookie parameters and cookie credentials in one
-//! `Cookie` header, unsigned integers in parameters, headers and bodies, and the mock server's
-//! reading of a chunked request body.
+//! `Cookie` header, cookie values RFC 6265 refuses, unsigned integers in parameters, headers and
+//! bodies, and the mock server's reading of a chunked request body.
 
 use super::*;
 use spargen::DateTimeBackend;
@@ -1380,6 +1380,119 @@ fn every_cookie_rides_in_one_header() {
         .status()
         .unwrap();
     assert!(status.success(), "every cookie must share one header");
+}
+
+/// A cookie value is held to RFC 6265's `cookie-value` before the `Cookie` header is joined
+/// (#1420): a `;` in a `content` cookie would otherwise split it into a second cookie the caller
+/// never declared, and a CTL in a `style: cookie` value is no cookie at all. Either call fails as
+/// `RequestConstruction` before anything is sent, naming the parameter and not its value, while
+/// the values the grammar admits (a quoted JSON string, an integer, the comma the `explode: false`
+/// array row of the `style: cookie` table joins items with) still reach the wire.
+#[test]
+fn a_cookie_value_outside_rfc_6265_is_refused_before_sending() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r##"
+openapi: 3.2.0
+info: { title: Cookie values, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: session
+          in: cookie
+          content:
+            application/json: { schema: { type: string } }
+        - { name: theme, in: cookie, style: cookie, schema: { type: string } }
+        - name: color
+          in: cookie
+          style: cookie
+          explode: false
+          schema: { type: array, items: { type: string } }
+        - { name: count, in: cookie, content: { application/json: { schema: { type: integer } } } }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    let out = temp.path().join("client");
+    let report = generate_fixture_crate(&spec, &out, "cookie_values_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    write_fixture_test(
+        &out,
+        "cookie_values",
+        r##"#![cfg(feature = "blocking")]
+
+mod common;
+
+use common::header;
+use cookie_values_client::ListItemsParams;
+
+/// The call `params` makes against a base no server listens on: a request that reached the
+/// transport would fail there instead, so `RequestConstruction` proves nothing was sent.
+fn refused(params: ListItemsParams) -> String {
+    let client = cookie_values_client::BlockingClient::new("http://127.0.0.1:9").unwrap();
+    let error = client.list_items(params).expect_err("the cookie value is refused");
+    assert!(
+        matches!(error, cookie_values_client::Error::RequestConstruction(_)),
+        "{error:?}"
+    );
+    format!("{error}: {error:?}")
+}
+
+#[test]
+fn a_semicolon_in_a_content_cookie_is_refused() {
+    let rendered = refused(ListItemsParams::default().session("x; admin=1".to_owned()));
+    assert!(rendered.contains("session"), "{rendered}");
+    assert!(!rendered.contains("admin"), "{rendered}");
+}
+
+#[test]
+fn a_ctl_in_a_style_cookie_value_is_refused() {
+    let rendered = refused(ListItemsParams::default().theme("da\u{7f}rk".to_owned()));
+    assert!(rendered.contains("theme"), "{rendered}");
+    assert!(!rendered.contains("da"), "{rendered}");
+}
+
+#[test]
+fn a_space_in_a_style_cookie_value_is_refused() {
+    refused(ListItemsParams::default().theme("dark mode".to_owned()));
+}
+
+#[test]
+fn values_the_cookie_grammar_admits_reach_the_wire() {
+    let (base, server) = common::serve_no_content();
+    let client = cookie_values_client::BlockingClient::new(&base).unwrap();
+    client
+        .list_items(
+            ListItemsParams::default()
+                .session("s3ss".to_owned())
+                .theme("dark".to_owned())
+                .color(vec!["blue".to_owned(), "black".to_owned()])
+                .count(3),
+        )
+        .expect("the call round-trips");
+    let head = server.join().unwrap().head;
+    assert_eq!(
+        header(&head, "cookie"),
+        ["session=\"s3ss\"; theme=dark; color=blue,black; count=3"],
+        "{head}"
+    );
+}
+"##,
+    );
+
+    let status = fixture_cargo(&out)
+        .args(["test", "--features", "blocking", "--test", "cookie_values"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "an invalid cookie value must be refused before sending"
+    );
 }
 
 /// The unsigned formats on the wire (#1261): a `uint64` path parameter, a `uint32` query
