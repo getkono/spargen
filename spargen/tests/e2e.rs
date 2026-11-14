@@ -668,6 +668,8 @@ mod bodyless_responses;
 mod bound_headers;
 #[path = "e2e/carried_docs.rs"]
 mod carried_docs;
+#[path = "e2e/check_with.rs"]
+mod check_with;
 #[path = "e2e/checked_sets.rs"]
 mod checked_sets;
 #[path = "e2e/collisions.rs"]

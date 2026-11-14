@@ -587,6 +587,53 @@ fn cargo_integration_policy_covers_each_environment() {
     }
 }
 
+/// A `check` resolves `Off` and `Required` exactly as a generation does, and `Auto` with the same
+/// directives and manifest but without a generation's `W012`/`W013` (#1430).
+#[test]
+fn check_integration_policy_drops_only_the_degraded_warnings_of_auto() {
+    let manifest = Some(Utf8PathBuf::from("Cargo.toml"));
+    for integration in [
+        CargoIntegration::Auto,
+        CargoIntegration::Required,
+        CargoIntegration::Off,
+    ] {
+        for under_build_script in [true, false] {
+            for manifest in [manifest.clone(), None] {
+                let generation =
+                    resolve_cargo_environment(integration, under_build_script, manifest.clone());
+                let check =
+                    resolve_check_environment(integration, under_build_script, manifest.clone());
+                let case = format!("{integration:?}, {under_build_script}, {manifest:?}");
+                assert_eq!(check.directives, generation.directives, "{case}");
+                assert_eq!(check.manifest, generation.manifest, "{case}");
+                assert_eq!(check.fatal, generation.fatal, "{case}");
+                let expected: Vec<&str> = if integration == CargoIntegration::Auto {
+                    Vec::new()
+                } else {
+                    codes(&generation)
+                };
+                assert_eq!(codes(&check), expected, "{case}");
+            }
+        }
+    }
+    // The table above is not vacuous: `Required` keeps an `E024` and `Auto` drops a warning.
+    assert_eq!(
+        codes(&resolve_check_environment(
+            CargoIntegration::Required,
+            false,
+            None
+        )),
+        ["E024"]
+    );
+    assert!(
+        codes(&resolve_cargo_environment(
+            CargoIntegration::Auto,
+            false,
+            None
+        )) == ["W013"]
+    );
+}
+
 /// Each Cargo-integration message reads as one single-spaced sentence: a lost `\` line
 /// continuation in a wrapped literal leaves its indentation mid-sentence instead.
 #[test]
