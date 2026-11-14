@@ -9,16 +9,24 @@ use super::content::{choose_media, lower_media_type, BodyPosition, ChosenMedia};
 use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// Lower an operation's Responses Object. `head` says the operation is a `HEAD`, every
+    /// response to which carries no body.
     pub(super) fn lower_responses(
         &mut self,
         responses: &crate::oas31::ResponsesObject,
+        head: bool,
     ) -> Responses {
         let mut by_status = Vec::new();
         for (status, response) in &responses.by_status {
             if let Some(status) = parse_status(status) {
+                let bodyless = match status {
+                    _ if head => Some(Bodyless::Head),
+                    StatusSpec::Exact(code @ (204 | 205 | 304)) => Some(Bodyless::Status(code)),
+                    _ => None,
+                };
                 if let Some(response) = self
                     .resolve_response(response)
-                    .map(|r| self.lower_response(&r))
+                    .map(|r| self.lower_response(&r, bodyless))
                 {
                     by_status.push((status, response));
                 }
@@ -28,11 +36,58 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .default
             .as_ref()
             .and_then(|response| self.resolve_response(response))
-            .map(|response| self.lower_response(&response));
+            .map(|response| self.lower_response(&response, head.then_some(Bodyless::Head)));
         Responses { by_status, default }
     }
 
-    fn lower_response(&mut self, response: &ResponseObject) -> Response {
+    /// Lower one response. Where `bodyless` names why the response carries no body by RFC 9110,
+    /// its declared `content` is acknowledged as having no effect (`W011`) and not lowered, so the
+    /// response is read as bodyless, its documented headers still typed. The references in that
+    /// content are still resolved, so one naming nothing is `E004`.
+    fn lower_response(
+        &mut self,
+        response: &ResponseObject,
+        bodyless: Option<Bodyless>,
+    ) -> Response {
+        if let Some(bodyless) = bodyless.filter(|_| !response.content.is_empty()) {
+            let message = match bodyless {
+                Bodyless::Head => "the `content` of a response to a `HEAD` request has no \
+                                   effect: a `HEAD` response carries no body, so this one is \
+                                   read as bodyless"
+                    .to_owned(),
+                Bodyless::Status(code) => format!(
+                    "the `content` of a `{code}` response has no effect: a `{code}` response \
+                     carries no body, so this one is read as bodyless"
+                ),
+            };
+            // W011 case: head-response-content, bodyless-status-content
+            Diagnostic::warning(Code::DeclarationHasNoEffect, response.provenance.clone())
+                .message(message)
+                .emit(self.diags);
+            // The dropped content is not lowered, but a reference in it that names nothing is
+            // still a broken document: each Media Type Object is resolved, and every reference in
+            // its schemas, as a schema lowering never reads is (`E004`).
+            for (media_name, object) in &response.content {
+                let Some(object) = self.resolve_media_object(object, media_name) else {
+                    continue;
+                };
+                for schema in object.schema.iter().chain(&object.item_schema) {
+                    crate::oas31::audit::resolve_dropped_schema(
+                        self.document,
+                        self.resolver,
+                        schema,
+                        self.diags,
+                    );
+                }
+            }
+            return Response {
+                media: None,
+                body: None,
+                stream: None,
+                accept: None,
+                headers: self.lower_response_headers(response),
+            };
+        }
         let body = choose_media(
             &response.content,
             &response.provenance,
@@ -399,6 +454,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             _ => None,
         }
     }
+}
+
+/// Why a response carries no body by RFC 9110, whatever `content` the document declares for it.
+#[derive(Clone, Copy)]
+enum Bodyless {
+    /// Every response to a `HEAD` request (§ 9.3.2).
+    Head,
+    /// A `204` (§ 15.3.5), `205` (§ 15.3.6) or `304` (§ 15.4.5) response.
+    Status(u16),
 }
 
 fn parse_status(status: &str) -> Option<StatusSpec> {

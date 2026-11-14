@@ -1063,3 +1063,168 @@ fn emitted_success_and_error_shapes_agree_with_the_ir_rule() {
         );
     }
 }
+
+/// A response to a `HEAD` request carries no body (RFC 9110 § 9.3.2), so a `HEAD` operation that
+/// reuses its `GET` response's `content` was given a decoder that failed on every call (#1341).
+/// Every response of a `HEAD` operation is read as bodyless — exact, range and `default` alike —
+/// its `content` acknowledged as having no effect and its documented headers still typed.
+// W011 case: head-response-content
+#[test]
+fn w011_the_content_of_a_head_response_has_no_effect() {
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    head:
+      operationId: probePet
+      responses:
+        "200":
+          description: the pet exists
+          headers:
+            X-Total: { required: true, schema: { type: integer } }
+          content:
+            application/json:
+              schema: { type: object, properties: { probeOnly: { type: string } } }
+        "4XX":
+          description: no such pet
+          content:
+            application/json:
+              schema: { type: object, properties: { probeProblem: { type: string } } }
+        default:
+          description: failed
+          content:
+            text/plain: { schema: { type: string } }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::DeclarationHasNoEffect),
+        ["the `content` of a response to a `HEAD` request has no effect: a `HEAD` response \
+             carries no body, so this one is read as bodyless"; 3],
+        "{report:#?}"
+    );
+    // No body schema was lowered, and the success is the unit value beside its typed headers.
+    assert!(!code.contains("probe_only"), "{code}");
+    assert!(!code.contains("probe_problem"), "{code}");
+    assert!(!code.contains("support::decode_success"), "{code}");
+    assert!(code.contains("support::ResponseValue<()>"), "{code}");
+    assert!(code.contains("pub x_total: "), "{code}");
+}
+
+/// A `204`, `205` or `304` response carries no body (RFC 9110 §§ 15.3.5, 15.3.6, 15.4.5), so one
+/// that declares `content` is read as bodyless on whichever side its status falls, with the
+/// `content` acknowledged as having no effect; a range or `default` entry is not one of them.
+// W011 case: bodyless-status-content
+#[test]
+fn w011_the_content_of_a_bodyless_status_has_no_effect() {
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        "200":
+          description: the items
+          content:
+            application/json: { schema: { type: array, items: { type: string } } }
+        "204":
+          description: no items
+          headers:
+            X-Reason: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { type: object, properties: { emptyOnly: { type: string } } }
+        "304":
+          description: unchanged
+          content:
+            application/json:
+              schema: { type: object, properties: { unchangedOnly: { type: string } } }
+    put:
+      operationId: resetItems
+      responses:
+        "205":
+          description: reset
+          content:
+            text/plain: { schema: { type: string } }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let warned = |status: u16| {
+        format!(
+            "the `content` of a `{status}` response has no effect: a `{status}` response \
+             carries no body, so this one is read as bodyless"
+        )
+    };
+    assert_eq!(
+        messages_for(&report, Code::DeclarationHasNoEffect),
+        [warned(204), warned(304), warned(205)],
+        "{report:#?}"
+    );
+    assert!(!code.contains("empty_only"), "{code}");
+    assert!(!code.contains("unchanged_only"), "{code}");
+    // `200` keeps its body, beside a unit `204` variant whose documented header is still typed.
+    assert!(code.contains("pub x_reason: "), "{code}");
+    assert!(code.contains("support::ResponseValue<()>"), "{code}");
+    // The single bodyless `304` leaves the error side with no body to decode.
+    assert!(
+        code.contains("pub type ListItemsError = std::convert::Infallible;")
+            || !code.contains("pub struct ListItemsError("),
+        "{code}"
+    );
+}
+
+/// The `content` a bodyless response drops is still resolved: a reference there naming nothing is
+/// a broken document wherever it sits, so it is `E004` under `generate` and `check` alike, whether
+/// it is the media's `schema` itself, a reference nested in an inline schema, or a Media Type
+/// Object `$ref`.
+#[test]
+fn e004_a_bodyless_response_still_resolves_its_dropped_content() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    head:
+      operationId: probePets
+      responses:
+        "200":
+          description: the pets exist
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/MissingHead" } }
+    get:
+      operationId: listPets
+      responses:
+        "200":
+          description: the pets
+          content:
+            application/json: { schema: { type: array, items: { type: string } } }
+        "204":
+          description: no pets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { nested: { $ref: "#/components/schemas/MissingNested" } }
+        "304":
+          description: unchanged
+          content:
+            application/json: { $ref: "#/components/mediaTypes/MissingMedia" }
+"##;
+    for report in [&generate(spec), &check(spec)] {
+        let pointers = e004_pointers(report, "bodyless content");
+        for expected in [
+            "/paths/~1pets/head/responses/200/content/application~1json/schema",
+            "/paths/~1pets/get/responses/204/content/application~1json/schema/properties/nested",
+            "/paths/~1pets/get/responses/304/content/application~1json",
+        ] {
+            assert!(pointers.contains(&expected), "{expected}\n{report:#?}");
+        }
+    }
+}

@@ -662,6 +662,8 @@ mod basic_crate;
 mod basic_defaults;
 #[path = "e2e/basic_errors.rs"]
 mod basic_errors;
+#[path = "e2e/bodyless_responses.rs"]
+mod bodyless_responses;
 #[path = "e2e/bound_headers.rs"]
 mod bound_headers;
 #[path = "e2e/carried_docs.rs"]

@@ -879,6 +879,16 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                 reserved_wording: Some("typed accessor"),
             },
             Case {
+                tag: "head-response-content",
+                stated_as: "`content` on any response to a `HEAD` request",
+                reserved_wording: None,
+            },
+            Case {
+                tag: "bodyless-status-content",
+                stated_as: "on a `204`, `205` or `304` response, none of which carries a body",
+                reserved_wording: None,
+            },
+            Case {
                 tag: "reference-docs",
                 stated_as: "a `summary` or `description` on a Reference Object",
                 reserved_wording: None,
