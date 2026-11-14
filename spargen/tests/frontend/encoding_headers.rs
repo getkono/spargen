@@ -514,6 +514,7 @@ paths:
 /// property, as OpenAPI 3.2 § Encoding Object requires. A pinned `Content-Disposition` was emitted
 /// as a second one beside it, which the runtime refuses when the request is built, so every call
 /// failed (#1384). It is acknowledged as having no effect and dropped, in any letter case.
+// W011 case: encoding-header-content-disposition
 #[test]
 fn w011_an_encoding_header_pinning_content_disposition_has_no_effect() {
     let spec = r##"

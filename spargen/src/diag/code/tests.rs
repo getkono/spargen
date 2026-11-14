@@ -854,6 +854,11 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                 reserved_wording: None,
             },
             Case {
+                tag: "encoding-header-content-disposition",
+                stated_as: "a `multipart` `encoding.headers` entry pinning `Content-Disposition`",
+                reserved_wording: None,
+            },
+            Case {
                 tag: "allow-empty-value",
                 stated_as: "`allowEmptyValue`, which is deprecated",
                 reserved_wording: None,
