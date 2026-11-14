@@ -709,7 +709,9 @@ fn each_url_accessor_names_the_url_its_operation_sends_to() {
     // The async client's accessor is the one the blocking client forwards to.
     assert_eq!(client.inner().stream_file_url("a b/c").unwrap(), stream);
 
-    client.stream_file("a b/c", "trace").unwrap();
+    client
+        .stream_file("a b/c", urls_client::StreamFileParams::new("trace"))
+        .unwrap();
     // `login` documents only `302`, so the server's `204` is an undocumented status: the request
     // line is what is compared, not the outcome.
     let _ = client.login(urls_client::LoginParams::default().redirect("/".to_owned()));
@@ -736,9 +738,11 @@ fn a_url_accessor_leaves_off_the_query_api_key_its_request_sends() {
         .unwrap()
         .with_key(urls_client::SecretString::from("s3cret"));
 
-    let url = client.search_url("a b").unwrap();
+    let url = client
+        .search_url(urls_client::SearchParams::new("a b"))
+        .unwrap();
     assert_eq!(url.as_str(), format!("{base}/v1/search?q=a%20b"));
-    client.search("a b").unwrap();
+    client.search(urls_client::SearchParams::new("a b")).unwrap();
     let seen = server.join().unwrap();
     assert_eq!(seen, vec!["GET /api/v1/search?q=a%20b&api_key=s3cret HTTP/1.1".to_owned()]);
 }
@@ -1323,9 +1327,9 @@ fn unsigned_values_are_decimal_on_the_wire() {
         br#"{"count":18446744073709551615}"#,
     ));
     let client = unsigned_client::BlockingClient::new(&base).unwrap();
-    let params = unsigned_client::GetCounterParams::default().limit(u32::MAX);
+    let params = unsigned_client::GetCounterParams::new(u16::MAX).limit(u32::MAX);
     let response = client
-        .get_counter(u64::MAX, u16::MAX, Some(params))
+        .get_counter(u64::MAX, params)
         .expect("the call round-trips");
 
     let request = server.join().unwrap();

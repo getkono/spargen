@@ -260,19 +260,15 @@ fn typed_parameters_follow_openapi_wire_rules() {
 
     let workflow_id: basic_client::types::WorkflowId =
         serde_json::from_str(r#""build.yml""#).unwrap();
-    let params = basic_client::SerializeParamsParams::default()
-        .labels(vec!["bug".to_owned(), "api".to_owned()])
-        .compact(vec!["one".to_owned(), "two".to_owned()])
-        .session(vec!["a".to_owned(), "b".to_owned()]);
+    let params = basic_client::SerializeParamsParams::new(
+        workflow_id,
+        vec!["fast".to_owned(), "safe".to_owned()],
+    )
+    .labels(vec!["bug".to_owned(), "api".to_owned()])
+    .compact(vec!["one".to_owned(), "two".to_owned()])
+    .session(vec!["a".to_owned(), "b".to_owned()]);
     let client = basic_client::BlockingClient::new(&base).unwrap();
-    client
-        .serialize_params(
-            vec![1, 2],
-            workflow_id,
-            vec!["fast".to_owned(), "safe".to_owned()],
-            Some(params),
-        )
-        .unwrap();
+    client.serialize_params(vec![1, 2], params).unwrap();
 
     let request = server.join().unwrap().text();
     let request_line = request.lines().next().unwrap();
@@ -364,8 +360,7 @@ fn content_typed_path_and_header_parameters_reach_the_wire() {
         .serialize_content_params(
             "x/../../admin".to_owned(),
             filter(),
-            "x/../../admin".to_owned(),
-            filter(),
+            basic_client::SerializeContentParamsParams::new("x/../../admin", filter()),
         )
         .unwrap();
 
@@ -644,7 +639,7 @@ fn required_path_query_parameter_is_not_shadowed_by_codegen_local() {
 
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .read_file("/tmp/example.txt".to_owned())
+        .read_file(basic_client::ReadFileParams::new("/tmp/example.txt"))
         .expect("read_file sends the caller-provided path query value");
 
     let request = server.join().unwrap().text();

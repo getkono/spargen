@@ -457,7 +457,8 @@ fn parameters_whose_names_escape_alike_get_distinct_identifiers() {
         "colliding parameter names must still generate compiling, lint-clean code"
     );
 
-    // Positional arguments follow the listing order: the query `id` first, then the path `id`.
+    // The path `id` is the method's positional argument; the query `id` is `GetItemParams::new`'s,
+    // a field of its own scope, so both keep the bare spelling.
     write_fixture_test(
         &out,
         "collide",
@@ -472,18 +473,16 @@ fn each_colliding_parameter_reaches_its_own_location() {
     let client = params_collide::BlockingClient::new(&base).unwrap();
     client
         .get_item(
-            8,
             7,
-            params_collide::GetItemParams::default()
+            params_collide::GetItemParams::new(8)
                 .page_size(10)
                 .HEADER_SETTER(20),
         )
         .expect("get_item round-trips");
     client
         .search(
-            "b",
             "a",
-            params_collide::SearchParams::default().params("c".to_owned()),
+            params_collide::SearchParams::new("b").params("c".to_owned()),
         )
         .expect("search round-trips");
 

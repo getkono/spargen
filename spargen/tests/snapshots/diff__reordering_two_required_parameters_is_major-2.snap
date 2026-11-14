@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|positional-args-reordered|GET /pets|positional arguments [`x-org` (header), `x-project` (header)] -> [`x-project` (header), `x-org` (header)]
+bump=major

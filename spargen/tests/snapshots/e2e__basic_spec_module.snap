@@ -12083,8 +12083,46 @@ pub mod ops {
     clippy::pedantic,
     clippy::nursery
 )]
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadFileParams {
+    #[serde(rename = "path")]
+    pub path: types::Path,
+}
+#[allow(
+    dead_code,
+    deprecated,
+    clippy::wrong_self_convention,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
+impl ReadFileParams {
+    ///The parameters with every required one given, in declaration order (`path`), and every optional one unset.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(path: impl Into<types::Path>) -> Self {
+        Self { path: path.into() }
+    }
+}
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct BindingCollisionsParams {
+    #[serde(rename = "query")]
+    pub query: types::Query,
+    #[serde(rename = "url")]
+    pub url: types::Url,
+    #[serde(rename = "request")]
+    pub request: types::Request,
+    #[serde(rename = "cookies")]
+    pub cookies: types::Cookies,
     #[serde(rename = "optional", skip_serializing_if = "Option::is_none")]
     pub optional: Option<types::Optional>,
 }
@@ -12098,6 +12136,23 @@ pub struct BindingCollisionsParams {
     clippy::nursery
 )]
 impl BindingCollisionsParams {
+    ///The parameters with every required one given, in declaration order (`query`, `url`, `request`, `cookies`), and every optional one unset.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        query: impl Into<types::Query>,
+        url: impl Into<types::Url>,
+        request: impl Into<types::Request>,
+        cookies: impl Into<types::Cookies>,
+    ) -> Self {
+        Self {
+            query: query.into(),
+            url: url.into(),
+            request: request.into(),
+            cookies: cookies.into(),
+            optional: None,
+        }
+    }
     ///Set the `optional` parameter.
     #[must_use]
     pub fn optional(mut self, value: types::Optional) -> Self {
@@ -12113,8 +12168,12 @@ impl BindingCollisionsParams {
     clippy::pedantic,
     clippy::nursery
 )]
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SignatureBindingCollisionsParams {
+    #[serde(rename = "body")]
+    pub body: types::Body,
+    #[serde(rename = "params")]
+    pub params: types::Params,
     #[serde(rename = "optional", skip_serializing_if = "Option::is_none")]
     pub optional: Option<types::Optional5db2f3f3>,
 }
@@ -12128,6 +12187,16 @@ pub struct SignatureBindingCollisionsParams {
     clippy::nursery
 )]
 impl SignatureBindingCollisionsParams {
+    ///The parameters with every required one given, in declaration order (`body`, `params`), and every optional one unset.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(body: impl Into<types::Body>, params: impl Into<types::Params>) -> Self {
+        Self {
+            body: body.into(),
+            params: params.into(),
+            optional: None,
+        }
+    }
     ///Set the `optional` parameter.
     #[must_use]
     pub fn optional(mut self, value: types::Optional5db2f3f3) -> Self {
@@ -12143,8 +12212,12 @@ impl SignatureBindingCollisionsParams {
     clippy::pedantic,
     clippy::nursery
 )]
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SerializeParamsParams {
+    #[serde(rename = "workflow_id")]
+    pub workflow_id: types::WorkflowId,
+    #[serde(rename = "X-Flags")]
+    pub x_flags: types::XFlags,
     #[serde(rename = "labels", skip_serializing_if = "Option::is_none")]
     pub labels: Option<types::Labels>,
     #[serde(rename = "compact", skip_serializing_if = "Option::is_none")]
@@ -12162,6 +12235,18 @@ pub struct SerializeParamsParams {
     clippy::nursery
 )]
 impl SerializeParamsParams {
+    ///The parameters with every required one given, in declaration order (`workflow_id`, `X-Flags`), and every optional one unset.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(workflow_id: types::WorkflowId, x_flags: types::XFlags) -> Self {
+        Self {
+            workflow_id,
+            x_flags,
+            labels: None,
+            compact: None,
+            session: None,
+        }
+    }
     ///Set the `labels` parameter.
     #[must_use]
     pub fn labels(mut self, value: types::Labels) -> Self {
@@ -12340,6 +12425,41 @@ impl SerializeStylesParams {
     pub fn reserved(mut self, value: types::Reserved) -> Self {
         self.reserved = Some(value);
         self
+    }
+}
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SerializeContentParamsParams {
+    #[serde(rename = "X-Text")]
+    pub x_text: types::XText,
+    #[serde(rename = "X-Json")]
+    pub x_json: types::DeepFilter,
+}
+#[allow(
+    dead_code,
+    deprecated,
+    clippy::wrong_self_convention,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
+impl SerializeContentParamsParams {
+    ///The parameters with every required one given, in declaration order (`X-Text`, `X-Json`), and every optional one unset.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(x_text: impl Into<types::XText>, x_json: types::DeepFilter) -> Self {
+        Self {
+            x_text: x_text.into(),
+            x_json,
+        }
     }
 }
 #[allow(
@@ -15007,25 +15127,24 @@ impl Client {
     #[inline]
     async fn prepare_read_file(
         &self,
-        path: impl Into<types::Path>,
+        params: ReadFileParams,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
-        let path: types::Path = path.into();
-        let mut path_3c31c5d6 = "/files".to_owned();
+        let mut path = "/files".to_owned();
         let mut query: Vec<String> = Vec::new();
         query
             .extend(
                 support::serialize_form(
                         "path",
-                        &path,
+                        &params.path,
                         true,
                         support::PercentEncoding::Form,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        let url = support::build_url_on(&self.core, None, &path_3c31c5d6, &query)
+        let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
         let replay: Option<support::Replay> = None;
@@ -15038,10 +15157,10 @@ impl Client {
     #[inline]
     pub async fn read_file(
         &self,
-        path: impl Into<types::Path>,
+        params: ReadFileParams,
     ) -> Result<support::ResponseValue<()>, support::Error<ReadFileError>> {
         let (request, replay) = self
-            .prepare_read_file(path)
+            .prepare_read_file(params)
             .await
             .map_err(support::Error::widen)?;
         let response = support::execute(&self.core, request, replay, false)
@@ -15053,12 +15172,12 @@ impl Client {
     #[inline]
     pub async fn read_file_request(
         &self,
-        path: impl Into<types::Path>,
+        params: ReadFileParams,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
     > {
-        self.prepare_read_file(path).await.map(|(request, _)| request)
+        self.prepare_read_file(params).await.map(|(request, _)| request)
     }
     ///Decode a response to the request `read_file` sends (`ops::READ_FILE`), obtained however the caller sent it, exactly as `read_file` decodes its own: the same status dispatch, typed error, and body limits from this client's configuration. `read_file` itself sends its request builder's request through the client's backend, replays it once where a refreshable credential was rejected, and decodes the response with this.
     #[inline]
@@ -15079,22 +15198,21 @@ impl Client {
     #[inline]
     pub fn read_file_url(
         &self,
-        path: impl Into<types::Path>,
+        params: ReadFileParams,
     ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
-        let path: types::Path = path.into();
-        let mut path_3c31c5d6 = "/files".to_owned();
+        let mut path = "/files".to_owned();
         let mut query: Vec<String> = Vec::new();
         query
             .extend(
                 support::serialize_form(
                         "path",
-                        &path,
+                        &params.path,
                         true,
                         support::PercentEncoding::Form,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        support::build_url_on(&self.core, None, &path_3c31c5d6, &query)
+        support::build_url_on(&self.core, None, &path, &query)
     }
     /// The request the operation method sends, credentials attached and the client's
     /// `RequestOptions` and the operation's `ops::Operation` on it, and the replay a rejected
@@ -15102,45 +15220,35 @@ impl Client {
     #[inline]
     async fn prepare_binding_collisions(
         &self,
-        query: impl Into<types::Query>,
-        url: impl Into<types::Url>,
-        request: impl Into<types::Request>,
-        cookies: impl Into<types::Cookies>,
-        params: impl Into<Option<BindingCollisionsParams>>,
+        params: BindingCollisionsParams,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
-        let query: types::Query = query.into();
-        let url: types::Url = url.into();
-        let request: types::Request = request.into();
-        let cookies: types::Cookies = cookies.into();
-        let params: Option<BindingCollisionsParams> = params.into();
         let mut path = "/binding-collisions".to_owned();
-        let mut query_fe9665f8: Vec<String> = Vec::new();
-        query_fe9665f8
+        let mut query: Vec<String> = Vec::new();
+        query
             .extend(
                 support::serialize_form(
                         "query",
-                        &query,
+                        &params.query,
                         true,
                         support::PercentEncoding::Form,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        query_fe9665f8
+        query
             .extend(
                 support::serialize_form(
                         "url",
-                        &url,
+                        &params.url,
                         true,
                         support::PercentEncoding::Form,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        if let Some(value) = params.as_ref().and_then(|params| params.optional.as_ref())
-        {
-            query_fe9665f8
+        if let Some(value) = params.optional.as_ref() {
+            query
                 .extend(
                     support::serialize_form(
                             "optional",
@@ -15151,63 +15259,50 @@ impl Client {
                         .map_err(support::Error::request_construction)?,
                 );
         }
-        let url_fe9665f8 = support::build_url_on(
-                &self.core,
-                None,
-                &path,
-                &query_fe9665f8,
-            )
+        let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
-        let mut request_fe9665f8 = support::RequestBuilder::new(
-            reqwest::Method::GET,
-            url_fe9665f8,
-        );
-        request_fe9665f8 = request_fe9665f8
+        let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request
             .header(
                 "request",
                 support::serialize_simple(
-                        &request,
+                        &params.request,
                         false,
                         support::PercentEncoding::Passthrough,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        let mut cookies_fe9665f8: Vec<String> = Vec::new();
-        cookies_fe9665f8
+        let mut cookies: Vec<String> = Vec::new();
+        cookies
             .extend(
                 support::serialize_form(
                         "cookies",
-                        &cookies,
+                        &params.cookies,
                         true,
                         support::PercentEncoding::Form,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        if !cookies_fe9665f8.is_empty() {
-            request_fe9665f8 = request_fe9665f8
-                .header(reqwest::header::COOKIE, cookies_fe9665f8.join("; "));
+        if !cookies.is_empty() {
+            request = request.header(reqwest::header::COOKIE, cookies.join("; "));
         }
         let replay: Option<support::Replay> = None;
-        let request_fe9665f8 = request_fe9665f8.build()?;
-        let mut request_fe9665f8 = support::prepare(&self.core, request_fe9665f8, false);
-        request_fe9665f8.extensions_mut().insert(ops::BINDING_COLLISIONS);
-        Ok((request_fe9665f8, replay))
+        let request = request.build()?;
+        let mut request = support::prepare(&self.core, request, false);
+        request.extensions_mut().insert(ops::BINDING_COLLISIONS);
+        Ok((request, replay))
     }
     ///Response `204`: No Content
     #[inline]
     pub async fn binding_collisions(
         &self,
-        query: impl Into<types::Query>,
-        url: impl Into<types::Url>,
-        request: impl Into<types::Request>,
-        cookies: impl Into<types::Cookies>,
-        params: impl Into<Option<BindingCollisionsParams>>,
+        params: BindingCollisionsParams,
     ) -> Result<support::ResponseValue<()>, support::Error<BindingCollisionsError>> {
-        let (request_fe9665f8, replay) = self
-            .prepare_binding_collisions(query, url, request, cookies, params)
+        let (request, replay) = self
+            .prepare_binding_collisions(params)
             .await
             .map_err(support::Error::widen)?;
-        let response = support::execute(&self.core, request_fe9665f8, replay, false)
+        let response = support::execute(&self.core, request, replay, false)
             .await
             .map_err(support::Error::widen)?;
         self.decode_binding_collisions(response).await
@@ -15216,18 +15311,12 @@ impl Client {
     #[inline]
     pub async fn binding_collisions_request(
         &self,
-        query: impl Into<types::Query>,
-        url: impl Into<types::Url>,
-        request: impl Into<types::Request>,
-        cookies: impl Into<types::Cookies>,
-        params: impl Into<Option<BindingCollisionsParams>>,
+        params: BindingCollisionsParams,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
     > {
-        self.prepare_binding_collisions(query, url, request, cookies, params)
-            .await
-            .map(|(request_fe9665f8, _)| request_fe9665f8)
+        self.prepare_binding_collisions(params).await.map(|(request, _)| request)
     }
     ///Decode a response to the request `binding_collisions` sends (`ops::BINDING_COLLISIONS`), obtained however the caller sent it, exactly as `binding_collisions` decodes its own: the same status dispatch, typed error, and body limits from this client's configuration. `binding_collisions` itself sends its request builder's request through the client's backend, replays it once where a refreshable credential was rejected, and decodes the response with this.
     #[inline]
@@ -15253,38 +15342,32 @@ impl Client {
     #[inline]
     pub fn binding_collisions_url(
         &self,
-        query: impl Into<types::Query>,
-        url: impl Into<types::Url>,
-        params: impl Into<Option<BindingCollisionsParams>>,
+        params: BindingCollisionsParams,
     ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
-        let query: types::Query = query.into();
-        let url: types::Url = url.into();
-        let params: Option<BindingCollisionsParams> = params.into();
         let mut path = "/binding-collisions".to_owned();
-        let mut query_fe9665f8: Vec<String> = Vec::new();
-        query_fe9665f8
+        let mut query: Vec<String> = Vec::new();
+        query
             .extend(
                 support::serialize_form(
                         "query",
-                        &query,
+                        &params.query,
                         true,
                         support::PercentEncoding::Form,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        query_fe9665f8
+        query
             .extend(
                 support::serialize_form(
                         "url",
-                        &url,
+                        &params.url,
                         true,
                         support::PercentEncoding::Form,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        if let Some(value) = params.as_ref().and_then(|params| params.optional.as_ref())
-        {
-            query_fe9665f8
+        if let Some(value) = params.optional.as_ref() {
+            query
                 .extend(
                     support::serialize_form(
                             "optional",
@@ -15295,7 +15378,7 @@ impl Client {
                         .map_err(support::Error::request_construction)?,
                 );
         }
-        support::build_url_on(&self.core, None, &path, &query_fe9665f8)
+        support::build_url_on(&self.core, None, &path, &query)
     }
     /// The request the operation method sends, credentials attached and the client's
     /// `RequestOptions` and the operation's `ops::Operation` on it, and the replay a rejected
@@ -15303,25 +15386,19 @@ impl Client {
     #[inline]
     async fn prepare_signature_binding_collisions(
         &self,
-        body: impl Into<types::Body>,
-        params: impl Into<types::Params>,
-        params_07e95c71: impl Into<Option<SignatureBindingCollisionsParams>>,
-        body_07e95c71: &types::CollisionPayload,
+        params: SignatureBindingCollisionsParams,
+        body: &types::CollisionPayload,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
-        let body: types::Body = body.into();
-        let params: types::Params = params.into();
-        let params_07e95c71: Option<SignatureBindingCollisionsParams> = params_07e95c71
-            .into();
         let mut path = "/signature-binding-collisions".to_owned();
         let mut query: Vec<String> = Vec::new();
         query
             .extend(
                 support::serialize_form(
                         "body",
-                        &body,
+                        &params.body,
                         true,
                         support::PercentEncoding::Form,
                     )
@@ -15331,16 +15408,13 @@ impl Client {
             .extend(
                 support::serialize_form(
                         "params",
-                        &params,
+                        &params.params,
                         true,
                         support::PercentEncoding::Form,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        if let Some(value) = params_07e95c71
-            .as_ref()
-            .and_then(|params| params.optional.as_ref())
-        {
+        if let Some(value) = params.optional.as_ref() {
             query
                 .extend(
                     support::serialize_form(
@@ -15355,11 +15429,11 @@ impl Client {
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
-        let body_07e95c71 = serde_json::to_vec(body_07e95c71)
+        let body = serde_json::to_vec(body)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body_07e95c71);
+            .body(body);
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -15370,21 +15444,14 @@ impl Client {
     #[inline]
     pub async fn signature_binding_collisions(
         &self,
-        body: impl Into<types::Body>,
-        params: impl Into<types::Params>,
-        params_07e95c71: impl Into<Option<SignatureBindingCollisionsParams>>,
-        body_07e95c71: &types::CollisionPayload,
+        params: SignatureBindingCollisionsParams,
+        body: &types::CollisionPayload,
     ) -> Result<
         support::ResponseValue<()>,
         support::Error<SignatureBindingCollisionsError>,
     > {
         let (request, replay) = self
-            .prepare_signature_binding_collisions(
-                body,
-                params,
-                params_07e95c71,
-                body_07e95c71,
-            )
+            .prepare_signature_binding_collisions(params, body)
             .await
             .map_err(support::Error::widen)?;
         let response = support::execute(&self.core, request, replay, false)
@@ -15396,20 +15463,13 @@ impl Client {
     #[inline]
     pub async fn signature_binding_collisions_request(
         &self,
-        body: impl Into<types::Body>,
-        params: impl Into<types::Params>,
-        params_07e95c71: impl Into<Option<SignatureBindingCollisionsParams>>,
-        body_07e95c71: &types::CollisionPayload,
+        params: SignatureBindingCollisionsParams,
+        body: &types::CollisionPayload,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
     > {
-        self.prepare_signature_binding_collisions(
-                body,
-                params,
-                params_07e95c71,
-                body_07e95c71,
-            )
+        self.prepare_signature_binding_collisions(params, body)
             .await
             .map(|(request, _)| request)
     }
@@ -15440,21 +15500,15 @@ impl Client {
     #[inline]
     pub fn signature_binding_collisions_url(
         &self,
-        body: impl Into<types::Body>,
-        params: impl Into<types::Params>,
-        params_07e95c71: impl Into<Option<SignatureBindingCollisionsParams>>,
+        params: SignatureBindingCollisionsParams,
     ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
-        let body: types::Body = body.into();
-        let params: types::Params = params.into();
-        let params_07e95c71: Option<SignatureBindingCollisionsParams> = params_07e95c71
-            .into();
         let mut path = "/signature-binding-collisions".to_owned();
         let mut query: Vec<String> = Vec::new();
         query
             .extend(
                 support::serialize_form(
                         "body",
-                        &body,
+                        &params.body,
                         true,
                         support::PercentEncoding::Form,
                     )
@@ -15464,16 +15518,13 @@ impl Client {
             .extend(
                 support::serialize_form(
                         "params",
-                        &params,
+                        &params.params,
                         true,
                         support::PercentEncoding::Form,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        if let Some(value) = params_07e95c71
-            .as_ref()
-            .and_then(|params| params.optional.as_ref())
-        {
+        if let Some(value) = params.optional.as_ref() {
             query
                 .extend(
                     support::serialize_form(
@@ -15494,14 +15545,11 @@ impl Client {
     async fn prepare_serialize_params(
         &self,
         ids: types::Ids,
-        workflow_id: types::WorkflowId,
-        x_flags: types::XFlags,
-        params: impl Into<Option<SerializeParamsParams>>,
+        params: SerializeParamsParams,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
-        let params: Option<SerializeParamsParams> = params.into();
         let mut path = "/params/{ids}".to_owned();
         path = path
             .replace(
@@ -15518,13 +15566,13 @@ impl Client {
             .extend(
                 support::serialize_form(
                         "workflow_id",
-                        &workflow_id,
+                        &params.workflow_id,
                         true,
                         support::PercentEncoding::Form,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        if let Some(value) = params.as_ref().and_then(|params| params.labels.as_ref()) {
+        if let Some(value) = params.labels.as_ref() {
             query
                 .extend(
                     support::serialize_form(
@@ -15536,7 +15584,7 @@ impl Client {
                         .map_err(support::Error::request_construction)?,
                 );
         }
-        if let Some(value) = params.as_ref().and_then(|params| params.compact.as_ref()) {
+        if let Some(value) = params.compact.as_ref() {
             query
                 .extend(
                     support::serialize_form(
@@ -15555,14 +15603,14 @@ impl Client {
             .header(
                 "X-Flags",
                 support::serialize_simple(
-                        &x_flags,
+                        &params.x_flags,
                         false,
                         support::PercentEncoding::Passthrough,
                     )
                     .map_err(support::Error::request_construction)?,
             );
         let mut cookies: Vec<String> = Vec::new();
-        if let Some(value) = params.as_ref().and_then(|params| params.session.as_ref()) {
+        if let Some(value) = params.session.as_ref() {
             cookies
                 .extend(
                     support::serialize_form(
@@ -15588,12 +15636,10 @@ impl Client {
     pub async fn serialize_params(
         &self,
         ids: types::Ids,
-        workflow_id: types::WorkflowId,
-        x_flags: types::XFlags,
-        params: impl Into<Option<SerializeParamsParams>>,
+        params: SerializeParamsParams,
     ) -> Result<support::ResponseValue<()>, support::Error<SerializeParamsError>> {
         let (request, replay) = self
-            .prepare_serialize_params(ids, workflow_id, x_flags, params)
+            .prepare_serialize_params(ids, params)
             .await
             .map_err(support::Error::widen)?;
         let response = support::execute(&self.core, request, replay, false)
@@ -15606,16 +15652,12 @@ impl Client {
     pub async fn serialize_params_request(
         &self,
         ids: types::Ids,
-        workflow_id: types::WorkflowId,
-        x_flags: types::XFlags,
-        params: impl Into<Option<SerializeParamsParams>>,
+        params: SerializeParamsParams,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
     > {
-        self.prepare_serialize_params(ids, workflow_id, x_flags, params)
-            .await
-            .map(|(request, _)| request)
+        self.prepare_serialize_params(ids, params).await.map(|(request, _)| request)
     }
     ///Decode a response to the request `serialize_params` sends (`ops::SERIALIZE_PARAMS`), obtained however the caller sent it, exactly as `serialize_params` decodes its own: the same status dispatch, typed error, and body limits from this client's configuration. `serialize_params` itself sends its request builder's request through the client's backend, replays it once where a refreshable credential was rejected, and decodes the response with this.
     #[inline]
@@ -15640,10 +15682,8 @@ impl Client {
     pub fn serialize_params_url(
         &self,
         ids: types::Ids,
-        workflow_id: types::WorkflowId,
-        params: impl Into<Option<SerializeParamsParams>>,
+        params: SerializeParamsParams,
     ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
-        let params: Option<SerializeParamsParams> = params.into();
         let mut path = "/params/{ids}".to_owned();
         path = path
             .replace(
@@ -15660,13 +15700,13 @@ impl Client {
             .extend(
                 support::serialize_form(
                         "workflow_id",
-                        &workflow_id,
+                        &params.workflow_id,
                         true,
                         support::PercentEncoding::Form,
                     )
                     .map_err(support::Error::request_construction)?,
             );
-        if let Some(value) = params.as_ref().and_then(|params| params.labels.as_ref()) {
+        if let Some(value) = params.labels.as_ref() {
             query
                 .extend(
                     support::serialize_form(
@@ -15678,7 +15718,7 @@ impl Client {
                         .map_err(support::Error::request_construction)?,
                 );
         }
-        if let Some(value) = params.as_ref().and_then(|params| params.compact.as_ref()) {
+        if let Some(value) = params.compact.as_ref() {
             query
                 .extend(
                     support::serialize_form(
@@ -19858,14 +19898,12 @@ Response `409`: binary error*/
         &self,
         text: impl Into<types::Text>,
         json: types::DeepFilter,
-        x_text: impl Into<types::XText>,
-        x_json: types::DeepFilter,
+        params: SerializeContentParamsParams,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
         let text: types::Text = text.into();
-        let x_text: types::XText = x_text.into();
         let mut path = "/content-params/{text}/{json}".to_owned();
         path = path
             .replace(
@@ -19897,7 +19935,7 @@ Response `409`: binary error*/
             .header(
                 "X-Text",
                 support::serialize_simple(
-                        &x_text,
+                        &params.x_text,
                         false,
                         support::PercentEncoding::Passthrough,
                     )
@@ -19906,7 +19944,7 @@ Response `409`: binary error*/
         request = request
             .header(
                 "X-Json",
-                serde_json::to_string(&x_json)
+                serde_json::to_string(&params.x_json)
                     .map_err(support::Error::request_construction)?,
             );
         let replay: Option<support::Replay> = None;
@@ -19921,14 +19959,13 @@ Response `409`: binary error*/
         &self,
         text: impl Into<types::Text>,
         json: types::DeepFilter,
-        x_text: impl Into<types::XText>,
-        x_json: types::DeepFilter,
+        params: SerializeContentParamsParams,
     ) -> Result<
         support::ResponseValue<()>,
         support::Error<SerializeContentParamsError>,
     > {
         let (request, replay) = self
-            .prepare_serialize_content_params(text, json, x_text, x_json)
+            .prepare_serialize_content_params(text, json, params)
             .await
             .map_err(support::Error::widen)?;
         let response = support::execute(&self.core, request, replay, false)
@@ -19942,13 +19979,12 @@ Response `409`: binary error*/
         &self,
         text: impl Into<types::Text>,
         json: types::DeepFilter,
-        x_text: impl Into<types::XText>,
-        x_json: types::DeepFilter,
+        params: SerializeContentParamsParams,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
     > {
-        self.prepare_serialize_content_params(text, json, x_text, x_json)
+        self.prepare_serialize_content_params(text, json, params)
             .await
             .map(|(request, _)| request)
     }
@@ -21683,20 +21719,20 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn read_file(
             &self,
-            path: impl Into<types::Path>,
+            params: ReadFileParams,
         ) -> Result<support::ResponseValue<()>, support::Error<ReadFileError>> {
-            self.runtime.block_on(self.inner.read_file(path))
+            self.runtime.block_on(self.inner.read_file(params))
         }
         ///The request `read_file` sends, built without sending it (mirrors the async client's `read_file_request`).
         #[inline]
         pub fn read_file_request(
             &self,
-            path: impl Into<types::Path>,
+            params: ReadFileParams,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
         > {
-            self.runtime.block_on(self.inner.read_file_request(path))
+            self.runtime.block_on(self.inner.read_file_request(params))
         }
         ///Decode a response to the request `read_file` sends, exactly as `read_file` decodes its own (mirrors the async client's `decode_read_file`).
         #[inline]
@@ -21710,44 +21746,28 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn read_file_url(
             &self,
-            path: impl Into<types::Path>,
+            params: ReadFileParams,
         ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
-            self.inner.read_file_url(path)
+            self.inner.read_file_url(params)
         }
         ///Response `204`: No Content
         #[inline]
         pub fn binding_collisions(
             &self,
-            query: impl Into<types::Query>,
-            url: impl Into<types::Url>,
-            request: impl Into<types::Request>,
-            cookies: impl Into<types::Cookies>,
-            params: impl Into<Option<BindingCollisionsParams>>,
+            params: BindingCollisionsParams,
         ) -> Result<support::ResponseValue<()>, support::Error<BindingCollisionsError>> {
-            self.runtime
-                .block_on(
-                    self.inner.binding_collisions(query, url, request, cookies, params),
-                )
+            self.runtime.block_on(self.inner.binding_collisions(params))
         }
         ///The request `binding_collisions` sends, built without sending it (mirrors the async client's `binding_collisions_request`).
         #[inline]
         pub fn binding_collisions_request(
             &self,
-            query: impl Into<types::Query>,
-            url: impl Into<types::Url>,
-            request: impl Into<types::Request>,
-            cookies: impl Into<types::Cookies>,
-            params: impl Into<Option<BindingCollisionsParams>>,
+            params: BindingCollisionsParams,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
         > {
-            self.runtime
-                .block_on(
-                    self
-                        .inner
-                        .binding_collisions_request(query, url, request, cookies, params),
-                )
+            self.runtime.block_on(self.inner.binding_collisions_request(params))
         }
         ///Decode a response to the request `binding_collisions` sends, exactly as `binding_collisions` decodes its own (mirrors the async client's `decode_binding_collisions`).
         #[inline]
@@ -21761,59 +21781,34 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn binding_collisions_url(
             &self,
-            query: impl Into<types::Query>,
-            url: impl Into<types::Url>,
-            params: impl Into<Option<BindingCollisionsParams>>,
+            params: BindingCollisionsParams,
         ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
-            self.inner.binding_collisions_url(query, url, params)
+            self.inner.binding_collisions_url(params)
         }
         ///Response `204`: No Content
         #[inline]
         pub fn signature_binding_collisions(
             &self,
-            body: impl Into<types::Body>,
-            params: impl Into<types::Params>,
-            params_07e95c71: impl Into<Option<SignatureBindingCollisionsParams>>,
-            body_07e95c71: &types::CollisionPayload,
+            params: SignatureBindingCollisionsParams,
+            body: &types::CollisionPayload,
         ) -> Result<
             support::ResponseValue<()>,
             support::Error<SignatureBindingCollisionsError>,
         > {
-            self.runtime
-                .block_on(
-                    self
-                        .inner
-                        .signature_binding_collisions(
-                            body,
-                            params,
-                            params_07e95c71,
-                            body_07e95c71,
-                        ),
-                )
+            self.runtime.block_on(self.inner.signature_binding_collisions(params, body))
         }
         ///The request `signature_binding_collisions` sends, built without sending it (mirrors the async client's `signature_binding_collisions_request`).
         #[inline]
         pub fn signature_binding_collisions_request(
             &self,
-            body: impl Into<types::Body>,
-            params: impl Into<types::Params>,
-            params_07e95c71: impl Into<Option<SignatureBindingCollisionsParams>>,
-            body_07e95c71: &types::CollisionPayload,
+            params: SignatureBindingCollisionsParams,
+            body: &types::CollisionPayload,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
         > {
             self.runtime
-                .block_on(
-                    self
-                        .inner
-                        .signature_binding_collisions_request(
-                            body,
-                            params,
-                            params_07e95c71,
-                            body_07e95c71,
-                        ),
-                )
+                .block_on(self.inner.signature_binding_collisions_request(params, body))
         }
         ///Decode a response to the request `signature_binding_collisions` sends, exactly as `signature_binding_collisions` decodes its own (mirrors the async client's `decode_signature_binding_collisions`).
         #[inline]
@@ -21831,42 +21826,30 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn signature_binding_collisions_url(
             &self,
-            body: impl Into<types::Body>,
-            params: impl Into<types::Params>,
-            params_07e95c71: impl Into<Option<SignatureBindingCollisionsParams>>,
+            params: SignatureBindingCollisionsParams,
         ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
-            self.inner.signature_binding_collisions_url(body, params, params_07e95c71)
+            self.inner.signature_binding_collisions_url(params)
         }
         ///Response `204`: No Content
         #[inline]
         pub fn serialize_params(
             &self,
             ids: types::Ids,
-            workflow_id: types::WorkflowId,
-            x_flags: types::XFlags,
-            params: impl Into<Option<SerializeParamsParams>>,
+            params: SerializeParamsParams,
         ) -> Result<support::ResponseValue<()>, support::Error<SerializeParamsError>> {
-            self.runtime
-                .block_on(self.inner.serialize_params(ids, workflow_id, x_flags, params))
+            self.runtime.block_on(self.inner.serialize_params(ids, params))
         }
         ///The request `serialize_params` sends, built without sending it (mirrors the async client's `serialize_params_request`).
         #[inline]
         pub fn serialize_params_request(
             &self,
             ids: types::Ids,
-            workflow_id: types::WorkflowId,
-            x_flags: types::XFlags,
-            params: impl Into<Option<SerializeParamsParams>>,
+            params: SerializeParamsParams,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
         > {
-            self.runtime
-                .block_on(
-                    self
-                        .inner
-                        .serialize_params_request(ids, workflow_id, x_flags, params),
-                )
+            self.runtime.block_on(self.inner.serialize_params_request(ids, params))
         }
         ///Decode a response to the request `serialize_params` sends, exactly as `serialize_params` decodes its own (mirrors the async client's `decode_serialize_params`).
         #[inline]
@@ -21881,10 +21864,9 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         pub fn serialize_params_url(
             &self,
             ids: types::Ids,
-            workflow_id: types::WorkflowId,
-            params: impl Into<Option<SerializeParamsParams>>,
+            params: SerializeParamsParams,
         ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
-            self.inner.serialize_params_url(ids, workflow_id, params)
+            self.inner.serialize_params_url(ids, params)
         }
         ///Response `204`: No Content
         #[inline]
@@ -23331,16 +23313,13 @@ Response `409`: binary error*/
             &self,
             text: impl Into<types::Text>,
             json: types::DeepFilter,
-            x_text: impl Into<types::XText>,
-            x_json: types::DeepFilter,
+            params: SerializeContentParamsParams,
         ) -> Result<
             support::ResponseValue<()>,
             support::Error<SerializeContentParamsError>,
         > {
             self.runtime
-                .block_on(
-                    self.inner.serialize_content_params(text, json, x_text, x_json),
-                )
+                .block_on(self.inner.serialize_content_params(text, json, params))
         }
         ///The request `serialize_content_params` sends, built without sending it (mirrors the async client's `serialize_content_params_request`).
         #[inline]
@@ -23348,17 +23327,14 @@ Response `409`: binary error*/
             &self,
             text: impl Into<types::Text>,
             json: types::DeepFilter,
-            x_text: impl Into<types::XText>,
-            x_json: types::DeepFilter,
+            params: SerializeContentParamsParams,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
         > {
             self.runtime
                 .block_on(
-                    self
-                        .inner
-                        .serialize_content_params_request(text, json, x_text, x_json),
+                    self.inner.serialize_content_params_request(text, json, params),
                 )
         }
         ///Decode a response to the request `serialize_content_params` sends, exactly as `serialize_content_params` decodes its own (mirrors the async client's `decode_serialize_content_params`).

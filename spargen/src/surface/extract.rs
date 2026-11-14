@@ -24,18 +24,36 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
         let url_accessor_name = operation_names.url_accessor.as_str().to_owned();
 
         let mut params = BTreeMap::new();
-        // The accessor takes the method's required arguments that shape the URL, in the method's
-        // order, then the bundle when an optional parameter shapes it. Codegen's
-        // `OperationSig::url_args` reads the same two `ir` predicates.
-        let mut url_args: Vec<UrlArgSurface> = operation
+        // The accessor takes the method's path arguments, in URL template order, then the bundle
+        // when one of its parameters shapes the URL. Codegen's `OperationSig::url_args` reads the
+        // same `ir` predicates and order.
+        let mut positional: Vec<_> = operation
             .params
             .iter()
-            .filter(|param| param.is_url_arg())
-            .map(|param| UrlArgSurface::Param((param.name.clone(), param.location.as_openapi_in())))
+            .filter(|param| param.is_positional())
+            .collect();
+        positional.sort_by_key(|param| operation.template_position(param));
+        let key_of =
+            |param: &crate::ir::Parameter| (param.name.clone(), param.location.as_openapi_in());
+        let mut url_args: Vec<UrlArgSurface> = positional
+            .iter()
+            .map(|param| UrlArgSurface::Param(key_of(param)))
             .collect();
         if operation.url_takes_params() {
-            url_args.push(UrlArgSurface::Optional);
+            url_args.push(UrlArgSurface::Params);
         }
+        // Then `…Params::new`'s arguments: every required bundled parameter, in declaration order,
+        // as codegen's `params_constructor` takes them.
+        let positional_args = positional
+            .into_iter()
+            .chain(
+                operation
+                    .params
+                    .iter()
+                    .filter(|param| param.required && !param.is_positional()),
+            )
+            .map(key_of)
+            .collect();
         for param in &operation.params {
             // A param that sends an explicit `null` is set through `Nullable<T>`, so the same
             // nullable type behind another serialization is a different surface.
@@ -82,6 +100,7 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                         ),
                     }),
                 url_args,
+                positional_args,
                 params,
                 request_body,
                 success: success_sig(&operation.responses.success(), api, names, settings),
