@@ -1105,9 +1105,9 @@ fn octet_stream_still_leaves_accept_to_the_http_stack() {
 }
 
 /// An optional nullable JSON `content` parameter has three states on the wire (#996): absent, the
-/// JSON `null`, and a value. Its `…Params` field is `Nullable<T>`, so `Nullable::Null` (the setter's
-/// `None`) must reach the server as the text `null` in every location that carries one, not as an
-/// omission.
+/// JSON `null`, and a value. Its `…Params` field is `Nullable<T>`, so `Nullable::Null` (what its
+/// `{field}_null` setter stores) must reach the server as the text `null` in every location that
+/// carries one, not as an omission.
 #[test]
 fn an_optional_nullable_json_content_parameter_sends_an_explicit_null() {
     let temp = tempfile::tempdir().unwrap();
@@ -1169,9 +1169,9 @@ fn absent_null_and_a_value_are_three_requests() {
 
     let null = request_head(
         nulls_client::ListItemsParams::default()
-            .filter(None)
-            .x_tag(None)
-            .session(None),
+            .filter_null()
+            .x_tag_null()
+            .session_null(),
     );
     assert!(null.starts_with("get /items?filter=null http/1.1"), "{null}");
     assert_eq!(header(&null, "x-tag"), ["null"], "{null}");
@@ -1179,17 +1179,19 @@ fn absent_null_and_a_value_are_three_requests() {
 
     let value = request_head(
         nulls_client::ListItemsParams::default()
-            .filter(Some(7))
-            .x_tag(Some("a".to_owned()))
-            .session(Some(3)),
+            .filter(7)
+            .x_tag("a".to_owned())
+            .session(3),
     );
     assert!(value.starts_with("get /items?filter=7 http/1.1"), "{value}");
     assert_eq!(header(&value, "x-tag"), ["\"a\""], "{value}");
     assert_eq!(header(&value, "cookie"), ["session=3"], "{value}");
 
-    // A bare value converts as `Some` of it does.
-    let bare = request_head(nulls_client::ListItemsParams::default().filter(7));
-    assert!(bare.starts_with("get /items?filter=7 http/1.1"), "{bare}");
+    // The value setter takes `Nullable::Null` too, as the `_null` setter stores it.
+    let spelled = request_head(
+        nulls_client::ListItemsParams::default().filter(nulls_client::Nullable::Null),
+    );
+    assert!(spelled.starts_with("get /items?filter=null http/1.1"), "{spelled}");
 }
 "##,
     );
@@ -1265,7 +1267,8 @@ fn a_patch_clears_one_member_and_leaves_another_off() {
     ]);
     let client = patches_client::BlockingClient::new(&base).unwrap();
 
-    let clear = PetPatch::new().with_nickname(None);
+    let clear = PetPatch::new().with_nickname_null();
+    assert_eq!(clear, PetPatch::new().with_nickname(Nullable::Null));
     assert_eq!(clear.nickname, Nullable::Null);
     assert_eq!(clear.age, Nullable::Absent);
     let cleared = client.patch_pet(&clear).expect("the clearing patch round-trips");
@@ -1273,7 +1276,7 @@ fn a_patch_clears_one_member_and_leaves_another_off() {
     assert_eq!(decoded.nickname, Nullable::Null);
     assert_eq!(decoded.age, Nullable::Absent);
 
-    let set = PetPatch::default().with_nickname("Rex".to_owned()).with_age(Some(3));
+    let set = PetPatch::default().with_nickname("Rex".to_owned()).with_age(3);
     let renamed = client.patch_pet(&set).expect("the setting patch round-trips");
     let decoded = renamed.into_inner();
     assert_eq!(decoded.nickname, Nullable::Value("Rex".to_owned()));

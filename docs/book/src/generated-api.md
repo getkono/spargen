@@ -81,10 +81,13 @@ use.
   `Nullable<T>` (re-exported at the root): `Nullable::Absent` leaves it off the wire and is what a
   missing member decodes as, `Nullable::Null` writes and reads an explicit `null`, and
   `Nullable::Value(v)` holds a value. Its `with_<member>` setter takes `impl Into<Nullable<T>>`,
-  so `with_nickname("Rex".to_owned())` sets a value and `with_nickname(None)` sends the `null`
-  that clears it in a PATCH. An optional JSON `content` parameter whose schema is nullable is a
-  `Nullable<T>` field of its `…Params` struct the same way. A required nullable member is
-  `Option<T>`, and an optional non-nullable one is `Option<T>` whose `None` is absence.
+  so `with_nickname("Rex".to_owned())` sets a value, and `with_nickname_null()` (or
+  `with_nickname(Nullable::Null)`) sends the `null` that clears it in a PATCH. `Nullable` has no
+  `From<Option<T>>`, so an `Option` must be spelled out as the state it means. An optional JSON
+  `content` parameter whose schema is nullable is a `Nullable<T>` field of its `…Params` struct
+  the same way, set by `<param>(value)` and cleared by `<param>_null()`. Where a member or
+  parameter is already spelled `<name>_null`, the setter takes a suffix. A required nullable
+  member is `Option<T>`, and an optional non-nullable one is `Option<T>` whose `None` is absence.
 - Each declared security scheme that takes a credential gives both clients typed setters, named
   after the scheme's `securitySchemes` key: `with_<scheme>(token)` for `http bearer`, `apiKey`,
   `oauth2` and `openIdConnect`, taking a [`secrecy`](https://docs.rs/secrecy) `SecretString`,
