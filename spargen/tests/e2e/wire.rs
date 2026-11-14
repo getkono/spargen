@@ -982,6 +982,80 @@ fn rfc6570_multipart_parts_are_not_percent_encoded() {
     assert!(status.success(), "the multipart wire round-trip must pass");
 }
 
+/// An untyped multipart part is a file part of raw bytes (#1410): `{contentMediaType: image/png}`
+/// sends the caller's octets under `image/png`, and `{}` under `application/octet-stream`, each
+/// with a `filename`, where both used to be `serde_json::Value` sent as JSON text.
+#[test]
+fn untyped_multipart_parts_send_their_octets() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r##"
+openapi: 3.1.0
+info: { title: Untyped parts, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, raw]
+              properties:
+                file: { contentMediaType: image/png }
+                raw: {}
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    let out = temp.path().join("client");
+    let report = generate_fixture_crate(&spec, &out, "untyped_parts_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    write_fixture_test(
+        &out,
+        "untyped_parts",
+        r##"#![cfg(feature = "blocking")]
+
+mod common;
+
+#[test]
+fn untyped_parts_are_sent_as_raw_file_parts() {
+    let (base, server) = common::serve_no_content();
+    let client = untyped_parts_client::BlockingClient::new(&base).unwrap();
+    let body = untyped_parts_client::types::UploadBody {
+        file: bytes::Bytes::from_static(b"\x89PNG\r\n"),
+        raw: bytes::Bytes::from_static(b"\x00\x01raw"),
+    };
+    client.upload(&body).expect("upload round-trips");
+
+    let request = server.join().unwrap();
+    let sent = |needle: &[u8]| request.body.windows(needle.len()).any(|window| window == needle);
+    let text = request.text();
+    for part in [
+        &b"name=\"file\"; filename=\"file\"\r\nContent-Type: image/png\r\n\r\n\x89PNG\r\n"[..],
+        &b"name=\"raw\"; filename=\"raw\"\r\nContent-Type: application/octet-stream\r\n\r\n\x00\x01raw"[..],
+    ] {
+        assert!(sent(part), "missing {:?} in {text}", String::from_utf8_lossy(part));
+    }
+}
+"##,
+    );
+
+    let status = fixture_cargo(&out)
+        .args(["test", "--features", "blocking", "--test", "untyped_parts"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the untyped-part wire round-trip must pass"
+    );
+}
+
 /// A CBOR body travels as the exact bytes it is (#900): `application/cbor` and a `+cbor` suffixed
 /// type are each sent as their own `Content-Type` and asked for as their own `Accept`, and the
 /// response comes back untouched, while an `application/octet-stream` operation still sets no
