@@ -13,6 +13,9 @@ mod generate;
 
 use generate::write_spec;
 
+#[path = "shared/repo.rs"]
+mod repo;
+
 fn spargen_bin() -> &'static str {
     env!("CARGO_BIN_EXE_spargen")
 }
@@ -72,19 +75,10 @@ fn the_cli_reference_quotes_the_help_output_verbatim() {
     );
 }
 
-/// The file under the repository root at `relative`, read as UTF-8.
-fn read_repo_file(relative: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(relative);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
-}
-
 /// The `Option<bool>` keys of `spargen.toml`, as `FileConfig` in `spargen/src/config.rs` declares
 /// them: the switches every other surface must spell.
 fn file_config_switches() -> Vec<String> {
-    let source = read_repo_file("spargen/src/config.rs");
+    let source = repo::read("spargen/src/config.rs");
     let (_, rest) = source
         .split_once("struct FileConfig {\n")
         .expect("spargen/src/config.rs declares `struct FileConfig`");
@@ -99,7 +93,7 @@ fn file_config_switches() -> Vec<String> {
 
 /// The names in `generate_api!`'s `SWITCHES` array, in `spargen-macro/src/lib.rs`.
 fn macro_switches() -> Vec<String> {
-    let source = read_repo_file("spargen-macro/src/lib.rs");
+    let source = repo::read("spargen-macro/src/lib.rs");
     let (_, rest) = source
         .split_once("const SWITCHES: [&str; ")
         .expect("spargen-macro/src/lib.rs declares `const SWITCHES`");
@@ -148,7 +142,7 @@ fn every_config_switch_is_spelled_on_every_surface() {
         "generate_api!'s SWITCHES are exactly spargen.toml's boolean keys"
     );
 
-    let setters = read_repo_file("spargen/src/config.rs");
+    let setters = repo::read("spargen/src/config.rs");
     for switch in &switches {
         assert!(
             setters.contains(&format!("    pub fn with_{switch}(")),
