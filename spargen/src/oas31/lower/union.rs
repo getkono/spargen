@@ -1482,9 +1482,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             } else {
                 // The member itself never reaches `lower_schema_inner`, which reports this.
                 self.diagnose_standalone_discriminator(schema);
-                self.ensure_component(name, schema.reference.as_deref(), &schema.provenance)?
+                self.ensure_component(&name, schema.reference.as_deref(), &schema.provenance)?
             };
-            return Some((ty, Some(name.to_owned())));
+            return Some((ty, Some(name.into_owned())));
         }
         let ty = self.lower_schema_or(member, hint)?;
         Some((ty, None))

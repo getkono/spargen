@@ -12,7 +12,7 @@ use crate::oas31::{
     ParameterObject, PathItem, RefOr, Reference, RequestBodyObject, Resolver, ResponseObject,
     Schema,
 };
-use crate::source::{is_remote_ref, SpannedValue};
+use crate::source::{is_remote_ref, schema_component_name, SpannedValue};
 
 use super::shape::ref_siblings_bear_shape;
 use super::{LowerCtx, MAX_SCHEMA_DEPTH};
@@ -429,9 +429,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// first, as lowering reads it; any other target is resolved from the referring file, or from
     /// the root for a remote reference, reporting nothing. `None` where the target cannot be read.
     pub(super) fn ref_target_hop(&self, reference: &str, at: &Provenance) -> Option<RefHop<'_>> {
-        let component = reference
-            .strip_prefix("#/components/schemas/")
-            .and_then(|name| self.document.components.schemas.get(name));
+        let component = schema_component_name(reference)
+            .and_then(|name| self.document.components.schemas.get(&*name));
         let target = match component {
             Some(RefOr::Item(target)) => std::borrow::Cow::Borrowed(target),
             Some(RefOr::Ref(alias)) => {

@@ -699,8 +699,8 @@ fn a_percent_encoded_component_schema_name_names_that_component() {
         );
     }
     assert!(
-        holder.contains("pub z: Option<String>"),
-        "`z` must be `Pet`'s `a`: {holder}"
+        holder.contains("pub z: Option<A>"),
+        "`z` must be `Pet`'s `a`, named for its own pointer token: {holder}"
     );
 }
 

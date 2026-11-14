@@ -8,6 +8,7 @@ use std::ops::Range;
 use crate::diag::Provenance;
 use crate::ir::{Ty, TypeKind, UnionVariant};
 use crate::oas31::{Schema, SchemaOr};
+use crate::source::schema_component_name;
 
 use super::combine::{objects_met_as_their_unions, take_refiners, Contribution};
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
@@ -475,7 +476,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return None;
         };
         let reference = member.reference.as_deref()?;
-        reference.strip_prefix("#/components/schemas/")?;
+        schema_component_name(reference)?;
         let target = self
             .ref_target_body(reference, &member.provenance)?
             .into_owned();
@@ -839,16 +840,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A `$ref` member's component stays open on [`Self::union_member_stack`] while its body
         // is lowered here, so a `$ref` back to it inside that body is not expanded again.
         let expanded = match &schema.all_of[union_index] {
-            SchemaOr::Schema(member) => member
-                .reference
-                .as_deref()
-                .and_then(|reference| reference.strip_prefix("#/components/schemas/")),
+            SchemaOr::Schema(member) => member.reference.as_deref().and_then(schema_component_name),
             SchemaOr::Bool(_) => None,
         };
         let Some(name) = expanded else {
             return self.meet_all_of_union_member(schema, hint, union_index);
         };
-        self.union_member_stack.push(name.to_owned());
+        self.union_member_stack.push(name.into_owned());
         let lowered = self.meet_all_of_union_member(schema, hint, union_index);
         self.union_member_stack.pop();
         lowered

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance};
-use crate::source::SpannedValue;
+use crate::source::{schema_component_name, SpannedValue};
 
 use super::{
     Document, EncodingObject, HeaderObject, MediaTypeObject, ParameterObject, PathItem, RefOr,
@@ -530,7 +530,7 @@ impl Audit<'_, '_> {
             return;
         }
         let from_root = self.resolver.written_in(at) == self.resolver.root_id();
-        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+        if let Some(name) = schema_component_name(reference) {
             let components = &self.document.components.schemas;
             // As lowering reads it: from the root, a name whose first segment is no declared
             // component is a missing component, and one whose first segment is declared is a
