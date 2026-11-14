@@ -228,6 +228,20 @@ impl DiagnosticBuilder {
 mod tests {
     use super::{Code, Diagnostic, JsonPointer, OutcomeClaim, Provenance, Severity};
 
+    /// The lookup `spargen explain` uses resolves every code trimmed and in either case, and hands
+    /// back a string naming no code as it was given, untrimmed.
+    #[test]
+    fn the_any_case_lookup_trims_and_folds_case_but_reports_the_input_as_given() {
+        for code in Code::all() {
+            let lower = format!(" {}\t", code.as_str().to_ascii_lowercase());
+            assert_eq!(Code::from_str_any_case(&lower).unwrap(), *code);
+            assert_eq!(Code::from_str_any_case(code.as_str()).unwrap(), *code);
+        }
+        let unknown = Code::from_str_any_case(" e999 ").unwrap_err();
+        assert_eq!(unknown.code(), " e999 ");
+        assert!(Code::from_str_any_case("E0 01").is_err());
+    }
+
     #[test]
     fn an_error_claims_the_rejection_and_a_warning_claims_nothing() {
         // A claim checked against its run's outcome holds something only if an error claims the
