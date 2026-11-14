@@ -546,6 +546,112 @@ components:
         }
     }
 
+    /// A rule repeated verbatim, from two sources or twice from one, removes its construct once
+    /// and is not an `E019` the second time.
+    #[test]
+    fn a_duplicate_rule_is_applied_once() {
+        for rule in [
+            OmitRule::path("/admin/users"),
+            OmitRule::path("/admin/**"),
+            OmitRule::operation(OmitMethod::Get, "/public/health"),
+            pointer_rule(None, "/components/schemas/Legacy*"),
+        ] {
+            let mut bundle = bundle_of(MULTI_SPEC);
+            let mut diags = Diagnostics::default();
+            let once = {
+                let mut bundle = bundle_of(MULTI_SPEC);
+                let mut diags = Diagnostics::default();
+                omit_of(vec![rule.clone()])
+                    .apply(&mut bundle, &mut diags)
+                    .unwrap();
+                omitted_count(&diags)
+            };
+            omit_of(vec![rule.clone(), rule.clone()])
+                .apply(&mut bundle, &mut diags)
+                .unwrap_or_else(|_| panic!("{rule:?}: {:#?}", diags.items()));
+            assert!(invalid_rule_messages(&diags).is_empty(), "{rule:?}");
+            assert_eq!(omitted_count(&diags), once, "{rule:?}");
+        }
+    }
+
+    /// An exact rule naming a construct a glob before it already removed, or one beneath it, is
+    /// satisfied: it removes nothing further, emits nothing, and is not an `E019`.
+    #[test]
+    fn an_exact_rule_a_glob_before_it_covered_is_satisfied() {
+        for covered in [
+            OmitRule::operation(OmitMethod::Get, "/admin/users"),
+            OmitRule::path("/admin/users/{id}"),
+            pointer_rule(None, "/paths/~1admin~1users/get/responses"),
+        ] {
+            let mut bundle = bundle_of(MULTI_SPEC);
+            let mut diags = Diagnostics::default();
+            omit_of(vec![OmitRule::path("/admin/**"), covered.clone()])
+                .apply(&mut bundle, &mut diags)
+                .unwrap_or_else(|_| panic!("{covered:?}: {:#?}", diags.items()));
+            assert!(invalid_rule_messages(&diags).is_empty(), "{covered:?}");
+            assert_eq!(omitted_count(&diags), 2, "{covered:?}");
+            assert_eq!(keys_under(&bundle, "paths", None), ["/public/health"]);
+        }
+    }
+
+    /// A glob whose every match an earlier rule removed (an exact rule for each, or a broader
+    /// glob) is satisfied, not an `E019`.
+    #[test]
+    fn a_glob_whose_matches_earlier_rules_removed_is_satisfied() {
+        for (earlier, glob, removed) in [
+            (
+                vec![
+                    OmitRule::path("/admin/users"),
+                    OmitRule::path("/admin/users/{id}"),
+                ],
+                OmitRule::path("/admin/**"),
+                2,
+            ),
+            (
+                vec![OmitRule::path("/admin/**")],
+                OmitRule::operation(OmitMethod::Get, "/admin/**"),
+                2,
+            ),
+            (
+                vec![OmitRule::component(ComponentKind::Schemas, "*")],
+                OmitRule::component(ComponentKind::Schemas, "Legacy*"),
+                3,
+            ),
+        ] {
+            let mut rules = earlier.clone();
+            rules.push(glob.clone());
+            let mut bundle = bundle_of(MULTI_SPEC);
+            let mut diags = Diagnostics::default();
+            omit_of(rules)
+                .apply(&mut bundle, &mut diags)
+                .unwrap_or_else(|_| panic!("{glob:?}: {:#?}", diags.items()));
+            assert!(invalid_rule_messages(&diags).is_empty(), "{glob:?}");
+            assert_eq!(omitted_count(&diags), removed, "{glob:?}");
+        }
+    }
+
+    /// Coverage is judged against the document as written: a rule naming a construct the
+    /// document never declared stays an `E019` however much earlier rules removed, and so does a
+    /// glob that matched nothing to begin with.
+    #[test]
+    fn a_rule_naming_nothing_as_written_is_still_e019_after_other_rules() {
+        for missing in [
+            OmitRule::path("/admin/nope"),
+            OmitRule::operation(OmitMethod::Post, "/admin/users"),
+            OmitRule::path("/nope/**"),
+        ] {
+            let mut bundle = bundle_of(MULTI_SPEC);
+            let mut diags = Diagnostics::default();
+            assert!(
+                omit_of(vec![OmitRule::path("/admin/**"), missing.clone()])
+                    .apply(&mut bundle, &mut diags)
+                    .is_err(),
+                "{missing:?}"
+            );
+            assert_eq!(invalid_rule_messages(&diags).len(), 1, "{missing:?}");
+        }
+    }
+
     /// The messages of every `E019` in `diags`, in emission order.
     fn invalid_rule_messages(diags: &Diagnostics) -> Vec<&str> {
         diags

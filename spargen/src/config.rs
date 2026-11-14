@@ -1046,6 +1046,33 @@ mod tests {
         assert_eq!(Build::new(spec, "out.rs").cargo, CargoIntegration::Auto);
     }
 
+    /// A config file reached by a second spelling of its path (here `discover_config_file` from a
+    /// spec spelled `<dir>/./openapi.yaml`, and an explicit `..` detour) is the file already
+    /// applied: its rules are not appended again and the path is recorded once, as first spelled.
+    #[test]
+    fn a_config_file_reached_by_another_spelling_is_applied_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let file = dir.join("spargen.toml");
+        std::fs::write(
+            &file,
+            "[[omit]]\npath = \"/x\"\n[[keep]]\nmethod = \"get\"\npath = \"/k\"\n",
+        )
+        .unwrap();
+
+        let spec = Spec::new(dir.join(".").join("openapi.yaml"))
+            .config_file(&file)
+            .unwrap()
+            .discover_config_file()
+            .unwrap()
+            .config_file(dir.join("sub").join("..").join("spargen.toml"))
+            .unwrap();
+        assert_eq!(spec.omit.rules, [OmitRule::path("/x")]);
+        assert_eq!(spec.omit.keep, [KeepRule::operation(OmitMethod::Get, "/k")]);
+        assert_eq!(spec.config_files(), [file]);
+    }
+
     /// `bind_headers` in the file is appended to what the spec already binds, in order, and a
     /// name already bound in another letter case is not bound twice, from the file or a setter.
     #[test]
