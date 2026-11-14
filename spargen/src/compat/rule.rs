@@ -241,7 +241,7 @@ impl OmitRule {
     /// resolves to a single pointer ([`RuleMatch::Exact`]). A pointer rule that names the
     /// document root, an unloaded file, or a file more than one loaded file answers to resolves to
     /// nothing, and the error says which (naming the candidates of an ambiguous file).
-    pub(super) fn resolve(&self, bundle: &InputBundle) -> Result<RuleMatch, Cow<'static, str>> {
+    pub(super) fn resolve(&self, bundle: &InputBundle) -> Result<RuleMatch, Unresolved> {
         let root = bundle.root_id();
         Ok(match self {
             OmitRule::Path { path } if has_glob_meta(path) => {
@@ -309,21 +309,27 @@ impl OmitRule {
             },
             OmitRule::Pointer { file, pointer } => {
                 if pointer.is_empty() {
-                    return Err("omit rules cannot remove the document root".into());
+                    return Err(Unresolved::Invalid(
+                        "omit rules cannot remove the document root".into(),
+                    ));
                 }
                 let file_id = match file.as_deref().map(|path| bundle.file_id_for_path(path)) {
                     None => root,
                     Some(Ok(id)) => id,
                     Some(Err(FileLookupError::Unloaded)) => {
-                        return Err("omit rule references an unloaded file".into())
+                        return Err(Unresolved::Absent(
+                            "omit rule references an unloaded file".into(),
+                        ))
                     }
                     Some(Err(FileLookupError::Ambiguous(candidates))) => {
-                        return Err(format!(
-                            "omit rule's file matches more than one loaded file ({}); name it by \
-                             its path relative to the root document",
-                            candidates.join(", ")
-                        )
-                        .into())
+                        return Err(Unresolved::Invalid(
+                            format!(
+                                "omit rule's file matches more than one loaded file ({}); name \
+                                 it by its path relative to the root document",
+                                candidates.join(", ")
+                            )
+                            .into(),
+                        ))
                     }
                 };
                 if has_glob_meta(pointer) {
@@ -363,6 +369,27 @@ pub(super) enum RuleMatch {
         file: FileId,
         pointers: Vec<JsonPointer>,
     },
+}
+
+/// Why an [`OmitRule`] resolves to nothing against a loaded bundle; each carries its `E019`
+/// message.
+pub(super) enum Unresolved {
+    /// The construct the rule names, or the file it names, is absent from this bundle (an exact
+    /// target missing, a glob matching nothing, an unloaded file), so the other spec of a diff
+    /// matching the rule satisfies it.
+    Absent(Cow<'static, str>),
+    /// The rule names no one construct (the document root, or a file more than one loaded file
+    /// answers to): an `E019` whatever the other spec of a diff matches.
+    Invalid(Cow<'static, str>),
+}
+
+impl Unresolved {
+    /// The `E019` message.
+    pub(super) fn into_message(self) -> Cow<'static, str> {
+        match self {
+            Unresolved::Absent(message) | Unresolved::Invalid(message) => message,
+        }
+    }
 }
 
 /// The immediate object-member keys of `value` (if it is an object) that a glob `pattern` matches,

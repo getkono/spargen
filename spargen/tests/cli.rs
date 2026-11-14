@@ -837,6 +837,39 @@ fn diff_classifies_a_setting_only_one_sides_config_file_changes() {
     );
 }
 
+/// An omit rule naming a path only the new spec declares is satisfied on the old side: the diff
+/// is printed and exits zero, the omission a `W009` beside it (#1428). A rule naming a path neither
+/// spec declares is an `E019` on each side, and exits one.
+#[test]
+fn diff_raises_e019_only_for_an_omit_rule_matching_neither_spec() {
+    let temp = tempfile::tempdir().unwrap();
+    let old = spec_arg(temp.path(), "old.yaml", ONE_OPERATION);
+    let new = spec_arg(temp.path(), "new.yaml", TWO_OPERATIONS);
+
+    let (status, stdout, stderr) = spargen(
+        temp.path(),
+        &["diff", &old, &new, "--omit-path", "/pets/{id}"],
+    );
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(stdout.contains("recommended bump: patch"), "{stdout}");
+    assert!(
+        stderr.contains("W009") && !stderr.contains("E019"),
+        "only the new side omits anything: {stderr}"
+    );
+
+    let (status, stdout, stderr) = spargen(
+        temp.path(),
+        &["diff", &old, &new, "--omit-path", "/nowhere"],
+    );
+    assert_eq!(status, Some(1), "stdout {stdout} stderr {stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_eq!(stderr.matches("E019").count(), 2, "one per side: {stderr}");
+    assert!(
+        stderr.contains("old spec rejected:") && stderr.contains("new spec rejected:"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn diff_exits_one_when_either_spec_fails_to_lower_with_or_without_the_gate() {
     let temp = tempfile::tempdir().unwrap();

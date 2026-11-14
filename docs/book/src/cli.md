@@ -69,7 +69,11 @@ than replacing them. Each switch pair sets its setting in either direction, so `
 overrides `carve = true` in the file and `--uuid` overrides `uuid = false`; with neither flag of a
 pair given, the file's value stands, and giving both is rejected by argument parsing (exit status
 `2`). `diff` resolves each of its two specs this way on its own: absent `--config`, each side
-discovers the `spargen.toml` beside it, while `--config` applies its one file to both sides.
+discovers the `spargen.toml` beside it, while `--config` applies its one file to both sides. An
+omit or keep rule that matches nothing in one spec but something in the other is satisfied on the
+side that lacks its construct (a keep rule keeping nothing there), so `diff --omit-path /beta`
+works when only the new spec declares `/beta`; a rule is `E019` only when it matches neither spec,
+or on a side where its file is ambiguous.
 
 ### `spargen.toml` reference
 
