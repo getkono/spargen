@@ -610,6 +610,15 @@ impl Spec {
                     .to_owned(),
             ));
         }
+        if file.bind_headers.is_some() {
+            // Renamed to match the `bound_headers()` getter; name the new key rather than leave
+            // `deny_unknown_fields`' bare "unknown field".
+            return Err(parse(
+                "the `bind_headers` key was renamed to `bound_headers`; write \
+                 `bound_headers = [...]` with the same list"
+                    .to_owned(),
+            ));
+        }
         if let Some(value) = file.uuid {
             self.uuid = UuidMapping::from_on(value);
         }
@@ -879,6 +888,9 @@ struct FileConfig {
     keep: Vec<KeepToml>,
     #[serde(default)]
     bound_headers: Vec<String>,
+    /// Retained solely to give the removed `bind_headers` key a targeted error naming
+    /// `bound_headers`.
+    bind_headers: Option<toml::Value>,
 }
 
 /// A `[[keep]]` entry: one operation, by `method` and `path`, both required.
@@ -1130,6 +1142,24 @@ mod tests {
         assert_eq!(spec.open_unions, UnionTags::Open);
         assert_eq!(spec.verbatim_docs, CarriedDocs::Verbatim);
         assert_eq!(spec.testing, TestingModule::Emitted);
+    }
+
+    /// The removed `bind_headers` key is refused, whatever its value, with an error naming its
+    /// `bound_headers` replacement.
+    #[test]
+    fn the_removed_bind_headers_key_names_its_bound_headers_replacement() {
+        for text in [
+            "bind_headers = [\"X-Tenant\"]\n",
+            "bind_headers = \"X-Tenant\"\n",
+        ] {
+            let error = apply(text).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("the `bind_headers` key was renamed to `bound_headers`"),
+                "{error}"
+            );
+        }
     }
 
     /// The removed `time` switch is refused, whatever its value, with an error naming the
