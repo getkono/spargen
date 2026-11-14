@@ -665,6 +665,8 @@ mod keywords;
 mod labels;
 #[path = "diff/narrowing.rs"]
 mod narrowing;
+#[path = "diff/omit.rs"]
+mod omit;
 #[path = "diff/operations.rs"]
 mod operations;
 #[path = "diff/rebinding.rs"]
