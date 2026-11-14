@@ -3,7 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http::header::{HeaderValue, AUTHORIZATION, COOKIE};
+use http::header::{HeaderName, HeaderValue, AUTHORIZATION, COOKIE};
 
 use crate::wasm::{BoxFuture, MaybeSend, MaybeSync};
 use crate::{ClientCore, Error, HttpBody, RequestBuilder, RequestError};
@@ -170,7 +170,8 @@ pub enum AuthKind {
     Bearer,
     /// `Authorization: Basic <base64>`.
     Basic,
-    /// An `apiKey` sent as the named request header.
+    /// An `apiKey` sent as the named request header, replacing any value the request already
+    /// carries under that name.
     ApiKeyHeader(&'static str),
     /// An `apiKey` sent as the named query parameter.
     ApiKeyQuery(&'static str),
@@ -611,7 +612,7 @@ fn attach_token(
             None => Err(credential_mismatch(scheme.name, "bearer", credential)),
         },
         AuthKind::ApiKeyHeader(name) => match token {
-            Some(token) => Ok(request.header(name, sensitive_value(token.expose_secret())?)),
+            Some(token) => set_header(request, name, token.expose_secret()),
             None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
         },
         AuthKind::ApiKeyQuery(name) => match token {
@@ -673,6 +674,25 @@ fn sensitive_value(secret: &str) -> Result<HeaderValue, Error<Infallible>> {
     let mut value = HeaderValue::from_str(secret).map_err(Error::request_construction)?;
     value.set_sensitive(true);
     Ok(value)
+}
+
+/// Set the request's header `name` to `value`, marked sensitive, replacing any value it already
+/// carries under that name, as [`set_authorization`] does for `Authorization`: a header `apiKey`
+/// named `Authorization` supersedes the `Basic` value a userinfo URL set, and one named after a
+/// header the operation already sent is sent once. A name or value that does not convert fails
+/// the call before anything is sent; a builder that already failed is left as it is, for `build`
+/// to report its failure.
+fn set_header(
+    mut request: RequestBuilder,
+    name: &str,
+    value: &str,
+) -> Result<RequestBuilder, Error<Infallible>> {
+    let name = HeaderName::from_bytes(name.as_bytes()).map_err(Error::request_construction)?;
+    let value = sensitive_value(value)?;
+    if let Some(headers) = request.headers_mut() {
+        headers.insert(name, value);
+    }
+    Ok(request)
 }
 
 /// Set the request's one `Authorization` header to `value`, marked sensitive, replacing any value
