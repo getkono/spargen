@@ -68,14 +68,14 @@ fn changing_a_types_generation_kind_is_major() {
 }
 
 #[test]
-fn adding_an_enum_variant_is_minor_and_removing_one_is_major() {
-    // The documented additive rule: a new value a consumer may now receive is minor.
+fn adding_an_enum_variant_is_major_and_removing_one_is_major() {
+    // The generated enum is exhaustive, so a new value breaks a consumer's exhaustive `match`.
     let added = diff(
         &full(TWO_OPS, &with_status(STATUS_ENUM_TWO)),
         &full(TWO_OPS, &with_status(STATUS_ENUM_THREE)),
     );
     assert_eq!(kinds(&added), vec![ChangeKind::VariantAdded]);
-    assert_eq!(added.bump, Impact::Minor);
+    assert_eq!(added.bump, Impact::Major);
 
     let removed = diff(
         &full(TWO_OPS, &with_status(STATUS_ENUM_THREE)),
@@ -86,7 +86,7 @@ fn adding_an_enum_variant_is_minor_and_removing_one_is_major() {
 }
 
 /// An integer set is a checked newtype (#1327): a listed value is an associated `const`, so a new
-/// one is the additive rule's variant and a removed one breaks code naming it, while a new width
+/// one is an added variant, major as on an enum, and a removed one breaks code naming it, while a new width
 /// changes what `get` returns and `TryFrom` takes. A set turning into a plain `integer` turns the
 /// newtype into an alias, a change of generation kind.
 #[test]
@@ -104,7 +104,7 @@ fn a_checked_sets_values_and_width_are_its_surface() {
         "{:?}",
         added.changes
     );
-    assert_eq!(added.bump, Impact::Minor);
+    assert_eq!(added.bump, Impact::Major);
 
     let removed = diff(&three, &two);
     assert_eq!(kinds(&removed), vec![ChangeKind::VariantRemoved]);
@@ -305,7 +305,8 @@ fn changing_a_typed_additional_properties_map_is_major() {
 }
 
 #[test]
-fn adding_a_typed_additional_properties_map_is_minor_and_removing_one_is_major() {
+fn adding_a_typed_additional_properties_map_is_major_and_removing_one_is_major() {
+    // The map is a new `pub` field, so every struct literal of the type breaks.
     let added = diff(&with_additional(""), &with_additional(ADDITIONAL_STRING));
     assert_eq!(
         kinds(&added),
@@ -313,7 +314,7 @@ fn adding_a_typed_additional_properties_map_is_minor_and_removing_one_is_major()
         "{:?}",
         added.changes
     );
-    assert_eq!(added.bump, Impact::Minor);
+    assert_eq!(added.bump, Impact::Major);
 
     let removed = diff(&with_additional(ADDITIONAL_STRING), &with_additional(""));
     assert_eq!(

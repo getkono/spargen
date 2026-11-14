@@ -112,7 +112,7 @@ use.
   runtime asks it for a fresh token and sends the call once more, returning the original response
   when the body cannot be cloned, the refresh fails, or the replay is rejected again.
 - A header every operation repeats (an API version, a tenant) can be bound once on the client:
-  `Spec::bind_header("X-Api-Version")` drops it from every operation's arguments, and
+  `Spec::add_bound_header("X-Api-Version")` drops it from every operation's arguments, and
   `Client::with_bound_header(name, value)?` sets the value each operation declaring it sends,
   refusing a value that is not a valid header value (a control character but a tab, such as CR or
   LF) as `Error::RequestConstruction`. An operation that requires it while no value is bound fails
@@ -222,4 +222,7 @@ use.
 The semver surface is the public API of generated output: changes that alter generated
 signatures, type shapes, or variant sets are major; output changes invisible to that API are
 minor; generator-internal fixes are patch. [`spargen diff`](./cli.md#spargen-diff) classifies a
-spec change the same way.
+spec change the same way. Generated enums and unions are exhaustive, an open enum included, and
+model, `…Params` and response-header fields are `pub`, so a spec adding a variant, a field (an
+optional one or an `additionalProperties` map included), an optional parameter or an optional
+response header breaks a consumer's exhaustive `match` or struct literal: `major`.

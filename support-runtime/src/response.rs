@@ -4,15 +4,30 @@ use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
 
+use crate::error::RedactedHeaders;
 use crate::{Error, HttpBody};
 
 /// A successful response body paired with its status and headers. Returned inside
 /// `Result<ResponseValue<T>, Error<E>>` from every generated operation method.
-#[derive(Debug, Clone)]
+///
+/// Its `Debug` prints the status, the headers and the body, with each `Set-Cookie`,
+/// `Authorization` and `Proxy-Authenticate` value, and each value marked sensitive, printed as
+/// `[redacted]`, as [`Error`]'s `Debug` prints a response's headers.
+#[derive(Clone)]
 pub struct ResponseValue<T> {
     status: StatusCode,
     headers: HeaderMap,
     inner: T,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for ResponseValue<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResponseValue")
+            .field("status", &self.status)
+            .field("headers", &RedactedHeaders(&self.headers))
+            .field("inner", &self.inner)
+            .finish()
+    }
 }
 
 impl<T> ResponseValue<T> {
@@ -183,6 +198,45 @@ mod tests {
         assert_eq!(value.headers()["x-trace"], "abc");
         assert_eq!(value.inner(), "body");
         assert_eq!(value.into_inner(), "body");
+    }
+
+    /// Issue #1402: a successful `ResponseValue`'s `Debug` printed every header, a login
+    /// response's session cookie included, which the same value inside `Error::Api` redacts. It
+    /// now redacts the same set, once per value, and keeps every other header, the status and the
+    /// body.
+    #[test]
+    fn debug_redacts_sensitive_headers_and_keeps_the_rest() {
+        let mut headers = HeaderMap::new();
+        headers.append("set-cookie", "session=SECRET-1".parse().unwrap());
+        headers.append("set-cookie", "csrf=SECRET-2".parse().unwrap());
+        headers.insert("authorization", "Bearer SECRET-3".parse().unwrap());
+        headers.insert("proxy-authenticate", "Basic SECRET-4".parse().unwrap());
+        let mut marked: reqwest::header::HeaderValue = "SECRET-5".parse().unwrap();
+        marked.set_sensitive(true);
+        headers.insert("x-session-token", marked);
+        headers.insert("x-trace", "trace-kept".parse().unwrap());
+        let value = ResponseValue::new(StatusCode::OK, headers, "body-kept".to_owned());
+
+        for debug in [format!("{value:?}"), format!("{value:#?}")] {
+            assert!(debug.starts_with("ResponseValue {"), "{debug}");
+            assert!(!debug.contains("SECRET"), "Debug leaks: {debug}");
+            assert_eq!(debug.matches("[redacted]").count(), 5, "{debug}");
+            for name in [
+                "set-cookie",
+                "authorization",
+                "proxy-authenticate",
+                "x-session-token",
+                "x-trace",
+            ] {
+                assert!(
+                    debug.contains(name),
+                    "the header name {name} is kept: {debug}"
+                );
+            }
+            assert!(debug.contains("trace-kept"), "{debug}");
+            assert!(debug.contains("200"), "the status is kept: {debug}");
+            assert!(debug.contains("body-kept"), "the body is kept: {debug}");
+        }
     }
 
     #[test]

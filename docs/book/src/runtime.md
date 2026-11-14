@@ -295,7 +295,9 @@ schema) or inside a `oneOf`/`anyOf` stays closed, because a target is shared by 
 union's variants are told apart by what each refuses. A narrowing whose value set is itself a
 `$ref` target opens a copy and leaves the target closed. Request bodies, parameters, and a
 formatted (`uuid`, date) string base stay closed. `spargen diff` reads a string set's catch-all as
-a variant: `variant-added` when a set opens, `variant-removed` when it closes or is renamed. An
+a variant: `variant-added` when a set opens, `variant-removed` when it closes or is renamed. Both
+are `major`, as is a value added to an open set, because the open enum is as exhaustive as a
+closed one. An
 integer or boolean set opening or closing changes what it decodes, not its API.
 
 ## Middleware

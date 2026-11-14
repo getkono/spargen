@@ -531,14 +531,8 @@ impl<E: std::fmt::Debug> std::fmt::Debug for Error<E> {
             Error::Timeout(kind) => f.debug_tuple("Timeout").field(kind).finish(),
             Error::Protocol(e) => f.debug_tuple("Protocol").field(e).finish(),
             Error::Redirect(e) => f.debug_tuple("Redirect").field(e).finish(),
-            Error::Api(value) => f
-                .debug_tuple("Api")
-                .field(&RedactedResponse {
-                    status: value.status(),
-                    headers: value.headers(),
-                    inner: value.inner(),
-                })
-                .finish(),
+            // `ResponseValue`'s own `Debug` redacts its headers.
+            Error::Api(value) => f.debug_tuple("Api").field(value).finish(),
             Error::UnexpectedStatus {
                 status,
                 headers,
@@ -581,27 +575,10 @@ impl<E: std::fmt::Debug> std::fmt::Debug for Error<E> {
     }
 }
 
-/// The `Debug` of an [`Error::Api`]'s `ResponseValue`, laid out as its own derive lays it out,
-/// with its headers redacted.
-struct RedactedResponse<'a, E> {
-    status: StatusCode,
-    headers: &'a HeaderMap,
-    inner: &'a E,
-}
-
-impl<E: std::fmt::Debug> std::fmt::Debug for RedactedResponse<'_, E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResponseValue")
-            .field("status", &self.status)
-            .field("headers", &RedactedHeaders(self.headers))
-            .field("inner", self.inner)
-            .finish()
-    }
-}
-
 /// A response's headers as `HeaderMap`'s own `Debug` prints them, one entry per value, except
-/// that a value [`is_redacted`] prints as `[redacted]`.
-struct RedactedHeaders<'a>(&'a HeaderMap);
+/// that a value [`is_redacted`] prints as `[redacted]`. The `Debug` of [`Error`] and of
+/// [`crate::ResponseValue`] print a response's headers through it, so both redact the same set.
+pub(crate) struct RedactedHeaders<'a>(pub(crate) &'a HeaderMap);
 
 impl std::fmt::Debug for RedactedHeaders<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -617,7 +594,7 @@ impl std::fmt::Debug for RedactedHeaders<'_> {
     }
 }
 
-/// Whether an error's `Debug` redacts a response header's value: a `Set-Cookie`,
+/// Whether a response's `Debug` redacts a header's value: a `Set-Cookie`,
 /// `Authorization` or `Proxy-Authenticate` header, or a value marked sensitive.
 fn is_redacted(name: &reqwest::header::HeaderName, value: &reqwest::header::HeaderValue) -> bool {
     value.is_sensitive()
@@ -736,7 +713,7 @@ pub enum RequestError {
         source: AuthError,
     },
     /// The operation declares a required header that the generated client binds once, as a
-    /// `Spec::bind_header` build option named it, and no value is bound to it on the client
+    /// `Spec::add_bound_header` build option named it, and no value is bound to it on the client
     /// (`with_bound_header`). Raised before anything is sent. The payload is the whole cause, so
     /// `source()` is `None`.
     MissingBoundParameter {

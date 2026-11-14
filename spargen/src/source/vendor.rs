@@ -19,7 +19,7 @@ use super::remote::{
     SelfIdentity,
 };
 use super::sha256::sha256_hex;
-use super::SpannedValue;
+use super::{canonical_pointer, SpannedValue};
 
 /// The network seam used by [`vendor`]. Real fetching lives in [`ReqwestFetcher`]; tests supply a
 /// stub so the vendor logic is exercised without HTTP.
@@ -381,8 +381,11 @@ pub(crate) fn vendor(
                 }
             };
             let (_, fragment) = split_fragment(reference);
-            if let Some(target) = target {
-                let target = (target, JsonPointer::from(fragment.to_owned()));
+            // The walk looks the target up as a plain pointer, so the fragment is decoded once
+            // here; a malformed one addresses nothing.
+            let pointer = canonical_pointer(&JsonPointer::from(fragment.to_owned()));
+            if let Some((target, pointer)) = target.zip(pointer) {
+                let target = (target, pointer);
                 if walked_targets.insert(target.clone()) {
                     queue.push_back(target);
                 }

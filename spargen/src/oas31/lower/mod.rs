@@ -677,7 +677,7 @@ struct LowerCtx<'a, 'doc> {
     /// The `open_unions` option: whether a discriminated union with no `defaultMapping` is
     /// lowered open ([`UnionStrategy::Discriminated::open`](crate::ir::UnionStrategy)).
     open_unions: bool,
-    /// The `bind_header` option: the header names whose parameters
+    /// The `bound_headers` option: the header names whose parameters
     /// [`operation::lower_operation`] binds on the client instead of lowering into arguments.
     bind_headers: &'a [String],
     /// Whether the schema being lowered right now is one `open_narrowing` applies to: set by
@@ -786,7 +786,7 @@ pub(crate) struct LowerOptions<'a> {
     pub(crate) open_narrowing: bool,
     /// `Spec::open_unions`: give a discriminated union a variant for a tag value it does not list.
     pub(crate) open_unions: bool,
-    /// `Spec::bind_header`: the header names whose parameters become an operation's
+    /// `Spec::add_bound_header`: the header names whose parameters become an operation's
     /// [`Operation::bound_headers`](crate::ir::Operation) rather than its parameters.
     pub(crate) bind_headers: &'a [String],
 }
