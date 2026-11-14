@@ -692,14 +692,16 @@ fn applies_default(field: &Field) -> bool {
 /// empty), then one consuming `with_<field>` setter per member `new` does not take and for the
 /// overflow map, in field order. A non-nullable member's setter takes the bare `T` by value, as
 /// the `…Params` setters take theirs, and stores `Some` of it. A nullable member's takes
-/// `impl Into<Nullable<T>>`, so `value`, `Some(value)` and `None` (an explicit `null`) all fit,
-/// and stores what it converts to. The overflow map's takes the whole map.
+/// `impl Into<Nullable<T>>`, so a value or `Nullable::Null` fits, and stores what it converts to;
+/// `Nullable` has no `From<Option<T>>`, so a `None` meaning "unset" never becomes a `null` that
+/// clears the member. Its `with_<field>_null()` setter stores that explicit `null`. The overflow
+/// map's takes the whole map.
 ///
 /// So `new` with the constructed members equals what decoding an object of just those members
 /// yields. With no constructed member, `Default` is `new()`: derived when every other member is
 /// absent there, and otherwise an `impl` calling `new`. Setter names are `with_` before the field
-/// identifier unraw, so they are distinct exactly when the identifiers are, which allocation makes
-/// them within one struct.
+/// identifier, or the null setter's stem ([`Names::null_setters`]), unraw, so they are distinct
+/// exactly when those identifiers are, which allocation makes them within one struct.
 ///
 /// [constructed]: Field::constructed
 fn emit_struct_constructors(
@@ -730,7 +732,13 @@ fn emit_struct_constructors(
         if field.constructed() && !field.decodes_optional() {
             quote! { #field_ident, }
         } else if field.constructed() && field.ty.nullable {
-            quote! { #field_ident: super::support::Nullable::from(#field_ident), }
+            // The argument is a required member's `Option<T>`, its `None` the `null` it may be.
+            quote! {
+                #field_ident: match #field_ident {
+                    Some(value) => super::support::Nullable::Value(value),
+                    None => super::support::Nullable::Null,
+                },
+            }
         } else if field.constructed() {
             quote! { #field_ident: Some(#field_ident), }
         } else if applies_default(field) {
@@ -754,9 +762,18 @@ fn emit_struct_constructors(
             let inner = non_null_ty_tokens(field.ty, names);
             if field.ty.nullable {
                 let doc = format!(
-                    "Set the `{}` member: a value, or `None` for an explicit `null`.",
+                    "Set the `{}` member: a value, or `Nullable::Null` for an explicit `null`.",
                     field.name.wire
                 );
+                let null_doc = format!(
+                    "Set the `{}` member to an explicit `null`.",
+                    field.name.wire
+                );
+                let stem = names
+                    .null_setters
+                    .get(&(id, field.name.wire.clone()))
+                    .expect("null setter allocated");
+                let null_setter = format_ident!("with_{}", stem.unraw());
                 let nullable = nullable_tokens(inner);
                 // Spelled by path: `name::TYPES_MODULE_NAMES` does not reserve `Into`, so a schema
                 // may take that name in this module.
@@ -765,6 +782,13 @@ fn emit_struct_constructors(
                     #[must_use]
                     pub fn #setter(mut self, value: impl std::convert::Into<#nullable>) -> Self {
                         self.#field_ident = value.into();
+                        self
+                    }
+
+                    #[doc = #null_doc]
+                    #[must_use]
+                    pub fn #null_setter(mut self) -> Self {
+                        self.#field_ident = super::support::Nullable::Null;
                         self
                     }
                 }

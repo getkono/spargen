@@ -829,6 +829,10 @@ mod support {
         use std::sync::Arc;
         use std::time::Duration;
         use url::Url;
+        #[cfg(not(target_arch = "wasm32"))]
+        use super::error::CrossOriginRedirect;
+        #[cfg(not(target_arch = "wasm32"))]
+        use super::paginate::{same_origin, without_credentials};
         use super::{
             Credential, Error, ExposeSecret, HttpBackend, LinkPaginator, ReqwestBackend,
             SecretString,
@@ -935,6 +939,12 @@ mod support {
         /// [`ClientCore::with_client`] keeps its own timeouts instead, and a backend installed with
         /// [`ClientCore::with_backend`] executes requests on its own terms. reqwest's `fetch` backend has
         /// neither timeout, so on `wasm32` both are ignored.
+        ///
+        /// The client built from it follows a redirect only within the origin of the request (the same
+        /// scheme, host and port), up to ten hops, and refuses one to another origin with
+        /// [`Error::Redirect`], whose [`super::RedirectError::cross_origin_target`] names the target
+        /// without its userinfo and query; nothing is sent there. On `wasm32` the browser's fetch follows
+        /// redirects by its own policy instead.
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct TransportConfig {
             /// How long establishing a connection may take — name resolution, the TCP handshake and TLS —
@@ -1043,6 +1053,11 @@ mod support {
             /// as [`Self::with_backend`] would with `Arc::new(ReqwestBackend::new(client))`. The client's
             /// own connect and read timeouts apply, and no [`TransportConfig`] is read;
             /// [`ClientConfig::timeout`] still applies to each request the runtime's `send` sends.
+            ///
+            /// The client keeps its own redirect policy too, not the same-origin one [`TransportConfig`]
+            /// describes: under reqwest's default it follows a redirect to any origin, and every header
+            /// reqwest does not strip on a cross-origin hop (an `apiKey` header, a bound header, a
+            /// [`RequestOptions::headers`] entry) travels with it.
             pub fn with_client(
                 client: reqwest::Client,
                 base_url: &str,
@@ -1054,8 +1069,9 @@ mod support {
             /// [`ClientConfig`]; nothing else is built, so several cores can share one backend. Every
             /// request is executed by `backend`, so connecting and reading are bounded however `backend`
             /// bounds them. [`ClientConfig::timeout`] travels on each request the runtime's `send` sends,
-            /// as a [`super::TotalTimeout`] extension, for `backend` to enforce. Returns a
-            /// request-construction error if the base URL is not an `http` or `https` URL.
+            /// as a [`super::TotalTimeout`] extension, for `backend` to enforce. Redirects are followed,
+            /// or not, as `backend` decides, not by the same-origin policy [`TransportConfig`] describes.
+            /// Returns a request-construction error if the base URL is not an `http` or `https` URL.
             pub fn with_backend(
                 backend: Arc<dyn HttpBackend>,
                 base_url: &str,
@@ -1205,15 +1221,25 @@ mod support {
             }
         }
         /// The `reqwest::Client` a core's default backend runs on, with `config`'s connect and read
-        /// timeouts.
-        /// reqwest's `fetch` backend has neither, so on `wasm32` `config` is not read.
+        /// timeouts and the same-origin redirect policy [`redirect_verdict`] decides.
+        /// reqwest's `fetch` backend has none of the three, so on `wasm32` `config` is not read and the
+        /// browser follows redirects as its own fetch policy decides.
         fn http_client(
             config: &TransportConfig,
         ) -> Result<reqwest::Client, Error<Infallible>> {
             let builder = reqwest::Client::builder();
             #[cfg(not(target_arch = "wasm32"))]
             let builder = {
-                let mut builder = builder;
+                let mut builder = builder
+                    .redirect(
+                        reqwest::redirect::Policy::custom(|attempt| match redirect_verdict(
+                            attempt.url(),
+                            attempt.previous(),
+                        ) {
+                            Ok(()) => attempt.follow(),
+                            Err(refusal) => attempt.error(refusal),
+                        }),
+                    );
                 if let Some(timeout) = config.connect_timeout {
                     builder = builder.connect_timeout(timeout);
                 }
@@ -1225,6 +1251,37 @@ mod support {
             #[cfg(target_arch = "wasm32")]
             let _ = config;
             builder.build().map_err(Error::request_construction)
+        }
+        /// How many redirects the default backend follows for one request, as reqwest's default policy
+        /// does.
+        #[cfg(not(target_arch = "wasm32"))]
+        const MAX_REDIRECTS: usize = 10;
+        /// Whether the default backend follows a redirect to `next`, `previous` being every URL already
+        /// requested in the chain, the request's own first. It follows one only within the origin of the
+        /// request it was sent as (the same scheme, host and port), since every header the request carries
+        /// travels with the hop: an `apiKey` credential, a bound header, a `RequestOptions` header. A hop
+        /// to another origin is refused with a [`CrossOriginRedirect`] naming the target without its
+        /// userinfo and query, and a hop past the [`MAX_REDIRECTS`]th as too many redirects.
+        #[cfg(not(target_arch = "wasm32"))]
+        fn redirect_verdict(
+            next: &Url,
+            previous: &[Url],
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            if let Some(origin) = previous.first() {
+                if !same_origin(origin, next) {
+                    return Err(
+                        Box::new(CrossOriginRedirect {
+                            target: without_credentials(next.clone()),
+                        }),
+                    );
+                }
+            }
+            if previous.len() > MAX_REDIRECTS {
+                return Err(
+                    format!("too many redirects (more than {MAX_REDIRECTS})").into(),
+                );
+            }
+            Ok(())
         }
     }
     mod dispatch {
@@ -2013,7 +2070,9 @@ mod support {
             /// connection cut short is not this class but [`Error::InterruptedBody`]; on `wasm32`, a
             /// non-streamed one is this class, as [`Error::InterruptedBody`] describes.
             Protocol(ProtocolError),
-            /// #5 — redirect-policy exhaustion (per the injected client's policy).
+            /// #5 — a redirect not followed: the default backend refuses one to another origin
+            /// ([`RedirectError::cross_origin_target`]) or past ten hops; an injected client or backend
+            /// reports one as its own policy decides.
             Redirect(RedirectError),
             /// #6 — a documented non-success status parsed into the operation's typed error body.
             Api(ResponseValue<E>),
@@ -2453,7 +2512,7 @@ mod support {
                     Error::Transport(_) => f.write_str("transport failed"),
                     Error::Timeout(kind) => write!(f, "{kind:?} timeout elapsed"),
                     Error::Protocol(_) => f.write_str("protocol error"),
-                    Error::Redirect(_) => f.write_str("redirect policy exhausted"),
+                    Error::Redirect(_) => f.write_str("redirect not followed"),
                     Error::Api(value) => {
                         write!(f, "documented API error ({})", value.status())
                     }
@@ -2778,7 +2837,8 @@ mod support {
             pub fn protocol(source: impl Into<BoxError>) -> Self {
                 Self::new(TransportClass::Protocol, source)
             }
-            /// Redirect-policy exhaustion. It becomes [`Error::Redirect`], which is not transient.
+            /// A redirect the backend's policy did not follow. It becomes [`Error::Redirect`], which is
+            /// not transient.
             pub fn redirect(source: impl Into<BoxError>) -> Self {
                 Self::new(TransportClass::Redirect, source)
             }
@@ -2968,11 +3028,44 @@ mod support {
         pub struct ProtocolError {
             source: BoxError,
         }
-        /// Redirect-policy exhaustion (taxonomy #5).
+        /// A redirect not followed (taxonomy #5): refused by the policy of the backend that executed the
+        /// request, or past its hop limit. The cause is [`std::error::Error::source`].
         #[derive(Debug)]
         pub struct RedirectError {
             source: BoxError,
         }
+        impl RedirectError {
+            /// The target of the hop refused for leaving the origin of the request, without its userinfo
+            /// and query: `Some` exactly when the default backend (`ClientCore::new` or `with_config`)
+            /// refused a redirect to another scheme, host or port. `None` for a redirect chain past the
+            /// hop limit, and for whatever an injected client's or backend's own policy reports.
+            pub fn cross_origin_target(&self) -> Option<&url::Url> {
+                let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(
+                    self.source.as_ref(),
+                );
+                while let Some(current) = cause {
+                    if let Some(refused) = current.downcast_ref::<CrossOriginRedirect>()
+                    {
+                        return Some(&refused.target);
+                    }
+                    cause = current.source();
+                }
+                None
+            }
+        }
+        /// The cause the default backend's redirect policy fails a hop to another origin with, read back
+        /// by [`RedirectError::cross_origin_target`]. `target` has its userinfo and query taken off before
+        /// it is stored, so neither reaches `Display` or `Debug`.
+        #[derive(Debug)]
+        pub(crate) struct CrossOriginRedirect {
+            pub(crate) target: url::Url,
+        }
+        impl std::fmt::Display for CrossOriginRedirect {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "refused a redirect to another origin, {}", self.target)
+            }
+        }
+        impl std::error::Error for CrossOriginRedirect {}
         /// The `FromStr` error of a generated closed string enum: the text is none of the values the
         /// enum lists. It carries the rejected text and the enum's Rust name.
         #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3518,8 +3611,10 @@ mod support {
         /// An optional, nullable member: absent, an explicit `null`, or a value.
         ///
         /// `Default` is `Absent`, so a member nobody sets is left off the wire. `From<T>` gives `Value`,
-        /// and `From<Option<T>>` maps `None` to `Null`, so a generated `with_<field>` setter taking
-        /// `impl Into<Nullable<T>>` accepts `value`, `Some(value)` and `None` alike.
+        /// so a generated `with_<field>` setter taking `impl Into<Nullable<T>>` accepts a value or
+        /// `Nullable::Null`, and its `with_<field>_null()` sibling stores that `Null`. An `Option<T>`
+        /// converts to neither: whether its `None` means "leave the member alone" (`Absent`) or "clear
+        /// it" (`Null`) is the caller's to spell out.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
         pub enum Nullable<T> {
             /// The member is left off the wire, or was missing from what was decoded.
@@ -3570,15 +3665,6 @@ mod support {
         impl<T> From<T> for Nullable<T> {
             fn from(value: T) -> Self {
                 Self::Value(value)
-            }
-        }
-        impl<T> From<Option<T>> for Nullable<T> {
-            /// `Some(value)` is `Value`, and `None` is an explicit `Null`, never `Absent`.
-            fn from(value: Option<T>) -> Self {
-                match value {
-                    Some(value) => Self::Value(value),
-                    None => Self::Null,
-                }
             }
         }
         impl<T: Serialize> Serialize for Nullable<T> {
@@ -4586,14 +4672,14 @@ mod support {
         }
         /// Whether two URLs share a scheme, host and port, as the URL parser normalises them: a host's
         /// case and a spelled-out default port make no difference.
-        fn same_origin(a: &Url, b: &Url) -> bool {
+        pub(crate) fn same_origin(a: &Url, b: &Url) -> bool {
             a.scheme() == b.scheme() && a.host() == b.host()
                 && a.port_or_known_default() == b.port_or_known_default()
         }
         /// `url` without its userinfo and query, the two places a URL carries a credential (an `apiKey`
         /// query parameter, a `user:password@` prefix), so an error holding it prints neither through
-        /// `Display` or `Debug`.
-        fn without_credentials(mut url: Url) -> Url {
+        /// `Display` or `Debug`. The default backend's redirect policy stores a refused target this way.
+        pub(crate) fn without_credentials(mut url: Url) -> Url {
             url.set_query(None);
             let _ = url.set_username("");
             let _ = url.set_password(None);
@@ -5039,9 +5125,10 @@ mod support {
                 self
             }
             /// Set the headers the part carries after its `Content-Disposition` and `Content-Type`,
-            /// replacing any set before. A map holding a `Content-Disposition` is refused as
-            /// [`Error::RequestConstruction`]: the part writes its own, from its name and
-            /// [`Self::file_name`], and a second would leave the reader to pick one.
+            /// replacing any set before. A map holding a `Content-Disposition` or a `Content-Type` is
+            /// refused as [`Error::RequestConstruction`]: the part writes its own of each, the first from
+            /// its name and [`Self::file_name`], the second from [`Self::mime_str`], and a second would
+            /// leave the reader to pick one.
             pub fn headers(
                 mut self,
                 headers: HeaderMap,
@@ -5050,6 +5137,13 @@ mod support {
                     return Err(
                         Error::request_message(
                             "a multipart part header sets `Content-Disposition`, which the part writes itself",
+                        ),
+                    );
+                }
+                if headers.contains_key(http::header::CONTENT_TYPE) {
+                    return Err(
+                        Error::request_message(
+                            "a multipart part header sets `Content-Type`, which the part writes from `mime_str`",
                         ),
                     );
                 }
@@ -6317,6 +6411,13 @@ mod support {
         /// a request-kind failure. A failure to execute is classified by
         /// [`TransportError::from_reqwest`], and one while reading the response body by the rules
         /// [`super::Error::InterruptedBody`] and [`super::Error::Protocol`] describe.
+        ///
+        /// Redirects are followed as the wrapped client's policy decides. The client `Client::new` builds
+        /// follows one only within the origin of the request and refuses one to another origin as
+        /// [`super::Error::Redirect`]; a client passed to `Client::with_client` or [`Self::new`] keeps its
+        /// own policy, reqwest's default following up to ten hops to any origin and forwarding every
+        /// header but `Authorization`, `Cookie` and the other few reqwest strips (an `apiKey` header or a
+        /// bound header among those forwarded).
         #[derive(Debug, Clone)]
         pub struct ReqwestBackend {
             client: reqwest::Client,
@@ -9032,13 +9133,19 @@ pub mod types {
                 x: super::support::Nullable::Absent,
             }
         }
-        ///Set the `x` member: a value, or `None` for an explicit `null`.
+        ///Set the `x` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_x(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<NullOnlyPropertyX>>,
         ) -> Self {
             self.x = value.into();
+            self
+        }
+        ///Set the `x` member to an explicit `null`.
+        #[must_use]
+        pub fn with_x_null(mut self) -> Self {
+            self.x = super::support::Nullable::Null;
             self
         }
     }
@@ -9212,13 +9319,19 @@ pub mod types {
             self.anything = Some(value);
             self
         }
-        ///Set the `maybe` member: a value, or `None` for an explicit `null`.
+        ///Set the `maybe` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_maybe(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<OptionalFieldsMaybe>>,
         ) -> Self {
             self.maybe = value.into();
+            self
+        }
+        ///Set the `maybe` member to an explicit `null`.
+        #[must_use]
+        pub fn with_maybe_null(mut self) -> Self {
+            self.maybe = super::support::Nullable::Null;
             self
         }
     }
@@ -10135,13 +10248,19 @@ pub mod types {
             self.alias_node = Some(value);
             self
         }
-        ///Set the `priority` member: a value, or `None` for an explicit `null`.
+        ///Set the `priority` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_priority(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<Priority>>,
         ) -> Self {
             self.priority = value.into();
+            self
+        }
+        ///Set the `priority` member to an explicit `null`.
+        #[must_use]
+        pub fn with_priority_null(mut self) -> Self {
+            self.priority = super::support::Nullable::Null;
             self
         }
         ///Set the `pet` member.
@@ -10162,13 +10281,19 @@ pub mod types {
             self.alias = Some(value);
             self
         }
-        ///Set the `notes` member: a value, or `None` for an explicit `null`.
+        ///Set the `notes` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_notes(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<StringListOrNull>>,
         ) -> Self {
             self.notes = value.into();
+            self
+        }
+        ///Set the `notes` member to an explicit `null`.
+        #[must_use]
+        pub fn with_notes_null(mut self) -> Self {
+            self.notes = super::support::Nullable::Null;
             self
         }
         ///Set the `refined` member.
@@ -10348,13 +10473,19 @@ pub mod types {
                 parent: super::support::Nullable::Absent,
             }
         }
-        ///Set the `parent` member: a value, or `None` for an explicit `null`.
+        ///Set the `parent` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_parent(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<Box<AliasNode>>>,
         ) -> Self {
             self.parent = value.into();
+            self
+        }
+        ///Set the `parent` member to an explicit `null`.
+        #[must_use]
+        pub fn with_parent_null(mut self) -> Self {
+            self.parent = super::support::Nullable::Null;
             self
         }
     }
@@ -10972,13 +11103,19 @@ pub mod types {
                 parent: super::support::Nullable::Absent,
             }
         }
-        ///Set the `parent` member: a value, or `None` for an explicit `null`.
+        ///Set the `parent` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_parent(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<Box<AliasNode>>>,
         ) -> Self {
             self.parent = value.into();
+            self
+        }
+        ///Set the `parent` member to an explicit `null`.
+        #[must_use]
+        pub fn with_parent_null(mut self) -> Self {
+            self.parent = super::support::Nullable::Null;
             self
         }
     }
@@ -11646,7 +11783,7 @@ pub mod types {
                 thumb: super::support::Nullable::Absent,
             }
         }
-        ///Set the `thumb` member: a value, or `None` for an explicit `null`.
+        ///Set the `thumb` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_thumb(
             mut self,
@@ -11655,6 +11792,12 @@ pub mod types {
             >,
         ) -> Self {
             self.thumb = value.into();
+            self
+        }
+        ///Set the `thumb` member to an explicit `null`.
+        #[must_use]
+        pub fn with_thumb_null(mut self) -> Self {
+            self.thumb = super::support::Nullable::Null;
             self
         }
     }

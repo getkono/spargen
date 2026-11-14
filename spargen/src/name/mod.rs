@@ -44,6 +44,12 @@ pub(crate) struct Names {
     /// (reserved after the declared fields) so it can never collide with a declared property named
     /// `additional`.
     pub(crate) struct_overflow: HashMap<TypeId, Ident>,
+    /// The stem of the explicit-`null` setter per `(type, wire property name)` of every member a
+    /// `with_<field>` setter takes as a `Nullable<T>`: `{field}_null`, which the setter
+    /// `with_{stem}` spells. Allocated in the struct's field scope after every declared field and
+    /// the overflow field, so a declared property spelled `{field}_null` keeps its name and this
+    /// stem takes a pointer-seeded suffix instead, and every `with_` setter stays distinct.
+    pub(crate) null_setters: HashMap<(TypeId, String), Ident>,
     /// Variant name per `(type, wire variant value)`.
     pub(crate) variants: HashMap<(TypeId, String), Ident>,
     /// The variant holding any unlisted string, per open string enum, and the one holding any
@@ -174,6 +180,12 @@ pub(crate) struct OperationNames {
     /// query `id`, a query `page-size` and a header `page_size`) are disambiguated instead of
     /// emitting a duplicate argument or field.
     parameters: Vec<Ident>,
+    /// The explicit-`null` setter per parameter, in `Operation::params` order: `{field}_null` for
+    /// a parameter that [sends an explicit `null`](crate::ir::Parameter::sends_explicit_null),
+    /// and `None` for every other one. Allocated as one ranked batch in the `…Params` field scope
+    /// after every field, so a parameter spelled `{field}_null` keeps its field and setter and
+    /// this one takes a pointer-seeded suffix instead.
+    null_setters: Vec<Option<Ident>>,
     /// The header struct per status label whose response documents a header.
     response_headers: HashMap<String, ResponseHeaderNames>,
 }
@@ -216,6 +228,14 @@ impl OperationNames {
     ) -> impl Iterator<Item = (&'a crate::ir::Parameter, &'a Ident)> {
         debug_assert_eq!(operation.params.len(), self.parameters.len());
         operation.params.iter().zip(&self.parameters)
+    }
+
+    /// The explicit-`null` setter of the parameter at `index` in `Operation::params`, which
+    /// [sends an explicit `null`](crate::ir::Parameter::sends_explicit_null).
+    pub(crate) fn null_setter(&self, index: usize) -> &Ident {
+        self.null_setters[index]
+            .as_ref()
+            .expect("a null setter is allocated for every parameter sending an explicit null")
     }
 
     /// The header struct of the response under the status `label`, which documents a header.
@@ -604,6 +624,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
             field_scope.reserve(method, IdentRole::Field);
         }
         let parameters = allocate_parameters(operation, &mut binding_scope, &mut field_scope);
+        let null_setters = allocate_null_setters(operation, &parameters, &mut field_scope);
         let params = operation
             .takes_params()
             .then(|| binding_scope.alloc("params", IdentRole::Param, pointer));
@@ -623,7 +644,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
             replay: binding_scope.alloc("replay", IdentRole::Param, pointer),
             streaming: binding_scope.alloc("streaming", IdentRole::Param, pointer),
         };
-        signatures.push((method, params_struct, parameters, bindings));
+        signatures.push((method, params_struct, (parameters, null_setters), bindings));
     }
     // After every method, so the accessor yields (see `OperationNames::url_accessor`).
     let accessor_hints: Vec<String> = signatures
@@ -702,7 +723,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
         response_headers,
     ) in records
     {
-        let (method, params_struct, parameters, bindings) = signature;
+        let (method, params_struct, (parameters, null_setters), bindings) = signature;
         let (request_builder, decoder, preparer) = companions;
         names.operations.insert(
             operation.id.clone(),
@@ -718,6 +739,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
                 success_enum,
                 bindings,
                 parameters,
+                null_setters,
                 response_headers,
             },
         );
@@ -749,6 +771,23 @@ pub(crate) fn allocate(api: &Api) -> Names {
                         id,
                         scope.alloc("additional", IdentRole::Field, &def.provenance.pointer),
                     );
+                }
+                // After every field and the overflow field, so neither is renamed by a stem. A
+                // member `new` does not take and whose type is nullable has a `Nullable<T>` setter.
+                let null_settable =
+                    |field: &&crate::ir::Field| !field.constructed() && field.ty.nullable;
+                for field in object.fields.iter().filter(null_settable) {
+                    let key = (id, field.name.wire.clone());
+                    let stem = format!("{}_null", names.fields[&key].unraw());
+                    let provenance = def
+                        .provenance
+                        .pointer
+                        .push("properties")
+                        .push(&field.name.wire)
+                        .push("null");
+                    names
+                        .null_setters
+                        .insert(key, scope.alloc(&stem, IdentRole::Field, &provenance));
                 }
             }
             TypeKind::Enum(enumeration) => {
@@ -1222,6 +1261,57 @@ fn allocate_parameters(
         .into_iter()
         .map(|ident| ident.expect("every parameter is either positional or in the bundle"))
         .collect()
+}
+
+/// Allocate the explicit-`null` setter, `{field}_null`, of every parameter of `operation` that
+/// [sends an explicit `null`](crate::ir::Parameter::sends_explicit_null), in `fields`, the
+/// `…Params` field scope already holding every field `parameters` names. One ranked batch, ranked
+/// by the field's spelling, which is unique in that scope, so the outcome does not depend on the
+/// order the spec lists the parameters in. The result is in `Operation::params` order, `None` for
+/// every parameter that sends no explicit `null`.
+fn allocate_null_setters(
+    operation: &crate::ir::Operation,
+    parameters: &[Ident],
+    fields: &mut Scope,
+) -> Vec<Option<Ident>> {
+    let indices: Vec<usize> = (0..operation.params.len())
+        .filter(|&index| operation.params[index].sends_explicit_null())
+        .collect();
+    let stems: Vec<String> = indices
+        .iter()
+        .map(|&index| format!("{}_null", parameters[index].unraw()))
+        .collect();
+    let seeds: Vec<crate::diag::JsonPointer> = indices
+        .iter()
+        .map(|&index| {
+            let parameter = &operation.params[index];
+            operation
+                .provenance
+                .pointer
+                .push("parameters")
+                .push(parameter.location.as_openapi_in())
+                .push(&parameter.name)
+                .push("null")
+        })
+        .collect();
+    let requests: Vec<_> = indices
+        .iter()
+        .zip(&stems)
+        .zip(&seeds)
+        .map(|((&index, stem), seed)| RankedRequest {
+            hint: stem.as_str(),
+            provenance: seed,
+            rank: parameters[index].as_str(),
+        })
+        .collect();
+    let mut allocated: Vec<Option<Ident>> = vec![None; operation.params.len()];
+    for (index, ident) in indices
+        .iter()
+        .zip(fields.alloc_ranked(&requests, IdentRole::Field))
+    {
+        allocated[*index] = Some(ident);
+    }
+    allocated
 }
 
 /// The stable label for one documented status, shared by naming and codegen so a header struct and

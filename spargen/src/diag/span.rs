@@ -21,7 +21,8 @@ pub struct Loc {
     pub line: u32,
     /// 1-based column number (in Unicode scalar values).
     pub col: u32,
-    /// 0-based byte offset from the start of the file.
+    /// 0-based byte offset from the start of the file, or from just after the leading UTF-8
+    /// byte-order mark of a file that begins with one.
     pub offset: usize,
 }
 

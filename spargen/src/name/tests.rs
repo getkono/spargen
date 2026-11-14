@@ -8,6 +8,7 @@ use crate::ir::{
 use indexmap::IndexMap;
 
 mod members;
+mod null_setters;
 
 fn parameter(name: &str, location: ParamLoc, required: bool) -> Parameter {
     Parameter {
@@ -1086,7 +1087,11 @@ fn synthetic_api(
                     .iter()
                     .map(|wire| Field {
                         name: PropertyName { wire: wire.clone() },
-                        ty: text,
+                        // Every other hint length nullable, so null setter stems share the scope.
+                        ty: Ty {
+                            nullable: wire.len() % 2 == 0,
+                            ..text
+                        },
                         required: false,
                         deprecated: false,
                         read_only: false,
@@ -1381,10 +1386,17 @@ proptest::proptest! {
                         .iter()
                         .map(|field| &names.fields[&(id, field.name.wire.clone())])
                         .chain(names.struct_overflow.get(&id))
+                        .chain(
+                            object
+                                .fields
+                                .iter()
+                                .filter_map(|field| names.null_setters.get(&(id, field.name.wire.clone()))),
+                        )
                         .collect();
                     let overflow =
                         usize::from(matches!(object.additional, crate::ir::AdditionalProps::Typed(_)));
-                    prop_assert_eq!(fields.len(), object.fields.len() + overflow);
+                    let nullable = object.fields.iter().filter(|field| field.ty.nullable).count();
+                    prop_assert_eq!(fields.len(), object.fields.len() + overflow + nullable);
                     assert_scope(&format!("fields of {}", def.name_hint), fields, &[])?;
                 }
                 TypeKind::Enum(enumeration) => {

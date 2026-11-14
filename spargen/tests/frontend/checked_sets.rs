@@ -335,3 +335,197 @@ paths:
         }
     }
 }
+
+/// The `E013` diagnostics of `report`, as `(message, remedy)`.
+fn e013s(report: &Report) -> Vec<(&str, &str)> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::AllOfIrreconcilable)
+        .map(|d| (d.message.as_str(), d.remedy.as_deref().unwrap_or_default()))
+        .collect()
+}
+
+/// A member of a kind the schema's own `type` does not name satisfies `enum` and never `type`, so
+/// no value is it (#1406). Beside members the `type` does admit it is `E008`, naming the member,
+/// as a member outside the set's `format` is; where it leaves no value at all, `null` included,
+/// the schema is `E013`.
+// E013 case: own-keywords-empty
+#[test]
+fn a_member_the_schemas_own_type_excludes_is_rejected() {
+    for (schema, member, kind) in [
+        ("{ type: string, enum: [a, 1] }", "1", "an integer"),
+        ("{ type: integer, enum: [1, a] }", "\"a\"", "a string"),
+        (
+            "{ type: boolean, enum: [true, \"false\"] }",
+            "\"false\"",
+            "a string",
+        ),
+        (
+            "{ type: [string, 'null'], enum: [1, null] }",
+            "1",
+            "an integer",
+        ),
+        ("{ type: string, enum: [a, 1.5] }", "1.5", "a number"),
+    ] {
+        let report = generate(&level_document(schema));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+        assert_eq!(
+            messages_for(&report, Code::NonScalarEnum),
+            [format!(
+                "enum/const value {member} is {kind}, which the schema's `type` does not admit, \
+                 so no value the schema admits is that member"
+            )],
+            "{schema}: {report:#?}"
+        );
+        assert!(e013s(&report).is_empty(), "{schema}: {report:#?}");
+    }
+    for schema in [
+        "{ type: string, enum: [1, 2] }",
+        "{ type: integer, enum: [a] }",
+        "{ type: string, const: 5 }",
+        "{ type: boolean, enum: [\"true\", \"false\"] }",
+        "{ type: string, enum: [1, null] }",
+    ] {
+        let report = generate(&level_document(schema));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+        assert_eq!(
+            e013s(&report),
+            [(
+                "every value this schema's own `enum` or `const` lists is of a kind its `type` \
+                 does not admit, so no value satisfies the schema",
+                "write each value as the `type` names it (`\"1\"`, not `1`, under `type: \
+                 string`), or correct the `type`"
+            )],
+            "{schema}: {report:#?}"
+        );
+    }
+}
+
+/// An integer member satisfies `type: number`, and an integral float `type: integer`: the `type`
+/// admits both, so neither is reported.
+#[test]
+fn a_member_its_type_admits_by_json_schemas_number_rules_is_kept() {
+    for schema in [
+        "{ type: number, enum: [1, 2] }",
+        "{ type: integer, enum: [1, 2.0] }",
+        "{ type: [integer, string], enum: [1, 2] }",
+    ] {
+        let report = generate(&level_document(schema));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{schema}: {report:#?}"
+        );
+        assert!(report.diagnostics().is_empty(), "{schema}: {report:#?}");
+    }
+}
+
+/// A schema's own `enum` and `const` both apply, so its values are the ones both list, as the
+/// `allOf` spelling of the same pair reads them: `{enum: [a, b], const: a}` is the one-value set
+/// `{enum: [a]}` is (#1406).
+#[test]
+fn an_enum_beside_a_const_is_their_intersection() {
+    let types_of = |schema: &str| {
+        let (report, code) = generate_with_code(&level_document(schema));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{schema}: {report:#?}"
+        );
+        assert!(report.diagnostics().is_empty(), "{schema}: {report:#?}");
+        types_module(&code)
+    };
+    for (both, alone, all_of) in [
+        (
+            "{ type: string, enum: [a, b], const: a }",
+            "{ type: string, enum: [a] }",
+            "{ allOf: [{ type: string, enum: [a, b] }, { const: a }] }",
+        ),
+        (
+            "{ type: integer, enum: [1, 2], const: 2.0 }",
+            "{ type: integer, enum: [2] }",
+            "{ allOf: [{ type: integer, enum: [1, 2] }, { const: 2 }] }",
+        ),
+        (
+            "{ type: [string, 'null'], enum: [a, null], const: null }",
+            "{ type: [string, 'null'], const: null }",
+            "{ allOf: [{ type: [string, 'null'], enum: [a, null] }, { const: null }] }",
+        ),
+    ] {
+        let intersected = types_of(both);
+        assert!(intersected == types_of(alone), "{both} is not {alone}");
+        assert!(intersected == types_of(all_of), "{both} is not {all_of}");
+    }
+}
+
+/// An `enum` and a `const` on one schema that share no value leave none to satisfy it: `E013`, as
+/// the `allOf` spelling of the same pair is.
+// E013 case: own-keywords-empty
+#[test]
+fn an_enum_and_a_const_sharing_no_value_are_irreconcilable() {
+    for schema in [
+        "{ type: string, enum: [a, b], const: c }",
+        "{ enum: [a, b], const: 1 }",
+        "{ enum: [null], const: a }",
+    ] {
+        let report = generate(&level_document(schema));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+        assert_eq!(
+            e013s(&report),
+            [(
+                "this schema's own `enum` and `const` share no value, so no value satisfies the \
+                 schema",
+                "make the `const` one of the `enum`'s values, or drop one of the two keywords"
+            )],
+            "{schema}: {report:#?}"
+        );
+        assert!(
+            messages_for(&report, Code::NonScalarEnum).is_empty(),
+            "{schema}: {report:#?}"
+        );
+    }
+}
+
+/// An `enum` beside a `const` is judged by the rules it is judged by alone before the two are
+/// intersected, so a member no set can hold is the `E008` its `allOf` spelling reports, and is
+/// never dropped to leave the `const`'s value or to report a disjoint pair: `1.0` equals `1`
+/// (#1406).
+#[test]
+fn an_enum_beside_a_const_is_checked_before_the_intersection() {
+    for (both, all_of) in [
+        (
+            "{ enum: [1, x], const: x }",
+            "{ allOf: [{ enum: [1, x] }, { const: x }] }",
+        ),
+        (
+            "{ enum: [{ a: 1 }, x], const: x }",
+            "{ allOf: [{ enum: [{ a: 1 }, x] }, { const: x }] }",
+        ),
+        (
+            "{ enum: [1.0, 2], const: 1 }",
+            "{ allOf: [{ enum: [1.0, 2] }, { const: 1 }] }",
+        ),
+        (
+            "{ type: number, enum: [1.0, 2], const: 1 }",
+            "{ allOf: [{ type: number, enum: [1.0, 2] }, { const: 1 }] }",
+        ),
+    ] {
+        let report = generate(&level_document(both));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{both}: {report:#?}");
+        assert!(e013s(&report).is_empty(), "{both}: {report:#?}");
+        let spelled = generate(&level_document(all_of));
+        assert_eq!(
+            spelled.outcome(),
+            Outcome::Rejected,
+            "{all_of}: {spelled:#?}"
+        );
+        let e008 = messages_for(&report, Code::NonScalarEnum);
+        assert!(!e008.is_empty(), "{both}: {report:#?}");
+        assert_eq!(
+            e008,
+            messages_for(&spelled, Code::NonScalarEnum),
+            "{both} is not {all_of}"
+        );
+    }
+}

@@ -413,20 +413,63 @@ impl std::fmt::Display for DateTimeBackend {
 }
 
 impl std::str::FromStr for DateTimeBackend {
-    type Err = String;
+    type Err = UnknownDateTimeBackend;
 
-    /// Reads the spelling [`as_str`](Self::as_str) writes; anything else is an error naming the
-    /// four it accepts.
+    /// Reads the spelling [`as_str`](Self::as_str) writes; anything else is an
+    /// [`UnknownDateTimeBackend`] naming the four it accepts.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         Self::ALL
             .iter()
             .copied()
             .find(|backend| backend.as_str() == text)
-            .ok_or_else(|| {
-                format!("unknown date-time backend `{text}`; expected time, jiff, chrono or string")
+            .ok_or_else(|| UnknownDateTimeBackend {
+                token: text.to_owned(),
             })
     }
 }
+
+/// A string that names no [`DateTimeBackend`]. Its message names the rejected token and the
+/// spelling of every backend, so `generate_api!`, the command line, and `spargen.toml` answer a
+/// mistyped backend with the same list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownDateTimeBackend {
+    token: String,
+}
+
+impl UnknownDateTimeBackend {
+    /// The string that named no backend, as it was given.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Every backend the parser accepts, in the order the message lists their spellings:
+    /// [`DateTimeBackend::ALL`].
+    pub fn accepted(&self) -> &'static [DateTimeBackend] {
+        DateTimeBackend::ALL
+    }
+}
+
+impl std::fmt::Display for UnknownDateTimeBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "unknown date-time backend `{}`; expected ",
+            self.token
+        )?;
+        let accepted = self.accepted();
+        for (index, backend) in accepted.iter().enumerate() {
+            let separator = match index {
+                0 => "",
+                _ if index + 1 == accepted.len() => " or ",
+                _ => ", ",
+            };
+            write!(formatter, "{separator}{backend}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for UnknownDateTimeBackend {}
 
 /// An object type: named fields plus an `additionalProperties` policy.
 #[derive(Debug, Clone)]
@@ -888,8 +931,35 @@ mod tests {
         }
         let error = "Jiff".parse::<DateTimeBackend>().unwrap_err();
         assert_eq!(
-            error,
+            error.to_string(),
             "unknown date-time backend `Jiff`; expected time, jiff, chrono or string"
         );
+    }
+
+    /// An unknown spelling is a typed error: it reads back the token as given and every backend
+    /// in `ALL`'s order, and it is a `std::error::Error`, so `?` lifts it into a boxed error.
+    #[test]
+    fn an_unknown_datetime_backend_is_a_typed_error() {
+        use super::{DateTimeBackend, UnknownDateTimeBackend};
+
+        fn parse(text: &str) -> Result<DateTimeBackend, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(text.parse::<DateTimeBackend>()?)
+        }
+
+        for token in ["Jiff", "", " time", "chrono-tz"] {
+            let error: UnknownDateTimeBackend = token.parse::<DateTimeBackend>().unwrap_err();
+            assert_eq!(error.token(), token);
+            assert_eq!(error.accepted(), DateTimeBackend::ALL);
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "unknown date-time backend `{token}`; expected time, jiff, chrono or string"
+                )
+            );
+            let boxed = parse(token).unwrap_err();
+            assert!(boxed.is::<UnknownDateTimeBackend>(), "{boxed}");
+            assert_eq!(boxed.to_string(), error.to_string());
+        }
+        assert_eq!(parse("jiff").unwrap(), DateTimeBackend::Jiff);
     }
 }

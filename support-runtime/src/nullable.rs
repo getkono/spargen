@@ -21,8 +21,10 @@ use std::marker::PhantomData;
 /// An optional, nullable member: absent, an explicit `null`, or a value.
 ///
 /// `Default` is `Absent`, so a member nobody sets is left off the wire. `From<T>` gives `Value`,
-/// and `From<Option<T>>` maps `None` to `Null`, so a generated `with_<field>` setter taking
-/// `impl Into<Nullable<T>>` accepts `value`, `Some(value)` and `None` alike.
+/// so a generated `with_<field>` setter taking `impl Into<Nullable<T>>` accepts a value or
+/// `Nullable::Null`, and its `with_<field>_null()` sibling stores that `Null`. An `Option<T>`
+/// converts to neither: whether its `None` means "leave the member alone" (`Absent`) or "clear
+/// it" (`Null`) is the caller's to spell out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum Nullable<T> {
     /// The member is left off the wire, or was missing from what was decoded.
@@ -80,16 +82,6 @@ impl<T> Nullable<T> {
 impl<T> From<T> for Nullable<T> {
     fn from(value: T) -> Self {
         Self::Value(value)
-    }
-}
-
-impl<T> From<Option<T>> for Nullable<T> {
-    /// `Some(value)` is `Value`, and `None` is an explicit `Null`, never `Absent`.
-    fn from(value: Option<T>) -> Self {
-        match value {
-            Some(value) => Self::Value(value),
-            None => Self::Null,
-        }
     }
 }
 
@@ -215,12 +207,38 @@ mod tests {
         );
     }
 
+    /// Answers whether `Nullable<T>: From<Option<T>>` holds: the inherent constant applies only
+    /// where it does, and the trait's default answers otherwise.
+    struct FromOption<T>(std::marker::PhantomData<T>);
+
+    trait NoFromOption {
+        const HOLDS: bool = false;
+    }
+
+    impl<T> NoFromOption for FromOption<T> {}
+
+    #[allow(dead_code)]
+    impl<T> FromOption<T>
+    where
+        Nullable<T>: From<Option<T>>,
+    {
+        const HOLDS: bool = true;
+    }
+
+    /// Issue #1414: a `None` meaning "not set" must not convert to the `null` that clears a
+    /// member, so a setter taking `impl Into<Nullable<T>>` accepts no `Option` at all.
+    #[test]
+    fn an_option_does_not_convert_into_a_nullable() {
+        assert_eq!(
+            [FromOption::<i32>::HOLDS, FromOption::<String>::HOLDS],
+            [false, false]
+        );
+    }
+
     #[test]
     fn conversions_and_accessors_agree_on_each_state() {
         assert_eq!(Nullable::<u8>::default(), Nullable::Absent);
         assert_eq!(Nullable::from(4_u8), Nullable::Value(4));
-        assert_eq!(Nullable::from(Some(4_u8)), Nullable::Value(4));
-        assert_eq!(Nullable::<u8>::from(None), Nullable::Null);
 
         let absent = Nullable::<u8>::Absent;
         let null = Nullable::<u8>::Null;
