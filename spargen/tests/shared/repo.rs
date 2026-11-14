@@ -1,7 +1,7 @@
 //! This repository's own gate configuration (`mise.toml` and `.github/workflows/`) through one set
 //! of readers, shared by `corpus_manifest.rs`, which holds the corpus-smoke gate to the manifest,
-//! and `repo_gates/`, which holds every other gate. `docs.rs` and `layering/` take only the
-//! workspace root and the file readers. Each integration test is its own crate, so each declares
+//! and `repo_gates/`, which holds every other gate. `docs.rs`, `layering/` and `cli.rs` take only
+//! the workspace root and the file readers. Each integration test is its own crate, so each declares
 //! this file with `#[path]`.
 
 // Each test crate that declares this module reads the parts its checks need.
