@@ -62,6 +62,16 @@ are themselves `HttpBackend`s that wrap an inner backend, so they compose by nes
 and builds nothing else, so clients that share one backend share everything they send through.
 `Client::with_client(client, base_url)` is the same as
 `Client::with_backend(Arc::new(ReqwestBackend::new(client)), base_url)`.
+
+The `reqwest::Client` that `Client::new` and `Client::with_config` build follows a redirect only
+within the origin of the request it sent (the same scheme, host and port), up to ten hops. A
+redirect to another origin is refused before anything is sent there, as `Error::Redirect`, whose
+`RedirectError::cross_origin_target()` names the target without its userinfo and query: every
+header a request carries would otherwise travel with the hop, an `apiKey` header, a bound header
+and a `RequestOptions` header included, since reqwest strips only `Authorization`, cookies and a
+few others. A client passed to `with_client`, and a backend passed to `with_backend`, keeps its own
+redirect policy, and under reqwest's default that means following up to ten hops to any origin with
+those headers. On `wasm32` the browser's fetch follows redirects by its own policy.
 `client.clone().with_base_url(url)?` derives a client value repointed at another base URL, keeping
 its backend, configuration and credentials.
 
