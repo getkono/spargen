@@ -37,13 +37,13 @@ pub(crate) use responses::{
     ApiErrorBodyImpl, ErrorShape, HeaderShape, Response, ResponseHeader, Responses, StatusSpec,
     SuccessShape,
 };
-pub use types::DateTimeBackend;
 pub(crate) use types::{
     AdditionalProps, BytesEncoding, DefaultValue, DisjointFeature, Field, FieldDefault,
     JsonCategory, Openness, Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty,
     TypeDef, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, VariantDispatch,
     XmlField,
 };
+pub use types::{DateTimeBackend, UnknownDateTimeBackend};
 
 /// The parts of an operation's `multipart/form-data` body that carry a `filename`, as
 /// [`Api::multipart_file_parts`] finds them.
