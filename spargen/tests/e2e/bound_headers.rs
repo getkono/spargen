@@ -75,7 +75,7 @@ fn every_operation_declaring_the_header_sends_the_bound_value() {
     let client = bound_headers::BlockingClient::new(&base).unwrap();
 
     // Unbound, the required header fails the call before anything is sent...
-    match client.list_items("t-1") {
+    match client.list_items(bound_headers::ListItemsParams::new("t-1")) {
         Err(bound_headers::Error::RequestConstruction(
             bound_headers::RequestError::MissingBoundParameter { name },
         )) => assert_eq!(name, "X-Api-Version"),
@@ -86,7 +86,7 @@ fn every_operation_declaring_the_header_sends_the_bound_value() {
 
     // A binding in any letter case reaches each operation, in its own spelling of the header.
     let client = client.with_bound_header("x-API-version", "2026-01-01").unwrap();
-    assert_eq!(client.list_items("t-2").unwrap().status(), 204);
+    assert_eq!(client.list_items(bound_headers::ListItemsParams::new("t-2")).unwrap().status(), 204);
 
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 2);
@@ -104,7 +104,7 @@ fn the_built_request_marks_the_bound_value_sensitive() {
         .unwrap()
         .with_bound_header("X-Api-Version", "TENANTSECRET")
         .unwrap();
-    let mut built = std::pin::pin!(client.list_items_request("t-1"));
+    let mut built = std::pin::pin!(client.list_items_request(bound_headers::ListItemsParams::new("t-1")));
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     let std::task::Poll::Ready(request) = std::future::Future::poll(built.as_mut(), &mut cx) else {
         panic!("a request needing no credential builds on the first poll");

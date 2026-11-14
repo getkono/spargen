@@ -134,6 +134,11 @@ struct OpSurface {
     /// The `{method}_url` accessor's arguments, in declaration order. Their types are those of
     /// `params`, compared there.
     url_args: Vec<UrlArgSurface>,
+    /// The parameters a call site passes by position, in order: the method's path arguments in URL
+    /// template order, then `…Params::new`'s arguments in declaration order. `params` holds what
+    /// each one is; this holds only the order, where two same-typed arguments trading places
+    /// still compiles at every call site.
+    positional_args: Vec<ParamKey>,
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
     params: BTreeMap<ParamKey, MemberSurface>,
@@ -164,26 +169,31 @@ struct ByteStreamSurface {
     success: String,
 }
 
-/// One argument of an operation's `{method}_url` accessor: a required path, query or querystring
-/// parameter, positional as on the method, or the optional-parameters bundle, which the accessor
-/// takes only when an optional parameter shapes the URL.
+/// One argument of an operation's `{method}_url` accessor: a path parameter, positional as on the
+/// method, or the `…Params` bundle, which the accessor takes only when one of its parameters
+/// shapes the URL.
 #[derive(PartialEq, Eq)]
 enum UrlArgSurface {
-    /// A required parameter that shapes the URL, by its identity.
+    /// A path parameter, by its identity.
     Param(ParamKey),
-    /// The optional-parameters bundle.
-    Optional,
+    /// The `…Params` bundle.
+    Params,
 }
 
 impl std::fmt::Display for UrlArgSurface {
-    /// Writes the argument as a change's detail names it: `` `id` (path) ``, or `optional
-    /// parameters` for the bundle.
+    /// Writes the argument as a change's detail names it: `` `id` (path) ``, or `parameters
+    /// bundle` for the bundle.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            UrlArgSurface::Param((name, loc)) => write!(formatter, "`{name}` ({loc})"),
-            UrlArgSurface::Optional => formatter.write_str("optional parameters"),
+            UrlArgSurface::Param(key) => formatter.write_str(&param_key_label(key)),
+            UrlArgSurface::Params => formatter.write_str("parameters bundle"),
         }
     }
+}
+
+/// A parameter as a change's detail names it: `` `id` (path) ``.
+fn param_key_label((name, loc): &ParamKey) -> String {
+    format!("`{name}` ({loc})")
 }
 
 /// One status's typed response-header struct: its generated name and its public fields, one per
@@ -199,8 +209,9 @@ struct HeadersSurface {
 /// A typed member's surface — a parameter, the request body, a struct field, or a response
 /// header: its canonical type and whether it is required, which the consumer sees in each:
 ///
-/// - a required parameter is a positional method argument, an optional one rides in the `…Params`
-///   struct;
+/// - a path parameter is a positional method argument; every other parameter rides in the
+///   `…Params` struct, a required one as a `…Params::new` argument and an optional one as a field
+///   defaulting to unset;
 /// - a required body is a `&T` argument in the generated signature, an optional one `Option<&T>`;
 /// - a struct field is both read (a required field is `T`, an optional one `Option<T>`) and
 ///   constructed (a newly-required field breaks every existing constructor);
@@ -313,10 +324,14 @@ pub enum ChangeKind {
     /// `{method}_url` accessor, request builder or decoder, or its `{method}_stream` twin or the
     /// twin's request builder or decoder. **Major** — the callable renames.
     MethodRenamed,
-    /// An operation's `{method}_url` accessor takes other arguments: a required parameter moved
-    /// into or out of the URL, or the optional-parameters bundle started or stopped shaping it.
-    /// **Major** — every call of the accessor breaks, even where the method's signature holds.
+    /// An operation's `{method}_url` accessor takes other arguments: a path parameter appeared or
+    /// went, or the `…Params` bundle started or stopped shaping the URL. **Major** — every call of
+    /// the accessor breaks, even where the method's signature holds.
     UrlAccessorArgsChanged,
+    /// An operation's positional arguments — its path arguments, then `…Params::new`'s — are the
+    /// same parameters in another order. **Major** — two same-typed arguments trading places
+    /// still compiles at every call site, and silently sends each value as the other.
+    PositionalArgsReordered,
     /// A request body was added to an operation. **Major** — a new `&T` or `Option<&T>` argument.
     RequestBodyAdded,
     /// An operation's request body was removed. **Major** — an argument disappears.
@@ -336,7 +351,8 @@ pub enum ChangeKind {
     /// An operation's error type no longer implements `ApiErrorBody`. **Major** — `body()`,
     /// `Error::api_body()`, and `E: ApiErrorBody` bounds stop compiling.
     ApiErrorBodyRemoved,
-    /// A new required parameter was added. **Major** — a new positional argument.
+    /// A new required parameter was added. **Major** — a new positional argument: of the method
+    /// for a path parameter, of `…Params::new` for any other.
     RequiredParamAdded,
     /// A new optional parameter was added. **Minor** — a new `…Params` field defaulting to unset.
     OptionalParamAdded,
@@ -454,6 +470,7 @@ impl ChangeKind {
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::UrlAccessorArgsChanged
+            | ChangeKind::PositionalArgsReordered
             | ChangeKind::RequestBodyAdded
             | ChangeKind::RequestBodyRemoved
             | ChangeKind::RequestBodyTypeChanged
@@ -498,6 +515,7 @@ impl ChangeKind {
             ChangeKind::OperationRemoved => "operation-removed",
             ChangeKind::MethodRenamed => "method-renamed",
             ChangeKind::UrlAccessorArgsChanged => "url-accessor-args-changed",
+            ChangeKind::PositionalArgsReordered => "positional-args-reordered",
             ChangeKind::RequestBodyAdded => "request-body-added",
             ChangeKind::RequestBodyRemoved => "request-body-removed",
             ChangeKind::RequestBodyTypeChanged => "request-body-type-changed",

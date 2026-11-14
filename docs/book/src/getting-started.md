@@ -169,8 +169,9 @@ use secrecy::SecretString;
 let client = Client::new("https://api.example.com")?
     .with_bearer_auth(SecretString::from("token"));
 
-// One async method per operation. Required parameters are positional; optional parameters
-// live in a per-operation `…Params` struct that derives `Default`.
+// One async method per operation. Path parameters are positional; every other parameter lives in
+// a per-operation `…Params` struct, which derives `Default` where all of them are optional and
+// otherwise takes the required ones in `…Params::new(..)`.
 let pets = client
     .list_pets(api::ListPetsParams { limit: Some(20), ..Default::default() })
     .await?;
@@ -193,9 +194,10 @@ Key points of the surface:
   the runtime guide's [Timeouts](./runtime.md#timeouts) section states every bound.
 - One `async` method per operation returning `Result<ResponseValue<T>, Error<E>>`;
   `.into_inner()` unwraps the decoded body, and `.into_parts()` yields the status, headers and
-  body, each owned. Required string parameters take `impl Into<String>`
-  and the `…Params` bundle takes `impl Into<Option<…>>`, so `None`, `Some(params)`, and `params`
-  all compile.
+  body, each owned. Required string parameters take `impl Into<String>`, and a `…Params` bundle
+  holding only optional parameters takes `impl Into<Option<…>>`, so `None`, `Some(params)`, and
+  `params` all compile; one holding a required parameter is passed as it is, built with
+  `…Params::new(..)`.
 - An object struct is built with `types::Pet::new(..)`, taking its required members, then one
   `with_<member>(value)` per optional member, and compares with `==`; the
   [generated surface](./generated-api.md#generated-surface) states what `new`

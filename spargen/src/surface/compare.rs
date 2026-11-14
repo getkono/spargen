@@ -4,9 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Change, ChangeKind, DiffReport, HeadersSurface, Impact, MemberSurface, OpSurface,
-    OverflowSurface, ParamKey, ServerSurface, ServerVariableSurface, Surface, TypeSurface,
-    UrlArgSurface,
+    param_key_label, Change, ChangeKind, DiffReport, HeadersSurface, Impact, MemberSurface,
+    OpSurface, OverflowSurface, ParamKey, ServerSurface, ServerVariableSurface, Surface,
+    TypeSurface, UrlArgSurface,
 };
 
 /// Diff two surfaces into a classified, deterministically ordered [`DiffReport`].
@@ -181,6 +181,21 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             ),
         ));
     }
+    // Only a reorder of the same parameters: one that appears, goes or turns positional is the
+    // parameter's own change below.
+    if old.positional_args != new.positional_args
+        && sorted(&old.positional_args) == sorted(&new.positional_args)
+    {
+        changes.push(Change::new(
+            ChangeKind::PositionalArgsReordered,
+            key,
+            format!(
+                "positional arguments [{}] -> [{}]",
+                params_label(&old.positional_args),
+                params_label(&new.positional_args)
+            ),
+        ));
+    }
     diff_member(
         &BODY,
         key,
@@ -267,6 +282,22 @@ fn diff_byte_stream(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut V
         }
         _ => {}
     }
+}
+
+/// Parameters as a change's detail lists them, comma-separated.
+fn params_label(params: &[ParamKey]) -> String {
+    params
+        .iter()
+        .map(param_key_label)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `params` in a fixed order, so two lists holding the same parameters compare equal.
+fn sorted(params: &[ParamKey]) -> Vec<&ParamKey> {
+    let mut sorted: Vec<&ParamKey> = params.iter().collect();
+    sorted.sort();
+    sorted
 }
 
 /// A URL accessor's arguments as a change's detail lists them, comma-separated.

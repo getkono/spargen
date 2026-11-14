@@ -17,10 +17,18 @@ use.
   `Client::with_options(RequestOptions)` gives a derived client value per-call options: a
   response body limit (`max_body`, refused as `Error::BodyTooLarge`), extensions a transport
   backend reads off each request, and headers added where a request lacks them.
-- One `async` method per operation: required parameters positional, optional parameters in a
-  per-operation `…Params` struct deriving `Default`, `Result<ResponseValue<T>, Error<E>>` out.
-  String parameters and the params bundle take `impl Into<…>`, so `client.get_pet("1")` and
-  `client.list_pets(params)` need no `to_owned()` or `Some`. An operation whose method name
+- One `async` method per operation: path parameters positional, in the order the URL template
+  names them, every other parameter in a per-operation `…Params` struct, and
+  `Result<ResponseValue<T>, Error<E>>` out. Where every parameter in the struct is optional, it
+  derives `Default` and is built `…Params::default().limit(20)`, and the method takes it as
+  `impl Into<Option<…>>`. Where a query, header, cookie or `querystring` parameter is required,
+  `…Params::new(..)` takes each required one, in declaration order, the optional ones are set by
+  name as before, and the method takes the struct itself: `client.search(SearchParams::new(from,
+  to).limit(20))`. Only path parameters and `new`'s arguments are positional, and `spargen diff`
+  reports a reorder of either as major (`positional-args-reordered`), since two same-typed
+  arguments trading places still compiles. String parameters and the optional bundle take
+  `impl Into<…>`, so `client.get_pet("1")` and `client.list_pets(params)` need no `to_owned()` or
+  `Some`. An operation whose method name
   would spell one of `Client`'s or `BlockingClient`'s fixed methods (`new`, `with_timeout`,
   …) takes a disambiguated name instead. Both clients emit `with_default_server` when the
   description declares a server, and only `BlockingClient` emits `inner`; both names are reserved
@@ -28,9 +36,9 @@ use.
 - Beside each operation method, a `{method}_url` accessor on both clients returns, as
   `Result<url::Url, Error<Infallible>>`, the URL that method sends its request to, less any
   `apiKey` query credential, without sending it: the same path-parameter and query encoding,
-  resolved against the base URL or the operation's server override. It takes the required path,
-  query and `querystring` parameters and, where it holds one of those, the `…Params` bundle; it
-  attaches no credential. This is for a URL handed to a fetcher of its own, such as a media player
+  resolved against the base URL or the operation's server override. It takes the path parameters
+  and, where it holds a query or `querystring` parameter, the `…Params` bundle; it attaches no
+  credential. This is for a URL handed to a fetcher of its own, such as a media player
   or a browser (`client.stream_file_url(id)`). Where another operation's method already spells
   `{method}_url`, that method keeps it and the accessor takes a disambiguated name.
 - Each operation is also its two halves, on both clients: `{method}_request` takes the method's

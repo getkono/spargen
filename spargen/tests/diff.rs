@@ -223,7 +223,8 @@ fn added_optional_param_is_minor() {
 
 #[test]
 fn added_required_param_is_major() {
-    // A required query parameter is a new positional argument of the URL accessor as well.
+    // A required query parameter is a new `…Params::new` argument, and its bundle a new argument
+    // of the URL accessor.
     let report = diff(&base(), &spec(PARAM_REQUIRED_INT, "id", PET_PROPS, ""));
     assert_eq!(
         kinds(&report),

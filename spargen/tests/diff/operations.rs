@@ -1040,20 +1040,16 @@ fn removing_a_parameter_is_major() {
 
 #[test]
 fn flipping_a_parameter_between_required_and_optional_is_major_both_ways() {
-    // Either direction changes the method signature and its URL accessor's: a required parameter
-    // is positional, an optional one is a `…Params` field.
+    // Either direction changes the method signature: a required query parameter is a
+    // `…Params::new` argument and the method takes the bundle itself, an optional one is a field
+    // set by name and the method takes `impl Into<Option<…Params>>`. The URL accessor takes the
+    // bundle either way.
     let optional = spec(PARAM_OPTIONAL_INT, "id", PET_PROPS, "");
     let required = spec(PARAM_REQUIRED_INT, "id", PET_PROPS, "");
 
     for (old, new) in [(&optional, &required), (&required, &optional)] {
         let report = diff(old, new);
-        assert_eq!(
-            kinds(&report),
-            vec![
-                ChangeKind::UrlAccessorArgsChanged,
-                ChangeKind::ParamRequirednessChanged
-            ]
-        );
+        assert_eq!(kinds(&report), vec![ChangeKind::ParamRequirednessChanged]);
         assert_eq!(report.bump, Impact::Major);
     }
 }
@@ -1265,7 +1261,7 @@ fn a_change_to_the_url_accessors_arguments_is_major() {
     );
     assert_eq!(
         report.changes[0].detail,
-        "URL accessor `list_pets_url` arguments [optional parameters] -> []"
+        "URL accessor `list_pets_url` arguments [parameters bundle] -> []"
     );
     assert_eq!(report.bump, Impact::Major);
 
@@ -1289,8 +1285,8 @@ fn a_change_to_the_url_accessors_arguments_is_major() {
     );
     assert_eq!(report.bump, Impact::Major);
 
-    // A required query parameter moved to a header stays a positional argument of the method but
-    // leaves the accessor's.
+    // A required query parameter moved to a header stays a `…Params::new` argument, but takes the
+    // bundle out of the accessor's arguments.
     let report = diff(
         &declared_params(&[("limit", "query", true)]),
         &declared_params(&[("limit", "header", true)]),
@@ -1303,7 +1299,7 @@ fn a_change_to_the_url_accessors_arguments_is_major() {
     );
     assert_eq!(
         report.changes[0].detail,
-        "URL accessor `list_pets_url` arguments [`limit` (query)] -> []"
+        "URL accessor `list_pets_url` arguments [parameters bundle] -> []"
     );
     assert_eq!(report.bump, Impact::Major);
 
@@ -1322,6 +1318,75 @@ fn a_change_to_the_url_accessors_arguments_is_major() {
         report.changes
     );
     assert_eq!(report.bump, Impact::Minor);
+}
+
+#[test]
+fn reordering_two_required_parameters_is_major() {
+    // Issue #1338: `ListPetsParams::new(from, to)` -> `new(to, from)`. Both are `i64`, so every
+    // call site still compiles and silently sends each value as the other: the same parameters,
+    // each unchanged, in another positional order.
+    let report = diff(
+        &declared_params(&[("from", "query", true), ("to", "query", true)]),
+        &declared_params(&[("to", "query", true), ("from", "query", true)]),
+    );
+    assert_eq!(
+        kinds_at(&report),
+        vec![(ChangeKind::PositionalArgsReordered, "GET /pets")],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(
+        report.changes[0].detail,
+        "positional arguments [`from` (query), `to` (query)] -> [`to` (query), `from` (query)]"
+    );
+    assert_eq!(report.bump, Impact::Major);
+
+    // Headers too: the URL accessor never takes them, so only the positional order reports it.
+    let report = diff(
+        &declared_params(&[("x-org", "header", true), ("x-project", "header", true)]),
+        &declared_params(&[("x-project", "header", true), ("x-org", "header", true)]),
+    );
+    assert_eq!(
+        kinds_at(&report),
+        vec![(ChangeKind::PositionalArgsReordered, "GET /pets")],
+        "{:?}",
+        report.changes
+    );
+
+    // An optional parameter is set by name, so reordering it beside a required one moves nothing.
+    let report = diff(
+        &declared_params(&[("from", "query", true), ("limit", "query", false)]),
+        &declared_params(&[("limit", "query", false), ("from", "query", true)]),
+    );
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
+}
+
+/// A spec whose one operation, `GET /orgs/{org}/teams/{team}`, declares its two integer path
+/// parameters in the order `names` gives.
+fn path_params_declared(names: [&str; 2]) -> String {
+    let mut spec = String::from(
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n  /orgs/{org}/teams/{team}:\n    get:\n      operationId: getTeam\n      parameters:\n",
+    );
+    for name in names {
+        spec.push_str(&format!(
+            "        - {{ name: {name}, in: path, required: true, schema: {{ type: integer }} }}\n"
+        ));
+    }
+    spec.push_str("      responses:\n        '204': { description: ok }\n");
+    spec
+}
+
+#[test]
+fn reordering_path_parameter_declarations_changes_nothing() {
+    // Path arguments follow the URL template, so swapping the declarations of `org` and `team`
+    // leaves `get_team(org, team)` and `get_team_url(org, team)` as they were.
+    let report = diff(
+        &path_params_declared(["org", "team"]),
+        &path_params_declared(["team", "org"]),
+    );
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
 }
 
 /// A 3.2 spec whose one path, `/items`, declares each `(method, operationId)` pair as an

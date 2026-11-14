@@ -16,7 +16,7 @@ use super::dispatch::{
 use super::docs::{doc_tokens, normalize_rustdoc};
 use super::params::{
     cookie_param_tokens, json_querystring_tokens, location_statements, param_value_tokens,
-    query_param_tokens, querystring_param_tokens,
+    query_param_tokens, querystring_param_tokens, required_param_value,
 };
 use super::ty::{reqwest_method, ty_tokens};
 
@@ -625,7 +625,7 @@ fn url_building(operation: &Operation, operation_names: &OperationNames) -> UrlB
     // `unused_assignments` warning in every consumer's build.
     let raw_query_init = uses_querystring.then(|| match json_querystring {
         Some((parameter, ident)) if parameter.required => {
-            let encoded = json_querystring_tokens(quote! { &#ident });
+            let encoded = json_querystring_tokens(required_param_value(bindings, parameter, ident));
             quote! { let #raw_query_binding: Option<String> = Some(#encoded); }
         }
         Some(_) => quote! { let mut #raw_query_binding: Option<String> = None; },
@@ -685,13 +685,14 @@ fn url_building(operation: &Operation, operation_names: &OperationNames) -> UrlB
     }
 }
 
-/// Whether a required parameter is emitted as `impl Into<String>` rather than its concrete type.
+/// Whether a required parameter, a path argument or a `…Params::new` argument, is emitted as
+/// `impl Into<String>` rather than its concrete type.
 ///
 /// Exactly a non-nullable, unboxed [`Prim::String`](crate::ir::Prim::String). `Option<String>`
 /// and `Box<String>` positions stay concrete: `Into` would make `None` ambiguous at the call site
 /// for no gain. A `uuid`, `date` or `date-time` primitive stays concrete too, including where its
 /// feature is off and it renders as `String`.
-fn takes_into_string(api: &Api, ty: Ty) -> bool {
+pub(super) fn takes_into_string(api: &Api, ty: Ty) -> bool {
     !ty.nullable
         && !ty.boxed
         && matches!(
@@ -720,13 +721,13 @@ pub(super) struct Arg {
     /// binary body the value the async method takes, so its name passes straight through.
     forward: TokenStream,
     /// The statement converting an `impl Into<..>` argument to its concrete type once, at the top
-    /// of the body, so the rest of the body is written against concrete types: a required
-    /// parameter [`takes_into_string`] admits, and the optional-parameters bundle from
+    /// of the body, so the rest of the body is written against concrete types: a path parameter
+    /// [`takes_into_string`] admits, and an all-optional `…Params` bundle from
     /// `impl Into<Option<…Params>>` to `Option<…Params>`.
     normalize: Option<TokenStream>,
-    /// Whether the URL accessor takes it too: a required parameter in a location that shapes the
-    /// URL, and the bundle where one of its parameters does. A header, a cookie or the request
-    /// body changes nothing in the URL, so the accessor does not ask for one.
+    /// Whether the URL accessor takes it too: a path parameter, and the bundle where one of its
+    /// parameters shapes the URL. A header, a cookie or the request body changes nothing in the
+    /// URL, so the accessor does not ask for one.
     shapes_url: bool,
 }
 
@@ -734,12 +735,13 @@ pub(super) struct Arg {
 /// by the async method, its blocking shim, and both of their URL accessors, so every one of them
 /// is declared from one source.
 pub(super) struct OperationSig {
-    /// The method's rustdoc, its required parameters' deprecation and `default` notes, and its
+    /// The method's rustdoc, its path parameters' deprecation and `default` notes, and its
     /// deprecation.
     attrs: TokenStream,
     /// `#[deprecated]` where the operation is, for the method and its URL accessor alike.
     deprecated: Option<TokenStream>,
-    /// The required parameters, then the optional-parameters bundle, then the request body.
+    /// The path parameters in URL template order, then the `…Params` bundle, then the request
+    /// body.
     args: Vec<Arg>,
     /// The `T` the success yields; see [`success_type`].
     success_ty: TokenStream,
@@ -763,14 +765,14 @@ impl OperationSig {
         let params_ident = &operation_names.params_struct;
 
         let docs = doc_tokens(&operation.docs, options);
-        // Required parameters are positional method arguments with no attribute slot of their
-        // own, so a required parameter's deprecation and `default` are surfaced in the method
-        // rustdoc instead, in the order an optional parameter's `…Params` field carries them.
-        // A bound header is no argument at all, so the rustdoc says where its value comes from.
+        // Path parameters are positional method arguments with no attribute slot of their own,
+        // so a path parameter's deprecation and `default` are surfaced in the method rustdoc
+        // instead, in the order a `…Params` field carries them. A bound header is no argument at
+        // all, so the rustdoc says where its value comes from.
         let param_docs = operation
             .params
             .iter()
-            .filter(|param| param.required)
+            .filter(|param| param.is_positional())
             .flat_map(|param| {
                 let deprecated = param
                     .deprecated
@@ -820,10 +822,14 @@ impl OperationSig {
         };
 
         let mut args = Vec::new();
-        for (param, ident) in operation_names
+        // Path parameters in the order the URL template names them, so a call site reads as the
+        // URL does, whatever order the spec declares them in.
+        let mut positional: Vec<_> = operation_names
             .params(operation)
-            .filter(|(param, _)| param.required)
-        {
+            .filter(|(param, _)| param.is_positional())
+            .collect();
+        positional.sort_by_key(|(param, _)| operation.template_position(param));
+        for (param, ident) in positional {
             // A plain `String` parameter accepts anything that converts, so a call site passes a
             // literal without `.to_owned()`. Narrowed to exactly `String`: every other generated
             // type keeps its concrete position, where `impl Into<T>` would buy nothing and cost
@@ -844,19 +850,29 @@ impl OperationSig {
                 decl,
                 forward: quote! { #ident },
                 normalize,
-                shapes_url: param.is_url_arg(),
+                shapes_url: true,
             });
         }
         if let Some(params_binding) = &bindings.params {
-            // `impl Into<Option<..>>` accepts the bundle directly as well as `None`/`Some(..)`, so
-            // a caller who sets optional parameters passes the bundle without wrapping it in
-            // `Some`.
+            let (decl, normalize) = if operation.params_required() {
+                // A required parameter rides in the bundle, so the bundle is always passed, built
+                // by `…Params::new(required…)`.
+                (quote! { #params_binding: #params_ident }, None)
+            } else {
+                // `impl Into<Option<..>>` accepts the bundle directly as well as
+                // `None`/`Some(..)`, so a caller who sets optional parameters passes the bundle
+                // without wrapping it in `Some`.
+                (
+                    quote! { #params_binding: impl Into<Option<#params_ident>> },
+                    Some(quote! {
+                        let #params_binding: Option<#params_ident> = #params_binding.into();
+                    }),
+                )
+            };
             args.push(Arg {
-                decl: quote! { #params_binding: impl Into<Option<#params_ident>> },
+                decl,
                 forward: quote! { #params_binding },
-                normalize: Some(quote! {
-                    let #params_binding: Option<#params_ident> = #params_binding.into();
-                }),
+                normalize,
                 shapes_url: operation.url_takes_params(),
             });
         }

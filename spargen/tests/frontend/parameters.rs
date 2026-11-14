@@ -169,6 +169,55 @@ paths:
     );
 }
 
+/// Path arguments follow the URL template, not the declaration: `getRepo` declares `{repo}` on
+/// its path item before `{owner}` on the operation, and `getTeam` declares `{team}` before
+/// `{org}` in one list, yet each method, blocking twin and URL accessor takes them as the URL
+/// names them.
+#[test]
+fn path_arguments_follow_the_url_template_whatever_order_they_are_declared_in() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /repos/{owner}/{repo}:
+    parameters:
+      - { name: repo, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getRepo
+      parameters:
+        - { name: owner, in: path, required: true, schema: { type: string } }
+      responses: { '204': { description: ok } }
+  /orgs/{org}/teams/{team}:
+    get:
+      operationId: getTeam
+      parameters:
+        - { name: team, in: path, required: true, schema: { type: integer } }
+        - { name: org, in: path, required: true, schema: { type: string } }
+      responses: { '204': { description: ok } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    let repo_args = "( &self, owner: impl Into<types::Owner>, repo: impl Into<types::Repo>, )";
+    let team_args = "( &self, org: impl Into<types::Org>, team: types::Team, )";
+    for signature in [
+        format!("pub async fn get_repo{repo_args}"),
+        format!("pub fn get_repo_request{repo_args}"),
+        format!("pub fn get_repo_url{repo_args}"),
+        format!("pub async fn get_team{team_args}"),
+        format!("pub fn get_team_request{team_args}"),
+        format!("pub fn get_team_url{team_args}"),
+    ] {
+        assert!(flat.contains(&signature), "{signature}\n{flat}");
+    }
+    // Every emitted signature, the blocking twin's included, takes the template's order.
+    assert!(
+        !flat.contains("repo: impl Into<types::Repo>, owner"),
+        "{flat}"
+    );
+    assert!(!flat.contains("team: types::Team, org"), "{flat}");
+}
+
 /// Each `parameters` list may name a `name`/`in` pair once. The two lists are checked apart,
 /// because a pair the operation repeats from its path item is an override, not a duplicate.
 #[test]
@@ -1469,12 +1518,12 @@ paths:
     }
 }
 
-/// Issue #1121: a required parameter is a positional argument with no attribute slot, so its
-/// `deprecated: true` is noted in its method's rustdoc, before its `default` note, as an optional
-/// parameter's `…Params` field carries both. A required parameter that is not deprecated gets no
-/// such note.
+/// Issue #1121: a path parameter is a positional argument with no attribute slot, so its
+/// `deprecated: true` is noted in its method's rustdoc. A required query parameter is a `…Params`
+/// field (issue #1338), so it carries both notes on its field, `deprecated` before `default`, as
+/// an optional parameter's field does. A parameter that is not deprecated gets no such note.
 #[test]
-fn a_deprecated_required_parameter_is_noted_in_its_method_docs() {
+fn a_deprecated_required_parameter_is_noted_in_its_method_docs_or_field_docs() {
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -1498,10 +1547,15 @@ paths:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
     let notes = "///Parameter `id` is deprecated per the spec. \
-                 ///Parameter `sort` is deprecated per the spec. \
-                 ///Parameter `sort` default: `name`. \
                  #[inline] pub async fn list_items(";
     assert!(flat.contains(notes), "{code}");
+    assert!(
+        flat.contains(
+            "///Deprecated per the spec. ///Default: `name`. #[serde(rename = \"sort\")] pub sort:"
+        ),
+        "{code}"
+    );
+    assert!(!flat.contains("Parameter `sort`"), "{code}");
     assert!(!flat.contains("Parameter `kept`"), "{code}");
     assert!(!flat.contains("Parameter `page`"), "{code}");
     assert!(

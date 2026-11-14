@@ -122,8 +122,9 @@ fn by_parameter(params: &[Parameter], names: &Names) -> Vec<((u8, String), Ident
     keyed
 }
 
-/// Parameters whose names escape to the same spelling in each scope: `id` twice and `ID`
-/// among the method arguments, `page-size`, `page_size` and `Page Size` among the fields.
+/// Parameters whose names escape to the same spelling in each scope: path `id` among the method
+/// arguments, and query `id` with header `ID`, and `page-size`, `page_size` and `Page Size`, among
+/// the `…Params` fields.
 fn colliding() -> Vec<Parameter> {
     vec![
         parameter("page_size", ParamLoc::Header, false),
@@ -137,11 +138,11 @@ fn colliding() -> Vec<Parameter> {
 
 fn assert_distinct_per_scope(params: &[Parameter], names: &Names) {
     let idents = &names.operations[&OperationId("getItem".to_owned())].parameters;
-    for required in [true, false] {
+    for positional in [true, false] {
         let scope: Vec<&str> = params
             .iter()
             .zip(idents)
-            .filter(|(parameter, _)| parameter.required == required)
+            .filter(|(parameter, _)| parameter.is_positional() == positional)
             .map(|(_, ident)| ident.as_str())
             .collect();
         let mut unique = scope.clone();
@@ -150,7 +151,7 @@ fn assert_distinct_per_scope(params: &[Parameter], names: &Names) {
         assert_eq!(
             unique.len(),
             scope.len(),
-            "required={required} identifiers collide: {scope:?}"
+            "positional={positional} identifiers collide: {scope:?}"
         );
     }
 }
@@ -171,7 +172,8 @@ fn colliding_parameter_identifiers_are_distinct_within_each_scope() {
             .expect("parameter is allocated")
     };
     assert_eq!(ident(0, "id"), "id");
-    assert_ne!(ident(1, "id"), "id");
+    // A path argument and a `…Params` field are scopes of their own.
+    assert_eq!(ident(1, "id"), "id");
     assert_ne!(ident(3, "ID"), "id");
     assert_eq!(ident(1, "page-size"), "page_size");
     assert_ne!(ident(3, "page_size"), "page_size");
@@ -241,15 +243,15 @@ fn generator_bindings_yield_to_every_parameter() {
     ];
     let mut params: Vec<Parameter> = bindings
         .iter()
-        .map(|name| parameter(name, ParamLoc::Query, true))
+        .map(|name| parameter(name, ParamLoc::Path, true))
         .collect();
-    // An optional parameter, so the `params` binding is allocated at all.
+    // A query parameter, so the `params` binding is allocated at all.
     params.push(parameter("limit", ParamLoc::Query, false));
     let names = names(params.clone(), true);
     let operation = OperationId("getItem".to_owned());
     let idents = &names.operations[&operation].parameters;
 
-    // Every required parameter keeps its bare spelling.
+    // Every parameter keeps its bare spelling.
     for (parameter, ident) in params.iter().zip(idents) {
         assert_eq!(ident.as_str(), parameter.name);
     }
@@ -278,7 +280,7 @@ fn generator_bindings_yield_to_every_parameter() {
             params
                 .iter()
                 .zip(idents)
-                .filter(|(parameter, _)| parameter.required)
+                .filter(|(parameter, _)| parameter.is_positional())
                 .all(|(_, parameter)| parameter != ident),
             "binding `{ident}` shadows a parameter"
         );
@@ -1432,14 +1434,14 @@ proptest::proptest! {
             let bindings = &names.operations[&operation.id].bindings;
             prop_assert_eq!(
                 bindings.params.is_some(),
-                operation.params.iter().any(|parameter| !parameter.required)
+                operation.params.iter().any(|parameter| !parameter.is_positional())
             );
             prop_assert_eq!(bindings.body.is_some(), operation.request_body.is_some());
             let arguments = operation
                 .params
                 .iter()
                 .zip(idents)
-                .filter(|(parameter, _)| parameter.required)
+                .filter(|(parameter, _)| parameter.is_positional())
                 .map(|(_, ident)| ident)
                 .chain(bindings.params.as_ref())
                 .chain(bindings.body.as_ref())
@@ -1459,7 +1461,7 @@ proptest::proptest! {
                 .params
                 .iter()
                 .zip(idents)
-                .filter(|(parameter, _)| !parameter.required)
+                .filter(|(parameter, _)| !parameter.is_positional())
                 .map(|(_, ident)| ident);
             assert_scope(
                 &format!("params fields of {}", operation.id.0),
@@ -1586,7 +1588,7 @@ proptest::proptest! {
         let arguments = params
             .iter()
             .zip(idents)
-            .filter(|(parameter, _)| parameter.required)
+            .filter(|(parameter, _)| parameter.is_positional())
             .map(|(_, ident)| ident)
             .chain(bindings.params.as_ref())
             .chain(bindings.body.as_ref())
@@ -1605,7 +1607,7 @@ proptest::proptest! {
         let fields = params
             .iter()
             .zip(idents)
-            .filter(|(parameter, _)| !parameter.required)
+            .filter(|(parameter, _)| !parameter.is_positional())
             .map(|(_, ident)| ident);
         assert_scope("params fields", fields, &[])?;
 

@@ -1,13 +1,14 @@
 //! Parameter serialization: each location's per-parameter statements an operation method runs,
-//! and the optional-parameters `…Params` struct.
+//! and the `…Params` struct.
 
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::ir::{MediaType, Operation, ParamLoc, Ty};
+use crate::ir::{Api, MediaType, Operation, ParamLoc, Ty};
 use crate::name::{Names, OperationBindings, OperationNames};
 
 use super::docs::normalize_rustdoc;
+use super::operation::takes_into_string;
 use super::ty::ty_tokens;
 
 /// The percent-encoding set for one parameter, derived from its location, style, and
@@ -47,9 +48,9 @@ pub(super) fn encoding_variant_tokens(variant: &str) -> TokenStream {
 
 /// The statements serializing every `location` parameter of `operation`, required ones first and
 /// then optional ones, each in declaration order. `serialize` renders one parameter from the
-/// expression its value is borrowed through: `&ident`, the method argument, for a required one, and
-/// `value` for an optional one, whose statement runs only when the caller set it in the
-/// optional-parameters bundle.
+/// expression its value is borrowed through: [`required_param_value`] for a required one, and
+/// `value` for an optional one, whose statement runs only when the caller set it in the `…Params`
+/// bundle.
 pub(super) fn location_statements(
     operation: &Operation,
     names: &OperationNames,
@@ -61,9 +62,12 @@ pub(super) fn location_statements(
             .params(operation)
             .filter(move |(param, _)| param.required == required && param.location == location)
     };
-    let required = at_location(true).map(|(param, ident)| serialize(param, quote! { &#ident }));
+    let required = at_location(true).map(|(param, ident)| {
+        serialize(param, required_param_value(&names.bindings, param, ident))
+    });
     let optional = at_location(false).map(|(param, ident)| {
         optional_param_guard(
+            operation,
             &names.bindings,
             param,
             ident,
@@ -73,20 +77,59 @@ pub(super) fn location_statements(
     required.chain(optional).collect()
 }
 
+/// The expression a required parameter's value is borrowed through: `&ident`, the method
+/// argument, for a path parameter, and `&params.ident`, its field of the `…Params` bundle the
+/// method takes by value, for every other one.
+pub(super) fn required_param_value(
+    bindings: &OperationBindings,
+    param: &crate::ir::Parameter,
+    ident: &crate::name::Ident,
+) -> TokenStream {
+    if param.is_positional() {
+        return quote! { &#ident };
+    }
+    let params_binding = params_binding(bindings);
+    quote! { &#params_binding.#ident }
+}
+
+/// The `…Params` argument's binding, which an operation with a non-path parameter takes.
+fn params_binding(bindings: &OperationBindings) -> &crate::name::Ident {
+    bindings
+        .params
+        .as_ref()
+        .expect("`…Params` argument allocated")
+}
+
 /// The statement that runs `body` with `value` bound to an optional parameter's value, when the
-/// caller supplied the optional-parameters bundle and set `ident` in it. A parameter that sends an
-/// explicit `null` binds the whole `&Nullable<T>`, which its JSON codec writes as `null` or the
-/// value, whenever it is not `Absent`; any other binds the `&T` its `Option` holds.
+/// caller set `ident` in the `…Params` bundle (and, where every parameter in it is optional and
+/// the method takes it as an `Option`, supplied the bundle). A parameter that sends an explicit
+/// `null` binds the whole `&Nullable<T>`, which its JSON codec writes as `null` or the value,
+/// whenever it is not `Absent`; any other binds the `&T` its `Option` holds.
 fn optional_param_guard(
+    operation: &Operation,
     bindings: &OperationBindings,
     param: &crate::ir::Parameter,
     ident: &crate::name::Ident,
     body: TokenStream,
 ) -> TokenStream {
-    let params_binding = bindings
-        .params
-        .as_ref()
-        .expect("optional parameters argument allocated");
+    let params_binding = params_binding(bindings);
+    if operation.params_required() {
+        // The bundle is always there, so the field is read directly.
+        return if param.sends_explicit_null() {
+            quote! {
+                if !#params_binding.#ident.is_absent() {
+                    let value = &#params_binding.#ident;
+                    #body
+                }
+            }
+        } else {
+            quote! {
+                if let Some(value) = #params_binding.#ident.as_ref() {
+                    #body
+                }
+            }
+        };
+    }
     let set = if param.sends_explicit_null() {
         quote! {
             .filter(|params| !params.#ident.is_absent())
@@ -304,19 +347,38 @@ const EXPLICIT_NULL_FIELD_DOC: &str =
 const EXPLICIT_NULL_SETTER_DOC: &str =
     "`None` sends the JSON `null`; leaving the parameter unset omits it.";
 
-/// Emit an operation's optional-parameters `…Params` struct (deriving `Default`, public fields)
-/// plus an `impl` of fluent `#[must_use]` consuming setters — one per optional param, named after
-/// its field — so callers can write `…Params::default().foo(x).bar(y)` instead of a struct literal.
-pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenStream {
+/// Emit an operation's `…Params` struct, which holds every parameter but a path one in a public
+/// field, plus an `impl` of fluent `#[must_use]` consuming setters — one per optional param, named
+/// after its field. Where every parameter in it is optional, the struct derives `Default`, so
+/// callers write `…Params::default().foo(x).bar(y)` instead of a struct literal; where one is
+/// required, `…Params::new(required…)` takes the required ones in declaration order, by name at
+/// the call site's `.foo(x)` for the rest, so two same-typed required parameters can never trade
+/// places unseen behind a positional method argument.
+pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
     let operation_names = names.operation(&operation.id);
     let ident = &operation_names.params_struct;
     // The setter method reuses the field ident verbatim, so the two can never disagree.
-    let optional: Vec<(&crate::ir::Parameter, &crate::name::Ident)> = operation_names
+    let bundled: Vec<(&crate::ir::Parameter, &crate::name::Ident)> = operation_names
         .params(operation)
-        .filter(|(param, _)| !param.required)
+        .filter(|(param, _)| !param.is_positional())
         .collect();
-    let fields = optional.iter().map(|(param, ident)| {
+    let optional = bundled.iter().filter(|(param, _)| !param.required);
+    let fields = bundled.iter().map(|(param, ident)| {
         let wire = &param.name;
+        if param.required {
+            // A required parameter is always sent, so its field is its own type, which
+            // `ty_tokens` already wraps in `Option` where it is nullable, serialized as `null`.
+            let ty = ty_tokens(param.ty, names, true);
+            let notes = param_notes(param)
+                .into_iter()
+                .map(|note| normalize_rustdoc(&note))
+                .map(|note| quote! { #[doc = #note] });
+            return quote! {
+                #(#notes)*
+                #[serde(rename = #wire)]
+                pub #ident: #ty,
+            };
+        }
         // Every struct param is optional, so its unset state is omitted. A nullable JSON
         // `content` param is a `support::Nullable` over the non-nullable type, because its codec
         // sends `Null` as the text `null` (#996). Every other param is an `Option`, its `None`
@@ -342,13 +404,7 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
             let inner = ty_tokens(param.ty, names, true);
             (quote! { Option<#inner> }, "Option::is_none")
         };
-        let mut notes: Vec<String> = Vec::new();
-        if param.deprecated {
-            notes.push("Deprecated per the spec.".to_owned());
-        }
-        if let Some(default) = &param.default_display {
-            notes.push(format!("Default: `{default}`."));
-        }
+        let mut notes = param_notes(param);
         if param.sends_explicit_null() {
             notes.push(EXPLICIT_NULL_FIELD_DOC.to_owned());
         }
@@ -367,7 +423,7 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
     // (not `impl Into<T>`) keeps inference trivial for every generated field type. One that sends
     // an explicit `null` takes `impl Into<Nullable<T>>`, as a nullable model member's setter does,
     // so `value`, `Some(value)` and `None` (that `null`) all fit.
-    let setters = optional.iter().map(|(param, ident)| {
+    let setters = optional.clone().map(|(param, ident)| {
         let inner = ty_tokens(
             Ty {
                 nullable: false,
@@ -399,9 +455,14 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
             }
         }
     });
+    let (derive_default, constructor) = if operation.params_required() {
+        (None, Some(params_constructor(&bundled, api, names)))
+    } else {
+        (Some(quote! { Default, }), None)
+    };
     quote! {
         #[allow(dead_code, deprecated)]
-        #[derive(Debug, Clone, Default, serde::Serialize)]
+        #[derive(Debug, Clone, #derive_default serde::Serialize)]
         pub struct #ident {
             #(#fields)*
         }
@@ -410,7 +471,72 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
         // `is_*`/`to_*`/etc.; a consuming builder setter is the intended shape, so allow it here.
         #[allow(dead_code, deprecated, clippy::wrong_self_convention)]
         impl #ident {
+            #constructor
             #(#setters)*
+        }
+    }
+}
+
+/// The rustdoc notes a `…Params` field carries for its parameter's `deprecated` and `default`.
+fn param_notes(param: &crate::ir::Parameter) -> Vec<String> {
+    let mut notes: Vec<String> = Vec::new();
+    if param.deprecated {
+        notes.push("Deprecated per the spec.".to_owned());
+    }
+    if let Some(default) = &param.default_display {
+        notes.push(format!("Default: `{default}`."));
+    }
+    notes
+}
+
+/// `…Params::new`, emitted where a bundled parameter is required: one argument per required
+/// parameter, in declaration order and named after its field, and every optional one unset. A
+/// plain `String` argument is an `impl Into<String>`, as a path parameter's is.
+fn params_constructor(
+    bundled: &[(&crate::ir::Parameter, &crate::name::Ident)],
+    api: &Api,
+    names: &Names,
+) -> TokenStream {
+    let required = bundled.iter().filter(|(param, _)| param.required);
+    let args = required.clone().map(|(param, ident)| {
+        let ty = ty_tokens(param.ty, names, true);
+        if takes_into_string(api, param.ty) {
+            quote! { #ident: impl Into<#ty> }
+        } else {
+            quote! { #ident: #ty }
+        }
+    });
+    let inits = bundled.iter().map(|(param, ident)| {
+        if param.required {
+            if takes_into_string(api, param.ty) {
+                quote! { #ident: #ident.into(), }
+            } else {
+                quote! { #ident, }
+            }
+        } else if param.sends_explicit_null() {
+            quote! { #ident: support::Nullable::Absent, }
+        } else {
+            quote! { #ident: None, }
+        }
+    });
+    let wires: Vec<String> = required
+        .map(|(param, _)| format!("`{}`", param.name))
+        .collect();
+    let doc = normalize_rustdoc(&format!(
+        "The parameters with every required one given, in declaration order ({}), and every \
+         optional one unset.",
+        wires.join(", ")
+    ));
+    // A description decides how many parameters are required, and a consumer's `clippy.toml`
+    // where `too_many_arguments` fires, so `new` allows it whatever its arity.
+    quote! {
+        #[doc = #doc]
+        #[must_use]
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(#(#args),*) -> Self {
+            Self {
+                #(#inits)*
+            }
         }
     }
 }

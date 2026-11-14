@@ -304,7 +304,7 @@ fn scheme_doc_lines(scheme: &SecuritySchemeDef, options: &CodegenOptions) -> Vec
         .collect()
 }
 
-/// Emit everything the generated root holds beside `types`: each operation's optional-parameters
+/// Emit everything the generated root holds beside `types`: each operation's `…Params`
 /// struct, typed error, multi-status success enum, and response-header structs, the `servers`
 /// module, and the `Client` itself — its constructors (`new`, `with_default_server` when a server
 /// is declared, `with_client`, `with_backend`), `core`, the typed credential setters of each
@@ -321,8 +321,8 @@ pub(super) fn emit_client(
     let params = api
         .operations
         .iter()
-        .filter(|operation| operation.has_optional_params())
-        .map(|operation| emit_params_struct(operation, names));
+        .filter(|operation| operation.takes_params())
+        .map(|operation| emit_params_struct(operation, api, names));
     let errors = api
         .operations
         .iter()

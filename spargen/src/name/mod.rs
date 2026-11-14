@@ -122,7 +122,7 @@ pub(crate) struct OperationNames {
     /// The private method both the operation method and its request builder prepare the request
     /// with, `prepare_{method}`. Allocated after every decoder, on the same terms.
     pub(crate) preparer: Ident,
-    /// The optional-parameters `…Params` struct.
+    /// The `…Params` struct every parameter but a path one rides in.
     pub(crate) params_struct: Ident,
     /// The error type: `{Method}Error`, or `{Method}OperationError` where the first form would
     /// shadow a root re-export. Allocated as one ranked batch in the root scope, which the
@@ -134,12 +134,12 @@ pub(crate) struct OperationNames {
     /// [`Responses::success`](crate::ir::Responses::success) is an enum, and allocated in the root
     /// scope beside the error types.
     success_enum: Option<Ident>,
-    /// Generator-owned signature and request-building bindings. Required OpenAPI parameters are
-    /// allocated in the same scope first, so these identifiers can never shadow caller-provided
-    /// values.
+    /// Generator-owned signature and request-building bindings. Path parameters are allocated in
+    /// the same scope first, so these identifiers can never shadow caller-provided values.
     pub(crate) bindings: OperationBindings,
-    /// Identifier per parameter, in `Operation::params` order: a method argument for a required
-    /// parameter, a `…Params` field (and setter) for an optional one. Each kind shares one scope
+    /// Identifier per parameter, in `Operation::params` order: a method argument for a path
+    /// parameter, a `…Params` field for every other one (and a setter where it is optional, a
+    /// `…Params::new` argument where it is required). Each kind shares one scope
     /// per operation, so two parameters whose names escape to the same spelling (a path and a
     /// query `id`, a query `page-size` and a header `page_size`) are disambiguated instead of
     /// emitting a duplicate argument or field.
@@ -247,9 +247,10 @@ pub(crate) const CLIENT_TRAIT_METHODS: &[&str] = &["clone"];
 
 /// The methods a `…Params` struct already answers to beside its setters, which are named after its
 /// optional parameters: `default` (its derived `Default`, the builder's entry point
-/// `…Params::default()`), `clone` (its derived `Clone`), and `new`, the conventional constructor
-/// spelling. A setter of one of these names would shadow the trait method or read as a
-/// constructor, so an optional parameter spelling one is disambiguated, field and setter alike.
+/// `…Params::default()` where every parameter is optional), `clone` (its derived `Clone`), and
+/// `new`, its constructor where a parameter is required. A setter of one of these names would
+/// shadow the trait method or the constructor, so a parameter spelling one is disambiguated,
+/// field and setter alike.
 pub(crate) const PARAMS_METHODS: &[&str] = &["clone", "default", "new"];
 
 /// The methods a server builder in the `servers` module already answers to beside its setters,
@@ -390,7 +391,7 @@ pub(crate) const DATETIME_ROOT_REEXPORTS: &[&str] = &["Date", "DateParseError", 
 /// Generator-owned bindings emitted inside one operation method.
 #[derive(Debug)]
 pub(crate) struct OperationBindings {
-    /// The optional-parameters struct argument, when one is emitted.
+    /// The `…Params` struct argument, when one is emitted.
     pub(crate) params: Option<Ident>,
     /// The request-body argument, when one is emitted.
     pub(crate) body: Option<Ident>,
@@ -559,11 +560,11 @@ pub(crate) fn allocate(api: &Api) -> Names {
     for ((operation, method), params_struct) in
         api.operations.iter().zip(methods).zip(params_structs)
     {
-        // Required parameters are fixed by the generated public surface. Allocate them first, then
+        // Path parameters are fixed by the generated public surface. Allocate them first, then
         // every generator-owned binding in the same lexical scope so the implementation yields on
-        // collision without renaming ordinary arguments. Optional parameters are fields of the
+        // collision without renaming ordinary arguments. Every other parameter is a field of the
         // `…Params` struct, a scope of their own, which holds the struct's own methods first
-        // because each field's setter shares its spelling.
+        // because each optional field's setter shares its spelling.
         let pointer = &operation.provenance.pointer;
         let mut binding_scope = Scope::default();
         let mut field_scope = Scope::default();
@@ -572,7 +573,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
         }
         let parameters = allocate_parameters(operation, &mut binding_scope, &mut field_scope);
         let params = operation
-            .has_optional_params()
+            .takes_params()
             .then(|| binding_scope.alloc("params", IdentRole::Param, pointer));
         let body = operation
             .typed_body()
@@ -1075,8 +1076,9 @@ fn allocate_response_headers(
     records
 }
 
-/// Allocate one identifier per parameter of `operation`, in `Operation::params` order: required
-/// parameters as method arguments in `arguments`, optional ones as `…Params` fields in `fields`.
+/// Allocate one identifier per parameter of `operation`, in `Operation::params` order: path
+/// parameters as method arguments in `arguments`, every other one as a `…Params` field in
+/// `fields`.
 ///
 /// Each kind is allocated as one ranked batch, so which of two parameters escaping to the same
 /// spelling keeps it depends on the parameters themselves and not on the order the spec lists
@@ -1109,12 +1111,12 @@ fn allocate_parameters(
         })
         .collect();
     let mut allocated: Vec<Option<Ident>> = vec![None; operation.params.len()];
-    for (required, scope, role) in [
+    for (positional, scope, role) in [
         (true, arguments, IdentRole::Param),
         (false, fields, IdentRole::Field),
     ] {
         let indices: Vec<usize> = (0..operation.params.len())
-            .filter(|&index| operation.params[index].required == required)
+            .filter(|&index| operation.params[index].is_positional() == positional)
             .collect();
         let requests: Vec<_> = indices
             .iter()
@@ -1133,7 +1135,7 @@ fn allocate_parameters(
     }
     allocated
         .into_iter()
-        .map(|ident| ident.expect("every parameter is either required or optional"))
+        .map(|ident| ident.expect("every parameter is either positional or in the bundle"))
         .collect()
 }
 

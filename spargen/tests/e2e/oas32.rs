@@ -145,7 +145,9 @@ fn a_json_querystring_parameter_is_one_encoded_query() {
 
     let query = |term: &str| oas32_client::types::Query { term: Some(term.to_owned()) };
     let client = oas32_client::BlockingClient::new(&base).unwrap();
-    client.lookup_records(query("a&b=c#d")).unwrap();
+    client
+        .lookup_records(oas32_client::LookupRecordsParams::new(query("a&b=c#d")))
+        .unwrap();
     client
         .lookup_records_maybe(Some(
             oas32_client::LookupRecordsMaybeParams::default().filter(query("x y")),

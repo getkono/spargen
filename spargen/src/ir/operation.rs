@@ -61,8 +61,9 @@ pub(crate) enum PathSegment {
     Param(String),
 }
 
-/// One API operation. Required parameters become positional method arguments; optional ones
-/// travel in a per-operation `…Params` struct deriving `Default`.
+/// One API operation. Path parameters become positional method arguments, in URL template order;
+/// every other parameter travels in a per-operation `…Params` struct, whose `new` takes the
+/// required ones and which derives `Default` where every one is optional.
 #[derive(Debug, Clone)]
 pub(crate) struct Operation {
     /// The operation identifier.
@@ -144,18 +145,38 @@ impl Operation {
             .and_then(|body| body.ty.map(|ty| (body, ty)))
     }
 
-    /// Whether any parameter is optional, so the method takes an optional-parameters `…Params`
-    /// bundle.
-    pub(crate) fn has_optional_params(&self) -> bool {
-        self.params.iter().any(|param| !param.required)
+    /// Whether any parameter rides in the `…Params` bundle (see [`Parameter::is_positional`]), so
+    /// the method takes one.
+    pub(crate) fn takes_params(&self) -> bool {
+        self.params.iter().any(|param| !param.is_positional())
     }
 
-    /// Whether the optional-parameters bundle holds a parameter that shapes the URL, so the
-    /// operation's URL accessor takes the bundle after its [`Parameter::is_url_arg`] arguments.
+    /// Whether the `…Params` bundle holds a required parameter, so the bundle is constructed with
+    /// `…Params::new(required…)` and the method takes it by value rather than as an optional
+    /// `impl Into<Option<…Params>>`.
+    pub(crate) fn params_required(&self) -> bool {
+        self.params
+            .iter()
+            .any(|param| param.required && !param.is_positional())
+    }
+
+    /// Whether the `…Params` bundle holds a parameter that shapes the URL, so the operation's URL
+    /// accessor takes the bundle after its [`Parameter::is_positional`] arguments.
     pub(crate) fn url_takes_params(&self) -> bool {
         self.params
             .iter()
-            .any(|param| !param.required && param.location.shapes_url())
+            .any(|param| !param.is_positional() && param.location.shapes_url())
+    }
+
+    /// Where `param`, a path parameter, sits in the URL template: the index of its `{name}`
+    /// placeholder among the template's segments, which orders the positional arguments. A name
+    /// no segment holds sorts last.
+    pub(crate) fn template_position(&self, param: &Parameter) -> usize {
+        self.path
+            .segments
+            .iter()
+            .position(|segment| matches!(segment, PathSegment::Param(name) if *name == param.name))
+            .unwrap_or(usize::MAX)
     }
 }
 
@@ -179,9 +200,9 @@ pub(crate) struct Parameter {
     pub(crate) allow_reserved: bool,
     /// Whether array/object values use the style's exploded representation.
     pub(crate) explode: bool,
-    /// `deprecated: true`. An optional parameter's `…Params` field carries a "Deprecated per the
-    /// spec." rustdoc note; a required parameter, a positional argument with no attribute slot,
-    /// gets a "Parameter `name` is deprecated per the spec." note in its method's rustdoc.
+    /// `deprecated: true`. A parameter's `…Params` field carries a "Deprecated per the spec."
+    /// rustdoc note; a path parameter, a positional argument with no attribute slot, gets a
+    /// "Parameter `name` is deprecated per the spec." note in its method's rustdoc.
     pub(crate) deprecated: bool,
     /// The rendered `default` value, if the parameter schema declared one. Documented in rustdoc
     /// (never serde-wired: a params struct is only serialized, and a server-side default means the
@@ -190,11 +211,12 @@ pub(crate) struct Parameter {
 }
 
 impl Parameter {
-    /// Whether this parameter is a positional argument of the operation's URL accessor: a
-    /// required parameter in a location that shapes the URL. The accessor takes these in
-    /// declaration order, then the bundle where [`Operation::url_takes_params`] holds.
-    pub(crate) fn is_url_arg(&self) -> bool {
-        self.required && self.location.shapes_url()
+    /// Whether this parameter is a positional argument of the operation's method and its URL
+    /// accessor: exactly a path parameter. Both take these in URL template order (see
+    /// [`Operation::template_position`]), then the `…Params` bundle, which every other parameter
+    /// rides in, required or not.
+    pub(crate) fn is_positional(&self) -> bool {
+        self.location == ParamLoc::Path
     }
 
     /// Whether this optional parameter's value can be an explicit `null` distinct from absence,
