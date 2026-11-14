@@ -369,13 +369,19 @@ impl MultipartPart {
     }
 
     /// Set the headers the part carries after its `Content-Disposition` and `Content-Type`,
-    /// replacing any set before. A map holding a `Content-Disposition` is refused as
-    /// [`Error::RequestConstruction`]: the part writes its own, from its name and
-    /// [`Self::file_name`], and a second would leave the reader to pick one.
+    /// replacing any set before. A map holding a `Content-Disposition` or a `Content-Type` is
+    /// refused as [`Error::RequestConstruction`]: the part writes its own of each, the first from
+    /// its name and [`Self::file_name`], the second from [`Self::mime_str`], and a second would
+    /// leave the reader to pick one.
     pub fn headers(mut self, headers: HeaderMap) -> Result<Self, Error<Infallible>> {
         if headers.contains_key(http::header::CONTENT_DISPOSITION) {
             return Err(Error::request_message(
                 "a multipart part header sets `Content-Disposition`, which the part writes itself",
+            ));
+        }
+        if headers.contains_key(http::header::CONTENT_TYPE) {
+            return Err(Error::request_message(
+                "a multipart part header sets `Content-Type`, which the part writes from `mime_str`",
             ));
         }
         self.headers = headers;
