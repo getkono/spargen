@@ -12,7 +12,7 @@
 //! # Nested-runtime caveat
 //!
 //! A [`BlockingRuntime`] must NOT be *driven* from inside another async runtime: tokio's
-//! `block_on` panics when called from within a runtime's context, and so does
+//! `block_on` panics when called from a future a runtime is driving, and so does
 //! [`BlockingRuntime::block_on`]; [`BlockingRuntime::try_block_on`] returns [`NestedRuntime`]
 //! there instead. Drive one on a plain (non-async) thread — for example a `std::thread`, or
 //! `tokio::task::spawn_blocking` when you are already inside an async context. Building one inside an async runtime is fine, and so is dropping one
@@ -60,25 +60,67 @@ impl BlockingRuntime {
     }
 
     /// Drive a future to completion on the owned runtime, as [`block_on`](Self::block_on) does,
-    /// unless the current thread is inside a tokio runtime's context.
+    /// unless the current thread is driving a future for a tokio runtime.
+    ///
+    /// A thread that only carries a runtime's handle is not refused: a `tokio::task::spawn_blocking`
+    /// closure and a thread holding a `Runtime::enter` guard drive the future here, as `block_on`
+    /// does there.
     ///
     /// # Errors
     ///
-    /// Returns [`NestedRuntime`] without polling `future` when called from within a tokio runtime's
-    /// context (an async task, or a thread that entered a runtime), where `block_on` would panic.
+    /// Returns [`NestedRuntime`] without polling `future` when called from a future a tokio
+    /// runtime is driving (an async task, or the future given to a runtime's `block_on`), where
+    /// `block_on` would panic. The refusal is read from tokio's cooperative budget, which the
+    /// runtime sets for every future it polls and lifts for blocking sections. A future that opted
+    /// out of the budget through `tokio::task::coop::unconstrained` reads as a blocking section, so
+    /// there `try_block_on` panics as `block_on` does.
     pub fn try_block_on<F: std::future::Future>(
         &self,
         future: F,
     ) -> Result<F::Output, NestedRuntime> {
-        if tokio::runtime::Handle::try_current().is_ok() {
+        if tokio::runtime::Handle::try_current().is_ok() && polled_under_a_task_budget() {
             return Err(NestedRuntime { _private: () });
         }
         Ok(self.block_on(future))
     }
 }
 
-/// The error [`BlockingRuntime::try_block_on`] returns when called from within a tokio runtime's
-/// context, where driving another runtime would panic. Drive the blocking client from a plain
+/// Whether the current thread is polling a future under a tokio task budget: the state in which
+/// tokio's `block_on` panics. tokio exposes no direct test of it, so this spends the budget one
+/// unit at a time: a constrained budget (at most `u8::MAX` units) runs out, an unconstrained one
+/// never does. Every unit is handed back before it returns, newest first, so the caller's budget
+/// is left as it was.
+fn polled_under_a_task_budget() -> bool {
+    use std::task::{Context, Poll, Waker};
+    use tokio::task::coop;
+
+    if !coop::has_budget_remaining() {
+        return true;
+    }
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut spent = Vec::new();
+    let constrained = loop {
+        match coop::poll_proceed(&mut cx) {
+            Poll::Ready(unit) => spent.push(unit),
+            Poll::Pending => break true,
+        }
+        if !coop::has_budget_remaining() {
+            break true;
+        }
+        if spent.len() > usize::from(u8::MAX) {
+            break false;
+        }
+    };
+    // Each unit restores the budget it found, so handing them back newest first ends on the
+    // budget the probe started from.
+    while let Some(unit) = spent.pop() {
+        drop(unit);
+    }
+    constrained
+}
+
+/// The error [`BlockingRuntime::try_block_on`] returns when called from a future a tokio runtime is
+/// driving, where driving another runtime would panic. Drive the blocking client from a plain
 /// thread instead, for example inside `tokio::task::spawn_blocking`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NestedRuntime {
