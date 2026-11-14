@@ -38,8 +38,8 @@ use crate::diag::{
 use crate::source::{InputBundle, SpannedValue};
 
 pub(crate) use carve::{carve_rules, MAX_CARVE_ROUNDS};
-use rule::RuleMatch;
 pub use rule::{ComponentKind, KeepRule, OmitMethod, OmitRule, UnknownOmitToken};
+use rule::{RuleMatch, Unresolved};
 
 /// A compatibility omit profile.
 ///
@@ -82,8 +82,10 @@ impl Omit {
     /// under a glob that already took its target, or a glob whose every match went before it.
     ///
     /// Beside the other spec of a `spargen diff` pair, a rule of this profile that removes or
-    /// keeps nothing here is also satisfied, not an `E019`, when `elsewhere` holds it, so a rule
-    /// is an `E019` only when it matches neither spec. A keep rule satisfied that way keeps
+    /// keeps nothing here because its construct or file is absent here is also satisfied, not an
+    /// `E019`, when `elsewhere` holds it, so such a rule is an `E019` only when it matches neither
+    /// spec. A rule whose file is ambiguous here names no one construct, and stays an `E019`
+    /// whatever `elsewhere` holds. A keep rule satisfied that way keeps
     /// nothing on this side. Every other entry point passes [`MatchedElsewhere::default`], under
     /// which each rule answers to its own spec alone.
     pub(crate) fn apply_beside(
@@ -270,7 +272,9 @@ fn covered(targets: &Targets, removed: &HashSet<(FileId, JsonPointer)>) -> bool 
 /// Remove what `rule` matches from `bundle`, recording each removed construct in `removed` and
 /// emitting a `W009` for it, or the one `E019` that says why the rule removed nothing. A rule
 /// that removes nothing because earlier rules removed everything it matched `as_written`, or one
-/// `satisfied_elsewhere` (the other spec of a diff matches it), emits nothing.
+/// `satisfied_elsewhere` (the other spec of a diff matches it) whose construct or file is absent
+/// here, emits nothing. A rule that names no one construct ([`Unresolved::Invalid`]: an
+/// ambiguous file, the document root) is an `E019` however it fares elsewhere.
 fn apply_rule(
     rule: &OmitRule,
     as_written: Option<&Targets>,
@@ -280,7 +284,7 @@ fn apply_rule(
     diags: &mut Diagnostics,
 ) {
     let applied = match rule.resolve(bundle) {
-        Err(invalid) => Err(invalid),
+        Err(unresolved) => Err(unresolved),
         Ok(RuleMatch::Exact { file, pointer }) => {
             match bundle.value_at_mut(file).remove_pointer(&pointer) {
                 Some(value) => {
@@ -288,7 +292,9 @@ fn apply_rule(
                     removed.insert((file, pointer));
                     Ok(())
                 }
-                None => Err("omit rule did not match any source construct".into()),
+                None => Err(Unresolved::Absent(
+                    "omit rule did not match any source construct".into(),
+                )),
             }
         }
         Ok(RuleMatch::Glob { file, mut pointers }) => {
@@ -308,13 +314,18 @@ fn apply_rule(
             if removed_any {
                 Ok(())
             } else {
-                Err("glob omit rule did not match any source construct".into())
+                Err(Unresolved::Absent(
+                    "glob omit rule did not match any source construct".into(),
+                ))
             }
         }
     };
-    if let Err(message) = applied {
-        if !satisfied_elsewhere && !as_written.is_some_and(|targets| covered(targets, removed)) {
-            emit_invalid_rule(rule, bundle, diags, message);
+    if let Err(unresolved) = applied {
+        let absent_here = matches!(unresolved, Unresolved::Absent(_));
+        if !(absent_here && satisfied_elsewhere)
+            && !as_written.is_some_and(|targets| covered(targets, removed))
+        {
+            emit_invalid_rule(rule, bundle, diags, unresolved.into_message());
         }
     }
 }

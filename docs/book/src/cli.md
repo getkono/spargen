@@ -72,7 +72,8 @@ pair given, the file's value stands, and giving both is rejected by argument par
 discovers the `spargen.toml` beside it, while `--config` applies its one file to both sides. An
 omit or keep rule that matches nothing in one spec but something in the other is satisfied on the
 side that lacks its construct (a keep rule keeping nothing there), so `diff --omit-path /beta`
-works when only the new spec declares `/beta`; a rule is `E019` only when it matches neither spec.
+works when only the new spec declares `/beta`; a rule is `E019` only when it matches neither spec,
+or on a side where its file is ambiguous.
 
 ### `spargen.toml` reference
 
