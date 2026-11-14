@@ -669,6 +669,41 @@ fn a_mapping_and_a_member_spelling_one_node_differently_are_one_member() {
     );
 }
 
+/// A root component named by a percent-encoded `#/components/schemas/<name>` is that component
+/// (#1479): `Pe%74` is `Pet` once the fragment is decoded, as the bundle's `(file, pointer)`
+/// identity already reads it, so the name-keyed lookup resolves it rather than reporting `E004`. A
+/// pointer into the component through an encoded name is the same subschema as the plain spelling.
+#[test]
+fn a_percent_encoded_component_schema_name_names_that_component() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    Pet: { type: object, properties: { a: { type: string } } }\n    \
+         Holder:\n      type: object\n      properties:\n        \
+         x: { $ref: '#/components/schemas/Pe%74' }\n        \
+         y: { $ref: '#/components/schemas/Pet' }\n        \
+         z: { $ref: '#/components/schemas/Pe%74/properties/a' }\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    let types = types_module(&code);
+    let holder = types
+        .split("pub struct Holder")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}").next())
+        .unwrap_or_else(|| panic!("no `Holder`: {types}"));
+    for field in ["x", "y"] {
+        assert!(
+            holder.contains(&format!("pub {field}: Option<Pet>")),
+            "`{field}` must be typed `Pet`: {holder}"
+        );
+    }
+    assert!(
+        holder.contains("pub z: Option<String>"),
+        "`z` must be `Pet`'s `a`: {holder}"
+    );
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
