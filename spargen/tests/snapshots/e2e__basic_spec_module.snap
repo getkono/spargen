@@ -3611,8 +3611,10 @@ mod support {
         /// An optional, nullable member: absent, an explicit `null`, or a value.
         ///
         /// `Default` is `Absent`, so a member nobody sets is left off the wire. `From<T>` gives `Value`,
-        /// and `From<Option<T>>` maps `None` to `Null`, so a generated `with_<field>` setter taking
-        /// `impl Into<Nullable<T>>` accepts `value`, `Some(value)` and `None` alike.
+        /// so a generated `with_<field>` setter taking `impl Into<Nullable<T>>` accepts a value or
+        /// `Nullable::Null`, and its `with_<field>_null()` sibling stores that `Null`. An `Option<T>`
+        /// converts to neither: whether its `None` means "leave the member alone" (`Absent`) or "clear
+        /// it" (`Null`) is the caller's to spell out.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
         pub enum Nullable<T> {
             /// The member is left off the wire, or was missing from what was decoded.
@@ -3663,15 +3665,6 @@ mod support {
         impl<T> From<T> for Nullable<T> {
             fn from(value: T) -> Self {
                 Self::Value(value)
-            }
-        }
-        impl<T> From<Option<T>> for Nullable<T> {
-            /// `Some(value)` is `Value`, and `None` is an explicit `Null`, never `Absent`.
-            fn from(value: Option<T>) -> Self {
-                match value {
-                    Some(value) => Self::Value(value),
-                    None => Self::Null,
-                }
             }
         }
         impl<T: Serialize> Serialize for Nullable<T> {
@@ -9132,13 +9125,19 @@ pub mod types {
                 x: super::support::Nullable::Absent,
             }
         }
-        ///Set the `x` member: a value, or `None` for an explicit `null`.
+        ///Set the `x` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_x(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<NullOnlyPropertyX>>,
         ) -> Self {
             self.x = value.into();
+            self
+        }
+        ///Set the `x` member to an explicit `null`.
+        #[must_use]
+        pub fn with_x_null(mut self) -> Self {
+            self.x = super::support::Nullable::Null;
             self
         }
     }
@@ -9312,13 +9311,19 @@ pub mod types {
             self.anything = Some(value);
             self
         }
-        ///Set the `maybe` member: a value, or `None` for an explicit `null`.
+        ///Set the `maybe` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_maybe(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<OptionalFieldsMaybe>>,
         ) -> Self {
             self.maybe = value.into();
+            self
+        }
+        ///Set the `maybe` member to an explicit `null`.
+        #[must_use]
+        pub fn with_maybe_null(mut self) -> Self {
+            self.maybe = super::support::Nullable::Null;
             self
         }
     }
@@ -10235,13 +10240,19 @@ pub mod types {
             self.alias_node = Some(value);
             self
         }
-        ///Set the `priority` member: a value, or `None` for an explicit `null`.
+        ///Set the `priority` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_priority(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<Priority>>,
         ) -> Self {
             self.priority = value.into();
+            self
+        }
+        ///Set the `priority` member to an explicit `null`.
+        #[must_use]
+        pub fn with_priority_null(mut self) -> Self {
+            self.priority = super::support::Nullable::Null;
             self
         }
         ///Set the `pet` member.
@@ -10262,13 +10273,19 @@ pub mod types {
             self.alias = Some(value);
             self
         }
-        ///Set the `notes` member: a value, or `None` for an explicit `null`.
+        ///Set the `notes` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_notes(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<StringListOrNull>>,
         ) -> Self {
             self.notes = value.into();
+            self
+        }
+        ///Set the `notes` member to an explicit `null`.
+        #[must_use]
+        pub fn with_notes_null(mut self) -> Self {
+            self.notes = super::support::Nullable::Null;
             self
         }
         ///Set the `refined` member.
@@ -10448,13 +10465,19 @@ pub mod types {
                 parent: super::support::Nullable::Absent,
             }
         }
-        ///Set the `parent` member: a value, or `None` for an explicit `null`.
+        ///Set the `parent` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_parent(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<Box<AliasNode>>>,
         ) -> Self {
             self.parent = value.into();
+            self
+        }
+        ///Set the `parent` member to an explicit `null`.
+        #[must_use]
+        pub fn with_parent_null(mut self) -> Self {
+            self.parent = super::support::Nullable::Null;
             self
         }
     }
@@ -11072,13 +11095,19 @@ pub mod types {
                 parent: super::support::Nullable::Absent,
             }
         }
-        ///Set the `parent` member: a value, or `None` for an explicit `null`.
+        ///Set the `parent` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_parent(
             mut self,
             value: impl std::convert::Into<super::support::Nullable<Box<AliasNode>>>,
         ) -> Self {
             self.parent = value.into();
+            self
+        }
+        ///Set the `parent` member to an explicit `null`.
+        #[must_use]
+        pub fn with_parent_null(mut self) -> Self {
+            self.parent = super::support::Nullable::Null;
             self
         }
     }
@@ -11746,7 +11775,7 @@ pub mod types {
                 thumb: super::support::Nullable::Absent,
             }
         }
-        ///Set the `thumb` member: a value, or `None` for an explicit `null`.
+        ///Set the `thumb` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_thumb(
             mut self,
@@ -11755,6 +11784,12 @@ pub mod types {
             >,
         ) -> Self {
             self.thumb = value.into();
+            self
+        }
+        ///Set the `thumb` member to an explicit `null`.
+        #[must_use]
+        pub fn with_thumb_null(mut self) -> Self {
+            self.thumb = super::support::Nullable::Null;
             self
         }
     }

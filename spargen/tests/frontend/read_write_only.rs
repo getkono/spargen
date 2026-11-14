@@ -113,7 +113,8 @@ fn a_property_an_all_of_member_requires_is_relaxed_on_the_merged_struct() {
 }
 
 /// A nullable `required` `writeOnly` member decodes as a `Nullable` and `new` takes the `Option`
-/// a required nullable member is, converting it.
+/// a required nullable member is, its `None` the explicit `Null` (#1414: spelled out, since
+/// `Nullable` has no `From<Option<T>>`).
 #[test]
 fn a_nullable_required_write_only_property_is_a_nullable_member() {
     let spec = with_schemas(
@@ -128,7 +129,9 @@ fn a_nullable_required_write_only_property_is_a_nullable_member() {
         &code,
         &[
             "pub token: super::support::Nullable<SecretToken>,",
-            "pub fn new(token: Option<SecretToken>) -> Self { Self { token: super::support::Nullable::from(token), } }",
+            "pub fn new(token: Option<SecretToken>) -> Self { Self { token: match token { \
+             Some(value) => super::support::Nullable::Value(value), None => \
+             super::support::Nullable::Null, }, } }",
         ],
     );
 }
