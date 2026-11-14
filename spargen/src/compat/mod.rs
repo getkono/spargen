@@ -62,13 +62,8 @@ impl Omit {
         self.rules.is_empty() && self.keep.is_empty()
     }
 
-    /// Apply the profile to the loaded input bundle: resolve the keep rules against the document
-    /// as written, apply the omit rules, then narrow what remains to the kept operations.
-    ///
-    /// The omit rules apply in declaration order, a rule equal to an earlier one only once. A rule
-    /// that removes nothing is satisfied, not an `E019`, when everything it matches in the
-    /// document as written lies at or beneath a construct an earlier rule removed: an exact rule
-    /// under a glob that already took its target, or a glob whose every match went before it.
+    /// [`apply_beside`](Self::apply_beside) with [`MatchedElsewhere::default`]: each rule answers
+    /// to its own spec alone.
     #[cfg(test)]
     pub(crate) fn apply(
         &self,
@@ -78,11 +73,19 @@ impl Omit {
         self.apply_beside(bundle, &MatchedElsewhere::default(), diags)
     }
 
-    /// [`apply`](Self::apply) beside the other spec of a `spargen diff` pair: a rule of this
-    /// profile that removes or keeps nothing here is also satisfied, not an `E019`, when
-    /// `elsewhere` holds it, so a rule is an `E019` only when it matches neither spec. A keep rule
-    /// satisfied that way keeps nothing on this side. Every other entry point passes
-    /// [`MatchedElsewhere::default`], under which each rule answers to its own spec alone.
+    /// Apply the profile to the loaded input bundle: resolve the keep rules against the document
+    /// as written, apply the omit rules, then narrow what remains to the kept operations.
+    ///
+    /// The omit rules apply in declaration order, a rule equal to an earlier one only once. A rule
+    /// that removes nothing is satisfied, not an `E019`, when everything it matches in the
+    /// document as written lies at or beneath a construct an earlier rule removed: an exact rule
+    /// under a glob that already took its target, or a glob whose every match went before it.
+    ///
+    /// Beside the other spec of a `spargen diff` pair, a rule of this profile that removes or
+    /// keeps nothing here is also satisfied, not an `E019`, when `elsewhere` holds it, so a rule
+    /// is an `E019` only when it matches neither spec. A keep rule satisfied that way keeps
+    /// nothing on this side. Every other entry point passes [`MatchedElsewhere::default`], under
+    /// which each rule answers to its own spec alone.
     pub(crate) fn apply_beside(
         &self,
         bundle: &mut InputBundle,
