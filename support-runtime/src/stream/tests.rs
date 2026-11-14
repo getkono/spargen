@@ -685,6 +685,118 @@ fn a_reconnect_carries_the_cores_option_headers_and_extensions() {
     );
 }
 
+/// The bearer scheme the re-signing tests' operation requires.
+const BEARER: &[&[crate::AuthScheme]] = &[&[crate::AuthScheme {
+    name: "bearer",
+    kind: crate::AuthKind::Bearer,
+}]];
+
+/// Open a reconnectable SSE stream on `core` the way a generated streaming operation does: sign
+/// the request for [`BEARER`], prepare it, send it through [`crate::execute`] (which replays it
+/// once after a rejected refreshable credential), and hand the stream what it needs to reconnect.
+fn signed_stream(core: &ClientCore) -> EventStream<serde_json::Value> {
+    let request = crate::tests::builder(Method::GET, "https://example.com/events");
+    let (request, replay) =
+        poll_ready(crate::attach_auth_replayable(core, request, BEARER)).unwrap();
+    let request = crate::prepare(core, request.build().unwrap(), true);
+    let reconnect_request = crate::try_clone_request(&request);
+    let response = poll_ready(crate::execute(core, request, replay, true)).unwrap();
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 1,
+        ..ImmediateReconnect::default()
+    });
+    EventStream::new_reconnectable(response, Framing::SseJsonData, core, None)
+        .resending(core, reconnect_request)
+        .with_reconnect(policy)
+        .unwrap()
+}
+
+/// Issue #1398: a stream whose first request was rejected, refreshed and replayed reconnects with
+/// the refreshed token, not the one the server already rejected.
+#[test]
+fn a_reconnect_after_a_refreshed_replay_carries_the_refreshed_token() {
+    let backend = SequenceBackend::new([
+        Reply::status(401, ""),
+        sse_reply(200, "data: {\"seq\":1}\n\n"),
+        sse_reply(200, "data: {\"seq\":2}\n\n"),
+    ]);
+    let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
+    // `on_rejected` stores the fresh token where `token` reads it, as a refresh that outlives
+    // the replay does.
+    let current = Arc::new(Mutex::new("stale".to_owned()));
+    let read = Arc::clone(&current);
+    let store = Arc::clone(&current);
+    core.set_credential(
+        "bearer",
+        crate::Credential::refreshable(
+            crate::token_provider(move || {
+                let token = read.lock().unwrap().clone();
+                async move { Ok(crate::SecretString::from(token)) }
+            }),
+            |response| response.status() == 401,
+            move |_stale| {
+                *store.lock().unwrap() = "fresh".to_owned();
+                async { Ok(crate::SecretString::from("fresh")) }
+            },
+        ),
+    );
+    let mut stream = signed_stream(&core);
+
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 1})
+    );
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 2})
+    );
+    assert_eq!(
+        backend.header("authorization"),
+        [
+            Some("Bearer stale".to_owned()),
+            Some("Bearer fresh".to_owned()),
+            Some("Bearer fresh".to_owned()),
+        ]
+    );
+}
+
+/// Issue #1398: a [`crate::Credential::Provider`] is asked for a token again on each reconnect,
+/// so a long-lived stream reconnects with a current token rather than the first one.
+#[test]
+fn a_reconnect_asks_a_token_provider_again() {
+    let backend = SequenceBackend::new([
+        sse_reply(200, "data: {\"seq\":1}\n\n"),
+        sse_reply(200, "data: {\"seq\":2}\n\n"),
+    ]);
+    let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
+    let asked = Arc::new(Mutex::new(0_u32));
+    let counter = Arc::clone(&asked);
+    core.set_credential(
+        "bearer",
+        crate::Credential::Provider(crate::token_provider(move || {
+            let mut asked = counter.lock().unwrap();
+            *asked += 1;
+            let token = format!("t{asked}");
+            async move { Ok(crate::SecretString::from(token)) }
+        })),
+    );
+    let mut stream = signed_stream(&core);
+
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 1})
+    );
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 2})
+    );
+    assert_eq!(
+        backend.header("authorization"),
+        [Some("Bearer t1".to_owned()), Some("Bearer t2".to_owned())]
+    );
+    assert_eq!(*asked.lock().unwrap(), 2);
+}
+
 /// Each connection's body is its own SSE stream, so a byte order mark opening a reconnect's body
 /// is stripped as the first connection's was, and its first event still decodes.
 #[test]
