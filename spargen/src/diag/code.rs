@@ -436,7 +436,7 @@ impl std::str::FromStr for Code {
 
 impl Code {
     /// Look a code up as a person types it: surrounding whitespace trimmed and matched in any ASCII
-    /// case, so `" w009 "` names [`Code::OmittedConstruct`]. [`Code::from_str`] stays exact. A
+    /// case, so `" w009 "` names [`Code::OmittedConstruct`]. The `FromStr` impl stays exact. A
     /// string naming no code comes back in the [`UnknownCode`] as it was given, untrimmed.
     pub(crate) fn from_str_any_case(s: &str) -> Result<Self, UnknownCode> {
         let trimmed = s.trim();
