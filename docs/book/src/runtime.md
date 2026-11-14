@@ -340,7 +340,11 @@ specification requires; a final ndjson line or JSON Text Sequence record is stil
 
 Automatic reconnect is explicit: call `with_reconnect(Arc<dyn ReconnectPolicy>)`. The caller's
 policy owns attempt limits and supplies the wait future, so the runtime introduces neither a timer
-nor a retry default. Each reconnect rebuilds the operation's request from a copy taken before its
+nor a retry default. `can_reconnect()` says whether the stream holds a request it can resend; one
+that does not (a streaming request body that could not be cloned, or a stream built by a
+`decode_{method}` from a response alone) makes `with_reconnect` return `Err((stream,
+Error::RequestConstruction(..)))`, the stream handed back unchanged so the caller can keep reading
+it without reconnects. Each reconnect rebuilds the operation's request from a copy taken before its
 credentials were attached, its cookies and other headers preserved, and signs it afresh with the
 client's credentials as they were registered when the call was made: a `Credential::Provider` or
 `Credential::Refreshable` is asked for a token again, and a reconnect whose refreshable token is

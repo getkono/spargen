@@ -7012,20 +7012,28 @@ mod support {
                     });
                 self
             }
+            /// Whether this stream holds a request it can resend, so that [`Self::with_reconnect`]
+            /// accepts a policy. `false` when the operation's request could not be cloned (a streaming
+            /// request body, for example) or the stream was decoded from a response alone.
+            pub fn can_reconnect(&self) -> bool {
+                self.reconnect.is_some()
+            }
             /// Enable automatic reconnects using a caller-owned policy and timer.
             ///
-            /// Returns [`Error::RequestConstruction`] when the stream holds no request it can resend,
-            /// because the operation's request could not be cloned (a streaming request body, for example).
+            /// When the stream holds no request it can resend ([`Self::can_reconnect`] is `false`), the
+            /// error is [`Error::RequestConstruction`] and comes with the stream itself, unchanged and
+            /// still readable without reconnects.
             pub fn with_reconnect(
                 mut self,
                 policy: Arc<dyn ReconnectPolicy>,
-            ) -> Result<Self, StreamError> {
+            ) -> Result<Self, (Self, StreamError)> {
                 let Some(reconnect) = self.reconnect.as_mut() else {
-                    return Err(
+                    return Err((
+                        self,
                         Error::request_message(
                             "this streaming request cannot be cloned safely for automatic reconnect",
                         ),
-                    );
+                    ));
                 };
                 reconnect.policy = Some(policy);
                 Ok(self)
