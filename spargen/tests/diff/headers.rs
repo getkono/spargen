@@ -100,7 +100,8 @@ fn adding_a_response_header_struct_is_minor_and_removing_one_is_major() {
 }
 
 #[test]
-fn adding_an_optional_response_header_is_minor_and_a_required_one_major() {
+fn adding_an_optional_response_header_is_major_and_a_required_one_major() {
+    // Either is a new `pub` field of the header struct, so every literal of it breaks.
     let optional = diff(
         &with_headers("listPets", RATE_LIMIT_INT),
         &with_headers("listPets", RATE_LIMIT_AND_OPTIONAL_REQUEST_ID),
@@ -111,7 +112,7 @@ fn adding_an_optional_response_header_is_minor_and_a_required_one_major() {
         "{:?}",
         optional.changes
     );
-    assert_eq!(optional.bump, Impact::Minor);
+    assert_eq!(optional.bump, Impact::Major);
 
     // `from_headers` now fails on a response without it.
     let required = diff(
@@ -200,8 +201,11 @@ fn a_response_header_field_rebound_to_another_header_is_major() {
         &with_headers("listPets", RATE_LIMIT_BOTH_SPELLINGS),
     );
     assert_eq!(
-        kinds(&report)[0],
-        ChangeKind::IdentifierRebound,
+        kinds(&report),
+        vec![
+            ChangeKind::ResponseHeaderAdded,
+            ChangeKind::IdentifierRebound
+        ],
         "{:?}",
         report.changes
     );

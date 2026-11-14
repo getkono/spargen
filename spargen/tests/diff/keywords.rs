@@ -53,8 +53,8 @@ fn renaming_a_keyword_named_operation_and_field_is_still_major() {
         kinds(&report),
         vec![
             ChangeKind::MethodRenamed,
-            ChangeKind::FieldRemoved,
             ChangeKind::FieldAdded,
+            ChangeKind::FieldRemoved,
         ],
         "{:?}",
         report.changes

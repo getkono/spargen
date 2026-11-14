@@ -2,5 +2,5 @@
 source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
-minor|variant-added|Status|variant added: `pending`
-bump=minor
+major|field-added|Pet.tag|optional field added: `String`
+bump=major
