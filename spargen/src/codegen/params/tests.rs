@@ -157,22 +157,34 @@ fn an_optional_bundle_is_read_through_its_option() {
     );
 }
 
-/// A whole-query value: an optional JSON one set as the one opaque raw query when given, and a
-/// form-encoded one as one `name=value` pair per member.
+/// A whole-query value: a required JSON one is the raw query's initializer, an optional JSON one
+/// is set as the one opaque raw query when given, and a form-encoded one is one `name=value` pair
+/// per member, leaving the raw query unset; each URL is built with the raw query beside the
+/// fragments.
 #[test]
 fn a_whole_query_value_renders_by_its_codec() {
     let generated = generated(PARAMS);
+    let build_url = r#"leturl=support::build_url_with_query_string_on(&self.core,None,&path,&query,raw_query.as_deref(),)"#;
+    assert_contains_all(
+        preparer(&generated, "lookup"),
+        &[&format!(
+            "{}{build_url}",
+            r#"letmutquery:Vec<String>=Vec::new();letraw_query:Option<String>=Some(support::encode(&serde_json::to_string(&params.filter).map_err(support::Error::request_construction)?,support::PercentEncoding::Form,),);"#,
+        )],
+    );
     assert_contains_all(
         preparer(&generated, "lookup_maybe"),
-        &[
-            r#"ifletSome(value)=params.as_ref().and_then(|params|params.filter.as_ref()){raw_query=Some(support::encode(&serde_json::to_string(value).map_err(support::Error::request_construction)?,support::PercentEncoding::Form,),);}"#,
-        ],
+        &[&format!(
+            "{}{build_url}",
+            r#"letmutraw_query:Option<String>=None;ifletSome(value)=params.as_ref().and_then(|params|params.filter.as_ref()){raw_query=Some(support::encode(&serde_json::to_string(value).map_err(support::Error::request_construction)?,support::PercentEncoding::Form,),);}"#,
+        )],
     );
     assert_contains_all(
         preparer(&generated, "list_records"),
-        &[
-            r#"ifletSome(value)=params.as_ref().and_then(|params|params.filter.as_ref()){query.extend(support::serialize_form("",value,true,support::PercentEncoding::Form,).map_err(support::Error::request_construction)?,);}"#,
-        ],
+        &[&format!(
+            "{}{build_url}",
+            r#"letraw_query:Option<String>=None;ifletSome(value)=params.as_ref().and_then(|params|params.filter.as_ref()){query.extend(support::serialize_form("",value,true,support::PercentEncoding::Form,).map_err(support::Error::request_construction)?,);}"#,
+        )],
     );
 }
 
