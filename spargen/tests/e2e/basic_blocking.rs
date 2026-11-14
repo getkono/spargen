@@ -244,7 +244,7 @@ fn with_timeout_none_lifts_the_configured_total_timeout() {
         stream.write_all(body).unwrap();
     });
 
-    let client = basic_client::BlockingClient::with_config(&format!("http://{addr}"), |config| {
+    let client = basic_client::BlockingClient::with_config(&format!("http://{addr}"), |config, _| {
         config.timeout = Some(std::time::Duration::from_millis(200));
     })
     .unwrap()

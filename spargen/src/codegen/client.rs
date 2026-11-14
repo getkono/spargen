@@ -74,14 +74,19 @@ pub(super) fn with_bound_header_tokens(api: &Api, body: TokenStream) -> Option<T
         /// no operation takes an argument for one: each operation declaring it sends this value
         /// as written. An operation that requires a bound header fails before anything is sent,
         /// with `RequestError::MissingBoundParameter`, while no value is bound to it; one that
-        /// declares it optional leaves it off. Binding checks nothing; a name no operation sends
-        /// is held and never read.
+        /// declares it optional leaves it off. A name no operation sends is held and never read.
+        /// Fails with `Error::RequestConstruction`, which does not quote `value`, if `value` is
+        /// not a valid header value: one holding a control character other than a tab, such as
+        /// CR, LF, NUL or DEL.
         ///
         #[doc = #headers_doc]
-        #[must_use]
-        pub fn with_bound_header(mut self, name: &str, value: impl Into<String>) -> Self {
+        pub fn with_bound_header(
+            mut self,
+            name: &str,
+            value: impl Into<String>,
+        ) -> Result<Self, support::Error<std::convert::Infallible>> {
             #body
-            self
+            Ok(self)
         }
     })
 }
@@ -153,7 +158,7 @@ pub(super) fn emit_client(
         .map(|operation| emit_response_headers(operation, names, options));
     let client_docs = client_doc_tokens(api, options);
     let with_bound_header =
-        with_bound_header_tokens(api, quote! { self.core.bind_header(name, value); });
+        with_bound_header_tokens(api, quote! { self.core.bind_header(name, value)?; });
     let error_body_cap = options.error_body_cap;
     let servers = emit_servers(api, names, options);
     let default_server = (!api.servers.is_empty()).then(|| {
@@ -190,26 +195,31 @@ pub(super) fn emit_client(
         #[forbid(unsafe_code)]
         #[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
         impl Client {
-            /// Build a client on the default `ClientConfig`: a 30 s connect timeout, a 5 min read
-            /// (stall) timeout, and no total timeout. [`Self::with_config`] changes any of them.
+            /// Build a client on the default `ClientConfig` and `TransportConfig`: a 30 s connect
+            /// timeout, a 5 min read (stall) timeout, and no total timeout.
+            /// [`Self::with_config`] changes any of them. Fails with `Error::RequestConstruction`
+            /// if `base_url` is not an `http` or `https` URL.
             pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
-                Self::with_config(base_url, |_| {})
+                Self::with_config(base_url, |_, _| {})
             }
 
-            /// Build a client whose `ClientConfig` is the default one as `configure` leaves it —
-            /// where the connect, read and total timeouts are tightened or loosened. The
-            /// `reqwest::Client` its default backend runs on is built from the connect and read
-            /// timeouts as they are when `configure` returns.
+            /// Build a client whose `ClientConfig` and `TransportConfig` are the default ones as
+            /// `configure` leaves them: the total timeout and body limits on the first, the
+            /// connect and read timeouts on the second. The `reqwest::Client` its default backend
+            /// runs on is built from the `TransportConfig` as it is when `configure` returns,
+            /// which is the one place it is read. Fails with `Error::RequestConstruction` if
+            /// `base_url` is not an `http` or `https` URL.
             pub fn with_config(
                 base_url: &str,
-                configure: impl FnOnce(&mut support::ClientConfig),
+                configure: impl FnOnce(&mut support::ClientConfig, &mut support::TransportConfig),
             ) -> Result<Self, support::Error<std::convert::Infallible>> {
                 let mut config = support::ClientConfig {
                     max_error_body: #error_body_cap,
                     ..support::ClientConfig::default()
                 };
-                configure(&mut config);
-                let core = support::ClientCore::with_config(base_url, config)?;
+                let mut transport = support::TransportConfig::default();
+                configure(&mut config, &mut transport);
+                let core = support::ClientCore::with_config(base_url, config, transport)?;
                 Ok(Self { core })
             }
 
@@ -217,7 +227,7 @@ pub(super) fn emit_client(
 
             /// Build a client that sends its requests on a caller-supplied `reqwest::Client`, as
             /// `with_backend` does with `ReqwestBackend::new(client)`: your client's timeouts
-            /// apply instead of `ClientConfig`'s connect and read timeouts.
+            /// apply instead of a `TransportConfig`'s connect and read timeouts.
             pub fn with_client(
                 client: reqwest::Client,
                 base_url: &str,
@@ -300,7 +310,7 @@ pub(super) fn emit_client(
             /// Repoint this client value at another base URL, keeping its transport backend,
             /// configuration and credentials, so nothing is rebuilt: derive one
             /// with `client.clone().with_base_url(url)?`. Fails with `Error::RequestConstruction`
-            /// if `base_url` is not a valid URL.
+            /// if `base_url` is not an `http` or `https` URL.
             pub fn with_base_url(
                 mut self,
                 base_url: &str,

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 
-use super::{ClientConfig, ClientCore};
+use super::{ClientConfig, ClientCore, TransportConfig};
 use crate::tests::poll_ready;
 use crate::{
     send, send_streaming, Credential, Error, ExecuteFuture, HttpBackend, HttpBody, RequestBuilder,
@@ -21,6 +21,54 @@ fn an_invalid_base_url_is_a_request_construction_error() {
         "{error}"
     );
     assert!(std::error::Error::source(&error).is_some());
+}
+
+/// Every message in `error`'s `source()` chain, outermost first, joined.
+fn chain(error: &Error<std::convert::Infallible>) -> String {
+    let error: &(dyn std::error::Error + 'static) = error;
+    std::iter::successors(Some(error), |error| error.source())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+/// Issue #1335: a URL that parses but is not an `http` or `https` URL is refused as a base by
+/// every constructor and by `set_base_url`, before anything is sent: `localhost:8080` parses with
+/// the scheme `localhost` and the path `8080`, and `mailto:x` cannot be a base at all. The refusal
+/// names the scheme and never the URL, which may carry userinfo.
+#[test]
+fn a_base_url_that_is_not_http_or_https_is_refused() {
+    for base in [
+        "localhost:8080",
+        "mailto:x",
+        "ftp://user:hunter2@files.example/",
+        "file:///etc/",
+        "data:text/plain,x",
+    ] {
+        let refusals = [
+            ClientCore::new(base).unwrap_err(),
+            ClientCore::with_config(base, ClientConfig::default(), TransportConfig::default())
+                .unwrap_err(),
+            ClientCore::with_client(reqwest::Client::new(), base).unwrap_err(),
+            ClientCore::with_backend(Recorder::new(), base).unwrap_err(),
+        ];
+        for error in refusals {
+            assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
+            let message = chain(&error);
+            assert!(message.contains("`http` or `https`"), "{message}");
+            assert!(!message.contains("hunter2"), "{message}");
+        }
+        let mut core = ClientCore::new("https://example.com/v1/").unwrap();
+        let error = core.set_base_url(base).unwrap_err();
+        assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
+        assert_eq!(core.base_url().as_str(), "https://example.com/v1/");
+    }
+    let scheme = ClientCore::new("localhost:8080").unwrap_err();
+    let message = chain(&scheme);
+    assert!(message.contains("`localhost`"), "{message}");
+    for base in ["http://example.com", "HTTPS://example.com/api/"] {
+        ClientCore::new(base).unwrap();
+    }
 }
 
 #[test]
@@ -128,9 +176,10 @@ fn a_bound_header_is_keyed_case_insensitively_and_the_last_binding_wins() {
     let mut core = ClientCore::new("https://example.com").unwrap();
     assert_eq!(core.bound_header("X-Api-Version"), None);
 
-    core.bind_header("X-Api-Version", "1");
+    core.bind_header("X-Api-Version", "1").unwrap();
     assert_eq!(core.bound_header("x-api-version"), Some("1"));
-    core.bind_header("X-API-VERSION", String::from("2"));
+    core.bind_header("X-API-VERSION", String::from("2"))
+        .unwrap();
     assert_eq!(core.bound_header("X-Api-Version"), Some("2"));
     assert_eq!(core.bound_header("X-Tenant"), None);
 
@@ -144,10 +193,41 @@ fn a_bound_header_is_keyed_case_insensitively_and_the_last_binding_wins() {
 #[test]
 fn a_bound_header_value_is_redacted_in_debug() {
     let mut core = ClientCore::new("https://example.com").unwrap();
-    core.bind_header("X-Tenant", "tenant-secret-7781");
+    core.bind_header("X-Tenant", "tenant-secret-7781").unwrap();
     let debug = format!("{core:?}");
     assert!(debug.contains("x-tenant"), "{debug}");
     assert!(!debug.contains("tenant-secret-7781"), "{debug}");
+}
+
+/// Issue #1335: a value no request could carry as a header value (CR/LF, NUL, DEL, any other
+/// control character but a tab) is refused when it is bound, rather than failing every later
+/// request, and the value already bound stays bound. The refusal names the header and does not
+/// quote the value, which the core holds as a secret.
+#[test]
+fn an_invalid_bound_header_value_is_refused_and_keeps_the_binding() {
+    let mut core = ClientCore::new("https://example.com").unwrap();
+    core.bind_header("X-Tenant", "acme").unwrap();
+    for value in [
+        "a\r\nb",
+        "secret\0value",
+        "line\nfeed",
+        "del\u{7f}x",
+        "esc\u{1b}x",
+    ] {
+        let error = core.bind_header("X-Tenant", value).unwrap_err();
+        assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
+        let message = chain(&error);
+        assert!(message.contains("`X-Tenant`"), "{message}");
+        assert!(!message.contains(value), "{message}");
+        assert!(!format!("{error:?}").contains(value), "{error:?}");
+        assert_eq!(core.bound_header("x-tenant"), Some("acme"));
+    }
+    // A tab, visible ASCII and bytes past ASCII (`obs-text`) are a valid header value, as they
+    // are to the request builder that sends it.
+    for value in ["a\tb ~", "tenant-é"] {
+        core.bind_header("X-Tenant", value).unwrap();
+        assert_eq!(core.bound_header("x-tenant"), Some(value));
+    }
 }
 
 /// The supplied client is the one requests run on: an `https_only` client refuses a plain `http`
@@ -187,20 +267,20 @@ fn with_client_installs_a_backend_on_the_injected_client() {
 /// so a long download or upload is not cut off by default.
 #[test]
 fn the_default_timeouts_are_a_30_s_connect_a_5_min_read_and_no_total() {
-    let config = ClientConfig::default();
-    assert_eq!(config.connect_timeout, Some(Duration::from_secs(30)));
-    assert_eq!(config.read_timeout, Some(Duration::from_secs(300)));
-    assert_eq!(config.timeout, None);
+    let transport = TransportConfig::default();
+    assert_eq!(transport.connect_timeout, Some(Duration::from_secs(30)));
+    assert_eq!(transport.read_timeout, Some(Duration::from_secs(300)));
+    assert_eq!(ClientConfig::default().timeout, None);
     let core = ClientCore::new("https://example.com").unwrap();
-    assert_eq!(core.config().connect_timeout, config.connect_timeout);
-    assert_eq!(core.config().read_timeout, config.read_timeout);
     assert_eq!(core.config().timeout, None);
+    let built = format!("{:?}", core.backend());
+    assert!(built.contains("read_timeout: 300s"), "{built}");
 }
 
-/// The client a core builds for its default backend carries the configured read timeout, and one
-/// built on `with_config` the caller's. reqwest's `Debug` of a client prints its read timeout and
-/// only when one is set; its connect timeout is printed nowhere, so this is the one observable
-/// without I/O.
+/// The client a core builds for its default backend carries the read timeout of the
+/// `TransportConfig` it was built from: the default one's for `new`, the caller's for
+/// `with_config`. reqwest's `Debug` of a client prints its read timeout and only when one is set;
+/// its connect timeout is printed nowhere, so this is the one observable without I/O.
 #[test]
 fn the_built_client_carries_the_configured_read_timeout() {
     let default = format!(
@@ -209,20 +289,21 @@ fn the_built_client_carries_the_configured_read_timeout() {
     );
     assert!(default.contains("read_timeout: 300s"), "{default}");
 
-    let config = ClientConfig {
+    let transport = TransportConfig {
         read_timeout: Some(Duration::from_secs(7)),
-        ..ClientConfig::default()
+        ..TransportConfig::default()
     };
-    let core = ClientCore::with_config("https://example.com", config).unwrap();
+    let core =
+        ClientCore::with_config("https://example.com", ClientConfig::default(), transport).unwrap();
     let configured = format!("{:?}", core.backend());
     assert!(configured.contains("read_timeout: 7s"), "{configured}");
-    assert_eq!(core.config().read_timeout, Some(Duration::from_secs(7)));
 
-    let config = ClientConfig {
+    let transport = TransportConfig {
         read_timeout: None,
-        ..ClientConfig::default()
+        ..TransportConfig::default()
     };
-    let core = ClientCore::with_config("https://example.com", config).unwrap();
+    let core =
+        ClientCore::with_config("https://example.com", ClientConfig::default(), transport).unwrap();
     let unbounded = format!("{:?}", core.backend());
     assert!(!unbounded.contains("read_timeout"), "{unbounded}");
 }

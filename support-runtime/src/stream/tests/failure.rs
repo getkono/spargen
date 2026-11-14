@@ -332,7 +332,7 @@ fn failing_response(data: &str, failure: crate::TransportError) -> crate::tests:
 }
 
 /// Issue #1330: a mid-stream read failure surfaces as the variant its transport class names, as
-/// `ByteStream` reports it: a stalled read is `Timeout`, as `ClientConfig::read_timeout` promises,
+/// `ByteStream` reports it: a stalled read is `Timeout`, as `TransportConfig::read_timeout` promises,
 /// and a corrupt body is a `Protocol` failure, which is not transient.
 #[test]
 fn a_mid_stream_read_failure_surfaces_as_its_transport_class() {

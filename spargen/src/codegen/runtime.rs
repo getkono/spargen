@@ -128,7 +128,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
             #blocking_module
 
             pub use auth::{attach_auth, attach_auth_replayable, replay_rejected, token_provider, AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, RejectionCheck, Replay, SecretString, TokenFuture, TokenProvider, TokenRefresher};
-            pub use client::{ClientConfig, ClientCore, RequestOptions};
+            pub use client::{ClientConfig, ClientCore, RequestOptions, TransportConfig};
             pub use dispatch::{build_url_on, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, classify_with, decode_success, decode_success_bytes, decode_success_text, decode_success_with, decode_text_body, execute, prepare, send, send_streaming, unexpected_status, with_body_limits, StatusSpec};
             pub use error::{ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind, TransportError, UnknownVariant};
             pub use middleware::{Middleware, MiddlewareBackend, Next};

@@ -102,7 +102,7 @@ its text, a bare URL is wrapped in `<…>`, and an HTML tag nothing closes has i
 `testing` under [testing with a mock backend](./runtime.md#testing-with-a-mock-backend),
 `bind_headers` on `Spec::bind_header` (each named header parameter, matched in any letter case,
 is no argument of any operation; the generated `with_bound_header(name, value)` sets the value
-every operation declaring it sends, and a name no operation declares is `E026`), and the `[[omit]]` and `[[keep]]` rules the file may
+every operation declaring it sends, refusing one that is not a valid header value, and a name no operation declares is `E026`), and the `[[omit]]` and `[[keep]]` rules the file may
 also carry under [keep rules](./compatibility.md#keep-rules-allow-list) and [`spargen.toml` and the analysis CLI](./compatibility.md#spargentoml-and-the-analysis-cli).
 An unknown key is a configuration error (exit status `3`).
 

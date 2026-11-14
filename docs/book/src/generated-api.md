@@ -7,7 +7,10 @@ use.
 ## Generated surface
 
 - `Client::new(base_url)` / `Client::with_client(reqwest::Client, base_url)` — the injected
-  client is the extension point for TLS choice, proxies, and timeouts. `Client` is `Debug` and
+  client is the extension point for TLS choice, proxies, and timeouts. Every constructor, and
+  `with_base_url`, refuses a base URL that is not an `http` or `https` URL (`localhost:8080`,
+  `mailto:x`) as `Error::RequestConstruction`, as each request refuses such a server override
+  before anything is sent. `Client` is `Debug` and
   `Clone`. `Client::with_timeout(Option<Duration>)` gives a derived client value its own total
   timeout (`client.clone().with_timeout(Some(UPLOAD))`), elapsing as
   `Error::Timeout(TimeoutKind::Total)`; an `EventStream` operation is exempt from it.
@@ -93,9 +96,10 @@ use.
   when the body cannot be cloned, the refresh fails, or the replay is rejected again.
 - A header every operation repeats (an API version, a tenant) can be bound once on the client:
   `Spec::bind_header("X-Api-Version")` drops it from every operation's arguments, and
-  `Client::with_bound_header(name, value)` sets the value each operation declaring it sends. An
-  operation that requires it while no value is bound fails before anything is sent, as
-  `RequestError::MissingBoundParameter`.
+  `Client::with_bound_header(name, value)?` sets the value each operation declaring it sends,
+  refusing a value that is not a valid header value (a control character but a tab, such as CR or
+  LF) as `Error::RequestConstruction`. An operation that requires it while no value is bound fails
+  before anything is sent, as `RequestError::MissingBoundParameter`.
 - A closed error taxonomy, identical across all spargen output: request-construction
   (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
   above, the missing bound header above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
