@@ -14475,44 +14475,273 @@ impl Client {
     pub fn core(&self) -> &support::ClientCore {
         &self.core
     }
-    /// Register a credential for a named security scheme (a `securitySchemes` key).
+    ///Register a static `token` for the security scheme `bearer`, sent as `Authorization: Bearer <token>`, replacing any credential registered for it.
     ///
-    /// Registration checks nothing; each operation matches its `security` requirement
-    /// against the registered credentials when it is called, and fails before anything is
-    /// sent, as `Error::RequestConstruction`, when no alternative has every scheme
-    /// registered (`RequestError::MissingCredential`), when the selected alternative has a
-    /// credential its scheme cannot carry (`RequestError::CredentialMismatch` — for
-    /// instance a `Credential::Provider` under an `http basic` scheme, which accepts only
-    /// `Credential::Basic`), or when its token provider fails
-    /// (`RequestError::CredentialProvider`). `Credential`'s documentation lists which
-    /// variant each kind of scheme accepts.
+    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_bearer` is how a caller reaches a later alternative.
     ///
-    ///# Declared schemes
+    ///# Scheme
     ///
     ///- `bearer` — `http` (`bearer`).
-    ///- `apiKey` — `apiKey`.
-    ///- `tenant` — `apiKey`.
-    ///- `mtls` — `mutualTLS`.
-    ///- `basic` — `http` (`basic`).
-    ///- `queryKey` — `apiKey`.
-    ///- `cookieKey` — `apiKey`.
     #[must_use]
-    pub fn with_credential(
-        mut self,
-        scheme: &str,
-        credential: support::Credential,
-    ) -> Self {
-        self.core.set_credential(scheme, credential);
+    pub fn with_bearer(mut self, token: support::SecretString) -> Self {
+        self.core.set_credential("bearer", support::Credential::Bearer(token));
         self
     }
-    /// Unregister the credential for a named security scheme; a scheme never registered
-    /// is left as it is. Operations pick the first `security` alternative whose schemes
-    /// are all registered and never fall through past it when attaching fails, so this
-    /// is how a caller reaches a later alternative: `client.clone().without_credential(..)`
-    /// derives a client that no longer selects the earlier one.
+    ///Register `provider` for the security scheme `bearer`, replacing any credential registered for it: it is asked for a fresh token each time a call attaches the scheme, and a call whose provider fails fails before anything is sent, as `RequestError::CredentialProvider`. `token_provider` builds one from an async closure.
     #[must_use]
-    pub fn without_credential(mut self, scheme: &str) -> Self {
-        self.core.remove_credential(scheme);
+    pub fn with_bearer_provider(mut self, provider: support::TokenProvider) -> Self {
+        self.core.set_credential("bearer", support::Credential::Provider(provider));
+        self
+    }
+    ///Register a refreshable token for the security scheme `bearer`, replacing any credential registered for it: `token` yields the token each call attaches, and when a call's failed response is one `is_rejection` reads as a rejection of that token, `on_rejected` is given it and yields a fresh one, and the call is sent once more with it. `Credential::Refreshable`'s documentation states when that replay happens and what the call returns.
+    #[must_use]
+    pub fn with_bearer_refreshable<P, R, Fut>(
+        mut self,
+        token: support::TokenProvider,
+        is_rejection: P,
+        on_rejected: R,
+    ) -> Self
+    where
+        P: Fn(&http::Response<bytes::Bytes>) -> bool + support::MaybeSend
+            + support::MaybeSync + 'static,
+        R: Fn(support::SecretString) -> Fut + support::MaybeSend + support::MaybeSync
+            + 'static,
+        Fut: std::future::Future<
+                Output = Result<support::SecretString, support::AuthError>,
+            > + support::MaybeSend + 'static,
+    {
+        self.core
+            .set_credential(
+                "bearer",
+                support::Credential::refreshable(token, is_rejection, on_rejected),
+            );
+        self
+    }
+    ///Unregister the credential for the security scheme `bearer`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_bearer()` derives a client that no longer selects one listing `bearer`.
+    #[must_use]
+    pub fn without_bearer(mut self) -> Self {
+        self.core.remove_credential("bearer");
+        self
+    }
+    ///Register a static `token` for the security scheme `apiKey`, an `apiKey` sent as the header `X-Api-Key`, replacing any credential registered for it.
+    ///
+    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_api_key` is how a caller reaches a later alternative.
+    ///
+    ///# Scheme
+    ///
+    ///- `apiKey` — `apiKey`.
+    #[must_use]
+    pub fn with_api_key(mut self, token: support::SecretString) -> Self {
+        self.core.set_credential("apiKey", support::Credential::ApiKey(token));
+        self
+    }
+    ///Register `provider` for the security scheme `apiKey`, replacing any credential registered for it: it is asked for a fresh token each time a call attaches the scheme, and a call whose provider fails fails before anything is sent, as `RequestError::CredentialProvider`. `token_provider` builds one from an async closure.
+    #[must_use]
+    pub fn with_api_key_provider(mut self, provider: support::TokenProvider) -> Self {
+        self.core.set_credential("apiKey", support::Credential::Provider(provider));
+        self
+    }
+    ///Register a refreshable token for the security scheme `apiKey`, replacing any credential registered for it: `token` yields the token each call attaches, and when a call's failed response is one `is_rejection` reads as a rejection of that token, `on_rejected` is given it and yields a fresh one, and the call is sent once more with it. `Credential::Refreshable`'s documentation states when that replay happens and what the call returns.
+    #[must_use]
+    pub fn with_api_key_refreshable<P, R, Fut>(
+        mut self,
+        token: support::TokenProvider,
+        is_rejection: P,
+        on_rejected: R,
+    ) -> Self
+    where
+        P: Fn(&http::Response<bytes::Bytes>) -> bool + support::MaybeSend
+            + support::MaybeSync + 'static,
+        R: Fn(support::SecretString) -> Fut + support::MaybeSend + support::MaybeSync
+            + 'static,
+        Fut: std::future::Future<
+                Output = Result<support::SecretString, support::AuthError>,
+            > + support::MaybeSend + 'static,
+    {
+        self.core
+            .set_credential(
+                "apiKey",
+                support::Credential::refreshable(token, is_rejection, on_rejected),
+            );
+        self
+    }
+    ///Unregister the credential for the security scheme `apiKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_api_key()` derives a client that no longer selects one listing `apiKey`.
+    #[must_use]
+    pub fn without_api_key(mut self) -> Self {
+        self.core.remove_credential("apiKey");
+        self
+    }
+    ///Register a static `token` for the security scheme `tenant`, an `apiKey` sent as the header `X-Tenant`, replacing any credential registered for it.
+    ///
+    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_tenant` is how a caller reaches a later alternative.
+    ///
+    ///# Scheme
+    ///
+    ///- `tenant` — `apiKey`.
+    #[must_use]
+    pub fn with_tenant(mut self, token: support::SecretString) -> Self {
+        self.core.set_credential("tenant", support::Credential::ApiKey(token));
+        self
+    }
+    ///Register `provider` for the security scheme `tenant`, replacing any credential registered for it: it is asked for a fresh token each time a call attaches the scheme, and a call whose provider fails fails before anything is sent, as `RequestError::CredentialProvider`. `token_provider` builds one from an async closure.
+    #[must_use]
+    pub fn with_tenant_provider(mut self, provider: support::TokenProvider) -> Self {
+        self.core.set_credential("tenant", support::Credential::Provider(provider));
+        self
+    }
+    ///Register a refreshable token for the security scheme `tenant`, replacing any credential registered for it: `token` yields the token each call attaches, and when a call's failed response is one `is_rejection` reads as a rejection of that token, `on_rejected` is given it and yields a fresh one, and the call is sent once more with it. `Credential::Refreshable`'s documentation states when that replay happens and what the call returns.
+    #[must_use]
+    pub fn with_tenant_refreshable<P, R, Fut>(
+        mut self,
+        token: support::TokenProvider,
+        is_rejection: P,
+        on_rejected: R,
+    ) -> Self
+    where
+        P: Fn(&http::Response<bytes::Bytes>) -> bool + support::MaybeSend
+            + support::MaybeSync + 'static,
+        R: Fn(support::SecretString) -> Fut + support::MaybeSend + support::MaybeSync
+            + 'static,
+        Fut: std::future::Future<
+                Output = Result<support::SecretString, support::AuthError>,
+            > + support::MaybeSend + 'static,
+    {
+        self.core
+            .set_credential(
+                "tenant",
+                support::Credential::refreshable(token, is_rejection, on_rejected),
+            );
+        self
+    }
+    ///Unregister the credential for the security scheme `tenant`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_tenant()` derives a client that no longer selects one listing `tenant`.
+    #[must_use]
+    pub fn without_tenant(mut self) -> Self {
+        self.core.remove_credential("tenant");
+        self
+    }
+    ///Register `username` and `password` for the `http basic` security scheme `basic`, sent as `Authorization: Basic <base64>`, replacing any credential registered for it.
+    ///
+    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_basic` is how a caller reaches a later alternative.
+    ///
+    ///# Scheme
+    ///
+    ///- `basic` — `http` (`basic`).
+    #[must_use]
+    pub fn with_basic(
+        mut self,
+        username: impl Into<String>,
+        password: support::SecretString,
+    ) -> Self {
+        self.core
+            .set_credential(
+                "basic",
+                support::Credential::Basic {
+                    username: username.into(),
+                    password,
+                },
+            );
+        self
+    }
+    ///Unregister the credential for the security scheme `basic`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_basic()` derives a client that no longer selects one listing `basic`.
+    #[must_use]
+    pub fn without_basic(mut self) -> Self {
+        self.core.remove_credential("basic");
+        self
+    }
+    ///Register a static `token` for the security scheme `queryKey`, an `apiKey` sent as the query parameter `api_key`, replacing any credential registered for it.
+    ///
+    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_query_key` is how a caller reaches a later alternative.
+    ///
+    ///# Scheme
+    ///
+    ///- `queryKey` — `apiKey`.
+    #[must_use]
+    pub fn with_query_key(mut self, token: support::SecretString) -> Self {
+        self.core.set_credential("queryKey", support::Credential::ApiKey(token));
+        self
+    }
+    ///Register `provider` for the security scheme `queryKey`, replacing any credential registered for it: it is asked for a fresh token each time a call attaches the scheme, and a call whose provider fails fails before anything is sent, as `RequestError::CredentialProvider`. `token_provider` builds one from an async closure.
+    #[must_use]
+    pub fn with_query_key_provider(mut self, provider: support::TokenProvider) -> Self {
+        self.core.set_credential("queryKey", support::Credential::Provider(provider));
+        self
+    }
+    ///Register a refreshable token for the security scheme `queryKey`, replacing any credential registered for it: `token` yields the token each call attaches, and when a call's failed response is one `is_rejection` reads as a rejection of that token, `on_rejected` is given it and yields a fresh one, and the call is sent once more with it. `Credential::Refreshable`'s documentation states when that replay happens and what the call returns.
+    #[must_use]
+    pub fn with_query_key_refreshable<P, R, Fut>(
+        mut self,
+        token: support::TokenProvider,
+        is_rejection: P,
+        on_rejected: R,
+    ) -> Self
+    where
+        P: Fn(&http::Response<bytes::Bytes>) -> bool + support::MaybeSend
+            + support::MaybeSync + 'static,
+        R: Fn(support::SecretString) -> Fut + support::MaybeSend + support::MaybeSync
+            + 'static,
+        Fut: std::future::Future<
+                Output = Result<support::SecretString, support::AuthError>,
+            > + support::MaybeSend + 'static,
+    {
+        self.core
+            .set_credential(
+                "queryKey",
+                support::Credential::refreshable(token, is_rejection, on_rejected),
+            );
+        self
+    }
+    ///Unregister the credential for the security scheme `queryKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_query_key()` derives a client that no longer selects one listing `queryKey`.
+    #[must_use]
+    pub fn without_query_key(mut self) -> Self {
+        self.core.remove_credential("queryKey");
+        self
+    }
+    ///Register a static `token` for the security scheme `cookieKey`, an `apiKey` sent as the cookie `session`, replacing any credential registered for it.
+    ///
+    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_cookie_key` is how a caller reaches a later alternative.
+    ///
+    ///# Scheme
+    ///
+    ///- `cookieKey` — `apiKey`.
+    #[must_use]
+    pub fn with_cookie_key(mut self, token: support::SecretString) -> Self {
+        self.core.set_credential("cookieKey", support::Credential::ApiKey(token));
+        self
+    }
+    ///Register `provider` for the security scheme `cookieKey`, replacing any credential registered for it: it is asked for a fresh token each time a call attaches the scheme, and a call whose provider fails fails before anything is sent, as `RequestError::CredentialProvider`. `token_provider` builds one from an async closure.
+    #[must_use]
+    pub fn with_cookie_key_provider(mut self, provider: support::TokenProvider) -> Self {
+        self.core.set_credential("cookieKey", support::Credential::Provider(provider));
+        self
+    }
+    ///Register a refreshable token for the security scheme `cookieKey`, replacing any credential registered for it: `token` yields the token each call attaches, and when a call's failed response is one `is_rejection` reads as a rejection of that token, `on_rejected` is given it and yields a fresh one, and the call is sent once more with it. `Credential::Refreshable`'s documentation states when that replay happens and what the call returns.
+    #[must_use]
+    pub fn with_cookie_key_refreshable<P, R, Fut>(
+        mut self,
+        token: support::TokenProvider,
+        is_rejection: P,
+        on_rejected: R,
+    ) -> Self
+    where
+        P: Fn(&http::Response<bytes::Bytes>) -> bool + support::MaybeSend
+            + support::MaybeSync + 'static,
+        R: Fn(support::SecretString) -> Fut + support::MaybeSend + support::MaybeSync
+            + 'static,
+        Fut: std::future::Future<
+                Output = Result<support::SecretString, support::AuthError>,
+            > + support::MaybeSend + 'static,
+    {
+        self.core
+            .set_credential(
+                "cookieKey",
+                support::Credential::refreshable(token, is_rejection, on_rejected),
+            );
+        self
+    }
+    ///Unregister the credential for the security scheme `cookieKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_cookie_key()` derives a client that no longer selects one listing `cookieKey`.
+    #[must_use]
+    pub fn without_cookie_key(mut self) -> Self {
+        self.core.remove_credential("cookieKey");
         self
     }
     /// Set the total timeout of every call made through this client value, replacing
@@ -20943,40 +21172,265 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         pub fn core(&self) -> &support::ClientCore {
             self.inner.core()
         }
-        /// Register a credential for a named security scheme (a `securitySchemes` key).
+        ///Register a static `token` for the security scheme `bearer`, sent as `Authorization: Bearer <token>`, replacing any credential registered for it.
         ///
-        /// Registration checks nothing; each operation matches its `security` requirement
-        /// against the registered credentials when it is called, and fails before anything is
-        /// sent, as `Error::RequestConstruction`, when no alternative has every scheme
-        /// registered (`RequestError::MissingCredential`), when the selected alternative has a
-        /// credential its scheme cannot carry (`RequestError::CredentialMismatch` — for
-        /// instance a `Credential::Provider` under an `http basic` scheme, which accepts only
-        /// `Credential::Basic`), or when its token provider fails
-        /// (`RequestError::CredentialProvider`). `Credential`'s documentation lists which
-        /// variant each kind of scheme accepts.
+        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_bearer` is how a caller reaches a later alternative.
         ///
-        ///# Declared schemes
+        ///# Scheme
         ///
         ///- `bearer` — `http` (`bearer`).
-        ///- `apiKey` — `apiKey`.
-        ///- `tenant` — `apiKey`.
-        ///- `mtls` — `mutualTLS`.
-        ///- `basic` — `http` (`basic`).
-        ///- `queryKey` — `apiKey`.
-        ///- `cookieKey` — `apiKey`.
         #[must_use]
-        pub fn with_credential(
-            mut self,
-            scheme: &str,
-            credential: support::Credential,
-        ) -> Self {
-            self.inner = self.inner.with_credential(scheme, credential);
+        pub fn with_bearer(mut self, token: support::SecretString) -> Self {
+            self.inner = self.inner.with_bearer(token);
             self
         }
-        /// Unregister the credential for a named security scheme (mirrors the async client).
+        ///Register `provider` for the security scheme `bearer`, replacing any credential registered for it: it is asked for a fresh token each time a call attaches the scheme, and a call whose provider fails fails before anything is sent, as `RequestError::CredentialProvider`. `token_provider` builds one from an async closure.
         #[must_use]
-        pub fn without_credential(mut self, scheme: &str) -> Self {
-            self.inner = self.inner.without_credential(scheme);
+        pub fn with_bearer_provider(mut self, provider: support::TokenProvider) -> Self {
+            self.inner = self.inner.with_bearer_provider(provider);
+            self
+        }
+        ///Register a refreshable token for the security scheme `bearer`, replacing any credential registered for it: `token` yields the token each call attaches, and when a call's failed response is one `is_rejection` reads as a rejection of that token, `on_rejected` is given it and yields a fresh one, and the call is sent once more with it. `Credential::Refreshable`'s documentation states when that replay happens and what the call returns.
+        #[must_use]
+        pub fn with_bearer_refreshable<P, R, Fut>(
+            mut self,
+            token: support::TokenProvider,
+            is_rejection: P,
+            on_rejected: R,
+        ) -> Self
+        where
+            P: Fn(&http::Response<bytes::Bytes>) -> bool + support::MaybeSend
+                + support::MaybeSync + 'static,
+            R: Fn(support::SecretString) -> Fut + support::MaybeSend + support::MaybeSync
+                + 'static,
+            Fut: std::future::Future<
+                    Output = Result<support::SecretString, support::AuthError>,
+                > + support::MaybeSend + 'static,
+        {
+            self.inner = self
+                .inner
+                .with_bearer_refreshable(token, is_rejection, on_rejected);
+            self
+        }
+        ///Unregister the credential for the security scheme `bearer`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_bearer()` derives a client that no longer selects one listing `bearer`.
+        #[must_use]
+        pub fn without_bearer(mut self) -> Self {
+            self.inner = self.inner.without_bearer();
+            self
+        }
+        ///Register a static `token` for the security scheme `apiKey`, an `apiKey` sent as the header `X-Api-Key`, replacing any credential registered for it.
+        ///
+        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_api_key` is how a caller reaches a later alternative.
+        ///
+        ///# Scheme
+        ///
+        ///- `apiKey` — `apiKey`.
+        #[must_use]
+        pub fn with_api_key(mut self, token: support::SecretString) -> Self {
+            self.inner = self.inner.with_api_key(token);
+            self
+        }
+        ///Register `provider` for the security scheme `apiKey`, replacing any credential registered for it: it is asked for a fresh token each time a call attaches the scheme, and a call whose provider fails fails before anything is sent, as `RequestError::CredentialProvider`. `token_provider` builds one from an async closure.
+        #[must_use]
+        pub fn with_api_key_provider(
+            mut self,
+            provider: support::TokenProvider,
+        ) -> Self {
+            self.inner = self.inner.with_api_key_provider(provider);
+            self
+        }
+        ///Register a refreshable token for the security scheme `apiKey`, replacing any credential registered for it: `token` yields the token each call attaches, and when a call's failed response is one `is_rejection` reads as a rejection of that token, `on_rejected` is given it and yields a fresh one, and the call is sent once more with it. `Credential::Refreshable`'s documentation states when that replay happens and what the call returns.
+        #[must_use]
+        pub fn with_api_key_refreshable<P, R, Fut>(
+            mut self,
+            token: support::TokenProvider,
+            is_rejection: P,
+            on_rejected: R,
+        ) -> Self
+        where
+            P: Fn(&http::Response<bytes::Bytes>) -> bool + support::MaybeSend
+                + support::MaybeSync + 'static,
+            R: Fn(support::SecretString) -> Fut + support::MaybeSend + support::MaybeSync
+                + 'static,
+            Fut: std::future::Future<
+                    Output = Result<support::SecretString, support::AuthError>,
+                > + support::MaybeSend + 'static,
+        {
+            self.inner = self
+                .inner
+                .with_api_key_refreshable(token, is_rejection, on_rejected);
+            self
+        }
+        ///Unregister the credential for the security scheme `apiKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_api_key()` derives a client that no longer selects one listing `apiKey`.
+        #[must_use]
+        pub fn without_api_key(mut self) -> Self {
+            self.inner = self.inner.without_api_key();
+            self
+        }
+        ///Register a static `token` for the security scheme `tenant`, an `apiKey` sent as the header `X-Tenant`, replacing any credential registered for it.
+        ///
+        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_tenant` is how a caller reaches a later alternative.
+        ///
+        ///# Scheme
+        ///
+        ///- `tenant` — `apiKey`.
+        #[must_use]
+        pub fn with_tenant(mut self, token: support::SecretString) -> Self {
+            self.inner = self.inner.with_tenant(token);
+            self
+        }
+        ///Register `provider` for the security scheme `tenant`, replacing any credential registered for it: it is asked for a fresh token each time a call attaches the scheme, and a call whose provider fails fails before anything is sent, as `RequestError::CredentialProvider`. `token_provider` builds one from an async closure.
+        #[must_use]
+        pub fn with_tenant_provider(mut self, provider: support::TokenProvider) -> Self {
+            self.inner = self.inner.with_tenant_provider(provider);
+            self
+        }
+        ///Register a refreshable token for the security scheme `tenant`, replacing any credential registered for it: `token` yields the token each call attaches, and when a call's failed response is one `is_rejection` reads as a rejection of that token, `on_rejected` is given it and yields a fresh one, and the call is sent once more with it. `Credential::Refreshable`'s documentation states when that replay happens and what the call returns.
+        #[must_use]
+        pub fn with_tenant_refreshable<P, R, Fut>(
+            mut self,
+            token: support::TokenProvider,
+            is_rejection: P,
+            on_rejected: R,
+        ) -> Self
+        where
+            P: Fn(&http::Response<bytes::Bytes>) -> bool + support::MaybeSend
+                + support::MaybeSync + 'static,
+            R: Fn(support::SecretString) -> Fut + support::MaybeSend + support::MaybeSync
+                + 'static,
+            Fut: std::future::Future<
+                    Output = Result<support::SecretString, support::AuthError>,
+                > + support::MaybeSend + 'static,
+        {
+            self.inner = self
+                .inner
+                .with_tenant_refreshable(token, is_rejection, on_rejected);
+            self
+        }
+        ///Unregister the credential for the security scheme `tenant`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_tenant()` derives a client that no longer selects one listing `tenant`.
+        #[must_use]
+        pub fn without_tenant(mut self) -> Self {
+            self.inner = self.inner.without_tenant();
+            self
+        }
+        ///Register `username` and `password` for the `http basic` security scheme `basic`, sent as `Authorization: Basic <base64>`, replacing any credential registered for it.
+        ///
+        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_basic` is how a caller reaches a later alternative.
+        ///
+        ///# Scheme
+        ///
+        ///- `basic` — `http` (`basic`).
+        #[must_use]
+        pub fn with_basic(
+            mut self,
+            username: impl Into<String>,
+            password: support::SecretString,
+        ) -> Self {
+            self.inner = self.inner.with_basic(username, password);
+            self
+        }
+        ///Unregister the credential for the security scheme `basic`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_basic()` derives a client that no longer selects one listing `basic`.
+        #[must_use]
+        pub fn without_basic(mut self) -> Self {
+            self.inner = self.inner.without_basic();
+            self
+        }
+        ///Register a static `token` for the security scheme `queryKey`, an `apiKey` sent as the query parameter `api_key`, replacing any credential registered for it.
+        ///
+        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_query_key` is how a caller reaches a later alternative.
+        ///
+        ///# Scheme
+        ///
+        ///- `queryKey` — `apiKey`.
+        #[must_use]
+        pub fn with_query_key(mut self, token: support::SecretString) -> Self {
+            self.inner = self.inner.with_query_key(token);
+            self
+        }
+        ///Register `provider` for the security scheme `queryKey`, replacing any credential registered for it: it is asked for a fresh token each time a call attaches the scheme, and a call whose provider fails fails before anything is sent, as `RequestError::CredentialProvider`. `token_provider` builds one from an async closure.
+        #[must_use]
+        pub fn with_query_key_provider(
+            mut self,
+            provider: support::TokenProvider,
+        ) -> Self {
+            self.inner = self.inner.with_query_key_provider(provider);
+            self
+        }
+        ///Register a refreshable token for the security scheme `queryKey`, replacing any credential registered for it: `token` yields the token each call attaches, and when a call's failed response is one `is_rejection` reads as a rejection of that token, `on_rejected` is given it and yields a fresh one, and the call is sent once more with it. `Credential::Refreshable`'s documentation states when that replay happens and what the call returns.
+        #[must_use]
+        pub fn with_query_key_refreshable<P, R, Fut>(
+            mut self,
+            token: support::TokenProvider,
+            is_rejection: P,
+            on_rejected: R,
+        ) -> Self
+        where
+            P: Fn(&http::Response<bytes::Bytes>) -> bool + support::MaybeSend
+                + support::MaybeSync + 'static,
+            R: Fn(support::SecretString) -> Fut + support::MaybeSend + support::MaybeSync
+                + 'static,
+            Fut: std::future::Future<
+                    Output = Result<support::SecretString, support::AuthError>,
+                > + support::MaybeSend + 'static,
+        {
+            self.inner = self
+                .inner
+                .with_query_key_refreshable(token, is_rejection, on_rejected);
+            self
+        }
+        ///Unregister the credential for the security scheme `queryKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_query_key()` derives a client that no longer selects one listing `queryKey`.
+        #[must_use]
+        pub fn without_query_key(mut self) -> Self {
+            self.inner = self.inner.without_query_key();
+            self
+        }
+        ///Register a static `token` for the security scheme `cookieKey`, an `apiKey` sent as the cookie `session`, replacing any credential registered for it.
+        ///
+        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_cookie_key` is how a caller reaches a later alternative.
+        ///
+        ///# Scheme
+        ///
+        ///- `cookieKey` — `apiKey`.
+        #[must_use]
+        pub fn with_cookie_key(mut self, token: support::SecretString) -> Self {
+            self.inner = self.inner.with_cookie_key(token);
+            self
+        }
+        ///Register `provider` for the security scheme `cookieKey`, replacing any credential registered for it: it is asked for a fresh token each time a call attaches the scheme, and a call whose provider fails fails before anything is sent, as `RequestError::CredentialProvider`. `token_provider` builds one from an async closure.
+        #[must_use]
+        pub fn with_cookie_key_provider(
+            mut self,
+            provider: support::TokenProvider,
+        ) -> Self {
+            self.inner = self.inner.with_cookie_key_provider(provider);
+            self
+        }
+        ///Register a refreshable token for the security scheme `cookieKey`, replacing any credential registered for it: `token` yields the token each call attaches, and when a call's failed response is one `is_rejection` reads as a rejection of that token, `on_rejected` is given it and yields a fresh one, and the call is sent once more with it. `Credential::Refreshable`'s documentation states when that replay happens and what the call returns.
+        #[must_use]
+        pub fn with_cookie_key_refreshable<P, R, Fut>(
+            mut self,
+            token: support::TokenProvider,
+            is_rejection: P,
+            on_rejected: R,
+        ) -> Self
+        where
+            P: Fn(&http::Response<bytes::Bytes>) -> bool + support::MaybeSend
+                + support::MaybeSync + 'static,
+            R: Fn(support::SecretString) -> Fut + support::MaybeSend + support::MaybeSync
+                + 'static,
+            Fut: std::future::Future<
+                    Output = Result<support::SecretString, support::AuthError>,
+                > + support::MaybeSend + 'static,
+        {
+            self.inner = self
+                .inner
+                .with_cookie_key_refreshable(token, is_rejection, on_rejected);
+            self
+        }
+        ///Unregister the credential for the security scheme `cookieKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_cookie_key()` derives a client that no longer selects one listing `cookieKey`.
+        #[must_use]
+        pub fn without_cookie_key(mut self) -> Self {
+            self.inner = self.inner.without_cookie_key();
             self
         }
         /// Set the total timeout of every call made through this client value (mirrors the

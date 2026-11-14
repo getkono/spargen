@@ -21,7 +21,7 @@ use.
   per-operation `…Params` struct deriving `Default`, `Result<ResponseValue<T>, Error<E>>` out.
   String parameters and the params bundle take `impl Into<…>`, so `client.get_pet("1")` and
   `client.list_pets(params)` need no `to_owned()` or `Some`. An operation whose method name
-  would spell one of `Client`'s or `BlockingClient`'s fixed methods (`new`, `with_credential`,
+  would spell one of `Client`'s or `BlockingClient`'s fixed methods (`new`, `with_timeout`,
   …) takes a disambiguated name instead. Both clients emit `with_default_server` when the
   description declares a server, and only `BlockingClient` emits `inner`; both names are reserved
   on both clients regardless, so declaring a server never renames an operation.
@@ -77,20 +77,26 @@ use.
   that clears it in a PATCH. An optional JSON `content` parameter whose schema is nullable is a
   `Nullable<T>` field of its `…Params` struct the same way. A required nullable member is
   `Option<T>`, and an optional non-nullable one is `Option<T>` whose `None` is absence.
-- `Client::with_credential(scheme, credential)` registers static secrets (via
-  [`secrecy`](https://docs.rs/secrecy)) or async token providers; operation `security`
-  requirements pick the first satisfiable alternative and attach bearer/basic/apiKey credentials.
-  A missing required credential is a request-construction error — typed as
-  `RequestError::MissingCredential`, listing for each security alternative the schemes with no
-  registered credential; a credential of a kind its scheme cannot carry, or a `Credential::Basic`
-  whose username holds `:` (which RFC 7617 §2 forbids), as `RequestError::CredentialMismatch`;
-  and a failed token provider as
-  `RequestError::CredentialProvider` — never a silent 401. A failure inside the selected
-  alternative never falls through to a later one; `Client::without_credential(scheme)`
-  unregisters a scheme, so a client derived with it (`client.clone().without_credential("oauth")`)
-  selects the next fully registered alternative. A request carries one `Authorization` header: a
+- Each declared security scheme that takes a credential gives both clients typed setters, named
+  after the scheme's `securitySchemes` key: `with_<scheme>(token)` for `http bearer`, `apiKey`,
+  `oauth2` and `openIdConnect`, taking a [`secrecy`](https://docs.rs/secrecy) `SecretString`,
+  with `with_<scheme>_provider(TokenProvider)` for an async token provider and
+  `with_<scheme>_refreshable(token, is_rejection, on_rejected)` for a refreshable token beside
+  it; `with_<scheme>(username, password)` for `http basic`; and `without_<scheme>()` for each.
+  A `mutualTLS` scheme has none, since the transport's client certificate satisfies it. Each
+  setter's rustdoc carries its scheme's description, flows and scopes. A setter whose name an
+  operation method or a fixed method already spells (a scheme named `timeout`) takes a
+  disambiguated name instead. Operation `security` requirements pick the first satisfiable
+  alternative and attach bearer/basic/apiKey credentials. A missing required credential is a
+  request-construction error — typed as `RequestError::MissingCredential`, listing for each
+  security alternative the schemes with no registered credential; an `http basic` username
+  holding `:` (which RFC 7617 §2 forbids) as `RequestError::CredentialMismatch`; and a failed
+  token provider as `RequestError::CredentialProvider` — never a silent 401. A failure inside the
+  selected alternative never falls through to a later one; `without_<scheme>()` unregisters a
+  scheme, so a client derived with it (`client.clone().without_oauth()`) selects the next fully
+  registered alternative. A request carries one `Authorization` header: a
   basic or bearer credential replaces the `Basic` one a base URL's `user:pass@` userinfo sets.
-  A `Credential::Refreshable` adds the reactive
+  A refreshable token adds the reactive
   case: when its check reads a failed response as a rejection of the token it carried, the
   runtime asks it for a fresh token and sends the call once more, returning the original response
   when the body cannot be cloned, the refresh fails, or the replay is rejected again.

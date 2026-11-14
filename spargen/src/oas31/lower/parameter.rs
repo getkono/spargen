@@ -149,7 +149,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ))
                 .remedy(
                     "remove the parameter; content types follow the operation's media types and \
-                     credentials are registered with `Client::with_credential`",
+                     credentials are registered with each scheme's `Client::with_<scheme>`",
                 )
                 .emit(self.diags);
         }

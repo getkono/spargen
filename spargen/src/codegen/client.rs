@@ -4,7 +4,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::ir::Api;
+use crate::ir::{Api, ApiKeyLoc, CredentialShape, SecurityScheme, SecuritySchemeDef};
 use crate::name::Names;
 
 use super::docs::{carried, normalize_rustdoc};
@@ -22,23 +22,217 @@ pub(super) fn default_server_docs() -> TokenStream {
     }
 }
 
-/// The rustdoc of `with_credential`, which `Client` and `BlockingClient` both carry: what
-/// registration checks and how an operation fails on it, followed by the declared schemes.
-pub(super) fn with_credential_docs(api: &Api, options: &CodegenOptions) -> TokenStream {
-    let scheme_docs = scheme_doc_lines(api, options);
-    quote! {
-        /// Register a credential for a named security scheme (a `securitySchemes` key).
-        ///
-        /// Registration checks nothing; each operation matches its `security` requirement
-        /// against the registered credentials when it is called, and fails before anything is
-        /// sent, as `Error::RequestConstruction`, when no alternative has every scheme
-        /// registered (`RequestError::MissingCredential`), when the selected alternative has a
-        /// credential its scheme cannot carry (`RequestError::CredentialMismatch` — for
-        /// instance a `Credential::Provider` under an `http basic` scheme, which accepts only
-        /// `Credential::Basic`), or when its token provider fails
-        /// (`RequestError::CredentialProvider`). `Credential`'s documentation lists which
-        /// variant each kind of scheme accepts.
-        #(#scheme_docs)*
+/// The typed credential setters of every declared security scheme that takes a credential, in
+/// declaration order, under the names [`Names::credential_setters`] holds: `with_<scheme>` (a
+/// static token, or a username and password for `http basic`), `with_<scheme>_provider` and
+/// `with_<scheme>_refreshable` for a scheme taking a token, and `without_<scheme>`. `Client`'s
+/// (`forward` is `None`) register on its core under the scheme's key; `BlockingClient`'s forward
+/// each call to the async client it wraps, the field `forward` names, and carry the same rustdoc.
+pub(super) fn credential_setter_tokens(
+    api: &Api,
+    names: &Names,
+    options: &CodegenOptions,
+    forward: Option<TokenStream>,
+) -> TokenStream {
+    let setters = api.security_schemes.iter().filter_map(|(id, def)| {
+        let shape = def.kind.credential_shape()?;
+        let setter = names
+            .credential_setters
+            .get(id)
+            .expect("credential setters are allocated for every scheme taking a credential");
+        let key = id.0.as_str();
+        let scheme_docs = scheme_doc_lines(def, options);
+        let register = |credential: TokenStream, method: &crate::name::Ident, args: TokenStream| {
+            match &forward {
+                None => quote! { self.core.set_credential(#key, #credential); },
+                Some(inner) => quote! { self.#inner = self.#inner.#method(#args); },
+            }
+        };
+        let with = &setter.with;
+        let selection = format!(
+            "An operation attaches the first alternative of its `security` whose schemes all have \
+             a credential registered, and fails before anything is sent, as \
+             `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. \
+             It never falls through past the alternative it chose: a credential that fails to \
+             attach fails the call, and `{}` is how a caller reaches a later alternative.",
+            setter.without.as_str()
+        );
+        let with_setter = match shape {
+            CredentialShape::Token => {
+                let (credential_variant, carrier) = token_carrier(&def.kind);
+                let summary = format!(
+                    "Register a static `token` for the security scheme `{key}`, {carrier}, \
+                     replacing any credential registered for it."
+                );
+                let body = register(
+                    quote! { support::Credential::#credential_variant(token) },
+                    with,
+                    quote! { token },
+                );
+                quote! {
+                    #[doc = #summary]
+                    ///
+                    #[doc = #selection]
+                    #(#scheme_docs)*
+                    #[must_use]
+                    pub fn #with(mut self, token: support::SecretString) -> Self {
+                        #body
+                        self
+                    }
+                }
+            }
+            CredentialShape::Basic => {
+                let summary = format!(
+                    "Register `username` and `password` for the `http basic` security scheme \
+                     `{key}`, sent as `Authorization: Basic <base64>`, replacing any credential \
+                     registered for it."
+                );
+                let body = register(
+                    quote! {
+                        support::Credential::Basic { username: username.into(), password }
+                    },
+                    with,
+                    quote! { username, password },
+                );
+                quote! {
+                    #[doc = #summary]
+                    ///
+                    #[doc = #selection]
+                    #(#scheme_docs)*
+                    #[must_use]
+                    pub fn #with(
+                        mut self,
+                        username: impl Into<String>,
+                        password: support::SecretString,
+                    ) -> Self {
+                        #body
+                        self
+                    }
+                }
+            }
+        };
+        let provider_setter = setter.provider.as_ref().map(|provider| {
+            let summary = format!(
+                "Register `provider` for the security scheme `{key}`, replacing any credential \
+                 registered for it: it is asked for a fresh token each time a call attaches the \
+                 scheme, and a call whose provider fails fails before anything is sent, as \
+                 `RequestError::CredentialProvider`. `token_provider` builds one from an async \
+                 closure."
+            );
+            let body = register(
+                quote! { support::Credential::Provider(provider) },
+                provider,
+                quote! { provider },
+            );
+            quote! {
+                #[doc = #summary]
+                #[must_use]
+                pub fn #provider(mut self, provider: support::TokenProvider) -> Self {
+                    #body
+                    self
+                }
+            }
+        });
+        let refreshable_setter = setter.refreshable.as_ref().map(|refreshable| {
+            let summary = format!(
+                "Register a refreshable token for the security scheme `{key}`, replacing any \
+                 credential registered for it: `token` yields the token each call attaches, and \
+                 when a call's failed response is one `is_rejection` reads as a rejection of that \
+                 token, `on_rejected` is given it and yields a fresh one, and the call is sent \
+                 once more with it. `Credential::Refreshable`'s documentation states when that \
+                 replay happens and what the call returns."
+            );
+            let body = register(
+                quote! {
+                    support::Credential::refreshable(token, is_rejection, on_rejected)
+                },
+                refreshable,
+                quote! { token, is_rejection, on_rejected },
+            );
+            quote! {
+                #[doc = #summary]
+                #[must_use]
+                pub fn #refreshable<P, R, Fut>(
+                    mut self,
+                    token: support::TokenProvider,
+                    is_rejection: P,
+                    on_rejected: R,
+                ) -> Self
+                where
+                    P: Fn(&http::Response<bytes::Bytes>) -> bool
+                        + support::MaybeSend
+                        + support::MaybeSync
+                        + 'static,
+                    R: Fn(support::SecretString) -> Fut
+                        + support::MaybeSend
+                        + support::MaybeSync
+                        + 'static,
+                    Fut: std::future::Future<
+                            Output = Result<support::SecretString, support::AuthError>,
+                        > + support::MaybeSend
+                        + 'static,
+                {
+                    #body
+                    self
+                }
+            }
+        });
+        let without = &setter.without;
+        let without_summary = format!(
+            "Unregister the credential for the security scheme `{key}`; one never registered is \
+             left as it is. Operations pick the first `security` alternative whose schemes are \
+             all registered and never fall through past it when attaching fails, so this is how \
+             a caller reaches a later alternative: `client.clone().{}()` derives a client that \
+             no longer selects one listing `{key}`.",
+            without.as_str()
+        );
+        let without_body = match &forward {
+            None => quote! { self.core.remove_credential(#key); },
+            Some(inner) => quote! { self.#inner = self.#inner.#without(); },
+        };
+        Some(quote! {
+            #with_setter
+            #provider_setter
+            #refreshable_setter
+            #[doc = #without_summary]
+            #[must_use]
+            pub fn #without(mut self) -> Self {
+                #without_body
+                self
+            }
+        })
+    });
+    quote! { #(#setters)* }
+}
+
+/// The `Credential` variant a static token registers as under a scheme taking a token, and how
+/// the scheme carries it, as the setter's rustdoc states it.
+fn token_carrier(scheme: &SecurityScheme) -> (TokenStream, String) {
+    match scheme {
+        SecurityScheme::ApiKey { location, name } => {
+            let place = match location {
+                ApiKeyLoc::Header => "header",
+                ApiKeyLoc::Query => "query parameter",
+                ApiKeyLoc::Cookie => "cookie",
+            };
+            (
+                quote! { ApiKey },
+                format!("an `apiKey` sent as the {place} `{name}`"),
+            )
+        }
+        SecurityScheme::OAuth2 => (
+            quote! { Bearer },
+            "an `oauth2` scheme whose token is sent as `Authorization: Bearer <token>`".to_owned(),
+        ),
+        SecurityScheme::OpenIdConnect => (
+            quote! { Bearer },
+            "an `openIdConnect` scheme whose token is sent as `Authorization: Bearer <token>`"
+                .to_owned(),
+        ),
+        SecurityScheme::Http(_) | SecurityScheme::MutualTls => (
+            quote! { Bearer },
+            "sent as `Authorization: Bearer <token>`".to_owned(),
+        ),
     }
 }
 
@@ -91,26 +285,17 @@ pub(super) fn with_bound_header_tokens(api: &Api, body: TokenStream) -> Option<T
     })
 }
 
-/// The declared security schemes, rendered as rustdoc for `with_credential`, for the reason
-/// [`crate::ir::SecuritySchemeDef`] gives. The lines carry the spec's scheme and scope
-/// descriptions, so they go through [`carried`] and then [`normalize_rustdoc`] together, as the one
-/// Markdown text rustdoc joins them into.
-fn scheme_doc_lines(api: &Api, options: &CodegenOptions) -> Vec<TokenStream> {
-    let documented: Vec<&str> = api
-        .security_schemes
-        .values()
-        .flat_map(|scheme| scheme.docs.iter().map(String::as_str))
-        .collect();
-    if documented.is_empty() {
+/// One declared security scheme's documentation, rendered as rustdoc for its `with_<scheme>`
+/// setter, for the reason [`crate::ir::SecuritySchemeDef`] gives. The lines carry the spec's
+/// scheme and scope descriptions, so they go through [`carried`] and then [`normalize_rustdoc`]
+/// together, as the one Markdown text rustdoc joins them into.
+fn scheme_doc_lines(scheme: &SecuritySchemeDef, options: &CodegenOptions) -> Vec<TokenStream> {
+    if scheme.docs.is_empty() {
         return Vec::new();
     }
-    let mut lines = vec![
-        String::new(),
-        "# Declared schemes".to_owned(),
-        String::new(),
-    ];
+    let mut lines = vec![String::new(), "# Scheme".to_owned(), String::new()];
     lines.extend(
-        normalize_rustdoc(&carried(&documented.join("\n"), options))
+        normalize_rustdoc(&carried(&scheme.docs.join("\n"), options))
             .split('\n')
             .map(str::to_owned),
     );
@@ -123,8 +308,8 @@ fn scheme_doc_lines(api: &Api, options: &CodegenOptions) -> Vec<TokenStream> {
 /// Emit everything the generated root holds beside `types`: each operation's optional-parameters
 /// struct, typed error, multi-status success enum, and response-header structs, the `servers`
 /// module, and the `Client` itself — its constructors (`new`, `with_default_server` when a server
-/// is declared, `with_client`, `with_backend`), `core`, the credential
-/// registration methods, `with_timeout`, `with_options` and `with_base_url`, and
+/// is declared, `with_client`, `with_backend`), `core`, the typed credential setters of each
+/// security scheme ([`credential_setter_tokens`]), `with_timeout`, `with_options` and `with_base_url`, and
 /// one async method per operation, declared from its entry in `signatures`, which runs parallel to
 /// `api.operations`.
 pub(super) fn emit_client(
@@ -133,7 +318,7 @@ pub(super) fn emit_client(
     names: &Names,
     options: &CodegenOptions,
 ) -> TokenStream {
-    let credential_docs = with_credential_docs(api, options);
+    let credential_setters = credential_setter_tokens(api, names, options, None);
     let params = api
         .operations
         .iter()
@@ -255,27 +440,7 @@ pub(super) fn emit_client(
                 &self.core
             }
 
-            #credential_docs
-            #[must_use]
-            pub fn with_credential(
-                mut self,
-                scheme: &str,
-                credential: support::Credential,
-            ) -> Self {
-                self.core.set_credential(scheme, credential);
-                self
-            }
-
-            /// Unregister the credential for a named security scheme; a scheme never registered
-            /// is left as it is. Operations pick the first `security` alternative whose schemes
-            /// are all registered and never fall through past it when attaching fails, so this
-            /// is how a caller reaches a later alternative: `client.clone().without_credential(..)`
-            /// derives a client that no longer selects the earlier one.
-            #[must_use]
-            pub fn without_credential(mut self, scheme: &str) -> Self {
-                self.core.remove_credential(scheme);
-                self
-            }
+            #credential_setters
 
             #with_bound_header
 
@@ -656,8 +821,27 @@ mod tests {
                 .map(|method| operation(method))
                 .collect(),
             types: TypeGraph::default(),
-            security_schemes: IndexMap::new(),
+            // Issue #1337: schemes spelling fixed methods (`with_timeout`, `with_config`) and an
+            // operation's (`with_new`), and a `mutualTLS` scheme, which takes no credential.
+            security_schemes: [
+                ("timeout", SecurityScheme::Http(HttpScheme::Bearer)),
+                ("config", SecurityScheme::Http(HttpScheme::Basic)),
+                ("new", SecurityScheme::OAuth2),
+                ("mtls", SecurityScheme::MutualTls),
+            ]
+            .into_iter()
+            .map(|(key, kind)| {
+                (
+                    SchemeId(key.to_owned()),
+                    SecuritySchemeDef {
+                        kind,
+                        docs: Vec::new(),
+                    },
+                )
+            })
+            .collect(),
         };
+        api.operations.push(operation("withNew"));
         api.operations[0].bound_headers.push(BoundHeader {
             name: "X-Api-Version".to_owned(),
             required: true,
@@ -733,6 +917,35 @@ mod tests {
             api.operations.len() + 3,
             "one operation has a twin family: {preparers:?}"
         );
+        // Each scheme taking a credential's typed setters, which both clients emit: four for a
+        // token scheme, two for `http basic`, none for `mutualTLS`.
+        let setters: std::collections::BTreeSet<String> = names
+            .credential_setters
+            .values()
+            .flat_map(|setter| {
+                [
+                    Some(&setter.with),
+                    setter.provider.as_ref(),
+                    setter.refreshable.as_ref(),
+                    Some(&setter.without),
+                ]
+            })
+            .flatten()
+            .map(|ident| ident.as_str().to_owned())
+            .collect();
+        assert_eq!(setters.len(), 4 + 2 + 4, "{setters:?}");
+        assert!(
+            !names
+                .credential_setters
+                .contains_key(&SchemeId("mtls".to_owned())),
+            "a `mutualTLS` scheme has no setter"
+        );
+        for setter in &setters {
+            assert!(
+                !operation_methods.contains(setter) && !preparers.contains(setter),
+                "credential setter `{setter}` took an operation's spelling"
+            );
+        }
         let reserved: std::collections::BTreeSet<String> = crate::name::CLIENT_METHODS
             .iter()
             .map(|method| (*method).to_owned())
@@ -759,6 +972,12 @@ mod tests {
                     "`impl {self_ty}` lacks operation method `{method}`: {methods:?}"
                 );
             }
+            for setter in &setters {
+                assert!(
+                    methods.contains(setter),
+                    "`impl {self_ty}` lacks credential setter `{setter}`: {methods:?}"
+                );
+            }
             for preparer in &preparers {
                 assert_eq!(
                     methods.contains(preparer),
@@ -768,7 +987,11 @@ mod tests {
             }
             let fixed: std::collections::BTreeSet<String> = methods
                 .into_iter()
-                .filter(|method| !operation_methods.contains(method) && !preparers.contains(method))
+                .filter(|method| {
+                    !operation_methods.contains(method)
+                        && !preparers.contains(method)
+                        && !setters.contains(method)
+                })
                 .collect();
             assert_eq!(
                 &fixed, expected,
@@ -778,10 +1001,17 @@ mod tests {
         }
         for method in crate::name::CLIENT_METHODS {
             assert!(
-                !operation_methods.contains(*method) && !preparers.contains(*method),
-                "operation `{method}` kept the bare spelling of a fixed client method"
+                !operation_methods.contains(*method)
+                    && !preparers.contains(*method)
+                    && !setters.contains(*method),
+                "an operation or a credential setter kept the bare spelling of the fixed client \
+                 method `{method}`"
             );
         }
+        assert!(
+            !setters.contains("with_new") && setters.contains("without_new"),
+            "the scheme `new` yields `with_new` to the operation `withNew`: {setters:?}"
+        );
     }
 
     /// Issue #1324: a server builder's inherent methods are `new` and `url` beside one setter per
@@ -895,8 +1125,8 @@ mod tests {
     }
 
     /// Issue #1119: `BlockingClient` emits `with_default_server` exactly when `Client` does (a
-    /// declared server), and its `with_credential` carries `Client`'s documentation, declared
-    /// schemes included, as does its `with_default_server`.
+    /// declared server), and its credential setters carry `Client`'s documentation, the scheme's
+    /// included on `with_<scheme>` (issue #1337), as does its `with_default_server`.
     #[test]
     fn blocking_client_mirrors_default_server_and_credential_docs() {
         for declares_server in [false, true] {
@@ -942,19 +1172,28 @@ mod tests {
             ))
             .expect("the emitted blocking client parses");
 
-            let credential = method_docs(&client.items, "Client", "with_credential")
-                .expect("`Client::with_credential` is emitted");
+            let credential = method_docs(&client.items, "Client", "with_bearer_auth")
+                .expect("`Client::with_bearer_auth` is emitted");
             assert!(
                 credential
                     .iter()
                     .any(|doc| doc.contains("a short-lived service token")),
-                "`Client::with_credential` lists the declared schemes: {credential:?}"
+                "`Client::with_bearer_auth` carries its scheme's documentation: {credential:?}"
             );
-            assert_eq!(
-                method_docs(&blocking.items, "BlockingClient", "with_credential"),
-                Some(credential),
-                "`BlockingClient::with_credential` carries `Client`'s documentation"
-            );
+            for setter in [
+                "with_bearer_auth",
+                "with_bearer_auth_provider",
+                "with_bearer_auth_refreshable",
+                "without_bearer_auth",
+            ] {
+                let docs = method_docs(&client.items, "Client", setter);
+                assert!(docs.is_some(), "`Client::{setter}` is emitted");
+                assert_eq!(
+                    method_docs(&blocking.items, "BlockingClient", setter),
+                    docs,
+                    "`BlockingClient::{setter}` carries `Client`'s documentation"
+                );
+            }
 
             let default_server = method_docs(&client.items, "Client", "with_default_server");
             assert_eq!(

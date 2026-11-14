@@ -720,6 +720,102 @@ fn operation_names_do_not_depend_on_operation_order() {
     );
 }
 
+/// Issue #1337: each scheme taking a credential gets its typed setters in the client method
+/// scope, after every operation-level method. A scheme spelling a fixed method (`timeout`,
+/// `config`) or an operation's method (`withItem`) yields it, and two schemes whose keys escape to
+/// one spelling (`api-key`, `api_key`) are told apart the same way in either declaration order. A
+/// token scheme has a provider and a refreshable setter, `http basic` neither, and `mutualTLS` no
+/// setter at all.
+#[test]
+fn credential_setters_yield_to_client_methods_and_do_not_depend_on_scheme_order() {
+    use crate::ir::{HttpScheme, SchemeId, SecurityScheme, SecuritySchemeDef};
+    let schemes = [
+        ("timeout", SecurityScheme::Http(HttpScheme::Bearer)),
+        ("config", SecurityScheme::Http(HttpScheme::Basic)),
+        ("item", SecurityScheme::OpenIdConnect),
+        ("api-key", SecurityScheme::OAuth2),
+        ("api_key", SecurityScheme::OAuth2),
+        ("mtls", SecurityScheme::MutualTls),
+    ];
+    let mut spellings = Vec::new();
+    for reversed in [false, true] {
+        let mut api = api(Vec::new(), false);
+        api.operations[0].id = OperationId("withItem".to_owned());
+        let mut declared: Vec<_> = schemes.to_vec();
+        if reversed {
+            declared.reverse();
+        }
+        api.security_schemes = declared
+            .into_iter()
+            .map(|(key, kind)| {
+                (
+                    SchemeId(key.to_owned()),
+                    SecuritySchemeDef {
+                        kind,
+                        docs: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        let names = allocate(&api);
+        assert_eq!(
+            names.operations[&OperationId("withItem".to_owned())]
+                .method
+                .as_str(),
+            "with_item",
+            "the operation keeps its method"
+        );
+        let setter = |key: &str| &names.credential_setters[&SchemeId(key.to_owned())];
+        assert!(!names
+            .credential_setters
+            .contains_key(&SchemeId("mtls".to_owned())));
+        let mut spelled = std::collections::BTreeMap::new();
+        for (key, _) in &schemes[..5] {
+            let setter = setter(key);
+            spelled.insert(
+                *key,
+                [
+                    Some(&setter.with),
+                    setter.provider.as_ref(),
+                    setter.refreshable.as_ref(),
+                    Some(&setter.without),
+                ]
+                .map(|ident| ident.map(|ident| ident.as_str().to_owned())),
+            );
+        }
+        for (key, yielded) in [
+            ("timeout", "with_timeout"),
+            ("config", "with_config"),
+            ("item", "with_item"),
+        ] {
+            let with = spelled[key][0].as_deref().expect("a `with_` setter");
+            assert!(
+                with != yielded && with.starts_with(yielded),
+                "{with} is not a suffixed {yielded}"
+            );
+        }
+        assert_eq!(
+            spelled["timeout"][1].as_deref(),
+            Some("with_timeout_provider")
+        );
+        assert_eq!(
+            spelled["config"][1..3],
+            [None, None],
+            "`http basic` takes no token"
+        );
+        assert_eq!(spelled["config"][3].as_deref(), Some("without_config"));
+        let api_key = spelled["api-key"].clone();
+        let api_key_snake = spelled["api_key"].clone();
+        assert_eq!(api_key[0].as_deref(), Some("with_api_key"));
+        assert_ne!(api_key, api_key_snake);
+        spellings.push(spelled);
+    }
+    assert_eq!(
+        spellings[0], spellings[1],
+        "setter names move with the declaration order"
+    );
+}
+
 #[test]
 fn a_declared_root_document_schema_takes_a_type_name_from_a_synthesized_one() {
     // A definition is anonymous only when it has neither a document nor a pointer. A schema
@@ -851,7 +947,7 @@ fn hint() -> impl proptest::strategy::Strategy<Value = String> {
         3 => "[a-cA-C][-_ ]?[a-cA-C]",
         1 => proptest::sample::select(vec![
             "", "type", "self", "Self", "super", "crate", "String", "Box", "Option", "Vec",
-            "Default", "default", "Into", "new", "clone", "core", "inner", "with_credential", "params",
+            "Default", "default", "Into", "new", "clone", "core", "inner", "timeout", "with_timeout", "params",
             "body", "path", "query", "url", "request", "cookies", "replay", "additional", "other",
             "Other", "unknown", "Unknown", "err", "1a", "-", "requestOperation", "getV2", "get_v_2",
             "a_l_l",
@@ -1147,8 +1243,8 @@ proptest::proptest! {
     /// biased to collide, is a legal identifier and distinct within the scope it is emitted
     /// in: the `types` module (definitions and response-header structs, beside the names
     /// that module imports), the module root (the `…Params` structs, the error types, and the
-    /// success enums, beside the runtime re-exports), the client methods and their URL
-    /// accessors (beside the fixed ones), each struct's fields with its overflow map, each
+    /// success enums, beside the runtime re-exports), the client methods, their companions and
+    /// the credential setters (beside the fixed ones), each struct's fields with its overflow map, each
     /// enum's and union's variants with an open enum's catch-all, each operation's method
     /// arguments with its generator bindings and its `…Params` fields, each header struct's
     /// fields, the `servers` module (the server builders and the server-variable enums
@@ -1160,10 +1256,27 @@ proptest::proptest! {
         definitions in proptest::collection::vec(definition(), 0..10),
         operations in proptest::collection::btree_map(hint(), operation(), 0..6),
         servers in proptest::collection::vec(server(), 0..3),
+        schemes in proptest::collection::btree_map(hint(), 0u8..3, 0..4),
     ) {
         use proptest::prop_assert_eq;
-        let api = synthetic_api(&definitions, &operations, &servers);
+        let mut api = synthetic_api(&definitions, &operations, &servers);
+        api.security_schemes = schemes
+            .iter()
+            .map(|(key, kind)| {
+                let kind = match kind {
+                    0 => crate::ir::SecurityScheme::Http(crate::ir::HttpScheme::Bearer),
+                    1 => crate::ir::SecurityScheme::Http(crate::ir::HttpScheme::Basic),
+                    _ => crate::ir::SecurityScheme::MutualTls,
+                };
+                let def = crate::ir::SecuritySchemeDef { kind, docs: Vec::new() };
+                (crate::ir::SchemeId(key.clone()), def)
+            })
+            .collect();
         let names = allocate(&api);
+        prop_assert_eq!(
+            names.credential_setters.len(),
+            schemes.values().filter(|kind| **kind < 2).count()
+        );
 
         prop_assert_eq!(names.types.len(), api.types.iter().count());
         let header_structs: usize = operations
@@ -1198,7 +1311,17 @@ proptest::proptest! {
                 .chain(records.iter().map(|record| &record.preparer))
                 .chain(records.iter().filter_map(|record| record.byte_stream.as_ref()).flat_map(
                     |stream| [&stream.twin, &stream.request_builder, &stream.decoder],
-                )),
+                ))
+                .chain(names.credential_setters.values().flat_map(|setter| {
+                    [
+                        Some(&setter.with),
+                        setter.provider.as_ref(),
+                        setter.refreshable.as_ref(),
+                        Some(&setter.without),
+                    ]
+                    .into_iter()
+                    .flatten()
+                })),
             &[super::CLIENT_METHODS, super::CLIENT_TRAIT_METHODS].concat(),
         )?;
         let enum_successes = api

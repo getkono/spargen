@@ -71,10 +71,7 @@ fn the_client_is_debug_and_clone() {
     // A `Debug` client must never render a registered secret.
     let client = basic_client::Client::new("http://127.0.0.1:1")
         .unwrap()
-        .with_credential(
-            "bearerAuth",
-            basic_client::Credential::Bearer(basic_client::SecretString::from("hunter2")),
-        );
+        .with_bearer(basic_client::SecretString::from("hunter2"));
     let rendered = format!("{:?}", client.clone());
     assert!(!rendered.contains("hunter2"), "secret leaked: {rendered}");
 }
@@ -119,19 +116,16 @@ fn a_missing_credential_is_a_typed_request_construction_error() {
     }
 }
 
-// `without_credential` on the async client reaches dispatch: a client derived from a registered
+// `without_bearer` on the async client reaches dispatch: a client derived from a registered
 // one by unregistering its only credential is back to reporting that scheme as missing, and the
 // client it was cloned from keeps its registration.
 #[test]
-fn without_credential_unregisters_a_scheme_on_a_derived_client() {
+fn without_a_scheme_unregisters_it_on_a_derived_client() {
     use std::future::Future;
     let registered = basic_client::Client::new("http://127.0.0.1:1")
         .unwrap()
-        .with_credential(
-            "bearer",
-            basic_client::Credential::Bearer(basic_client::SecretString::from("t0k")),
-        );
-    let derived = registered.clone().without_credential("bearer").without_credential("never");
+        .with_bearer(basic_client::SecretString::from("t0k"));
+    let derived = registered.clone().without_bearer().without_basic();
     assert!(registered.core().credential("bearer").is_some());
     assert!(derived.core().credential("bearer").is_none());
     let mut call = std::pin::pin!(derived.get_user("1", None));
@@ -272,10 +266,7 @@ fn a_generated_conjunction_reports_each_alternative_grouped() {
     // outstanding.
     let partial = basic_client::Client::new("http://127.0.0.1:1")
         .unwrap()
-        .with_credential(
-            "bearer",
-            basic_client::Credential::Bearer(basic_client::SecretString::from("t0k")),
-        );
+        .with_bearer(basic_client::SecretString::from("t0k"));
     assert_eq!(
         outstanding(&partial),
         [vec!["tenant"], vec!["apiKey"], vec!["tenant"]]
@@ -290,13 +281,10 @@ fn a_failed_token_provider_is_a_typed_request_construction_error() {
     use std::future::Future;
     let client = basic_client::Client::new("http://127.0.0.1:1")
         .unwrap()
-        .with_credential(
-            "bearer",
-            basic_client::Credential::Provider(std::sync::Arc::new(|| {
-                Box::pin(async { Err(basic_client::AuthError::new("refresh rejected")) })
-                    as basic_client::TokenFuture
-            })),
-        );
+        .with_bearer_provider(std::sync::Arc::new(|| {
+            Box::pin(async { Err(basic_client::AuthError::new("refresh rejected")) })
+                as basic_client::TokenFuture
+        }));
     let mut call = std::pin::pin!(client.get_user("1", None));
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
@@ -366,10 +354,12 @@ fn a_rejected_refreshable_credential_is_refreshed_and_the_call_replayed() {
         }
     }
 
-    let credential = |refreshed: Option<&'static str>| {
-        basic_client::Credential::refreshable(
+    let register = |client: basic_client::Client, refreshed: Option<&'static str>| {
+        client.with_bearer_refreshable(
             basic_client::token_provider(|| async { Ok(basic_client::SecretString::from("stale")) }),
-            |response| response.status() == 401 && &response.body()[..] == b"expired",
+            |response: &http::Response<bytes::Bytes>| {
+                response.status() == 401 && &response.body()[..] == b"expired"
+            },
             move |_stale| async move {
                 refreshed
                     .map(basic_client::SecretString::from)
@@ -380,9 +370,10 @@ fn a_rejected_refreshable_credential_is_refreshed_and_the_call_replayed() {
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
 
     let backend = Arc::new(Scripted::default());
-    let client = basic_client::Client::with_backend(backend.clone(), "https://example.com")
-        .unwrap()
-        .with_credential("bearer", credential(Some("fresh")));
+    let client = register(
+        basic_client::Client::with_backend(backend.clone(), "https://example.com").unwrap(),
+        Some("fresh"),
+    );
     let mut call = std::pin::pin!(client.get_user("1", None));
     let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
         panic!("the scripted backend answers at once");
@@ -391,9 +382,10 @@ fn a_rejected_refreshable_credential_is_refreshed_and_the_call_replayed() {
     assert_eq!(*backend.sent.lock().unwrap(), ["Bearer stale", "Bearer fresh"]);
 
     let backend = Arc::new(Scripted::default());
-    let client = basic_client::Client::with_backend(backend.clone(), "https://example.com")
-        .unwrap()
-        .with_credential("bearer", credential(None));
+    let client = register(
+        basic_client::Client::with_backend(backend.clone(), "https://example.com").unwrap(),
+        None,
+    );
     let mut call = std::pin::pin!(client.get_user("1", None));
     let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
         panic!("the scripted backend answers at once");
@@ -532,7 +524,7 @@ fn an_operation_is_its_request_builder_and_decoder_and_names_its_operation() {
     let backend = Arc::new(Recording::default());
     let client = basic_client::Client::with_backend(backend.clone(), "https://example.com")
         .unwrap()
-        .with_credential("bearer", basic_client::Credential::Bearer("token".into()))
+        .with_bearer("token".into())
         .with_options(options);
     let params = || basic_client::GetUserParams::default().page(2);
 
@@ -644,43 +636,50 @@ fn a_stream_twin_is_its_request_builder_and_decoder() {
     }
 }
 
-// The third credential state: a credential is registered and selects its alternative, but it is of
-// a kind the scheme cannot carry. It is typed from generated output too, with nothing beneath it,
-// so a consumer never has to match on its text.
+// Issue #1337: each declared scheme's typed setter registers, under the scheme's own key, the
+// credential kind that scheme carries, so a credential its scheme cannot carry is unrepresentable
+// from generated output; `without_<scheme>` unregisters exactly that key.
 #[test]
-fn a_credential_of_the_wrong_kind_is_a_typed_request_construction_error() {
-    use std::future::Future;
+fn each_typed_setter_registers_its_schemes_credential_kind() {
+    let secret = || basic_client::SecretString::from("s3cret");
+    let provider = || basic_client::token_provider(|| async { Ok(basic_client::SecretString::from("t")) });
     let client = basic_client::Client::new("http://127.0.0.1:1")
         .unwrap()
-        .with_credential(
-            "bearer",
-            basic_client::Credential::Basic {
-                username: "aladdin".to_owned(),
-                password: basic_client::SecretString::from("open sesame"),
-            },
+        .with_bearer(secret())
+        .with_api_key(secret())
+        .with_tenant_provider(provider())
+        .with_query_key(secret())
+        .with_cookie_key_refreshable(
+            provider(),
+            |_: &http::Response<bytes::Bytes>| false,
+            |stale| async move { Ok(stale) },
+        )
+        .with_basic("aladdin", basic_client::SecretString::from("open sesame"));
+    let registered = |scheme: &str| {
+        client
+            .core()
+            .credential(scheme)
+            .map(|credential| format!("{credential:?}"))
+    };
+    for (scheme, kind) in [
+        ("bearer", "Bearer"),
+        ("apiKey", "ApiKey"),
+        ("tenant", "Provider"),
+        ("queryKey", "ApiKey"),
+        ("cookieKey", "Refreshable"),
+        ("basic", "Basic"),
+    ] {
+        assert_eq!(
+            registered(scheme),
+            Some(format!("Credential::{kind}(***)")),
+            "{scheme}"
         );
-    let mut call = std::pin::pin!(client.get_user("1", None));
-    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
-        panic!("a credential mismatch must fail before anything is sent");
-    };
-    let error = match result {
-        Err(error) => error,
-        Ok(_) => panic!("a credential mismatch cannot produce a response"),
-    };
-    match &error {
-        basic_client::Error::RequestConstruction(
-            basic_client::RequestError::CredentialMismatch { scheme, required, registered },
-        ) => {
-            assert_eq!(*scheme, "bearer");
-            assert_eq!(*required, "bearer");
-            assert_eq!(*registered, "Basic");
-        }
-        other => panic!("expected CredentialMismatch, got {other:?}"),
     }
-    assert!(!error.is_transient());
-    let cause = std::error::Error::source(&error).unwrap();
-    assert!(std::error::Error::source(cause).is_none());
+    assert_eq!(registered("mtls"), None, "`mutualTLS` takes no credential");
+    let client = client.without_basic().without_cookie_key();
+    assert!(client.core().credential("basic").is_none());
+    assert!(client.core().credential("cookieKey").is_none());
+    assert!(client.core().credential("bearer").is_some());
 }
 
 #[test]

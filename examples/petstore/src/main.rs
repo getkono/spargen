@@ -24,9 +24,9 @@ mod petstore {
 }
 
 use petstore::{
-    exponential_backoff, types, ApiErrorProblem, AuthError, Client, CreatePetError, Credential,
-    Error, HttpBackend, RequestError, ReqwestBackend, RetryBackend, RetryOutcome, RetryPolicy,
-    RetryWait, TokenFuture,
+    exponential_backoff, types, ApiErrorProblem, AuthError, Client, CreatePetError, Error,
+    HttpBackend, RequestError, ReqwestBackend, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+    TokenFuture,
 };
 
 const TOKEN: &str = "let-me-in";
@@ -84,7 +84,7 @@ async fn main() {
 
     let client = Client::new(&base_url)
         .unwrap()
-        .with_credential("bearerAuth", Credential::Bearer(SecretString::from(TOKEN)));
+        .with_bearer_auth(SecretString::from(TOKEN));
 
     // The spec's server is templated (`http://{host}:{port}`), so spargen generates a typed builder
     // whose variables default to a resolvable URL. The example dials the mock's ephemeral port
@@ -311,16 +311,15 @@ async fn main() {
     // yielding, so the request build is held across a pending poll rather than a ready one. The
     // mock accepts only `Bearer let-me-in`, so a 200 proves the provider's token is what travelled.
     // It is asked once per request, not once per client: two calls, two refreshes.
-    let rotating = Client::new(&base_url).unwrap().with_credential(
-        "bearerAuth",
-        Credential::Provider(Arc::new(|| -> TokenFuture {
+    let rotating = Client::new(&base_url)
+        .unwrap()
+        .with_bearer_auth_provider(Arc::new(|| -> TokenFuture {
             Box::pin(async {
                 tokio::time::sleep(Duration::from_millis(5)).await;
                 PROVIDER_CALLS.fetch_add(1, Ordering::SeqCst);
                 Ok(SecretString::from(TOKEN))
             })
-        })),
-    );
+        }));
     for _ in 0..2 {
         let pet = rotating
             .get_pet("1")
@@ -334,15 +333,14 @@ async fn main() {
     // A provider that fails is the client's "unauthenticated" state: typed, naming the scheme, with
     // the provider's own `AuthError` as the cause — and raised before anything is sent, so the mock
     // sees no request for it.
-    let failing = Client::new(&base_url).unwrap().with_credential(
-        "bearerAuth",
-        Credential::Provider(Arc::new(|| -> TokenFuture {
+    let failing = Client::new(&base_url)
+        .unwrap()
+        .with_bearer_auth_provider(Arc::new(|| -> TokenFuture {
             Box::pin(async {
                 tokio::time::sleep(Duration::from_millis(5)).await;
                 Err(AuthError::new("identity provider unavailable"))
             })
-        })),
-    );
+        }));
     let requests_before = mock_http::requests_read();
     // The calls above reached the mock, so a counter that never counts fails here rather than
     // passing the unchanged-count check below.
@@ -379,7 +377,7 @@ async fn main() {
     // A wrong token draws the server's (undocumented) 401: preserved raw, and not retry-worthy.
     let wrong = Client::new(&base_url)
         .unwrap()
-        .with_credential("bearerAuth", Credential::Bearer(SecretString::from("nope")));
+        .with_bearer_auth(SecretString::from("nope"));
     match wrong.get_pet("1").await {
         Err(error @ Error::UnexpectedStatus { status, .. }) if status == 401 => {
             assert!(!error.is_transient());
@@ -406,7 +404,7 @@ async fn main() {
     };
     let unreachable = Client::new(&format!("http://{closed}"))
         .unwrap()
-        .with_credential("bearerAuth", Credential::Bearer(SecretString::from(TOKEN)));
+        .with_bearer_auth(SecretString::from(TOKEN));
     match unreachable.get_pet("1").await {
         Err(error @ Error::Transport(_)) => {
             assert!(error.is_transient());
@@ -425,7 +423,7 @@ async fn main() {
     ));
     let retrying = Client::with_backend(retry_backend, &base_url)
         .unwrap()
-        .with_credential("bearerAuth", Credential::Bearer(SecretString::from(TOKEN)));
+        .with_bearer_auth(SecretString::from(TOKEN));
     let recovered = retrying
         .get_pet("flaky")
         .await

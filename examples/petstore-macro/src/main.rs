@@ -34,7 +34,7 @@ mod petstore {
     );
 }
 
-use petstore::{types, Client, Credential, Error, RequestError};
+use petstore::{types, Client, Error, RequestError};
 
 const TOKEN: &str = "let-me-in";
 
@@ -46,7 +46,7 @@ async fn main() {
 
     let client = Client::new(&base_url)
         .unwrap()
-        .with_credential("bearerAuth", Credential::Bearer(SecretString::from(TOKEN)));
+        .with_bearer_auth(SecretString::from(TOKEN));
 
     // A typed list response.
     let pets = client.list_pets(None).await.expect("list_pets");

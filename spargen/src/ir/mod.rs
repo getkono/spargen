@@ -21,7 +21,8 @@ use std::collections::BTreeSet;
 use indexmap::IndexMap;
 
 pub(crate) use auth::{
-    ApiKeyLoc, HttpScheme, SchemeId, SecurityRequirement, SecurityScheme, SecuritySchemeDef,
+    ApiKeyLoc, CredentialShape, HttpScheme, SchemeId, SecurityRequirement, SecurityScheme,
+    SecuritySchemeDef,
 };
 pub(crate) use graph::{Emission, TypeGraph};
 pub(crate) use invariant::check_invariants;

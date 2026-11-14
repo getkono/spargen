@@ -732,10 +732,9 @@ fn each_url_accessor_names_the_url_its_operation_sends_to() {
 #[test]
 fn a_url_accessor_leaves_off_the_query_api_key_its_request_sends() {
     let (base, server) = serve(1);
-    let client = urls_client::BlockingClient::new(&base).unwrap().with_credential(
-        "key",
-        urls_client::Credential::ApiKey(urls_client::SecretString::from("s3cret")),
-    );
+    let client = urls_client::BlockingClient::new(&base)
+        .unwrap()
+        .with_key(urls_client::SecretString::from("s3cret"));
 
     let url = client.search_url("a b").unwrap();
     assert_eq!(url.as_str(), format!("{base}/v1/search?q=a%20b"));
@@ -1229,14 +1228,8 @@ fn request_head(params: cookies_client::ListItemsParams) -> String {
     let (base, server) = common::serve_no_content();
     let client = cookies_client::BlockingClient::new(&base)
         .unwrap()
-        .with_credential(
-            "session",
-            cookies_client::Credential::ApiKey(cookies_client::SecretString::from("s3ss")),
-        )
-        .with_credential(
-            "csrf",
-            cookies_client::Credential::ApiKey(cookies_client::SecretString::from("t0k")),
-        );
+        .with_session(cookies_client::SecretString::from("s3ss"))
+        .with_csrf(cookies_client::SecretString::from("t0k"));
     client.list_items(params).expect("the call round-trips");
     server.join().unwrap().head
 }
