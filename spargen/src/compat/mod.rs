@@ -30,9 +30,12 @@ mod rule;
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
-use crate::diag::{fnv1a64, Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance, Span};
-use crate::source::InputBundle;
+use crate::diag::{
+    fnv1a64, Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance, Span,
+};
+use crate::source::{InputBundle, SpannedValue};
 
 pub(crate) use carve::{carve_rules, MAX_CARVE_ROUNDS};
 use rule::RuleMatch;
@@ -61,6 +64,11 @@ impl Omit {
 
     /// Apply the profile to the loaded input bundle: resolve the keep rules against the document
     /// as written, apply the omit rules, then narrow what remains to the kept operations.
+    ///
+    /// The omit rules apply in declaration order, a rule equal to an earlier one only once. A rule
+    /// that removes nothing is satisfied, not an `E019`, when everything it matches in the
+    /// document as written lies at or beneath a construct an earlier rule removed: an exact rule
+    /// under a glob that already took its target, or a glob whose every match went before it.
     pub(crate) fn apply(
         &self,
         bundle: &mut InputBundle,
@@ -73,8 +81,22 @@ impl Omit {
             // to the rules that did resolve would only add an `E020` for an empty `paths`.
             Some(keep::resolve(&self.keep, bundle, diags))
         };
-        for rule in &self.rules {
-            apply_rule(rule, bundle, diags);
+        let mut seen = HashSet::new();
+        let rules: Vec<&OmitRule> = self
+            .rules
+            .iter()
+            .filter(|rule| seen.insert(*rule))
+            .collect();
+        // What each rule after the first matches before any rule removes anything: the first
+        // has no earlier rule to be covered by.
+        let as_written: Vec<Option<Targets>> = rules
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| (index > 0).then(|| targets_as_written(rule, bundle)))
+            .collect();
+        let mut removed = HashSet::new();
+        for (rule, as_written) in rules.into_iter().zip(as_written) {
+            apply_rule(rule, as_written.as_ref(), &mut removed, bundle, diags);
         }
         if let Some(Some(kept)) = &kept {
             keep::retain(kept, bundle, diags);
@@ -148,15 +170,65 @@ impl Omit {
     }
 }
 
-/// Remove what `rule` matches from `bundle`, emitting a `W009` per removed construct, or the one
-/// `E019` that says why the rule removed nothing.
-fn apply_rule(rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics) {
+/// The constructs a rule matches in one file: the file and every matching pointer.
+type Targets = (FileId, Vec<JsonPointer>);
+
+/// What `rule` matches in `bundle` as it stands: an exact rule's pointer where a value is there,
+/// every pointer a glob matches, and nothing for a rule that does not resolve.
+fn targets_as_written(rule: &OmitRule, bundle: &InputBundle) -> Targets {
+    match rule.resolve(bundle) {
+        Ok(RuleMatch::Exact { file, pointer }) => {
+            let present = value_at_pointer(bundle.value_at(file), &pointer).is_some();
+            (file, present.then_some(pointer).into_iter().collect())
+        }
+        Ok(RuleMatch::Glob { file, pointers }) => (file, pointers),
+        Err(_) => (bundle.root_id(), Vec::new()),
+    }
+}
+
+/// The value `pointer` names below `value`, read the way `remove_pointer` reads it: object
+/// members by key, array items by index.
+fn value_at_pointer<'a>(
+    value: &'a SpannedValue,
+    pointer: &JsonPointer,
+) -> Option<&'a SpannedValue> {
+    pointer
+        .tokens()
+        .iter()
+        .try_fold(value, |current, token| match current.as_array() {
+            Some(items) => items.get(token.parse::<usize>().ok()?),
+            None => current.get(token),
+        })
+}
+
+/// Whether every one of `targets` (at least one) lies at or beneath a pointer in `removed`.
+fn covered(targets: &Targets, removed: &HashSet<(FileId, JsonPointer)>) -> bool {
+    let (file, pointers) = targets;
+    !pointers.is_empty()
+        && pointers.iter().all(|pointer| {
+            std::iter::successors(Some(pointer.clone()), JsonPointer::parent)
+                .any(|ancestor| removed.contains(&(*file, ancestor)))
+        })
+}
+
+/// Remove what `rule` matches from `bundle`, recording each removed construct in `removed` and
+/// emitting a `W009` for it, or the one `E019` that says why the rule removed nothing. A rule
+/// that removes nothing because earlier rules removed everything it matched `as_written`
+/// emits nothing.
+fn apply_rule(
+    rule: &OmitRule,
+    as_written: Option<&Targets>,
+    removed: &mut HashSet<(FileId, JsonPointer)>,
+    bundle: &mut InputBundle,
+    diags: &mut Diagnostics,
+) {
     let applied = match rule.resolve(bundle) {
         Err(invalid) => Err(invalid),
         Ok(RuleMatch::Exact { file, pointer }) => {
             match bundle.value_at_mut(file).remove_pointer(&pointer) {
                 Some(value) => {
                     emit_omitted(diags, &pointer, value.span(), &rule.describe());
+                    removed.insert((file, pointer));
                     Ok(())
                 }
                 None => Err("omit rule did not match any source construct".into()),
@@ -173,6 +245,7 @@ fn apply_rule(rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics
                 if let Some(value) = bundle.value_at_mut(file).remove_pointer(&pointer) {
                     removed_any = true;
                     emit_omitted(diags, &pointer, value.span(), &describe);
+                    removed.insert((file, pointer));
                 }
             }
             if removed_any {
@@ -183,7 +256,9 @@ fn apply_rule(rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics
         }
     };
     if let Err(message) = applied {
-        emit_invalid_rule(rule, bundle, diags, message);
+        if !as_written.is_some_and(|targets| covered(targets, removed)) {
+            emit_invalid_rule(rule, bundle, diags, message);
+        }
     }
 }
 
@@ -543,6 +618,112 @@ components:
                 "{rule:?}: {:#?}",
                 diags.items()
             );
+        }
+    }
+
+    /// A rule repeated verbatim, from two sources or twice from one, removes its construct once
+    /// and is not an `E019` the second time.
+    #[test]
+    fn a_duplicate_rule_is_applied_once() {
+        for rule in [
+            OmitRule::path("/admin/users"),
+            OmitRule::path("/admin/**"),
+            OmitRule::operation(OmitMethod::Get, "/public/health"),
+            pointer_rule(None, "/components/schemas/Legacy*"),
+        ] {
+            let mut bundle = bundle_of(MULTI_SPEC);
+            let mut diags = Diagnostics::default();
+            let once = {
+                let mut bundle = bundle_of(MULTI_SPEC);
+                let mut diags = Diagnostics::default();
+                omit_of(vec![rule.clone()])
+                    .apply(&mut bundle, &mut diags)
+                    .unwrap();
+                omitted_count(&diags)
+            };
+            omit_of(vec![rule.clone(), rule.clone()])
+                .apply(&mut bundle, &mut diags)
+                .unwrap_or_else(|_| panic!("{rule:?}: {:#?}", diags.items()));
+            assert!(invalid_rule_messages(&diags).is_empty(), "{rule:?}");
+            assert_eq!(omitted_count(&diags), once, "{rule:?}");
+        }
+    }
+
+    /// An exact rule naming a construct a glob before it already removed, or one beneath it, is
+    /// satisfied: it removes nothing further, emits nothing, and is not an `E019`.
+    #[test]
+    fn an_exact_rule_a_glob_before_it_covered_is_satisfied() {
+        for covered in [
+            OmitRule::operation(OmitMethod::Get, "/admin/users"),
+            OmitRule::path("/admin/users/{id}"),
+            pointer_rule(None, "/paths/~1admin~1users/get/responses"),
+        ] {
+            let mut bundle = bundle_of(MULTI_SPEC);
+            let mut diags = Diagnostics::default();
+            omit_of(vec![OmitRule::path("/admin/**"), covered.clone()])
+                .apply(&mut bundle, &mut diags)
+                .unwrap_or_else(|_| panic!("{covered:?}: {:#?}", diags.items()));
+            assert!(invalid_rule_messages(&diags).is_empty(), "{covered:?}");
+            assert_eq!(omitted_count(&diags), 2, "{covered:?}");
+            assert_eq!(keys_under(&bundle, "paths", None), ["/public/health"]);
+        }
+    }
+
+    /// A glob whose every match an earlier rule removed (an exact rule for each, or a broader
+    /// glob) is satisfied, not an `E019`.
+    #[test]
+    fn a_glob_whose_matches_earlier_rules_removed_is_satisfied() {
+        for (earlier, glob, removed) in [
+            (
+                vec![
+                    OmitRule::path("/admin/users"),
+                    OmitRule::path("/admin/users/{id}"),
+                ],
+                OmitRule::path("/admin/**"),
+                2,
+            ),
+            (
+                vec![OmitRule::path("/admin/**")],
+                OmitRule::operation(OmitMethod::Get, "/admin/**"),
+                2,
+            ),
+            (
+                vec![OmitRule::component(ComponentKind::Schemas, "*")],
+                OmitRule::component(ComponentKind::Schemas, "Legacy*"),
+                3,
+            ),
+        ] {
+            let mut rules = earlier.clone();
+            rules.push(glob.clone());
+            let mut bundle = bundle_of(MULTI_SPEC);
+            let mut diags = Diagnostics::default();
+            omit_of(rules)
+                .apply(&mut bundle, &mut diags)
+                .unwrap_or_else(|_| panic!("{glob:?}: {:#?}", diags.items()));
+            assert!(invalid_rule_messages(&diags).is_empty(), "{glob:?}");
+            assert_eq!(omitted_count(&diags), removed, "{glob:?}");
+        }
+    }
+
+    /// Coverage is judged against the document as written: a rule naming a construct the
+    /// document never declared stays an `E019` however much earlier rules removed, and so does a
+    /// glob that matched nothing to begin with.
+    #[test]
+    fn a_rule_naming_nothing_as_written_is_still_e019_after_other_rules() {
+        for missing in [
+            OmitRule::path("/admin/nope"),
+            OmitRule::operation(OmitMethod::Post, "/admin/users"),
+            OmitRule::path("/nope/**"),
+        ] {
+            let mut bundle = bundle_of(MULTI_SPEC);
+            let mut diags = Diagnostics::default();
+            assert!(
+                omit_of(vec![OmitRule::path("/admin/**"), missing.clone()])
+                    .apply(&mut bundle, &mut diags)
+                    .is_err(),
+                "{missing:?}"
+            );
+            assert_eq!(invalid_rule_messages(&diags).len(), 1, "{missing:?}");
         }
     }
 
