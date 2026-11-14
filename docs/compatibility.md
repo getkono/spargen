@@ -10,7 +10,9 @@ Rules:
 - Omit rules are exact by default, or **glob** (bulk) when the value carries a metacharacter (see
   [Globbing](#globbing-bulk-omits) below).
 - Every rule must match at least one construct, or generation fails with `E019` (an exact rule that
-  matches nothing, or a glob rule that matches nothing).
+  matches nothing, or a glob rule that matches nothing). `spargen diff` judges each rule against
+  both of its specs: a rule that matches nothing in one spec but something in the other is
+  satisfied on the side that lacks its construct, and is `E019` only when it matches neither.
 - Every omitted construct emits `W009` — one per removed construct, so a bulk glob rule reports each.
 - If the remaining document is structurally invalid, generation fails with `E020`.
 - Dangling `$ref`s remain errors; omit dependent consumers too (or use [auto-carve](#auto-carve)).
