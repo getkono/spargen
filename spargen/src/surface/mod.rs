@@ -214,6 +214,10 @@ struct HeadersSurface {
     name: String,
     /// The header fields, keyed by generated field name.
     fields: BTreeMap<String, MemberSurface>,
+    /// The header name each field reads, as the spec spells it, keyed by field name. A header name
+    /// is case-insensitive, so the two sides' are compared ignoring ASCII case: respelling it
+    /// leaves the field reading the same header.
+    bindings: Bindings,
 }
 
 /// A typed member's surface — a parameter, the request body, a struct field, or a response
@@ -477,7 +481,8 @@ pub enum ChangeKind {
     FileNameSetterRemoved,
     /// A generated identifier now binds another wire name: a `…Params` field and its setter (bound
     /// by name and location, so a same-named parameter of another location can take it), a
-    /// struct field, or a string enum variant, which another member's spelling outranked for its
+    /// struct field, a string enum variant, or a response-header struct's field (bound by header
+    /// name, compared case-insensitively), which another member's spelling outranked for its
     /// identifier. **Major** — code using it still compiles, and silently sends or reads the other
     /// member.
     IdentifierRebound,

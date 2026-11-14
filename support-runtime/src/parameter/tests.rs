@@ -1128,3 +1128,136 @@ fn a_parameter_failure_downcasts_from_the_request_error() {
         "{cause:?}"
     );
 }
+
+/// The cookie-value a `content` or `style: cookie` pair carries.
+fn octets(value: &str) -> Result<String, ParameterError> {
+    cookie_pair("session", format!("session={value}"), CookieValue::Octets)
+}
+
+fn refuses_naming_the_parameter(result: Result<String, ParameterError>) {
+    let error = result.expect_err("the pair is refused");
+    assert!(
+        matches!(&error, ParameterError::InvalidCookie { parameter } if parameter == "session"),
+        "{error:?}"
+    );
+}
+
+/// Every RFC 6265 `cookie-octet` passes, bare and between two `"`, and the pair comes back as it
+/// went in.
+#[test]
+fn a_cookie_pair_admits_every_cookie_octet() {
+    let every_octet: String = (0x21..=0x7e_u8)
+        .filter(|byte| !matches!(byte, b'"' | b',' | b';' | b'\\'))
+        .map(char::from)
+        .collect();
+    assert_eq!(
+        octets(&every_octet).unwrap(),
+        format!("session={every_octet}")
+    );
+    assert_eq!(
+        octets(&format!("\"{every_octet}\"")).unwrap(),
+        format!("session=\"{every_octet}\"")
+    );
+    assert_eq!(octets("").unwrap(), "session=");
+    assert_eq!(octets("\"\"").unwrap(), "session=\"\"");
+    assert_eq!(octets("null").unwrap(), "session=null");
+}
+
+/// Each byte class outside `cookie-octet` is refused: the `;` that would start a second cookie,
+/// every CTL, space, `"` other than as the two quotes, `,`, `\`, and any non-ASCII byte.
+#[test]
+fn a_cookie_pair_refuses_each_byte_outside_cookie_octet() {
+    for value in [
+        "x; admin=1",
+        "x;",
+        "a b",
+        "a\"b",
+        "\"a",
+        "a,b",
+        "a\\b",
+        "café",
+    ] {
+        refuses_naming_the_parameter(octets(value));
+    }
+    for ctl in (0x00..0x20_u8).chain([0x7f]) {
+        refuses_naming_the_parameter(octets(&format!("a{}b", char::from(ctl))));
+        refuses_naming_the_parameter(octets(&format!("\"a{}b\"", char::from(ctl))));
+    }
+}
+
+/// The error names the parameter and never echoes the value, which may be a secret.
+#[test]
+fn a_refused_cookie_names_the_parameter_and_not_the_value() {
+    let error = octets("s3cret; admin=1").unwrap_err();
+    for rendered in [error.to_string(), format!("{error:?}")] {
+        assert!(rendered.contains("session"), "{rendered}");
+        assert!(!rendered.contains("s3cret"), "{rendered}");
+        assert!(!rendered.contains("admin"), "{rendered}");
+    }
+}
+
+/// A verbatim pair's name is an RFC 9110 `token`: an exploded `style: cookie` object's member
+/// name is caller data, so a separator in it is refused like one in a value.
+#[test]
+fn a_cookie_pair_name_is_a_token() {
+    assert_eq!(
+        cookie_pair("color", "R=100".to_owned(), CookieValue::Octets).unwrap(),
+        "R=100"
+    );
+    for pair in [
+        "=1",
+        "a b=1",
+        "a;b=1",
+        "a,b=1",
+        "a\"b=1",
+        "a\u{7f}=1",
+        "no-equals",
+    ] {
+        assert!(
+            cookie_pair("color", pair.to_owned(), CookieValue::Octets).is_err(),
+            "{pair}"
+        );
+    }
+}
+
+/// An `explode: false` `style: cookie` value carries the `,` that joins its items, as the
+/// specification's table writes `color=blue,black,brown`; an exploded one does not.
+#[test]
+fn only_an_unexploded_style_cookie_value_carries_commas() {
+    let joined = serialize_form("color", &array(), false, P).unwrap();
+    let [pair] = joined.as_slice() else {
+        panic!("{joined:?}");
+    };
+    assert_eq!(
+        cookie_pair("color", pair.clone(), CookieValue::OctetList).unwrap(),
+        "color=blue,black,brown"
+    );
+    assert!(cookie_pair("color", pair.clone(), CookieValue::Octets).is_err());
+    assert!(cookie_pair("color", "color=a;b".to_owned(), CookieValue::OctetList).is_err());
+}
+
+/// A `style: form` pair is percent-encoded already, so it passes as it is, but a `;` or a CTL
+/// that `allowReserved` left literal is still refused.
+#[test]
+fn an_encoded_cookie_pair_refuses_only_what_breaks_the_header() {
+    for pair in serialize_form("color", &array(), false, F).unwrap() {
+        assert_eq!(
+            cookie_pair("color", pair.clone(), CookieValue::Encoded).unwrap(),
+            pair
+        );
+    }
+    let reserved = serialize_form(
+        "color",
+        &serde_json::json!("a;b"),
+        true,
+        PercentEncoding::Reserved,
+    )
+    .unwrap();
+    assert_eq!(reserved, ["color=a;b"]);
+    assert!(cookie_pair("color", reserved[0].clone(), CookieValue::Encoded).is_err());
+    assert!(cookie_pair("color", "color=a\u{7}".to_owned(), CookieValue::Encoded).is_err());
+    assert_eq!(
+        cookie_pair("color", "color=a,b:c".to_owned(), CookieValue::Encoded).unwrap(),
+        "color=a,b:c"
+    );
+}

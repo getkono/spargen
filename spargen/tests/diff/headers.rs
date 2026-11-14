@@ -178,3 +178,46 @@ fn renaming_an_operation_id_renames_its_response_header_struct() {
     );
     assert_eq!(report.bump, Impact::Major);
 }
+
+const RATE_LIMIT_UNDERSCORED: &str = "          headers:
+            X_Rate_Limit:
+              schema: { type: integer }
+";
+
+const RATE_LIMIT_BOTH_SPELLINGS: &str = "          headers:
+            X-Rate-Limit:
+              schema: { type: integer }
+            X_Rate_Limit:
+              schema: { type: integer }
+";
+
+#[test]
+fn a_response_header_field_rebound_to_another_header_is_major() {
+    // `X-Rate-Limit` sorts before `X_Rate_Limit`, so it takes `x_rate_limit`, and a caller's
+    // `headers.x_rate_limit` would now read the other header (#1453).
+    let report = diff(
+        &with_headers("listPets", RATE_LIMIT_UNDERSCORED),
+        &with_headers("listPets", RATE_LIMIT_BOTH_SPELLINGS),
+    );
+    assert_eq!(
+        kinds(&report)[0],
+        ChangeKind::IdentifierRebound,
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn respelling_a_response_headers_case_rebinds_nothing() {
+    // A header name is case-insensitive, so `x-rate-limit` is the header `X-Rate-Limit` was, and
+    // its field still reads it.
+    let report = diff(
+        &with_headers("listPets", RATE_LIMIT_INT),
+        &with_headers(
+            "listPets",
+            &RATE_LIMIT_INT.replace("X-Rate-Limit", "x-rate-limit"),
+        ),
+    );
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+}
