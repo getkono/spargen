@@ -900,6 +900,53 @@ paths:
     );
 }
 
+/// An absent `items` beside `prefixItems` admits any remainder, as `items: true` and `items: {}`
+/// do under JSON Schema 2020-12, so it is the same variable-length tuple and the same `E015`
+/// (#1413): the closed tuple is `items: false`, which the message names.
+#[test]
+fn e015_prefix_items_without_items() {
+    for items in [
+        "",
+        "                items: true\n",
+        "                items: {}\n",
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                prefixItems:
+                  - {{ type: string }}
+                  - {{ type: integer }}
+{items}"##
+        );
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{items:?}: {report:#?}"
+        );
+        let diagnostic = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::TupleRestNotRepresentable)
+            .unwrap_or_else(|| panic!("{items:?}: {report:#?}"));
+        assert!(
+            diagnostic.message.contains("`items: false`"),
+            "{items:?}: {diagnostic:#?}"
+        );
+    }
+}
+
 #[test]
 fn items_false_beside_prefix_items_is_a_closed_tuple() {
     let spec = r##"
