@@ -142,10 +142,12 @@ struct OpSurface {
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
     params: BTreeMap<ParamKey, MemberSurface>,
-    /// The wire name of the parameter each `…Params` field identifier (and its `with_` setter)
-    /// binds, keyed by the identifier: a path parameter is passed by position, so only the bundled
-    /// ones are here. A parameter moving to another location keeps its field, as `params` pairs it.
-    param_fields: Bindings,
+    /// The `(wire name, location)` of the parameter each `…Params` field identifier (and its
+    /// `with_` setter) binds, keyed by the identifier: a path parameter is passed by position, so
+    /// only the bundled ones are here. The location is part of the binding, since a same-named
+    /// parameter of another location can take the identifier; a parameter that `params` pairs as
+    /// moved to another location keeps its field, and that move is not a rebinding.
+    param_fields: BTreeMap<String, ParamKey>,
     /// The request body, or `None` for a bodyless operation or a body without a type. An optional
     /// multipart body with file parts is taken as a `MultipartBody`, which its type renders.
     request_body: Option<MemberSurface>,
@@ -473,7 +475,8 @@ pub enum ChangeKind {
     /// — calls to it break, and where the body has no file part left, so does passing a
     /// `MultipartBody`.
     FileNameSetterRemoved,
-    /// A generated identifier now binds another wire name: a `…Params` field and its setter, a
+    /// A generated identifier now binds another wire name: a `…Params` field and its setter (bound
+    /// by name and location, so a same-named parameter of another location can take it), a
     /// struct field, or a string enum variant, which another member's spelling outranked for its
     /// identifier. **Major** — code using it still compiles, and silently sends or reads the other
     /// member.

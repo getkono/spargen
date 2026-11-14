@@ -270,12 +270,28 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             (old_param, new_param) => diff_member(&PARAM, location, old_param, new_param, changes),
         }
     }
-    diff_bindings(
-        &old.param_fields,
-        &new.param_fields,
-        |field| format!("{key} params field `{field}`"),
-        changes,
-    );
+    // A `…Params` field binds a parameter by name and location. One that now binds another
+    // parameter is a rebinding, unless the two are the one parameter `moved_param` pairs across a
+    // location move, which keeps its field.
+    for (field, old_param) in &old.param_fields {
+        match new.param_fields.get(field) {
+            Some(new_param)
+                if new_param != old_param
+                    && moved_param(old_param, &old.params, &new.params) != Some(new_param) =>
+            {
+                changes.push(Change::new(
+                    ChangeKind::IdentifierRebound,
+                    format!("{key} params field `{field}`"),
+                    format!(
+                        "`{field}` now binds {} (was {})",
+                        param_key_label(new_param),
+                        param_key_label(old_param)
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
     diff_response_headers(key, &old.response_headers, &new.response_headers, changes);
 }
 

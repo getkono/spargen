@@ -27,7 +27,12 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
         let param_fields = operation_names
             .params(operation)
             .filter(|(param, _)| !param.is_positional())
-            .map(|(param, ident)| (ident.as_str().to_owned(), param.name.clone()))
+            .map(|(param, ident)| {
+                (
+                    ident.as_str().to_owned(),
+                    (param.name.clone(), param.location.as_openapi_in()),
+                )
+            })
             .collect();
         // The accessor takes the method's path arguments, in URL template order, then the bundle
         // when one of its parameters shapes the URL. Codegen's `OperationSig::url_args` reads the

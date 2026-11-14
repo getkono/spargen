@@ -170,7 +170,8 @@ use.
   otherwise the lexically smaller wire name does; the other takes a disambiguated name seeded from
   its own wire name. The order the spec declares them in decides nothing. A name that comes to
   stand for another wire name (a new `foo_bar` beside an existing `fooBar`, or a new query
-  `page-size` beside `pageSize`) still compiles and silently sends or reads the other member, so
+  `page-size` beside `pageSize`, or a new header `id` beside an existing cookie `id`, since a
+  header ranks before a cookie) still compiles and silently sends or reads the other member, so
   `spargen diff` reports it as major (`identifier-rebound`).
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
