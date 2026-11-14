@@ -154,10 +154,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
             return None;
         }
-        let ty = if media == MediaType::OctetStream {
-            self.opaque_octets(hint, ty, object.schema.is_some(), &body.provenance)
-        } else {
-            ty
+        let ty = match media {
+            MediaType::OctetStream => {
+                self.opaque_octets(hint, ty, object.schema.is_some(), &body.provenance)
+            }
+            MediaType::Multipart => {
+                ty.map(|ty| self.retype_untyped_parts(ty, mark, hint, &body.provenance))
+            }
+            _ => ty,
         };
         if let Some(ty) = ty {
             if !self.raw_body_compatible(media, ty) {

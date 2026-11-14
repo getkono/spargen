@@ -44,6 +44,7 @@ use crate::name::{assign_operation_ids, OperationIdRequest};
 use super::{Document, PathItem, Resolver, Schema};
 
 use combine::{Gathering, RecordedContribution};
+pub(super) use content::selected_request_media;
 use cycle::{MemberOrder, MemberOrders, Opening};
 use defaults::retype_field_defaults;
 use object::warn_relaxed_requiredness;

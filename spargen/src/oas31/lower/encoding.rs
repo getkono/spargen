@@ -119,7 +119,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
         let raw_part_media = if media == MediaType::Multipart {
-            self.retype_untyped_parts(&fields);
             object
                 .schema
                 .as_ref()
@@ -167,24 +166,75 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         })
     }
 
-    /// Retype each untyped part of a `multipart/form-data` body as raw bytes, in place: a property
-    /// whose schema lowered to `serde_json::Value` (`{}`, `true`, or a schema with no `type` such
-    /// as `{contentMediaType: image/png}`). OpenAPI 3.1 and 3.2 both default such a part's
-    /// `Content-Type` to `application/octet-stream`, and 3.2 spells a raw file part as
+    /// The type a `multipart/form-data` body `ty` is sent as, with each untyped part as raw bytes:
+    /// a property whose schema lowered to `serde_json::Value` (`{}`, `true`, or a schema with no
+    /// `type` such as `{contentMediaType: image/png}`). OpenAPI 3.1 and 3.2 both default such a
+    /// part's `Content-Type` to `application/octet-stream`, and 3.2 spells a raw file part as
     /// `contentMediaType` with no `type`, so the part is a file part, as a `format: binary` one is.
     ///
-    /// A property that names an untyped component keeps it: rewriting a named component would
-    /// retype it for every other reference in the document, as [`Self::opaque_octets`] holds for
-    /// a body.
-    fn retype_untyped_parts(&mut self, fields: &[(String, Ty)]) {
-        for (_, ty) in fields {
-            if matches!(self.kind_of(ty.id), Some(TypeKind::Any)) && !self.is_component_root(ty.id)
-            {
-                if let Some(definition) = self.graph.get_mut(ty.id) {
-                    definition.kind = TypeKind::Bytes(BytesEncoding::Raw);
-                }
-            }
+    /// No definition another use shares is retyped, as [`Self::opaque_octets`] and
+    /// [`Self::raw_body_bytes`] hold for a body. Each part takes a bytes definition of its own,
+    /// and the untyped definition it replaces is elided only where nothing else reaches it (an
+    /// inline property), so a field an `allOf` member's component declares keeps its type there.
+    /// A property that names an untyped component keeps it. The body struct is rewritten in
+    /// place only where this body alone holds it (an inline definition lowered since `mark`);
+    /// a component body keeps its declared fields for its other uses, and the multipart
+    /// position takes a struct of its own, named by `hint`.
+    pub(super) fn retype_untyped_parts(
+        &mut self,
+        ty: Ty,
+        mark: u32,
+        hint: &str,
+        provenance: &Provenance,
+    ) -> Ty {
+        let Some(TypeKind::Struct(structure)) = self.kind_of(ty.id) else {
+            return ty;
+        };
+        let mut structure = structure.clone();
+        let mut replaced = Vec::new();
+        for field in &mut structure.fields {
+            let untyped = matches!(self.kind_of(field.ty.id), Some(TypeKind::Any))
+                && !self.is_component_root(field.ty.id);
+            let Some(definition) = self.graph.get(field.ty.id).filter(|_| untyped) else {
+                continue;
+            };
+            let (name_hint, docs) = (definition.name_hint.clone(), definition.docs.clone());
+            let bytes = self.insert_type(
+                &name_hint,
+                TypeKind::Bytes(BytesEncoding::Raw),
+                docs,
+                Some(provenance.clone()),
+            );
+            replaced.push(field.ty.id);
+            field.ty = Ty {
+                id: bytes.id,
+                ..field.ty
+            };
         }
+        if replaced.is_empty() {
+            return ty;
+        }
+        if ty.id.0 >= mark && !self.is_component_root(ty.id) {
+            if let Some(definition) = self.graph.get_mut(ty.id) {
+                definition.kind = TypeKind::Struct(structure);
+            }
+            for id in replaced {
+                self.elide_unused_lowering(id.0..id.0 + 1);
+            }
+            return ty;
+        }
+        let docs = self
+            .graph
+            .get(ty.id)
+            .map(|definition| definition.docs.clone())
+            .unwrap_or_default();
+        let copy = self.insert_type(
+            hint,
+            TypeKind::Struct(structure),
+            docs,
+            Some(provenance.clone()),
+        );
+        Ty { id: copy.id, ..ty }
     }
 
     /// Apply the Encoding Object's mode switch for one property, or `None` once a refusal is

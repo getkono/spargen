@@ -5,7 +5,11 @@ use indexmap::IndexMap;
 
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::ir::MediaType;
-use crate::oas31::media::{classify_media, classify_media_range, is_cbor, media_essence};
+use crate::oas31::media::{
+    classify_media, classify_media_range, is_cbor, media_essence, media_object_is_opaque,
+    request_media_candidates,
+};
+use crate::oas31::MediaTypeObject;
 
 /// The codec a `content` key's essence classifies as, or `None` with an `E009` for one spargen
 /// does not support.
@@ -145,6 +149,27 @@ pub(super) fn choose_media<'a, T>(
     let (media, _) = content.first()?;
     media_type_not_supported(media, provenance, diags);
     None
+}
+
+/// The `content` key a request body is generated from, selected as
+/// [`LowerCtx::lower_request_body`](super::LowerCtx) selects it, with nothing reported: the audit
+/// reads an annotation only where that entry is the one lowering reads.
+pub(in crate::oas31) fn selected_request_media(
+    content: &IndexMap<String, MediaTypeObject>,
+) -> Option<&str> {
+    let (candidates, _) = request_media_candidates(content);
+    // Nothing built here is reported, so any position serves.
+    let provenance = &content.values().next()?.provenance;
+    let chosen = choose_media(
+        &candidates,
+        provenance,
+        &mut Diagnostics::new(0),
+        BodyPosition::Request,
+        |object: &&MediaTypeObject| media_object_is_opaque(object),
+    )?;
+    content
+        .get_key_value(chosen.media)
+        .map(|(media, _)| media.as_str())
 }
 
 /// The `W014` saying `media` is selected and `ignored` is not, or `None` when nothing was ignored.

@@ -631,6 +631,11 @@ fn consumed_content_annotations(
 ) -> HashSet<AnnotationKey> {
     let mut consumed = HashSet::new();
     let mut inspect = |content: &indexmap::IndexMap<String, MediaTypeObject>, request: bool| {
+        // A request generates only the entry lowering selects; the others are `W014`, and a part
+        // annotation reached only through one of them is never read.
+        let selected = request
+            .then(|| super::lower::selected_request_media(content))
+            .flatten();
         for (media_name, media) in content {
             // The classification lowering selects a body by, so a key it consumes here is one
             // lowering reads as a stream, in whatever letter case it is spelled (#709).
@@ -659,7 +664,9 @@ fn consumed_content_annotations(
                     consumed.insert(annotation_key(&schema.provenance));
                 }
             }
-            if request && classified == Some(crate::ir::MediaType::Multipart) {
+            if selected == Some(media_name.as_str())
+                && classified == Some(crate::ir::MediaType::Multipart)
+            {
                 for (_, _, at) in raw_part_media_types(resolver, body) {
                     consumed.insert(annotation_key(&at));
                 }
