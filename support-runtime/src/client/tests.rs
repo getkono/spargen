@@ -246,6 +246,32 @@ fn an_invalid_bound_header_value_is_refused_and_keeps_the_binding() {
     }
 }
 
+/// Issue #1433: a name that is not a valid header name (a trailing space, a colon, an empty name)
+/// is refused when it is bound, rather than being stored under a key no operation's lookup ever
+/// matches, so the mistake surfaced later as `MissingBoundParameter`. Nothing is bound under it,
+/// a value already bound to another header stays bound, and the refusal names the header without
+/// quoting the value.
+#[test]
+fn an_invalid_bound_header_name_is_refused_and_binds_nothing() {
+    let mut core = ClientCore::new("https://example.com").unwrap();
+    core.bind_header("X-Tenant", "acme").unwrap();
+    for name in ["X-Tenant ", "a:b", "", "x tenant", "x-t\u{e9}nant", "x\ny"] {
+        let error = core.bind_header(name, "secret-4417").unwrap_err();
+        assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
+        let message = chain(&error);
+        assert!(
+            message.contains(&format!("`{}`", name.escape_debug())),
+            "{message}"
+        );
+        assert!(!message.contains("secret-4417"), "{message}");
+        assert!(!format!("{error:?}").contains("secret-4417"), "{error:?}");
+        assert_eq!(core.bound_header(name), None);
+        assert!(!format!("{core:?}").contains("secret-4417"));
+    }
+    assert_eq!(core.bound_header("x-tenant"), Some("acme"));
+    assert_eq!(core.bound_header("X-Tenant "), None);
+}
+
 /// The supplied client is the one requests run on: an `https_only` client refuses a plain `http`
 /// request at execute, which a default client would instead try to send. reqwest refuses it
 /// without touching the network, so the future is ready on the first poll, and the refusal is a
