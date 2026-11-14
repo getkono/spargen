@@ -1188,6 +1188,51 @@ fn a_build_script_with_no_discoverable_manifest_warns_and_still_generates() {
     );
 }
 
+/// A build script whose cache record cannot be written once its module is still generates: the
+/// module stands, a `W016` says the record is missing, and nothing rejects the run. The cache
+/// lives under `OUT_DIR/spargen`, which only a real build script has; a regular file in that
+/// directory's place stops the record's write and nothing else.
+#[test]
+fn a_build_script_whose_cache_record_cannot_be_written_warns_and_still_generates() {
+    let temp = build_script_consumer(
+        "unwritable-cache-consumer",
+        r#"fn main() {
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let cache = out_dir.join("spargen");
+    if cache.is_dir() {
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+    std::fs::write(&cache, "").unwrap();
+
+    let output = out_dir.join("generated.rs");
+    let build = spargen::Spec::new(concat!(env!("CARGO_MANIFEST_DIR"), "/openapi.yaml"))
+        .build(output.to_str().unwrap());
+    let report = spargen::generate(&build);
+    assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
+    assert!(report.errors().next().is_none(), "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == spargen::Code::CacheWriteFailed),
+        "expected W016: {report:#?}"
+    );
+    assert!(std::fs::read_to_string(&output).unwrap().contains("pub fn ping"));
+}
+"#,
+    );
+
+    let output = fixture_cargo(&temp.path().join("consumer"))
+        .arg("check")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "build script must warn and still generate:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// A consumer crate whose manifest declares every dependency the `/ping` spec needs, with
 /// `build_rs` as its build script, ready for [`fixture_cargo`]. The build script asserts its
 /// expectations itself: the consumer manifest is reached only from a real build script, because

@@ -117,6 +117,9 @@ pub enum Code {
     /// A property both `required` and `readOnly` or `writeOnly` is generated as a member that may
     /// be absent when decoded, since `required` holds for it in one direction only.
     ReadWriteOnlyRequirednessRelaxed,
+    /// A build wrote its generated module but could not write the build-cache record beside it,
+    /// so the next build over the same inputs regenerates instead of replaying the record.
+    CacheWriteFailed,
 }
 
 impl Code {
@@ -158,6 +161,7 @@ impl Code {
             Code::CargoIntegrationRequired => "E024",
             Code::BoundHeaderNotDeclared => "E026",
             Code::ReadWriteOnlyRequirednessRelaxed => "W015",
+            Code::CacheWriteFailed => "W016",
         }
     }
 
@@ -210,6 +214,7 @@ impl Code {
             Code::ReadWriteOnlyRequirednessRelaxed => {
                 "read-only or write-only property's requiredness relaxed"
             }
+            Code::CacheWriteFailed => "build cache record not written",
         }
     }
 
@@ -340,6 +345,9 @@ impl Code {
             Code::XmlHintIgnored => {
                 "XML request/response bodies honor the `xml.name` (element/attribute rename) and `xml.attribute` (serialize as an XML attribute via quick-xml's `@name` convention, also spelled OpenAPI 3.2 `xml.nodeType: attribute`) hints on a property, and an `xml.name` on an array property's `items`, or else the root `xml.name` of the struct its items resolve to (naming each list element, while the array's own `xml.name` names nothing, as OpenAPI specifies for an unwrapped array), and, under OpenAPI 3.2, the element name of the struct a property that is a `$ref` (or an array property whose items are) resolves to — its root `xml.name`, or else its component name — since 3.2 gives a `$ref` the node type `none` (an explicit `xml.nodeType: element` on that `$ref` makes it an element named after the property), so the referenced schema's own element stands in its place (OpenAPI 3.1 has no node types and names that element after the property), but only on a schema used *exclusively* as an XML body. A root `xml.name` on a struct's own component schema or Media Type Object schema names the element the body serializes as, through a serde container rename no non-XML format reads, so it is applied whether or not the type is used exclusively as an XML body. Without a root `xml.name`, a struct lowered from a schema directly under `components.schemas` that an XML body reaches takes its component name as that element's name, as OpenAPI infers it. This warning reports a name that is not applied, in four cases. First, `xml.name`/`xml.attribute` on a schema that is not used exclusively as an XML body: the hint is withheld because a serde `rename` is format-agnostic and would also rewrite the non-XML wire name, so on a schema that is also reachable from a non-XML request or response body or from a parameter, or that no XML body reaches at all, the property keeps its normal wire name in every format, the XML body included. On a schema no XML body reaches, nothing on any wire moves; on one shared between an XML body and a non-XML use, withholding the hint does change the XML wire, which then carries the property's normal name rather than the hinted one. The message says which of the two it is. Second, a hint quick-xml serde has no faithful mapping for — `xml.namespace`, `xml.prefix`, `xml.wrapped`, or an `xml.nodeType` other than `attribute` that departs from the node's default (`element` on an array, which is `wrapped: true`; `none` on a node that does not default to it; `text`, `cdata`, or any other token), whether on a property, an array property's `items`, or a schema's own root, plus the `items`, root, and merged composition member hints `E009` lists — on a type that is never serialized as XML, where it has no effect on any wire. The same unsupported hint on a type that *is* serialized as XML is rejected with `E009` instead, because ignoring it would put structurally different XML on the wire. Third, a component name that is not an XML 1.1 name (a component key may begin with a digit, `-` or `.`, which no XML element name may), on a struct an XML body reaches with no root `xml.name`: quick-xml refuses to write such an element, so the inferred name is not applied and the body serializes under the struct's generated Rust type name instead; give the schema a root `xml.name` to choose the element name. Fourth, a name derived rather than written — the root `xml.name` an array property's items take, or a 3.2 `$ref` property's element name — that equals the element name of another field of the same struct: two fields read from one element name cannot be told apart, and quick-xml refuses the body as a duplicate field, so each such field keeps its property name as its element name. On a schema shared between an XML body and a non-XML one, the first case's message names a derived name as derived. Declaring `xml.attribute` or `xml.wrapped` beside `xml.nodeType` is `E011`, and so is an `xml.name` that is not an XML 1.1 name."
             }
+            Code::CacheWriteFailed => {
+                "Build-time generation keeps a cache record for each generated module under Cargo's `OUT_DIR` (in its `spargen` directory): the fingerprint of every input, the digest of the module written, and the run's diagnostics and runtime requirements, so a later build over unchanged inputs replays the record instead of running the pipeline again. This generation wrote its module, but the record could not be written — `OUT_DIR` is not writable, the disk is full, or something other than a directory stands where the `spargen` directory goes — and the message names the record and the error. The module on disk is complete and current, so the run still succeeds: the cache is only an optimisation, and without a record the next build regenerates the module, as it would after the record were deleted. Clear what stopped the write to have later builds replay the record again."
+            }
         }
     }
 
@@ -393,6 +401,7 @@ impl Code {
             Code::CargoIntegrationRequired,
             Code::BoundHeaderNotDeclared,
             Code::ReadWriteOnlyRequirednessRelaxed,
+            Code::CacheWriteFailed,
         ];
         ALL
     }
