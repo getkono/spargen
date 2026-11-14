@@ -51,8 +51,8 @@ impl Scope {
     ///
     /// The first call for a spelling wins it. Model types, their fields and variants, and every
     /// operation-level name (methods, URL accessors, `…Params` structs, error types, success enums,
-    /// response-header structs and their fields, and parameters) are allocated through [`Scope::alloc_ranked`]
-    /// instead, so reordering their requests renames none of them.
+    /// response-header structs and their fields, and parameters) are allocated through
+    /// [`Scope::alloc_ranked`] instead, so reordering their requests renames none of them.
     pub(crate) fn alloc(&mut self, hint: &str, role: IdentRole, provenance: &JsonPointer) -> Ident {
         let base = super::escape(hint, role);
         if self.used.insert(base.as_str().to_owned()) {
