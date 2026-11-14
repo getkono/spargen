@@ -100,8 +100,10 @@ use.
   disambiguated name instead. Operation `security` requirements pick the first satisfiable
   alternative and attach bearer/basic/apiKey credentials. A missing required credential is a
   request-construction error — typed as `RequestError::MissingCredential`, listing for each
-  security alternative the schemes with no registered credential; an `http basic` username
-  holding `:` (which RFC 7617 §2 forbids) as `RequestError::CredentialMismatch`; and a failed
+  security alternative the schemes with no registered credential; a credential of a kind its
+  scheme cannot carry as `RequestError::CredentialMismatch`, naming the scheme, the
+  `SchemeCarrier` it requires and the `CredentialKind` registered; an `http basic` username
+  holding `:` (which RFC 7617 §2 forbids) as `RequestError::InvalidBasicUsername`; and a failed
   token provider as `RequestError::CredentialProvider` — never a silent 401. A failure inside the
   selected alternative never falls through to a later one; `without_<scheme>()` unregisters a
   scheme, so a client derived with it (`client.clone().without_oauth()`) selects the next fully
@@ -127,7 +129,7 @@ use.
   anything is sent, as `Error::RequestConstruction` whose `RequestError::Other` source downcasts
   to `ParameterError::InvalidCookie`, which names the parameter and never the value.
 - A closed error taxonomy, identical across all spargen output: request-construction
-  (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
+  (`Error::RequestConstruction`, carrying a `RequestError` — one of the four credential causes
   above, the missing bound header above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
   (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
   error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body

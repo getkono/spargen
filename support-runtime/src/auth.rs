@@ -95,6 +95,8 @@ where
 ///   [`super::RequestError::MissingCredential`];
 /// - the selected alternative has a credential of a variant its scheme cannot carry:
 ///   [`super::RequestError::CredentialMismatch`];
+/// - the selected alternative's `http basic` scheme has a [`Credential::Basic`] whose username
+///   holds `:`, which RFC 7617 §2 forbids: [`super::RequestError::InvalidBasicUsername`];
 /// - the selected alternative's [`Credential::Provider`], or the token provider of its
 ///   [`Credential::Refreshable`], fails: [`super::RequestError::CredentialProvider`].
 ///
@@ -130,9 +132,10 @@ pub enum Credential {
     ///
     /// It is **not** accepted under an `http basic` scheme, which needs a username and password
     /// ([`Credential::Basic`]). There the call fails as
-    /// [`super::RequestError::CredentialMismatch`] with `required: "http basic"` and
-    /// `registered: "Provider"`, and the provider is never called. Under a `mutualTLS` scheme it is
-    /// ignored and never called, since the transport's client certificate satisfies the scheme.
+    /// [`super::RequestError::CredentialMismatch`] with `required: SchemeCarrier::HttpBasic`
+    /// and `registered: CredentialKind::Provider`, and the provider is never called. Under a
+    /// `mutualTLS` scheme it is ignored and never called, since the transport's client
+    /// certificate satisfies the scheme.
     Provider(TokenProvider),
     /// A token the runtime refreshes and replays once when the server rejects it.
     ///
@@ -193,16 +196,84 @@ pub struct AuthScheme {
     pub kind: AuthKind,
 }
 
-impl Credential {
-    /// The variant's name, as `Debug` renders it and as
-    /// [`super::RequestError::CredentialMismatch`] reports it in `registered`.
-    fn kind_name(&self) -> &'static str {
+/// What a security scheme carries on the wire, as [`super::RequestError::CredentialMismatch`]
+/// reports it in `required`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SchemeCarrier {
+    /// An `http basic` scheme: a username and password.
+    HttpBasic,
+    /// A bearer token: an `http bearer` scheme, and every `oauth2` and `openIdConnect` scheme,
+    /// which attach their token as a bearer credential.
+    Bearer,
+    /// An `apiKey` scheme, in a header, query or cookie.
+    ApiKey,
+}
+
+impl SchemeCarrier {
+    /// The carrier as the error message spells it: `"http basic"`, `"bearer"` or `"apiKey"`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Credential::Bearer(_) => "Bearer",
-            Credential::Basic { .. } => "Basic",
-            Credential::ApiKey(_) => "ApiKey",
-            Credential::Provider(_) => "Provider",
-            Credential::Refreshable { .. } => "Refreshable",
+            SchemeCarrier::HttpBasic => "http basic",
+            SchemeCarrier::Bearer => "bearer",
+            SchemeCarrier::ApiKey => "apiKey",
+        }
+    }
+}
+
+impl std::fmt::Display for SchemeCarrier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Which [`Credential`] variant is registered, as [`super::RequestError::CredentialMismatch`]
+/// reports it in `registered`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CredentialKind {
+    /// [`Credential::Bearer`].
+    Bearer,
+    /// [`Credential::Basic`].
+    Basic,
+    /// [`Credential::ApiKey`].
+    ApiKey,
+    /// [`Credential::Provider`].
+    Provider,
+    /// [`Credential::Refreshable`].
+    Refreshable,
+}
+
+impl CredentialKind {
+    /// The variant's name, as `Credential`'s `Debug` renders it: `"Bearer"`, `"Basic"`,
+    /// `"ApiKey"`, `"Provider"` or `"Refreshable"`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            CredentialKind::Bearer => "Bearer",
+            CredentialKind::Basic => "Basic",
+            CredentialKind::ApiKey => "ApiKey",
+            CredentialKind::Provider => "Provider",
+            CredentialKind::Refreshable => "Refreshable",
+        }
+    }
+}
+
+impl std::fmt::Display for CredentialKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Credential {
+    /// The variant, as `Debug` renders it and as
+    /// [`super::RequestError::CredentialMismatch`] reports it in `registered`.
+    fn kind(&self) -> CredentialKind {
+        match self {
+            Credential::Bearer(_) => CredentialKind::Bearer,
+            Credential::Basic { .. } => CredentialKind::Basic,
+            Credential::ApiKey(_) => CredentialKind::ApiKey,
+            Credential::Provider(_) => CredentialKind::Provider,
+            Credential::Refreshable { .. } => CredentialKind::Refreshable,
         }
     }
 
@@ -226,7 +297,7 @@ impl Credential {
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Secrets are redacted throughout.
-        write!(f, "Credential::{}(***)", self.kind_name())
+        write!(f, "Credential::{}(***)", self.kind())
     }
 }
 
@@ -590,15 +661,21 @@ fn attach_token(
         AuthKind::Basic => match credential {
             // RFC 7617 §2: the server splits the decoded credentials at their first colon, so a
             // username holding one would be read as another user and password.
-            Credential::Basic { username, .. } if username.contains(':') => {
-                Err(credential_mismatch(scheme.name, "http basic", credential))
-            }
+            Credential::Basic { username, .. } if username.contains(':') => Err(
+                Error::RequestConstruction(RequestError::InvalidBasicUsername {
+                    scheme: scheme.name,
+                }),
+            ),
             Credential::Basic { username, password } => {
                 let value =
                     basic_authorization(username.as_bytes(), password.expose_secret().as_bytes());
                 set_authorization(request, &value)
             }
-            _ => Err(credential_mismatch(scheme.name, "http basic", credential)),
+            _ => Err(credential_mismatch(
+                scheme.name,
+                SchemeCarrier::HttpBasic,
+                credential,
+            )),
         },
         AuthKind::Bearer => match token {
             Some(token) => {
@@ -609,21 +686,37 @@ fn attach_token(
                 value.push_str(token);
                 set_authorization(request, &value)
             }
-            None => Err(credential_mismatch(scheme.name, "bearer", credential)),
+            None => Err(credential_mismatch(
+                scheme.name,
+                SchemeCarrier::Bearer,
+                credential,
+            )),
         },
         AuthKind::ApiKeyHeader(name) => match token {
             Some(token) => set_header(request, name, token.expose_secret()),
-            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
+            None => Err(credential_mismatch(
+                scheme.name,
+                SchemeCarrier::ApiKey,
+                credential,
+            )),
         },
         AuthKind::ApiKeyQuery(name) => match token {
             Some(token) => append_query_pair(request, name, token.expose_secret()),
-            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
+            None => Err(credential_mismatch(
+                scheme.name,
+                SchemeCarrier::ApiKey,
+                credential,
+            )),
         },
         // Satisfied by the transport; `attach_auth` never reaches this arm.
         AuthKind::MutualTls => Ok(request),
         AuthKind::ApiKeyCookie(name) => match token {
             Some(token) => append_cookie(request, name, token.expose_secret()),
-            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
+            None => Err(credential_mismatch(
+                scheme.name,
+                SchemeCarrier::ApiKey,
+                credential,
+            )),
         },
     }
 }
@@ -752,13 +845,13 @@ fn base64_encode_into(bytes: &[u8], encoded: &mut String) {
 
 fn credential_mismatch(
     scheme: &'static str,
-    required: &'static str,
+    required: SchemeCarrier,
     credential: &Credential,
 ) -> Error<Infallible> {
     Error::RequestConstruction(RequestError::CredentialMismatch {
         scheme,
         required,
-        registered: credential.kind_name(),
+        registered: credential.kind(),
     })
 }
 

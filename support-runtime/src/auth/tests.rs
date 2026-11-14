@@ -5,7 +5,8 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::{ClientCore, Error, RequestBuilder, RequestError};
 
 use super::{
-    attach_auth, token_provider, AuthError, AuthKind, AuthScheme, Credential, TokenFuture,
+    attach_auth, token_provider, AuthError, AuthKind, AuthScheme, Credential, CredentialKind,
+    SchemeCarrier, TokenFuture,
 };
 use crate::tests::{core, poll_ready};
 
@@ -569,8 +570,8 @@ fn a_token_provider_under_a_basic_scheme_is_a_mismatch_without_calling_it() {
             error,
             Error::RequestConstruction(RequestError::CredentialMismatch {
                 scheme: "login",
-                required: "http basic",
-                registered: "Provider",
+                required: SchemeCarrier::HttpBasic,
+                registered: CredentialKind::Provider,
             })
         ),
         "{error:?}"
@@ -694,8 +695,14 @@ fn removing_the_selected_credential_falls_through_to_a_later_alternative() {
 #[test]
 fn both_static_token_variants_attach_under_every_token_kind_and_neither_under_basic() {
     for (credential, registered) in [
-        (Credential::Bearer(SecretString::from("t0k")), "Bearer"),
-        (Credential::ApiKey(SecretString::from("t0k")), "ApiKey"),
+        (
+            Credential::Bearer(SecretString::from("t0k")),
+            CredentialKind::Bearer,
+        ),
+        (
+            Credential::ApiKey(SecretString::from("t0k")),
+            CredentialKind::ApiKey,
+        ),
     ] {
         let mut core = core();
         core.set_credential("s", credential);
@@ -742,7 +749,7 @@ fn both_static_token_variants_attach_under_every_token_kind_and_neither_under_ba
         match error {
             Error::RequestConstruction(RequestError::CredentialMismatch {
                 scheme: "s",
-                required: "http basic",
+                required: SchemeCarrier::HttpBasic,
                 registered: reported,
             }) => assert_eq!(reported, registered),
             other => panic!("expected CredentialMismatch for {registered}, got {other:?}"),
@@ -797,8 +804,8 @@ fn a_bearer_credential_does_not_satisfy_a_basic_scheme() {
             error,
             Error::RequestConstruction(RequestError::CredentialMismatch {
                 scheme: "login",
-                required: "http basic",
-                registered: "Bearer",
+                required: SchemeCarrier::HttpBasic,
+                registered: CredentialKind::Bearer,
             })
         ),
         "{error:?}"
@@ -818,10 +825,10 @@ fn a_basic_credential_does_not_satisfy_a_token_scheme() {
         },
     );
     for (kind, required) in [
-        (AuthKind::Bearer, "bearer"),
-        (AuthKind::ApiKeyHeader("X-Api-Key"), "apiKey"),
-        (AuthKind::ApiKeyQuery("api_key"), "apiKey"),
-        (AuthKind::ApiKeyCookie("SESSION"), "apiKey"),
+        (AuthKind::Bearer, SchemeCarrier::Bearer),
+        (AuthKind::ApiKeyHeader("X-Api-Key"), SchemeCarrier::ApiKey),
+        (AuthKind::ApiKeyQuery("api_key"), SchemeCarrier::ApiKey),
+        (AuthKind::ApiKeyCookie("SESSION"), SchemeCarrier::ApiKey),
     ] {
         let error = poll_ready(attach_auth(
             &core,
@@ -840,7 +847,7 @@ fn a_basic_credential_does_not_satisfy_a_token_scheme() {
             }) => {
                 assert_eq!(scheme, "login");
                 assert_eq!(reported, required, "{kind:?}");
-                assert_eq!(registered, "Basic");
+                assert_eq!(registered, CredentialKind::Basic);
             }
             other => panic!("expected CredentialMismatch for {kind:?}, got {other:?}"),
         }
@@ -994,7 +1001,7 @@ fn a_basic_credential_is_base64_of_user_colon_password() {
 
 /// Issue #1333: RFC 7617 §2 forbids a colon in a Basic user-id, because the server splits the
 /// decoded credentials at the first one. A `Basic` credential whose username holds one is refused
-/// as `CredentialMismatch` before anything is sent, rather than sent for the server to read as a
+/// as `InvalidBasicUsername` before anything is sent, rather than sent for the server to read as a
 /// different user and password; a colon in the password is the server's to keep.
 #[test]
 fn a_basic_username_holding_a_colon_is_refused_before_send() {
@@ -1019,13 +1026,9 @@ fn a_basic_username_holding_a_colon_is_refused_before_send() {
     for username in [":", "us:er", "user:", ":user"] {
         let error = match attach(username).unwrap_err() {
             Error::RequestConstruction(
-                error @ RequestError::CredentialMismatch {
-                    scheme: "login",
-                    required: "http basic",
-                    registered: "Basic",
-                },
+                error @ RequestError::InvalidBasicUsername { scheme: "login" },
             ) => error,
-            other => panic!("{username}: expected CredentialMismatch, got {other:?}"),
+            other => panic!("{username}: expected InvalidBasicUsername, got {other:?}"),
         };
         assert_eq!(
             error.to_string(),
