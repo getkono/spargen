@@ -7,8 +7,9 @@ use std::process::ExitCode;
 pub(crate) enum ExitStatus {
     /// Success — no errors (warnings may still have been emitted).
     Ok = 0,
-    /// One or more error-severity diagnostics were reported, or `spargen diff --exit-code` found a
-    /// breaking change.
+    /// One or more error-severity diagnostics were reported, `spargen diff --exit-code` found a
+    /// breaking change, or output could not be written for a reason other than a closed stream (a
+    /// closed stream keeps the command's own status).
     Diagnostics = 1,
     /// Invalid usage that parsed as a command: a `spargen.toml` or `--config` file that cannot be
     /// read or applied, a malformed omit flag, or an unknown code given to `spargen explain`.

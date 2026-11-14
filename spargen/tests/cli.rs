@@ -1129,3 +1129,157 @@ fn deps_prints_a_human_rejection_only_on_stderr() {
     assert_eq!(stderr.lines().next(), Some("spargen: rejected"), "{stderr}");
     assert!(stderr.contains("E001"), "{stderr}");
 }
+
+/// Run the binary in `dir` with the stream `closed` names (`"stdout"` or `"stderr"`) connected to
+/// a pipe whose reader is already gone, so every write to it fails with `BrokenPipe`, as under
+/// `spargen … | head -1`. Returns the exit status and the other stream's text.
+fn spargen_with_a_closed(closed: &str, dir: &Path, args: &[&str]) -> (Option<i32>, String) {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut command = Command::new(spargen_bin());
+    command.current_dir(dir).args(args);
+    match closed {
+        "stdout" => command.stdout(writer).stderr(std::process::Stdio::piped()),
+        "stderr" => command.stderr(writer).stdout(std::process::Stdio::piped()),
+        other => panic!("no stream named {other}"),
+    };
+    let output = command.output().unwrap();
+    let other = if closed == "stdout" {
+        output.stderr
+    } else {
+        output.stdout
+    };
+    (output.status.code(), String::from_utf8(other).unwrap())
+}
+
+/// A closed stdout or stderr is no panic (#1429): the write that meets it fails quietly, and the
+/// command exits with the status it would have returned with the stream open.
+#[test]
+fn a_closed_output_stream_keeps_the_commands_own_status_without_a_panic() {
+    let temp = tempfile::tempdir().unwrap();
+    let good = spec_arg(temp.path(), "good.yaml", ONE_OPERATION);
+    let rejected = spec_arg(temp.path(), "rejected.yaml", REJECTED);
+
+    for (closed, args, status) in [
+        ("stdout", vec!["explain", EXPLAINED_CODE], 0),
+        (
+            "stdout",
+            vec!["explain", EXPLAINED_CODE, "--format", "json"],
+            0,
+        ),
+        ("stdout", vec!["deps", good.as_str()], 0),
+        (
+            "stdout",
+            vec!["deps", rejected.as_str(), "--format", "json"],
+            1,
+        ),
+        ("stdout", vec!["diff", good.as_str(), good.as_str()], 0),
+        ("stderr", vec!["check", rejected.as_str()], 1),
+        ("stderr", vec!["check", good.as_str()], 0),
+        ("stderr", vec!["explain", "E999"], 3),
+    ] {
+        let (actual, other) = spargen_with_a_closed(closed, temp.path(), &args);
+        assert!(
+            !other.contains("panicked"),
+            "a closed {closed} must not panic `spargen {args:?}`: {other}"
+        );
+        assert_eq!(
+            actual,
+            Some(status),
+            "a closed {closed} keeps `spargen {args:?}`'s own status: {other}"
+        );
+        if closed == "stdout" {
+            assert!(
+                other.is_empty(),
+                "a closed stdout is reported nowhere: `spargen {args:?}` wrote {other}"
+            );
+        }
+    }
+}
+
+/// A stdout that fails for a reason other than a closed reader (here `/dev/full`, which refuses
+/// every write with `ENOSPC`) is a failed run: the command exits `1` whatever its outcome, and
+/// stderr names the write it could not make.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_stdout_write_exits_one_and_says_so_on_stderr() {
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let output = Command::new(spargen_bin())
+        .args(["explain", EXPLAINED_CODE])
+        .stdout(full)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with("error: failed writing to stdout: "),
+        "{stderr}"
+    );
+}
+
+/// A stderr that fails for a reason other than a closed reader is a failed run too: `check` on a
+/// clean spec, which would exit `0`, exits `1` with its report lost. Nothing is left to name the
+/// failed write, so stdout stays empty.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_stderr_write_exits_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let good = spec_arg(temp.path(), "good.yaml", ONE_OPERATION);
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let output = Command::new(spargen_bin())
+        .args(["check", good.as_str()])
+        .stderr(full)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.is_empty(), "{stdout}");
+}
+
+/// `write_line` (`cli/run.rs`) is the CLI's one writer, because the std print macros panic on a
+/// failed write (#1429). No source under `spargen/src/cli/` or `spargen/src/bin/` calls one;
+/// comments are skipped, since `write_line`'s doc names them.
+#[test]
+fn the_cli_writes_only_through_write_line() {
+    const PRINT_MACROS: [&str; 4] = ["println!", "eprintln!", "print!", "eprint!"];
+    let root = repo::workspace_root();
+    let mut offenders = Vec::new();
+    for dir in ["spargen/src/cli", "spargen/src/bin"] {
+        let mut sources: Vec<_> = std::fs::read_dir(root.join(dir))
+            .unwrap_or_else(|error| panic!("{dir} must be readable: {error}"))
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+            .collect();
+        sources.sort();
+        assert!(!sources.is_empty(), "{dir} holds no Rust source");
+        for path in sources {
+            let source = repo::read_file(&path);
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or_default();
+                let calls = PRINT_MACROS.iter().any(|name| {
+                    code.match_indices(name).any(|(at, _)| {
+                        !code[..at]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    })
+                });
+                if calls {
+                    offenders.push(format!("{}:{}: {line}", path.display(), index + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "write through `write_line`, not a print macro:\n{}",
+        offenders.join("\n")
+    );
+}
