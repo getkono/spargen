@@ -278,4 +278,23 @@ mod tests {
             atomic_write_all(&[(dir.join("into-blocked"), b"new".to_vec())]).unwrap_err();
         assert_eq!(path, dir.join("into-blocked"));
     }
+
+    /// A link to a directory stages beside the directory, so only the rename fails: that error
+    /// names the path the caller passed, not the directory the link resolves to, and the earlier
+    /// file is already replaced.
+    #[cfg(all(unix, feature = "remote-fetch"))]
+    #[test]
+    fn a_failed_rename_names_the_given_path_not_the_resolved_target() {
+        let (_temp, dir) = dir();
+        std::fs::create_dir_all(dir.join("directory")).unwrap();
+        std::os::unix::fs::symlink("directory", dir.join("link")).unwrap();
+        let files = vec![
+            (dir.join("a"), b"new a".to_vec()),
+            (dir.join("link"), b"new".to_vec()),
+        ];
+        let (path, _) = atomic_write_all(&files).unwrap_err();
+        assert_eq!(path, dir.join("link"));
+        assert_eq!(std::fs::read_to_string(dir.join("a")).unwrap(), "new a");
+        assert_eq!(listing(&dir), ["a", "directory", "link"]);
+    }
 }
