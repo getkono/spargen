@@ -328,6 +328,44 @@ fn pinned_remote_ref_resolves_hermetically_to_typed_schema() {
     );
 }
 
+/// A vendored copy that carries a leading byte-order mark resolves (#1425). The pin is the
+/// SHA-256 of the bytes on disk, mark included, so the mark is skipped only for parsing.
+#[test]
+fn a_vendored_copy_with_a_byte_order_mark_resolves_against_its_raw_byte_pin() {
+    use sha2::{Digest, Sha256};
+    // `properties` first, so a mark read as part of the first key would drop the member.
+    let vendored = format!(
+        "{}properties:\n  id:\n    type: string\ntype: object\n",
+        super::source_parse::BOM
+    );
+    let pin = format!("{:x}", Sha256::digest(vendored.as_bytes()));
+    for check_only in [false, true] {
+        let (report, _temp, out) = run(Some(lock(&pin)), Some(&vendored), check_only);
+        assert_eq!(
+            report.outcome(),
+            if check_only {
+                Outcome::Clean
+            } else {
+                Outcome::Generated
+            },
+            "{report:#?}"
+        );
+        if !check_only {
+            let generated = std::fs::read_to_string(&out).expect("module written");
+            assert!(
+                generated.contains("pub id: Option<String>"),
+                "the vendored schema's member is emitted:\n{generated}"
+            );
+        }
+    }
+    // A pin of the bytes after the mark does not admit the marked copy: hashing stays on the raw
+    // bytes.
+    let stripped = vendored.trim_start_matches(super::source_parse::BOM);
+    let stripped_pin = format!("{:x}", Sha256::digest(stripped.as_bytes()));
+    let (drift, _temp, _out) = run(Some(lock(&stripped_pin)), Some(&vendored), true);
+    assert!(has_code(&drift, Code::VendoredRefDrift), "{drift:#?}");
+}
+
 #[test]
 fn drifted_vendored_content_is_e021() {
     // The vendored bytes are fine, but the lock pins a different sha256 ⇒ the lock is the source
