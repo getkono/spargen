@@ -1037,7 +1037,9 @@ mod support {
                 transport: TransportConfig,
             ) -> Result<Self, Error<Infallible>> {
                 let base_url = parse_base_url(base_url)?;
-                let backend = Arc::new(ReqwestBackend::new(http_client(&transport)?));
+                let backend = Arc::new(
+                    ReqwestBackend::built_from(http_client(&transport)?, transport),
+                );
                 Ok(Self::assemble(backend, base_url, config))
             }
             /// Build a core executing requests on a caller-supplied `reqwest::Client` — the injection
@@ -2547,17 +2549,7 @@ mod support {
                     Error::Timeout(kind) => f.debug_tuple("Timeout").field(kind).finish(),
                     Error::Protocol(e) => f.debug_tuple("Protocol").field(e).finish(),
                     Error::Redirect(e) => f.debug_tuple("Redirect").field(e).finish(),
-                    Error::Api(value) => {
-                        f.debug_tuple("Api")
-                            .field(
-                                &RedactedResponse {
-                                    status: value.status(),
-                                    headers: value.headers(),
-                                    inner: value.inner(),
-                                },
-                            )
-                            .finish()
-                    }
+                    Error::Api(value) => f.debug_tuple("Api").field(value).finish(),
                     Error::UnexpectedStatus { status, headers, body } => {
                         f.debug_struct("UnexpectedStatus")
                             .field("status", status)
@@ -2595,25 +2587,10 @@ mod support {
                 }
             }
         }
-        /// The `Debug` of an [`Error::Api`]'s `ResponseValue`, laid out as its own derive lays it out,
-        /// with its headers redacted.
-        struct RedactedResponse<'a, E> {
-            status: StatusCode,
-            headers: &'a HeaderMap,
-            inner: &'a E,
-        }
-        impl<E: std::fmt::Debug> std::fmt::Debug for RedactedResponse<'_, E> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("ResponseValue")
-                    .field("status", &self.status)
-                    .field("headers", &RedactedHeaders(self.headers))
-                    .field("inner", self.inner)
-                    .finish()
-            }
-        }
         /// A response's headers as `HeaderMap`'s own `Debug` prints them, one entry per value, except
-        /// that a value [`is_redacted`] prints as `[redacted]`.
-        struct RedactedHeaders<'a>(&'a HeaderMap);
+        /// that a value [`is_redacted`] prints as `[redacted]`. The `Debug` of [`Error`] and of
+        /// [`super::ResponseValue`] print a response's headers through it, so both redact the same set.
+        pub(crate) struct RedactedHeaders<'a>(pub(crate) &'a HeaderMap);
         impl std::fmt::Debug for RedactedHeaders<'_> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let mut map = f.debug_map();
@@ -2627,7 +2604,7 @@ mod support {
                 map.finish()
             }
         }
-        /// Whether an error's `Debug` redacts a response header's value: a `Set-Cookie`,
+        /// Whether a response's `Debug` redacts a header's value: a `Set-Cookie`,
         /// `Authorization` or `Proxy-Authenticate` header, or a value marked sensitive.
         fn is_redacted(
             name: &reqwest::header::HeaderName,
@@ -5381,14 +5358,28 @@ mod support {
         use bytes::Bytes;
         use reqwest::header::HeaderMap;
         use reqwest::StatusCode;
+        use super::error::RedactedHeaders;
         use super::{Error, HttpBody};
         /// A successful response body paired with its status and headers. Returned inside
         /// `Result<ResponseValue<T>, Error<E>>` from every generated operation method.
-        #[derive(Debug, Clone)]
+        ///
+        /// Its `Debug` prints the status, the headers and the body, with each `Set-Cookie`,
+        /// `Authorization` and `Proxy-Authenticate` value, and each value marked sensitive, printed as
+        /// `[redacted]`, as [`Error`]'s `Debug` prints a response's headers.
+        #[derive(Clone)]
         pub struct ResponseValue<T> {
             status: StatusCode,
             headers: HeaderMap,
             inner: T,
+        }
+        impl<T: std::fmt::Debug> std::fmt::Debug for ResponseValue<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("ResponseValue")
+                    .field("status", &self.status)
+                    .field("headers", &RedactedHeaders(&self.headers))
+                    .field("inner", &self.inner)
+                    .finish()
+            }
         }
         impl<T> ResponseValue<T> {
             /// Wrap a decoded body with its status and headers.
@@ -6497,18 +6488,50 @@ mod support {
         /// own policy, reqwest's default following up to ten hops to any origin and forwarding every
         /// header but `Authorization`, `Cookie` and the other few reqwest strips (an `apiKey` header or a
         /// bound header among those forwarded).
-        #[derive(Debug, Clone)]
+        ///
+        /// Its `Debug` prints the connect and read timeouts `ClientCore` built its client with, each only
+        /// when set, and nothing of the wrapped client: reqwest's own `Debug` of a client prints its
+        /// default headers (an `Authorization` among them) and proxies in full. A backend wrapping a
+        /// caller's client prints as `ReqwestBackend { .. }`.
+        #[derive(Clone)]
         pub struct ReqwestBackend {
             client: reqwest::Client,
+            /// The connect and read timeouts the client was built with, when the runtime built it.
+            timeouts: Option<super::TransportConfig>,
         }
         impl ReqwestBackend {
             /// Wrap a `reqwest::Client` as the transport backend.
             pub fn new(client: reqwest::Client) -> Self {
-                Self { client }
+                Self { client, timeouts: None }
+            }
+            /// Wrap the client `ClientCore` built from `transport`, whose timeouts `Debug` prints. On
+            /// `wasm32` the client has neither timeout, and none is recorded.
+            pub(crate) fn built_from(
+                client: reqwest::Client,
+                transport: super::TransportConfig,
+            ) -> Self {
+                Self {
+                    client,
+                    timeouts: (!cfg!(target_arch = "wasm32")).then_some(transport),
+                }
             }
             /// The wrapped client.
             pub fn client(&self) -> &reqwest::Client {
                 &self.client
+            }
+        }
+        impl std::fmt::Debug for ReqwestBackend {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut debug = f.debug_struct("ReqwestBackend");
+                if let Some(transport) = &self.timeouts {
+                    if let Some(timeout) = &transport.connect_timeout {
+                        debug.field("connect_timeout", timeout);
+                    }
+                    if let Some(timeout) = &transport.read_timeout {
+                        debug.field("read_timeout", timeout);
+                    }
+                }
+                debug.finish_non_exhaustive()
             }
         }
         impl HttpBackend for ReqwestBackend {

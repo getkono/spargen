@@ -229,7 +229,10 @@ impl ClientCore {
         transport: TransportConfig,
     ) -> Result<Self, Error<Infallible>> {
         let base_url = parse_base_url(base_url)?;
-        let backend = Arc::new(ReqwestBackend::new(http_client(&transport)?));
+        let backend = Arc::new(ReqwestBackend::built_from(
+            http_client(&transport)?,
+            transport,
+        ));
         Ok(Self::assemble(backend, base_url, config))
     }
 

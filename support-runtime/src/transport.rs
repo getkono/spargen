@@ -527,20 +527,54 @@ pub(crate) fn response_from_reqwest(
 /// own policy, reqwest's default following up to ten hops to any origin and forwarding every
 /// header but `Authorization`, `Cookie` and the other few reqwest strips (an `apiKey` header or a
 /// bound header among those forwarded).
-#[derive(Debug, Clone)]
+///
+/// Its `Debug` prints the connect and read timeouts `ClientCore` built its client with, each only
+/// when set, and nothing of the wrapped client: reqwest's own `Debug` of a client prints its
+/// default headers (an `Authorization` among them) and proxies in full. A backend wrapping a
+/// caller's client prints as `ReqwestBackend { .. }`.
+#[derive(Clone)]
 pub struct ReqwestBackend {
     client: reqwest::Client,
+    /// The connect and read timeouts the client was built with, when the runtime built it.
+    timeouts: Option<crate::TransportConfig>,
 }
 
 impl ReqwestBackend {
     /// Wrap a `reqwest::Client` as the transport backend.
     pub fn new(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            timeouts: None,
+        }
+    }
+
+    /// Wrap the client `ClientCore` built from `transport`, whose timeouts `Debug` prints. On
+    /// `wasm32` the client has neither timeout, and none is recorded.
+    pub(crate) fn built_from(client: reqwest::Client, transport: crate::TransportConfig) -> Self {
+        Self {
+            client,
+            timeouts: (!cfg!(target_arch = "wasm32")).then_some(transport),
+        }
     }
 
     /// The wrapped client.
     pub fn client(&self) -> &reqwest::Client {
         &self.client
+    }
+}
+
+impl std::fmt::Debug for ReqwestBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("ReqwestBackend");
+        if let Some(transport) = &self.timeouts {
+            if let Some(timeout) = &transport.connect_timeout {
+                debug.field("connect_timeout", timeout);
+            }
+            if let Some(timeout) = &transport.read_timeout {
+                debug.field("read_timeout", timeout);
+            }
+        }
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -603,19 +637,20 @@ mod tests {
     }
 
     /// `ClientCore::new` installs a `ReqwestBackend`, which `ClientCore`'s `Debug` names, since
-    /// `Debug` is required of every backend.
+    /// `Debug` is required of every backend. The backend prints the timeouts it built its client
+    /// with and nothing of the client itself.
     #[test]
     fn new_installs_a_reqwest_backend_that_debug_names() {
         let rendered = format!("{:?}", ReqwestBackend::new(reqwest::Client::new()));
-        assert!(
-            rendered.starts_with("ReqwestBackend { client: Client {"),
-            "{rendered}"
-        );
+        assert_eq!(rendered, "ReqwestBackend { .. }");
         let core = format!("{:?}", ClientCore::new("https://example.com").unwrap());
         assert!(
-            core.contains("backend: ReqwestBackend { client: Client {"),
+            core.contains(
+                "backend: ReqwestBackend { connect_timeout: 30s, read_timeout: 300s, .. }"
+            ),
             "{core}"
         );
+        assert!(!core.contains("Client {"), "{core}");
     }
 
     /// `client` hands back the wrapped client, not a default one: it still holds the default
