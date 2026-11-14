@@ -440,8 +440,7 @@ impl<'a, T> MultipartBody<'a, T> {
     }
 
     /// Send `file_name` as the `filename` of the file part named `part`, replacing any set for it
-    /// before. A name naming no file part of the body sends nothing: a text part carries no
-    /// `filename`.
+    /// before. Only the body's file parts read it.
     #[must_use]
     pub fn file_name_for(mut self, part: impl Into<String>, file_name: impl Into<String>) -> Self {
         let part = part.into();
