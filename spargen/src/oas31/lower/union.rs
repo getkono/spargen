@@ -1241,6 +1241,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                 }
             }
+            // A tag-selected member that may arrive with no tag has nowhere to go but a
+            // `defaultMapping` (#1421).
+            if let Some(UnionDispatch {
+                variants: variant_dispatch,
+                ..
+            }) = &discriminated
+            {
+                if default_variant.is_none()
+                    && self.reject_optional_tag_property(discriminator, lowered, variant_dispatch)
+                {
+                    return None;
+                }
+            }
             // `None` only where no variant carries a tag, which the `W011` above has said.
             discriminated
                 .or_else(|| self.disjoint_strategy(types))

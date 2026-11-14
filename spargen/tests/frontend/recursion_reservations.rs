@@ -1248,3 +1248,76 @@ fn a_meet_copy_of_a_deferred_discriminated_union_keeps_tag_dispatch_in_either_or
         "the declaration order changed `C`'s dispatch"
     );
 }
+
+/// #1421 over a deferred discriminated union (#1400), in a 3.2 document: `A` holds a `U`, so with
+/// `A` declared first `U`'s dispatch is decided once every reservation is filled, and that is
+/// where an optional tag property is checked. `A` leaving `kind` optional, with no
+/// `defaultMapping`, is `E007` at the Discriminator Object in either declaration order. `A`
+/// requiring it generates in either order, tag-dispatched: the inline member pinning `kind` to
+/// `b` and requiring it has that field dropped only after the check, so it is never read as
+/// leaving the tag optional.
+#[test]
+fn a_recursive_member_leaving_the_tag_optional_is_e007_in_either_declaration_order() {
+    let a = |required: &str| {
+        format!(
+            "    A: {{ type: object, {required}properties: {{ kind: {{ type: string }}, \
+             next: {{ $ref: '#/components/schemas/U' }} }} }}\n"
+        )
+    };
+    let u =
+        "    U: { oneOf: [{ $ref: '#/components/schemas/A' }, { type: object, required: [kind], \
+             properties: { kind: { type: string, const: b } } }], discriminator: { propertyName: \
+             kind } }\n";
+    let spec = |schemas: [&str; 2]| {
+        format!(
+            "openapi: 3.2.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths: {{}}\n\
+             components:\n  \
+             schemas:\n{}",
+            schemas.concat()
+        )
+    };
+    let optional = a("");
+    let required = a("required: [kind], ");
+    for (order, schemas) in [("U first", [u, &optional]), ("A first", [&optional, u])] {
+        let report = generate(&spec(schemas));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{order}: {report:#?}");
+        let rejection = report
+            .diagnostics()
+            .iter()
+            .find(|d| {
+                d.code == Code::NonDisjointUnion
+                    && d.pointer.as_str() == "/components/schemas/U/discriminator"
+            })
+            .unwrap_or_else(|| panic!("{order}: {report:#?}"));
+        assert!(
+            rejection
+                .message
+                .contains("the discriminator property `kind` is optional in union member 0 (`A`)"),
+            "{order}: {rejection:#?}"
+        );
+        assert!(
+            !rejection.message.contains("union member 1"),
+            "{order}: {rejection:#?}"
+        );
+    }
+    for (order, schemas) in [("U first", [u, &required]), ("A first", [&required, u])] {
+        let (report, code) = generate_with_code(&spec(schemas));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{order}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::NonDisjointUnion),
+            "{order}: {report:#?}"
+        );
+        let tags: Vec<Vec<String>> = super::discriminator::discriminated_arms(&code, "U")
+            .decode
+            .into_iter()
+            .map(|(_, tags)| tags)
+            .collect();
+        assert_eq!(
+            tags,
+            vec![vec!["A".to_owned()], vec!["b".to_owned()]],
+            "{order}: {code}"
+        );
+    }
+}

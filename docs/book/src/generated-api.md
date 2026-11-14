@@ -117,6 +117,14 @@ use.
   refusing a value that is not a valid header value (a control character but a tab, such as CR or
   LF) as `Error::RequestConstruction`. An operation that requires it while no value is bound fails
   before anything is sent, as `RequestError::MissingBoundParameter`.
+- Cookie parameters share one `Cookie` header, and each value is checked before it joins it, so
+  no value can split into a cookie the caller never declared. A `content` or `style: cookie`
+  value, sent without escaping, must be an RFC 6265 `cookie-value` (visible ASCII but `"`, `,`,
+  `;` and `\`, bare or between two `"`, plus the `,` an `explode: false` `style: cookie` value
+  joins its items with); a `style: form` value is percent-encoded, and only a `;` or a control
+  character `allowReserved` left literal is refused. A refused value fails the call before
+  anything is sent, as `Error::RequestConstruction` whose `RequestError::Other` source downcasts
+  to `ParameterError::InvalidCookie`, which names the parameter and never the value.
 - A closed error taxonomy, identical across all spargen output: request-construction
   (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
   above, the missing bound header above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
@@ -168,13 +176,14 @@ use.
   suffix is a hash of the item's JSON Pointer with the type and subtype of each media key on it
   lowercased, so respelling a media key's type or subtype in another letter case renames nothing;
   its parameters are hashed as written, so a respelled parameter (`Charset` for `charset`) does.
-- Where two properties of one model, or two values of one enum, case to the same field or variant
-  name, the one whose wire name already is that name keeps it (`foo_bar` beside `fooBar`), and
+- Where two properties of one model, two values of one enum, or two headers of one response case
+  to the same field or variant name, the one whose wire name already is that name keeps it (`foo_bar` beside `fooBar`), and
   otherwise the lexically smaller wire name does; the other takes a disambiguated name seeded from
   its own wire name. The order the spec declares them in decides nothing. A name that comes to
   stand for another wire name (a new `foo_bar` beside an existing `fooBar`, or a new query
   `page-size` beside `pageSize`, or a new header `id` beside an existing cookie `id`, since a
-  header ranks before a cookie) still compiles and silently sends or reads the other member, so
+  header ranks before a cookie, or a new response header `X-Rate-Limit` beside `X_Rate_Limit`)
+  still compiles and silently sends or reads the other member, so
   `spargen diff` reports it as major (`identifier-rebound`).
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 

@@ -569,18 +569,27 @@ pub(super) fn parse_by_name(
     parse_by_extension(id, Utf8Path::new(name).extension(), text, diags)
 }
 
+/// The UTF-8 byte-order mark [`parse_by_extension`] skips at the start of a document.
+const BYTE_ORDER_MARK: char = '\u{feff}';
+
 /// Parse `text` in the format `extension` names, compared ASCII case-insensitively: `json` as
 /// JSON, `yaml` or `yml` as YAML, and any other extension, or none, as YAML then JSON. The build
 /// ([`parse_by_name`]) and `spargen lock` (`vendor::parse_scratch_local` and
 /// `vendor::parse_scratch_remote`) each read the extension from a document's name and both choose
 /// the format here, so an upper- or mixed-case extension such as `.JSON` names the same format to
 /// both (#915).
+///
+/// One leading UTF-8 byte-order mark (U+FEFF), which some Windows tooling writes, is skipped
+/// before either parser runs, as RFC 8259 §8.1 allows (#1425): it is an encoding signature, not
+/// the document's first character, so spans count from the character after it. Only the parse
+/// skips it; the bytes a lock pins and a build fingerprints are the file's own, mark included.
 pub(super) fn parse_by_extension(
     id: FileId,
     extension: Option<&str>,
     text: &str,
     diags: &mut Diagnostics,
 ) -> Result<SpannedValue, Aborted> {
+    let text = text.strip_prefix(BYTE_ORDER_MARK).unwrap_or(text);
     match extension {
         Some(ext) if ext.eq_ignore_ascii_case("json") => parse_json(id, text, diags),
         Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") => {
@@ -715,6 +724,46 @@ mod tests {
     fn load(root: &Utf8Path) -> InputBundle {
         let mut diags = Diagnostics::default();
         InputBundle::load(root, &mut diags).expect("the bundle loads")
+    }
+
+    /// Every format `parse_by_extension` selects, the build's and `spargen lock`'s alike, skips
+    /// one leading byte-order mark and reads the same tree as without it, spans included, and a
+    /// second mark is the document's own first character (#1425).
+    #[test]
+    fn parse_by_extension_skips_one_leading_byte_order_mark_in_every_format() {
+        let yaml = "a: 1\n";
+        let json = r#"{"a": 1}"#;
+        for (extension, body) in [
+            (Some("yaml"), yaml),
+            (Some("YML"), yaml),
+            (Some("json"), json),
+            (None, yaml),
+            (Some("txt"), json),
+        ] {
+            let parse = |text: &str| {
+                let mut diags = Diagnostics::default();
+                parse_by_extension(FileId(0), extension, text, &mut diags).ok()
+            };
+            let plain = parse(body).expect("parses without a mark");
+            let marked = parse(&format!("{BYTE_ORDER_MARK}{body}"));
+            assert_eq!(marked, Some(plain), "{extension:?}");
+            let twice = parse(&format!("{BYTE_ORDER_MARK}{BYTE_ORDER_MARK}{body}"));
+            assert_ne!(twice, marked, "{extension:?}: a second mark is not skipped");
+        }
+    }
+
+    /// The bytes a build fingerprints are the file's own, mark included: only the parse skips it.
+    #[test]
+    fn a_loaded_document_keeps_its_byte_order_mark_in_its_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let text = format!(
+            "{BYTE_ORDER_MARK}openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n"
+        );
+        std::fs::write(dir.join("openapi.yaml"), &text).unwrap();
+        let bundle = load(&dir.join("openapi.yaml"));
+        let root = bundle.file(bundle.root_id()).expect("the root is loaded");
+        assert_eq!(&*root.bytes, text.as_bytes());
     }
 
     /// Every spelling of the root's own path is the root: one document, one `FileId`, and the

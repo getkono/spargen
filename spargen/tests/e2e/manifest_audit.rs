@@ -1237,7 +1237,7 @@ fn a_build_script_whose_cache_record_cannot_be_written_warns_and_still_generates
 /// `build_rs` as its build script, ready for [`fixture_cargo`]. The build script asserts its
 /// expectations itself: the consumer manifest is reached only from a real build script, because
 /// the facade reads it from the environment Cargo gives one.
-fn build_script_consumer(name: &str, build_rs: &str) -> tempfile::TempDir {
+pub(super) fn build_script_consumer(name: &str, build_rs: &str) -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let crate_dir = temp.path().join("consumer");
     std::fs::create_dir_all(crate_dir.join("src")).unwrap();
@@ -1288,7 +1288,7 @@ paths:
 /// The build-script helpers both fixtures below share: the consumer manifest, the edit that drops
 /// `secrecy` from it, and the assertion that a report is rejected by `E023` alone, naming the
 /// dropped crate.
-const BUILD_SCRIPT_HELPERS: &str = r#"
+pub(super) const BUILD_SCRIPT_HELPERS: &str = r#"
 fn manifest() -> std::path::PathBuf {
     std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("Cargo.toml")
 }
@@ -1371,6 +1371,13 @@ fn check_in_a_build_script_rejects_a_consumer_missing_a_runtime_dependency() {
 
     let missing = without_secrecy(|| spargen::check(&spec));
     assert_rejected_for_secrecy(&missing);
+
+    let required = spargen::check_with(&spec, spargen::CargoIntegration::Required);
+    assert_eq!(required.outcome(), spargen::Outcome::Clean, "{{required:#?}}");
+    let required_missing = without_secrecy(|| {{
+        spargen::check_with(&spec, spargen::CargoIntegration::Required)
+    }});
+    assert_rejected_for_secrecy(&required_missing);
 }}
 {BUILD_SCRIPT_HELPERS}"#
     );
@@ -1385,6 +1392,17 @@ fn check_in_a_build_script_rejects_a_consumer_missing_a_runtime_dependency() {
         "the build script's assertions failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// What the build script of every fixture package whose build directory starts with `prefix`
+/// printed: Cargo keeps it in `build/<package>-<hash>/output`.
+pub(super) fn build_script_output(prefix: &str) -> String {
+    std::fs::read_dir(fixture_target_dir().join("debug/build"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+        .filter_map(|entry| std::fs::read_to_string(entry.path().join("output")).ok())
+        .collect()
 }
 
 /// The rebuild triggers a build script prints, read from the output Cargo recorded for it (#1350).
@@ -1457,18 +1475,7 @@ components: { schemas: { Pet: { $ref: "schemas/pet.yaml" } } }
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Cargo keeps what the build script printed in `build/<package>-<hash>/output`.
-    let recorded: String = std::fs::read_dir(fixture_target_dir().join("debug/build"))
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("rerun-directives-consumer-")
-        })
-        .filter_map(|entry| std::fs::read_to_string(entry.path().join("output")).ok())
-        .collect();
+    let recorded = build_script_output("rerun-directives-consumer-");
     let named: Vec<&str> = recorded
         .lines()
         .filter_map(|line| line.strip_prefix("cargo:rerun-if-changed="))

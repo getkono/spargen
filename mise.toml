@@ -169,7 +169,7 @@ run = "cargo test --workspace --all-features"
 
 [tasks.bench-build]
 description = "Run each benchmark once in test mode, so its outcome asserts run, as CI's bench-build job does"
-# A slow gate pull requests skip, so a task of its own rather than part of `test` (the pre-push hook).
+# A slow gate pull requests skip, so a task of its own rather than part of `test` (CI's `test` job).
 run = "cargo test --benches --workspace"
 
 [tasks.msrv]
