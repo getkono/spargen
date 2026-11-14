@@ -108,23 +108,31 @@ impl Drop for BlockingRuntime {
 mod tests {
     use super::{BlockingRuntime, NestedRuntime};
 
+    /// Spend the current task's cooperative budget to exhaustion, returning how many units it had.
+    fn spend_the_task_budget() -> u32 {
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut spent_units = 0;
+        while let std::task::Poll::Ready(spent) = tokio::task::coop::poll_proceed(&mut cx) {
+            spent.made_progress();
+            spent_units += 1;
+        }
+        spent_units
+    }
+
     #[test]
     fn try_block_on_drives_a_future_outside_a_runtime() {
         let runtime = BlockingRuntime::new().expect("current-thread runtime builds");
         assert_eq!(runtime.try_block_on(async { 1 }), Ok(1));
     }
 
-    /// Inside another runtime's context `block_on` panics; `try_block_on` returns the typed
-    /// error instead, without polling the future.
+    /// Inside a future another runtime is driving, `block_on` panics; `try_block_on` returns the
+    /// typed error instead, without polling the future.
     #[test]
-    fn try_block_on_refuses_inside_a_runtime_context() {
-        let outer = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("current-thread runtime builds");
-        let _entered = outer.enter();
+    fn try_block_on_refuses_inside_a_driven_future() {
+        let outer = BlockingRuntime::new().expect("current-thread runtime builds");
         let runtime = BlockingRuntime::new().expect("current-thread runtime builds");
         let polled = std::cell::Cell::new(false);
-        let result = runtime.try_block_on(async { polled.set(true) });
+        let result = outer.block_on(async { runtime.try_block_on(async { polled.set(true) }) });
         assert_eq!(result, Err(NestedRuntime { _private: () }));
         assert!(!polled.get());
         let error: &dyn std::error::Error = &result.unwrap_err();
@@ -134,14 +142,71 @@ mod tests {
         );
     }
 
-    /// The same refusal from inside an async task, the context a blocking client called from an
+    /// The same refusal from a spawned async task, the context a blocking client called from an
     /// async handler runs in.
     #[test]
-    fn try_block_on_refuses_inside_an_async_task() {
+    fn try_block_on_refuses_inside_a_spawned_task() {
         let outer = BlockingRuntime::new().expect("current-thread runtime builds");
         let inner = BlockingRuntime::new().expect("current-thread runtime builds");
-        let result = outer.block_on(async { inner.try_block_on(async { 1 }) });
-        assert!(result.is_err());
+        let result = outer.block_on(async move {
+            tokio::spawn(async move { inner.try_block_on(async { 1 }) })
+                .await
+                .expect("the task completes")
+        });
+        assert_eq!(result, Err(NestedRuntime { _private: () }));
+    }
+
+    /// A task that has spent its whole cooperative budget is still inside the runtime.
+    #[test]
+    fn try_block_on_refuses_once_the_task_budget_is_spent() {
+        let outer = BlockingRuntime::new().expect("current-thread runtime builds");
+        let inner = BlockingRuntime::new().expect("current-thread runtime builds");
+        let result = outer.block_on(async {
+            spend_the_task_budget();
+            inner.try_block_on(async { 1 })
+        });
+        assert_eq!(result, Err(NestedRuntime { _private: () }));
+    }
+
+    /// The probe leaves the calling task's budget as it found it.
+    #[test]
+    fn a_refusal_spends_none_of_the_task_budget() {
+        let outer = BlockingRuntime::new().expect("current-thread runtime builds");
+        let inner = BlockingRuntime::new().expect("current-thread runtime builds");
+        let spendable = outer.block_on(async {
+            assert!(inner.try_block_on(async { 1 }).is_err());
+            spend_the_task_budget()
+        });
+        let fresh = outer.block_on(async { spend_the_task_budget() });
+        assert_eq!(spendable, fresh);
+    }
+
+    /// `spawn_blocking`'s pool threads carry the runtime's handle but drive no tasks, so
+    /// `block_on` works there and `try_block_on` drives the future: this is where the module
+    /// docs send a caller who is inside an async runtime.
+    #[test]
+    fn try_block_on_drives_a_future_inside_spawn_blocking() {
+        let outer = BlockingRuntime::new().expect("current-thread runtime builds");
+        let inner = BlockingRuntime::new().expect("current-thread runtime builds");
+        let result = outer.block_on(async move {
+            tokio::task::spawn_blocking(move || inner.try_block_on(async { 1 }))
+                .await
+                .expect("the blocking task completes")
+        });
+        assert_eq!(result, Ok(1));
+    }
+
+    /// A `Runtime::enter` guard makes the runtime's handle current without driving it, so
+    /// `block_on` works there and `try_block_on` drives the future.
+    #[test]
+    fn try_block_on_drives_a_future_under_an_enter_guard() {
+        let outer = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime builds");
+        let _entered = outer.enter();
+        assert!(tokio::runtime::Handle::try_current().is_ok());
+        let runtime = BlockingRuntime::new().expect("current-thread runtime builds");
+        assert_eq!(runtime.try_block_on(async { 1 }), Ok(1));
     }
 
     #[test]
