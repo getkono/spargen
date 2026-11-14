@@ -864,8 +864,8 @@ fn is_declared_schema(pointer: &crate::diag::JsonPointer) -> bool {
 }
 
 /// Allocate one identifier per member of one type, in `wires` order: a struct's fields by wire
-/// property name, a string enum's variants by wire value, or a union's variants by name hint, each
-/// unique within the type.
+/// property name, a string enum's variants by wire value, a union's variants by name hint, or a
+/// response-header struct's fields by header name, each unique within the type.
 ///
 /// The members are one ranked batch, so who keeps a contested spelling depends on the set of
 /// members and not on the order the spec declares them in (#1422): first a member whose wire name
@@ -1144,7 +1144,8 @@ fn allocate_stream_success_enums(
 ///
 /// The structs are allocated as one ranked batch, so which of two contending structs keeps the bare
 /// spelling depends on the operations and not on the order the spec lists them in: the lexically
-/// smaller `operationId` wins, then the smaller status label.
+/// smaller `operationId` wins, then the smaller status label. Each struct's fields are ranked as a
+/// model's are ([`allocate_members`], #1453), by header name.
 fn allocate_response_headers(
     api: &Api,
     scope: &mut Scope,
@@ -1180,16 +1181,20 @@ fn allocate_response_headers(
     let types = scope.alloc_ranked(&requests, IdentRole::Type);
     let mut records: Vec<HashMap<String, ResponseHeaderNames>> =
         api.operations.iter().map(|_| HashMap::new()).collect();
+    let headers_pointer = pointer.push("headers");
     for ((index, _, label, response), ty) in documented.into_iter().zip(types) {
-        let mut field_scope = Scope::default();
-        let fields = response
+        let wires: Vec<&str> = response
             .headers
             .iter()
-            .map(|header| {
-                let field = field_scope.alloc(&header.name, IdentRole::Field, &pointer);
-                (header.name.clone(), field)
-            })
+            .map(|header| header.name.as_str())
             .collect();
+        let idents = allocate_members(
+            &mut Scope::default(),
+            &wires,
+            IdentRole::Field,
+            &headers_pointer,
+        );
+        let fields = wires.into_iter().map(str::to_owned).zip(idents).collect();
         records[index].insert(label, ResponseHeaderNames { ty, fields });
     }
     records

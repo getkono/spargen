@@ -381,19 +381,25 @@ fn response_headers(
         let label = crate::name::status_label(status);
         let header_names = names.operation(&operation.id).response_headers(&label);
         let name = header_names.ty.as_str().to_owned();
-        let fields = response
-            .headers
-            .iter()
-            .map(|header| {
-                let field = header_names.field(&header.name).as_str().to_owned();
-                let surface = MemberSurface {
-                    ty: canon_ty(header.ty, api, names, settings),
-                    required: header.required,
-                };
-                (field, surface)
-            })
-            .collect();
-        structs.insert(status.display_label(), HeadersSurface { name, fields });
+        let mut fields = BTreeMap::new();
+        let mut bindings = BTreeMap::new();
+        for header in &response.headers {
+            let field = header_names.field(&header.name).as_str().to_owned();
+            bindings.insert(field.clone(), header.name.clone());
+            let surface = MemberSurface {
+                ty: canon_ty(header.ty, api, names, settings),
+                required: header.required,
+            };
+            fields.insert(field, surface);
+        }
+        structs.insert(
+            status.display_label(),
+            HeadersSurface {
+                name,
+                fields,
+                bindings,
+            },
+        );
     }
     structs
 }

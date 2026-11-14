@@ -168,13 +168,14 @@ use.
   suffix is a hash of the item's JSON Pointer with the type and subtype of each media key on it
   lowercased, so respelling a media key's type or subtype in another letter case renames nothing;
   its parameters are hashed as written, so a respelled parameter (`Charset` for `charset`) does.
-- Where two properties of one model, or two values of one enum, case to the same field or variant
-  name, the one whose wire name already is that name keeps it (`foo_bar` beside `fooBar`), and
+- Where two properties of one model, two values of one enum, or two headers of one response case
+  to the same field or variant name, the one whose wire name already is that name keeps it (`foo_bar` beside `fooBar`), and
   otherwise the lexically smaller wire name does; the other takes a disambiguated name seeded from
   its own wire name. The order the spec declares them in decides nothing. A name that comes to
   stand for another wire name (a new `foo_bar` beside an existing `fooBar`, or a new query
   `page-size` beside `pageSize`, or a new header `id` beside an existing cookie `id`, since a
-  header ranks before a cookie) still compiles and silently sends or reads the other member, so
+  header ranks before a cookie, or a new response header `X-Rate-Limit` beside `X_Rate_Limit`)
+  still compiles and silently sends or reads the other member, so
   `spargen diff` reports it as major (`identifier-rebound`).
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
