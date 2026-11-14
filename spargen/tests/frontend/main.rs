@@ -90,6 +90,7 @@ mod unions_null_branches;
 mod unions_nullability;
 mod unions_siblings;
 mod untyped_branch_nullability;
+mod version_gate;
 mod xml;
 mod xml_members;
 mod xml_names;
