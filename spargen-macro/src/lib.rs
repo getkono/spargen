@@ -417,7 +417,7 @@ fn parse_datetime(
     let backend = value
         .value()
         .parse()
-        .map_err(|message: String| syn::Error::new(value.span(), message))?;
+        .map_err(|error: spargen::UnknownDateTimeBackend| syn::Error::new(value.span(), error))?;
     if slot.is_some() {
         return Err(syn::Error::new(
             key.span(),
