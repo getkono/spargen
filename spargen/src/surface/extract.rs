@@ -71,10 +71,30 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
             );
         }
 
-        let request_body = operation.typed_body().map(|(body, ty)| MemberSurface {
-            ty: canon_ty(ty, api, names, settings),
-            required: body.required,
+        let file_parts = api.multipart_file_parts(operation);
+        let request_body = operation.typed_body().map(|(body, ty)| {
+            let ty = canon_ty(ty, api, names, settings);
+            // An optional body with file parts is the concrete `Option<MultipartBody<'_, T>>`;
+            // a required one is `impl AsMultipartBody<T>`, which `&T` still satisfies.
+            let ty = if file_parts.is_some() && !body.required {
+                format!("MultipartBody<{ty}>")
+            } else {
+                ty
+            };
+            MemberSurface {
+                ty,
+                required: body.required,
+            }
         });
+        let file_name_setters = file_parts
+            .map(|parts| {
+                names
+                    .file_name_setters(&parts)
+                    .into_iter()
+                    .map(|(setter, _)| setter)
+                    .collect()
+            })
+            .unwrap_or_default();
         let error = operation.responses.error();
 
         operations.insert(
@@ -103,6 +123,7 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                 positional_args,
                 params,
                 request_body,
+                file_name_setters,
                 success: success_sig(&operation.responses.success(), api, names, settings),
                 error: error_sig(&error, api, names, settings),
                 error_body: error_body_sig(&error, api, names, settings),

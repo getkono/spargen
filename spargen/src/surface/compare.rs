@@ -203,6 +203,24 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
         new.request_body.as_ref(),
         changes,
     );
+    for setter in old.file_name_setters.union(&new.file_name_setters) {
+        match (
+            old.file_name_setters.contains(setter),
+            new.file_name_setters.contains(setter),
+        ) {
+            (false, true) => changes.push(Change::new(
+                ChangeKind::FileNameSetterAdded,
+                key,
+                format!("file name setter `{setter}` added"),
+            )),
+            (true, false) => changes.push(Change::new(
+                ChangeKind::FileNameSetterRemoved,
+                key,
+                format!("file name setter `{setter}` removed"),
+            )),
+            _ => {}
+        }
+    }
     if old.success != new.success {
         changes.push(Change::new(
             ChangeKind::SuccessTypeChanged,

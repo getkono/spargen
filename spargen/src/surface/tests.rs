@@ -62,6 +62,8 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::CredentialSettersChanged,
         ChangeKind::TestingModuleAdded,
         ChangeKind::TestingModuleRemoved,
+        ChangeKind::FileNameSetterAdded,
+        ChangeKind::FileNameSetterRemoved,
     ];
     for kind in every {
         // Exhaustive by construction: adding a variant to `ChangeKind` fails to compile here
@@ -118,7 +120,9 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::CredentialSchemeRemoved
             | ChangeKind::CredentialSettersChanged
             | ChangeKind::TestingModuleAdded
-            | ChangeKind::TestingModuleRemoved => {}
+            | ChangeKind::TestingModuleRemoved
+            | ChangeKind::FileNameSetterAdded
+            | ChangeKind::FileNameSetterRemoved => {}
         }
     }
     every.to_vec()
@@ -179,6 +183,8 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::CredentialSettersChanged => "CredentialSettersChanged",
         ChangeKind::TestingModuleAdded => "TestingModuleAdded",
         ChangeKind::TestingModuleRemoved => "TestingModuleRemoved",
+        ChangeKind::FileNameSetterAdded => "FileNameSetterAdded",
+        ChangeKind::FileNameSetterRemoved => "FileNameSetterRemoved",
     }
 }
 
@@ -186,7 +192,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
 fn the_kind_list_covers_the_whole_enum() {
     assert_eq!(
         all_kinds().len(),
-        52,
+        54,
         "a `ChangeKind` variant reached the exhaustive match without joining the list"
     );
 }
@@ -262,6 +268,7 @@ fn only_the_additive_kinds_are_minor() {
         ChangeKind::StreamTwinAdded,
         ChangeKind::CredentialSchemeAdded,
         ChangeKind::TestingModuleAdded,
+        ChangeKind::FileNameSetterAdded,
     ];
     for kind in all_kinds() {
         let expected = if MINOR.contains(&kind) {

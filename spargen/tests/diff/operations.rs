@@ -307,6 +307,106 @@ fn adding_a_request_body_is_major() {
     assert_eq!(report.bump, Impact::Major);
 }
 
+/// A request body whose object holds a binary `photo`, sent under `media`, `required` or not.
+fn photo_body(media: &str, required: bool) -> String {
+    format!(
+        "      requestBody:
+        required: {required}
+        content:
+          {media}:
+            schema:
+              type: object
+              properties:
+                photo: {{ type: string, format: binary }}
+"
+    )
+}
+
+#[test]
+fn a_body_turning_multipart_with_a_file_part_adds_its_file_name_setter_and_is_minor() {
+    // Issue #1385: the binary `photo` becomes a file part, whose `filename` a caller sets with
+    // `photo_file_name` on the `MultipartBody` the method now takes. A required body is
+    // `impl AsMultipartBody<T>`, which the `&T` every caller passes still satisfies.
+    let old = full(
+        &pets_get("listPets", &photo_body("application/json", true), PET_REF),
+        PET_SCHEMA,
+    );
+    let new = full(
+        &pets_get(
+            "listPets",
+            &photo_body("multipart/form-data", true),
+            PET_REF,
+        ),
+        PET_SCHEMA,
+    );
+    let report = diff(&old, &new);
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::FileNameSetterAdded],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.changes[0].location, "GET /pets");
+    assert_eq!(
+        report.changes[0].detail,
+        "file name setter `photo_file_name` added"
+    );
+    assert_eq!(report.bump, Impact::Minor);
+}
+
+#[test]
+fn a_body_losing_its_file_part_removes_its_file_name_setter_and_is_major() {
+    let old = full(
+        &pets_get(
+            "listPets",
+            &photo_body("multipart/form-data", true),
+            PET_REF,
+        ),
+        PET_SCHEMA,
+    );
+    let new = full(
+        &pets_get("listPets", &photo_body("application/json", true), PET_REF),
+        PET_SCHEMA,
+    );
+    let report = diff(&old, &new);
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::FileNameSetterRemoved],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn an_optional_body_turning_multipart_with_a_file_part_changes_its_argument_type() {
+    // An optional body with file parts is `Option<MultipartBody<'_, T>>`, so `Some(&body)` no
+    // longer compiles.
+    let old = full(
+        &pets_get("listPets", &photo_body("application/json", false), PET_REF),
+        PET_SCHEMA,
+    );
+    let new = full(
+        &pets_get(
+            "listPets",
+            &photo_body("multipart/form-data", false),
+            PET_REF,
+        ),
+        PET_SCHEMA,
+    );
+    let report = diff(&old, &new);
+    assert_eq!(
+        kinds(&report),
+        vec![
+            ChangeKind::RequestBodyTypeChanged,
+            ChangeKind::FileNameSetterAdded
+        ],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
 #[test]
 fn removing_a_request_body_is_major() {
     let old = full(&pets_get("listPets", REQUEST_BODY_PET, PET_REF), PET_SCHEMA);
