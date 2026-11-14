@@ -5,8 +5,8 @@ use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{
-    AdditionalProps, JsonCategory, ScalarValue, Ty, TypeId, TypeKind, UnionMode, UnionStrategy,
-    VariantDispatch,
+    AdditionalProps, JsonCategory, ScalarValue, Ty, TypeId, TypeKind, Union, UnionMode,
+    UnionStrategy, UnionVariant, VariantDispatch,
 };
 use crate::name::hint_segment;
 use crate::oas31::discriminator::{
@@ -16,7 +16,7 @@ use crate::oas31::discriminator::{
 use crate::oas31::{Resolver, Schema, SchemaOr};
 
 use super::shape::schema_has_union;
-use super::strategy::UnionDispatch;
+use super::strategy::{retain_strategy, UnionDispatch};
 use super::union::{HeldUntypedWarning, LoweredVariant};
 use super::LowerCtx;
 
@@ -547,11 +547,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// a variant reached an open reservation. Run once every reservation is filled, so the
     /// declaration order of the components decides nothing: the union gets the dispatch, the
     /// pinned variant names and the reports it would have had were each variant lowered before
-    /// it. Every union definition lowered from the deferred schema over the same variant types
-    /// takes the decision. A refusal is reported here, and the document is rejected.
+    /// it. Every union definition carrying the union's [`VariantDispatch::Deferred`] markers takes
+    /// the decision over the variants it kept: the union itself, and each copy a meet, a collapse
+    /// or a re-emit made of it before the decision, exactly as a copy made after it would have
+    /// kept the decided dispatch. A refusal is reported here, and the document is rejected.
     pub(super) fn decide_deferred_discriminators(&mut self) {
         for deferred in std::mem::take(&mut self.deferred_discriminators) {
             let DeferredDiscriminator {
+                id: deferred_id,
                 schema,
                 hint,
                 mode,
@@ -561,16 +564,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 fresh,
                 reports_untyped,
             } = deferred;
-            let types: Vec<Ty> = lowered.iter().map(|variant| variant.ty).collect();
-            let targets: Vec<TypeId> = self
+            // Each definition whose every variant is a marker of this union, with the position
+            // in the union each of its variants stands for.
+            let targets: Vec<(TypeId, Vec<usize>)> = self
                 .graph
                 .iter()
-                .filter(|(_, def)| {
-                    def.provenance == schema.provenance
-                        && matches!(&def.kind, TypeKind::Union(union)
-                            if union.variants.iter().map(|variant| variant.ty).eq(types.iter().copied()))
+                .filter_map(|(id, def)| {
+                    let TypeKind::Union(union) = &def.kind else {
+                        return None;
+                    };
+                    let members: Option<Vec<usize>> = union
+                        .variants
+                        .iter()
+                        .map(|variant| match variant.dispatch {
+                            VariantDispatch::Deferred { union, member } if union == deferred_id => {
+                                Some(member)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    members
+                        .filter(|members| !members.is_empty())
+                        .map(|members| (id, members))
                 })
-                .map(|(id, _)| id)
                 .collect();
             if targets.is_empty() {
                 continue;
@@ -597,27 +613,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     },
                 );
             }
-            let first = targets[0];
-            for id in targets {
+            for (id, members) in targets {
                 if let Some(TypeKind::Union(union)) =
                     self.graph.get_mut(id).map(|def| &mut def.kind)
                 {
-                    union.strategy = strategy.clone();
-                    for ((variant, lowered), dispatch) in
-                        union.variants.iter_mut().zip(&lowered).zip(&dispatches)
-                    {
-                        variant.name_hint.clone_from(&lowered.name_hint);
-                        variant.dispatch = dispatch.clone();
+                    union.strategy = retain_strategy(&strategy, &members);
+                    for (variant, &member) in union.variants.iter_mut().zip(&members) {
+                        variant.name_hint.clone_from(&lowered[member].name_hint);
+                        variant.dispatch = dispatches[member].clone();
                     }
                 }
             }
             if reports_untyped {
                 let labels: Vec<usize> = lowered.iter().map(LoweredVariant::member).collect();
-                let untyped = if let Some(TypeKind::Union(union)) = self.kind_of(first) {
-                    self.untyped_one_of_variants(union, &labels)
-                } else {
-                    Vec::new()
+                let union = Union {
+                    variants: lowered
+                        .iter()
+                        .zip(dispatches)
+                        .map(|(variant, dispatch)| UnionVariant {
+                            name_hint: variant.name_hint.clone(),
+                            ty: variant.ty,
+                            dispatch,
+                        })
+                        .collect(),
+                    strategy,
                 };
+                let untyped = self.untyped_one_of_variants(&union, &labels);
                 self.report_untyped_one_of(HeldUntypedWarning {
                     provenance: schema.provenance.clone(),
                     untyped,
@@ -818,10 +839,14 @@ pub(super) struct UncarriedTag {
 /// A discriminated union whose dispatch waits for lowering to fill a reservation one of its
 /// variants reaches ([`LowerCtx::awaits_reservation`]): everything [`LowerCtx::union_strategy`]
 /// and [`LowerCtx::name_pinned_variants`] read, held until
-/// [`LowerCtx::decide_deferred_discriminators`] decides it. Until then the union carries a
-/// provisional dispatch that nothing emits.
+/// [`LowerCtx::decide_deferred_discriminators`] decides it. Until then the union, and every copy
+/// a meet, a collapse or a re-emit makes of it, carries [`VariantDispatch::Deferred`] markers,
+/// which no strategy admits, so a copy the decision missed is an `E011` invariant failure rather
+/// than an emitted dispatch.
 pub(super) struct DeferredDiscriminator {
-    /// The union schema, whose provenance identifies the union definitions to decide.
+    /// The number [`LowerCtx::union_strategy`] gave the union, which its variants' markers carry.
+    pub(super) id: usize,
+    /// The union schema, whose discriminator is decided and at whose provenance it reports.
     pub(super) schema: Schema,
     pub(super) hint: String,
     pub(super) mode: UnionMode,

@@ -453,7 +453,9 @@ pub(super) fn emit_union(
                     VariantDispatch::Disjoint(DisjointFeature::RequiredKey(key)) => {
                         quote! { value.get(#key).is_some() }
                     }
-                    VariantDispatch::Discriminated { .. } | VariantDispatch::Trial { .. } => {
+                    VariantDispatch::Discriminated { .. }
+                    | VariantDispatch::Trial { .. }
+                    | VariantDispatch::Deferred { .. } => {
                         unreachable!("{MISMATCHED_DISPATCH}")
                     }
                 };
@@ -657,7 +659,9 @@ fn discriminated_dispatch(variant: &UnionVariant) -> Discriminated<'_> {
             category: *category,
             untagged: *untagged,
         },
-        VariantDispatch::Disjoint(_) | VariantDispatch::Trial { .. } => {
+        VariantDispatch::Disjoint(_)
+        | VariantDispatch::Trial { .. }
+        | VariantDispatch::Deferred { .. } => {
             unreachable!("{MISMATCHED_DISPATCH}")
         }
     }
@@ -772,7 +776,9 @@ fn json_category_predicate(category: &JsonCategory) -> TokenStream {
 fn trial_dispatch(variant: &UnionVariant) -> (u32, Option<JsonCategory>) {
     match variant.dispatch {
         VariantDispatch::Trial { priority, category } => (priority, category),
-        VariantDispatch::Discriminated { .. } | VariantDispatch::Disjoint(_) => {
+        VariantDispatch::Discriminated { .. }
+        | VariantDispatch::Disjoint(_)
+        | VariantDispatch::Deferred { .. } => {
             unreachable!("{MISMATCHED_DISPATCH}")
         }
     }

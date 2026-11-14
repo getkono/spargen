@@ -736,7 +736,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let fresh = self.fresh_member_ids(&member_lowerings, &meet_inserts);
         // A dispatch waiting on a reservation is decided, with its pinned names, once lowering
         // has filled it ([`Self::decide_deferred_discriminators`]).
-        let deferred = deferred.then(|| DeferredDiscriminator {
+        let deferred = deferred.map(|id| DeferredDiscriminator {
+            id,
             schema: schema.clone(),
             hint: hint.to_owned(),
             mode,
@@ -1093,8 +1094,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Where `may_defer` holds and a variant of a discriminated union reaches a reservation still
     /// being lowered ([`Self::awaits_reservation`]), nothing about that variant is known yet, so
     /// the decision waits until every reservation is filled: the dispatch returned is a
-    /// provisional one, every variant untagged, and the `bool` beside it says so; the caller
-    /// records the union for [`Self::decide_deferred_discriminators`]. Deciding it now would
+    /// provisional one, every variant a [`VariantDispatch::Deferred`] marker, and the number
+    /// beside it names the deferred union; the caller records the union under that number for
+    /// [`Self::decide_deferred_discriminators`]. Deciding it now would
     /// make the order components are declared in choose the dispatch.
     pub(super) fn union_strategy(
         &mut self,
@@ -1103,7 +1105,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         mode: UnionMode,
         discriminator_members: Option<&DiscriminatorMembers>,
         may_defer: bool,
-    ) -> Option<(UnionDispatch, bool)> {
+    ) -> Option<(UnionDispatch, Option<usize>)> {
         let types: Vec<Ty> = lowered.iter().map(|variant| variant.ty).collect();
         let types = types.as_slice();
         let dispatch = if let (Some(discriminator), Some(resolved)) =
@@ -1114,6 +1116,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .iter()
                     .any(|ty| self.awaits_reservation(*ty, &mut HashSet::new()))
             {
+                let union = self.deferred_discriminator_count;
+                self.deferred_discriminator_count += 1;
                 let provisional = UnionDispatch {
                     strategy: UnionStrategy::Discriminated {
                         tag_field: discriminator.property_name.clone(),
@@ -1121,16 +1125,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         mode,
                         open: false,
                     },
-                    variants: types
-                        .iter()
-                        .map(|_| VariantDispatch::Discriminated {
-                            tags: Vec::new(),
-                            category: None,
-                            untagged: Some(0),
-                        })
+                    variants: (0..types.len())
+                        .map(|member| VariantDispatch::Deferred { union, member })
                         .collect(),
                 };
-                return Some((provisional, true));
+                return Some((provisional, Some(union)));
             }
             // `discriminator_members` already refused a `defaultMapping` naming a non-member. A
             // member the enclosing schema's sibling keywords excluded (`W011`) is the one way left
@@ -1250,7 +1249,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.disjoint_strategy(types)
                 .unwrap_or_else(|| self.trial_strategy(types, mode))
         };
-        Some((dispatch, false))
+        Some((dispatch, None))
     }
 
     /// Report, as `W001` at `provenance`, the variants of a trial-matched `oneOf` (one whose decode

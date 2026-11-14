@@ -269,6 +269,7 @@ fn lower_pass(
         variant_meets: Vec::new(),
         deferred_map_values: Vec::new(),
         deferred_discriminators: Vec::new(),
+        deferred_discriminator_count: 0,
         pinned_tag_fields: Vec::new(),
         reserved_types: HashSet::new(),
     };
@@ -753,6 +754,11 @@ struct LowerCtx<'a, 'doc> {
     /// [`Self::decide_deferred_discriminators`] decides them once lowering has filled every
     /// reservation.
     deferred_discriminators: Vec<discriminator::DeferredDiscriminator>,
+    /// How many discriminated unions [`Self::union_strategy`] has deferred: the next one's
+    /// number, which its [`VariantDispatch::Deferred`] markers carry.
+    ///
+    /// [`VariantDispatch::Deferred`]: crate::ir::VariantDispatch::Deferred
+    deferred_discriminator_count: usize,
     /// Each struct [`Self::name_pinned_variants`] named from its pinned tag, with the tag
     /// property it leaves out. The field stays through lowering, so a later meet still reads the
     /// pin and excludes the branch a conflicting tag constraint rules out;

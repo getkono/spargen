@@ -234,6 +234,17 @@ pub(crate) enum VariantDispatch {
         /// every payload.
         category: Option<JsonCategory>,
     },
+    /// A variant of a discriminated union whose dispatch lowering decides only once every
+    /// reservation is filled: the variant at position `member` of the union lowering deferred
+    /// as `union`. A union definition copied from it, by a meet, a collapse or a re-emit, carries
+    /// these markers with the variants it keeps, so the decision reaches every copy. No
+    /// [`UnionStrategy`] admits it, so `check_invariants` reports one that outlives lowering.
+    Deferred {
+        /// Which deferred union the variant came from, in the order lowering deferred them.
+        union: usize,
+        /// The variant's position in that union as lowering built it.
+        member: usize,
+    },
 }
 
 /// Runtime matching semantics for an overlapping typed union.
