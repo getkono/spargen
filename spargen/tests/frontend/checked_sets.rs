@@ -366,6 +366,7 @@ fn a_member_the_schemas_own_type_excludes_is_rejected() {
             "1",
             "an integer",
         ),
+        ("{ type: string, enum: [a, 1.5] }", "1.5", "a number"),
     ] {
         let report = generate(&level_document(schema));
         assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
@@ -482,6 +483,49 @@ fn an_enum_and_a_const_sharing_no_value_are_irreconcilable() {
         assert!(
             messages_for(&report, Code::NonScalarEnum).is_empty(),
             "{schema}: {report:#?}"
+        );
+    }
+}
+
+/// An `enum` beside a `const` is judged by the rules it is judged by alone before the two are
+/// intersected, so a member no set can hold is the `E008` its `allOf` spelling reports, and is
+/// never dropped to leave the `const`'s value or to report a disjoint pair: `1.0` equals `1`
+/// (#1406).
+#[test]
+fn an_enum_beside_a_const_is_checked_before_the_intersection() {
+    for (both, all_of) in [
+        (
+            "{ enum: [1, x], const: x }",
+            "{ allOf: [{ enum: [1, x] }, { const: x }] }",
+        ),
+        (
+            "{ enum: [{ a: 1 }, x], const: x }",
+            "{ allOf: [{ enum: [{ a: 1 }, x] }, { const: x }] }",
+        ),
+        (
+            "{ enum: [1.0, 2], const: 1 }",
+            "{ allOf: [{ enum: [1.0, 2] }, { const: 1 }] }",
+        ),
+        (
+            "{ type: number, enum: [1.0, 2], const: 1 }",
+            "{ allOf: [{ type: number, enum: [1.0, 2] }, { const: 1 }] }",
+        ),
+    ] {
+        let report = generate(&level_document(both));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{both}: {report:#?}");
+        assert!(e013s(&report).is_empty(), "{both}: {report:#?}");
+        let spelled = generate(&level_document(all_of));
+        assert_eq!(
+            spelled.outcome(),
+            Outcome::Rejected,
+            "{all_of}: {spelled:#?}"
+        );
+        let e008 = messages_for(&report, Code::NonScalarEnum);
+        assert!(!e008.is_empty(), "{both}: {report:#?}");
+        assert_eq!(
+            e008,
+            messages_for(&spelled, Code::NonScalarEnum),
+            "{both} is not {all_of}"
         );
     }
 }
