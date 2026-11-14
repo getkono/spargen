@@ -66,7 +66,8 @@ pub struct Diagnostic {
     /// know. `Outcome::admits` is that check.
     ///
     /// Hidden from the documented API, like `OutcomeClaim` and `Outcome::admits`: public only so
-    /// `spargen/tests/frontend/`, outside the crate, can read and set it, and outside semver.
+    /// `spargen/tests/frontend/` and `spargen/tests/corpus_manifest.rs`, outside the crate, can
+    /// read and set it, and outside semver.
     #[doc(hidden)]
     pub claim: OutcomeClaim,
 }
@@ -79,8 +80,8 @@ pub struct Diagnostic {
 /// here. `Outcome::admits` then checks that claim against the run that emitted it (#413).
 ///
 /// Hidden from the documented API: it is the internal claim oracle, public only so
-/// `spargen/tests/frontend/`, outside the crate, can name it, and outside semver. Its serialized
-/// spelling is the `claim` key of a diagnostic's JSON form.
+/// `spargen/tests/frontend/` and `spargen/tests/corpus_manifest.rs`, outside the crate, can name
+/// it, and outside semver. Its serialized spelling is the `claim` key of a diagnostic's JSON form.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]

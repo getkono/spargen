@@ -82,8 +82,8 @@ pub use config::{
     UnionTags, UuidMapping,
 };
 pub use diag::{Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, Severity, Span, UnknownCode};
-// The internal claim oracle `spargen/tests/frontend/` holds every run to, hidden and outside
-// semver like `Outcome::admits` and `Diagnostic::claim`.
+// The internal claim oracle `spargen/tests/frontend/` and `spargen/tests/corpus_manifest.rs`
+// hold every run to, hidden and outside semver like `Outcome::admits` and `Diagnostic::claim`.
 #[doc(hidden)]
 pub use diag::OutcomeClaim;
 pub use diff_api::{DiffRejection, DiffSides, Side};

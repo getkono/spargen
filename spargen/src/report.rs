@@ -55,8 +55,9 @@ impl Outcome {
     /// run reports must make a claim its outcome admits, through `check` and through `generate`
     /// alike. Any other combination is a message that says something false about the run.
     ///
-    /// Hidden from the documented API: it is the oracle `spargen/tests/frontend/` holds every run
-    /// to, public only so that suite, outside the crate, can call it, and outside semver.
+    /// Hidden from the documented API: it is the oracle `spargen/tests/frontend/` and
+    /// `spargen/tests/corpus_manifest.rs` hold every run to, public only so those suites, outside
+    /// the crate, can call it, and outside semver.
     #[doc(hidden)]
     pub fn admits(self, claim: OutcomeClaim) -> bool {
         match claim {
