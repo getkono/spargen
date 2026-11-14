@@ -387,6 +387,35 @@ fn a_part_header_setting_content_disposition_is_refused() {
     }
 }
 
+/// A part header map holding `Content-Type`, in any case, is refused as request construction,
+/// since the part writes its own from `mime_str`, and the refusal names `mime_str`.
+#[test]
+fn a_part_header_setting_content_type_is_refused() {
+    for name in ["content-type", "Content-Type"] {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_static("text/csv"),
+        );
+        let error = MultipartPart::bytes(&b"a,b"[..])
+            .mime_str("application/json")
+            .unwrap()
+            .headers(headers)
+            .unwrap_err();
+        assert!(matches!(error, Error::RequestConstruction(_)));
+        let mut chain = Vec::new();
+        let mut cause: Option<&dyn std::error::Error> = Some(&error);
+        while let Some(current) = cause {
+            chain.push(current.to_string());
+            cause = current.source();
+        }
+        assert!(
+            chain.iter().any(|message| message.contains("mime_str")),
+            "{chain:?}"
+        );
+    }
+}
+
 /// A candidate boundary that occurs in a part, in its bytes or its header lines, is passed over
 /// for the next seed's.
 #[test]
