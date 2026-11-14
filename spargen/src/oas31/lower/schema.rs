@@ -573,15 +573,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// The members of a schema's own `enum` that equal its own `const`, in the `enum`'s order:
     /// both keywords apply, so the schema's values are the ones both list, as the `allOf` set
-    /// meet reads the same pair written as two members (#1406). A `const` no set can hold (an
-    /// object, say) is the one member, which [`Self::lower_enum`] reports as it reports it alone.
-    /// None shared is `E013`.
+    /// meet reads the same pair written as two members (#1406). The `enum` is first judged by
+    /// [`Self::enum_set`]'s rules, as it is alone, so a member no set can hold is reported rather
+    /// than dropped by the intersection. A `const` no set can hold (an object, say) is the one
+    /// member, which [`Self::lower_enum`] reports as it reports it alone. None shared is `E013`.
     fn enum_meet_const(
         &mut self,
         enumeration: &[SpannedValue],
         value: &SpannedValue,
         schema: &Schema,
     ) -> Option<Vec<SpannedValue>> {
+        self.enum_set(enumeration, schema)?;
         let integer = schema.types.types.contains(&JsonType::Integer);
         let wanted = match &value.node {
             Node::Null => None,
@@ -615,12 +617,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(shared)
     }
 
-    fn lower_enum(&mut self, values: &[SpannedValue], schema: &Schema, hint: &str) -> Option<Ty> {
+    /// The set the `enum`/`const` members `values` of `schema` lower to, its `null` members
+    /// stripped, or `None` once the `E008` or `E013` that says why it has none is emitted. It
+    /// inserts nothing, so [`Self::enum_meet_const`] judges an `enum` by it before intersecting.
+    fn enum_set(&mut self, values: &[SpannedValue], schema: &Schema) -> Option<EnumSet> {
         // The enum/const admits `null` where its own `type`, `enum` and `const` all do — their
         // conjunction, the one decision ([`NullAdmission::of_own_keywords`]): a `"null"` in the
         // type array beside an `enum` that leaves it out admits none (#666), and nor does a `null`
-        // member beside a `type` that leaves it out. Strip the nulls, lower the remaining scalars
-        // as the enum, and wrap the result in `Option` where it admits `null`.
+        // member beside a `type` that leaves it out. Strip the nulls and read the remaining
+        // scalars as the set.
         let has_null = NullAdmission::of_own_keywords(schema) == NullAdmission::Admits;
         // Declared order is preserved (minus nulls) so double generation stays byte-identical.
         let remainder: Vec<&SpannedValue> = values
@@ -669,10 +674,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return None;
         }
 
-        // Only `null` members remained (`enum: [null]` / `const: null`): emit the exact JSON null
-        // type (`()`), not a nullable unconstrained value that would also accept non-null content.
+        // Only `null` members remained (`enum: [null]` / `const: null`): no scalar set.
         if remainder.is_empty() {
-            return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
+            return Some(EnumSet {
+                repr: ScalarRepr::String,
+                variants: Vec::new(),
+                width: Prim::String,
+            });
         }
 
         // On a schema whose `type` names `integer`, an integral float member is the integer it
@@ -711,8 +719,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             variants.push(scalar);
         }
-        // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate
-        // (last-insert invariant: `lower_into_reservation`).
         let repr = repr.unwrap_or(ScalarRepr::String);
         // An integer set is held in the width its `format` names, as a plain `integer` is, so a
         // member that width cannot hold satisfies `enum` and never `format`: no value the schema
@@ -736,6 +742,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
             return None;
         }
+        Some(EnumSet {
+            repr,
+            variants,
+            width,
+        })
+    }
+
+    fn lower_enum(&mut self, values: &[SpannedValue], schema: &Schema, hint: &str) -> Option<Ty> {
+        // Wrap the set in `Option` where the schema admits `null` ([`Self::enum_set`]).
+        let has_null = NullAdmission::of_own_keywords(schema) == NullAdmission::Admits;
+        let EnumSet {
+            repr,
+            variants,
+            width,
+        } = self.enum_set(values, schema)?;
+        // Only `null` members remained (`enum: [null]` / `const: null`): emit the exact JSON null
+        // type (`()`), not a nullable unconstrained value that would also accept non-null content.
+        if variants.is_empty() {
+            return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
+        }
+        // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate
+        // (last-insert invariant: `lower_into_reservation`).
+        //
         // A string set whose own schema names a `uuid` or date format is narrowed against that
         // format exactly as an `allOf` member declaring it would narrow it (`narrowed_set`).
         let formatted = matches!(
@@ -819,6 +848,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             boxed: false,
         }
     }
+}
+
+/// An `enum`/`const` set as [`LowerCtx::enum_set`] reads it: no `variants` where only `null`
+/// members were listed.
+struct EnumSet {
+    repr: ScalarRepr,
+    variants: Vec<ScalarValue>,
+    width: Prim,
 }
 
 /// The enum variant an `enum`/`const` member becomes, or `None` where it has none. `integer` says
