@@ -25,6 +25,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::codegen::DEFAULT_ERROR_BODY_CAP;
 use crate::compat::{KeepRule, Omit, OmitMethod, OmitRule, UnknownOmitToken};
 use crate::ir::DateTimeBackend;
+use crate::source::{local_identity, working_dir};
 
 /// The default cap on diagnostics collected before batching stops.
 const DEFAULT_BATCH_CAP: usize = 100;
@@ -526,8 +527,10 @@ impl Spec {
     ///
     /// The spec records `path`, so an edit to the file reruns the build:
     /// [`generate`](crate::generate) names it as a `cargo:rerun-if-changed` path and fingerprints
-    /// its bytes, and `generate_api!` tracks it. Applying a path already applied, spelled the same,
-    /// sets the file's keys again but appends neither its rules nor a second record of the path.
+    /// its bytes, and `generate_api!` tracks it. Applying a path already applied, however it is
+    /// spelled (paths compare made absolute against the working directory, with `.` and `..`
+    /// segments resolved lexically), sets the file's keys again but appends neither its rules nor
+    /// a second record of the path.
     pub fn config_file(self, path: impl AsRef<Utf8Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let text =
@@ -535,7 +538,12 @@ impl Spec {
                 path: path.to_path_buf(),
                 source,
             })?;
-        let applied = self.config_files.iter().any(|applied| applied == path);
+        let working_dir = working_dir();
+        let identity = local_identity(working_dir.as_deref(), path);
+        let applied = self
+            .config_files
+            .iter()
+            .any(|applied| local_identity(working_dir.as_deref(), applied) == identity);
         let mut spec = self.apply_config(&text, path, !applied)?;
         if !applied {
             spec.config_files.push(path.to_path_buf());
@@ -1044,6 +1052,33 @@ mod tests {
         assert!(spec.bind_headers.is_empty());
         assert!(spec.omit.is_empty());
         assert_eq!(Build::new(spec, "out.rs").cargo, CargoIntegration::Auto);
+    }
+
+    /// A config file reached by a second spelling of its path (here `discover_config_file` from a
+    /// spec spelled `<dir>/./openapi.yaml`, and an explicit `..` detour) is the file already
+    /// applied: its rules are not appended again and the path is recorded once, as first spelled.
+    #[test]
+    fn a_config_file_reached_by_another_spelling_is_applied_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let file = dir.join("spargen.toml");
+        std::fs::write(
+            &file,
+            "[[omit]]\npath = \"/x\"\n[[keep]]\nmethod = \"get\"\npath = \"/k\"\n",
+        )
+        .unwrap();
+
+        let spec = Spec::new(dir.join(".").join("openapi.yaml"))
+            .config_file(&file)
+            .unwrap()
+            .discover_config_file()
+            .unwrap()
+            .config_file(dir.join("sub").join("..").join("spargen.toml"))
+            .unwrap();
+        assert_eq!(spec.omit.rules, [OmitRule::path("/x")]);
+        assert_eq!(spec.omit.keep, [KeepRule::operation(OmitMethod::Get, "/k")]);
+        assert_eq!(spec.config_files(), [file]);
     }
 
     /// `bind_headers` in the file is appended to what the spec already binds, in order, and a

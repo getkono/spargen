@@ -520,6 +520,13 @@ pub(crate) fn response_from_reqwest(
 /// a request-kind failure. A failure to execute is classified by
 /// [`TransportError::from_reqwest`], and one while reading the response body by the rules
 /// [`crate::Error::InterruptedBody`] and [`crate::Error::Protocol`] describe.
+///
+/// Redirects are followed as the wrapped client's policy decides. The client `Client::new` builds
+/// follows one only within the origin of the request and refuses one to another origin as
+/// [`crate::Error::Redirect`]; a client passed to `Client::with_client` or [`Self::new`] keeps its
+/// own policy, reqwest's default following up to ten hops to any origin and forwarding every
+/// header but `Authorization`, `Cookie` and the other few reqwest strips (an `apiKey` header or a
+/// bound header among those forwarded).
 #[derive(Debug, Clone)]
 pub struct ReqwestBackend {
     client: reqwest::Client,
