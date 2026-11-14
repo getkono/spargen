@@ -35,9 +35,7 @@ fn a_204_reconnect_response_ends_the_stream() {
             ..ImmediateReconnect::default()
         });
         let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
-        let request = crate::tests::builder(Method::GET, "https://example.com/events")
-            .build()
-            .unwrap();
+        let request = crate::tests::builder(Method::GET, "https://example.com/events");
         let initial = match framing {
             Framing::Ndjson => "{\"seq\":1}\n",
             _ => "data: {\"seq\":1}\n\n",
@@ -142,9 +140,7 @@ fn refused_reconnect_stream(
 ) -> EventStream<serde_json::Value> {
     let mut core = ClientCore::with_backend(backend, "https://example.com").unwrap();
     core.config_mut().max_error_body = max_error_body;
-    let request = crate::tests::builder(Method::GET, "https://example.com/events")
-        .build()
-        .unwrap();
+    let request = crate::tests::builder(Method::GET, "https://example.com/events");
     EventStream::new_reconnectable(
         response(initial),
         Framing::SseJsonData,

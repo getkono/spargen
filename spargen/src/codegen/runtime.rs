@@ -57,7 +57,8 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
     let stream_reexport = uses_streams.then(|| {
         quote! {
             pub use stream::{
-                EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
+                EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, Resend,
+                StreamError,
             };
         }
     });
