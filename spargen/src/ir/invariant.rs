@@ -261,10 +261,11 @@ mod tests {
     use crate::diag::{Code, Diagnostics, JsonPointer, Provenance};
     use crate::ir::{
         AdditionalProps, Api, BodyEncoding, DisjointFeature, Field, HeaderShape, Info,
-        JsonCategory, MediaType, Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter,
-        PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response, ResponseHeader,
-        Responses, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode,
-        UnionStrategy, UnionVariant, VariantDispatch, XmlField,
+        JsonCategory, MediaType, Method, Openness, Operation, OperationId, ParamLoc, ParamStyle,
+        Parameter, PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response,
+        ResponseHeader, Responses, ScalarEnum, ScalarRepr, ScalarValue, StatusSpec, Struct, Ty,
+        TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant,
+        VariantDispatch, XmlField,
     };
     use indexmap::IndexMap;
 
@@ -924,6 +925,202 @@ mod tests {
         let mut diags = Diagnostics::new(100);
         check_invariants(&api, &mut diags);
         assert!(!diags.has_errors(), "{diags:#?}");
+    }
+
+    /// Whether `check_invariants` reports nothing for `api`.
+    fn accepted(api: &Api) -> bool {
+        let mut diags = Diagnostics::new(100);
+        check_invariants(api, &mut diags);
+        diags.items().is_empty()
+    }
+
+    /// The resolvable header API with a closed two-variant discriminated union whose
+    /// `defaultMapping` is `default_variant`.
+    fn api_with_default_variant(default_variant: usize) -> Api {
+        let variant = |name: &str, tag: &str| UnionVariant {
+            name_hint: name.to_owned(),
+            ty: ty(0),
+            dispatch: VariantDispatch::Discriminated {
+                tags: vec![tag.to_owned()],
+                category: None,
+                untagged: None,
+            },
+        };
+        let mut api = api_with_header_ty(ty(0));
+        api.types.insert(def(
+            "Shape",
+            TypeKind::Union(Union {
+                variants: vec![variant("Circle", "circle"), variant("Square", "square")],
+                strategy: UnionStrategy::Discriminated {
+                    tag_field: "kind".to_owned(),
+                    default_variant: Some(default_variant),
+                    mode: UnionMode::OneOf,
+                    open: false,
+                },
+            }),
+        ));
+        api
+    }
+
+    /// The emitter indexes the union's variants by its `defaultMapping` position unchecked, so one
+    /// past the last variant would panic there; the last variant itself is in range.
+    #[test]
+    fn a_default_variant_out_of_range_is_caught() {
+        assert!(
+            accepted(&api_with_default_variant(1)),
+            "the last variant is a valid `defaultMapping`"
+        );
+        assert_eq!(
+            only_failure(&api_with_default_variant(2)),
+            format!(
+                "{INVARIANT_FAILURE}: union `Shape`'s `defaultMapping` names variant 2, but it has \
+                 2 variants"
+            )
+        );
+    }
+
+    /// The resolvable header API with one closed enum of `repr` listing `variants`.
+    fn api_with_enum(repr: ScalarRepr, width: Prim, variants: Vec<ScalarValue>) -> Api {
+        let mut api = api_with_header_ty(ty(0));
+        api.types.insert(def(
+            "Status",
+            TypeKind::Enum(ScalarEnum {
+                repr,
+                variants,
+                width,
+                openness: Openness::Closed,
+            }),
+        ));
+        api
+    }
+
+    /// Codegen reads a string enum's values as strings (an `unreachable!` otherwise) and an
+    /// integer or boolean set's as its own kind, so a value of another kind is caught, under each
+    /// representation, and a set of its own kind is accepted.
+    #[test]
+    fn an_enum_value_of_another_kind_is_caught() {
+        let string = || ScalarValue::String("on".to_owned());
+        let rows = [
+            (
+                ScalarRepr::String,
+                Prim::String,
+                string(),
+                ScalarValue::Int(1),
+            ),
+            (
+                ScalarRepr::String,
+                Prim::String,
+                string(),
+                ScalarValue::Bool(true),
+            ),
+            (ScalarRepr::Int, Prim::I64, ScalarValue::Int(1), string()),
+            (
+                ScalarRepr::Int,
+                Prim::I64,
+                ScalarValue::Int(1),
+                ScalarValue::Bool(false),
+            ),
+            (
+                ScalarRepr::Bool,
+                Prim::Bool,
+                ScalarValue::Bool(true),
+                ScalarValue::Int(0),
+            ),
+            (
+                ScalarRepr::Bool,
+                Prim::Bool,
+                ScalarValue::Bool(true),
+                string(),
+            ),
+        ];
+        for (repr, width, own, other) in rows {
+            assert!(
+                accepted(&api_with_enum(repr, width, vec![own.clone()])),
+                "{repr:?} listing {own:?}"
+            );
+            assert_eq!(
+                only_failure(&api_with_enum(repr, width, vec![own, other.clone()])),
+                format!(
+                    "{INVARIANT_FAILURE}: enum `Status` of {repr:?} values lists `{}`, a value of \
+                     another kind",
+                    other.wire()
+                ),
+                "{repr:?} listing {other:?}"
+            );
+        }
+    }
+
+    /// The resolvable header API whose operation carries `count` `in: querystring` parameters.
+    fn api_with_querystrings(count: usize) -> Api {
+        let mut api = api_with_header_ty(ty(0));
+        for at in 0..count {
+            api.operations[0].params.push(Parameter {
+                name: format!("filter{at}"),
+                location: ParamLoc::QueryString,
+                ty: ty(0),
+                required: false,
+                style: ParamStyle::Content(MediaType::Json),
+                allow_reserved: false,
+                explode: false,
+                deprecated: false,
+                default_display: None,
+            });
+        }
+        api
+    }
+
+    /// The emitter sets the raw query from the first `in: querystring` parameter it finds, so a
+    /// second one would be silently dropped from the request.
+    #[test]
+    fn a_second_querystring_parameter_is_caught() {
+        assert!(
+            accepted(&api_with_querystrings(1)),
+            "one is the most allowed"
+        );
+        assert_eq!(
+            only_failure(&api_with_querystrings(2)),
+            format!(
+                "{INVARIANT_FAILURE}: operation `listItems` has 2 `in: querystring` parameters, \
+                 but its method sends only one"
+            )
+        );
+    }
+
+    /// The resolvable header API whose `200` entry is followed by one more bodyless entry under
+    /// `status`.
+    fn api_with_second_status(status: StatusSpec) -> Api {
+        let mut api = api_with_header_ty(ty(0));
+        api.operations[0].responses.by_status.push((
+            status,
+            Response {
+                body: None,
+                media: None,
+                stream: None,
+                accept: None,
+                headers: Vec::new(),
+            },
+        ));
+        api
+    }
+
+    /// The emitter names a response variant after its selector, so a selector listed twice would
+    /// emit two variants of one name, which does not compile; distinct selectors, a range beside
+    /// an exact code of its class included, are accepted.
+    #[test]
+    fn a_repeated_status_selector_is_caught() {
+        for distinct in [StatusSpec::Exact(201), StatusSpec::Range(2)] {
+            assert!(
+                accepted(&api_with_second_status(distinct)),
+                "{distinct:?} beside `Exact(200)`"
+            );
+        }
+        assert_eq!(
+            only_failure(&api_with_second_status(StatusSpec::Exact(200))),
+            format!(
+                "{INVARIANT_FAILURE}: operation `listItems` lists the status selector `Exact(200)` \
+                 more than once, so two of its response variants would share a name"
+            )
+        );
     }
 
     /// Every invariant failure starts with [`INVARIANT_FAILURE`], and the shared test oracles match
