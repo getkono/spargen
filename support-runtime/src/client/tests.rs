@@ -199,6 +199,22 @@ fn a_bound_header_value_is_redacted_in_debug() {
     assert!(!debug.contains("tenant-secret-7781"), "{debug}");
 }
 
+/// Issue #1402: a base URL's `user:password@` prefix is a Basic credential the request builder
+/// takes off each request, and its query may carry an `apiKey`; `ClientCore`'s `Debug` printed
+/// both through `Url`'s own `Debug`. It now prints the base URL without either, and the getter
+/// still returns it as configured.
+#[test]
+fn a_base_urls_userinfo_and_query_stay_out_of_debug() {
+    let core = ClientCore::new("https://alice:pa55word@example.com/v1?api_key=k3y").unwrap();
+    for debug in [format!("{core:?}"), format!("{core:#?}")] {
+        assert!(!debug.contains("pa55word"), "{debug}");
+        assert!(!debug.contains("alice"), "{debug}");
+        assert!(!debug.contains("k3y"), "{debug}");
+        assert!(debug.contains("https://example.com/v1"), "{debug}");
+    }
+    assert_eq!(core.base_url().password(), Some("pa55word"));
+}
+
 /// Issue #1335: a value no request could carry as a header value (CR/LF, NUL, DEL, any other
 /// control character but a tab) is refused when it is bound, rather than failing every later
 /// request, and the value already bound stays bound. The refusal names the header and does not
@@ -246,21 +262,50 @@ fn with_client_runs_requests_on_the_supplied_client() {
     assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
 }
 
-/// The installed backend runs on the caller's client, not a default one: its configuration is
-/// what the caller injected it for. reqwest's `Debug` is the one view of a client's configuration
-/// that needs no I/O, and it prints a configured total timeout only when one is set.
+/// Issue #1402: `ClientCore`'s `Debug` printed the injected `reqwest::Client`'s own `Debug`,
+/// whose default headers (an `Authorization` the paginator docs suggest injecting) and proxies
+/// reqwest prints in full. The backend now prints none of the wrapped client: an injected one
+/// shows as `ReqwestBackend { .. }`.
 #[test]
-fn with_client_installs_a_backend_on_the_injected_client() {
+fn an_injected_clients_default_headers_and_proxies_stay_out_of_debug() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        "Bearer s3cret".parse().unwrap(),
+    );
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(7))
+        .default_headers(headers)
+        .proxy(reqwest::Proxy::all("http://proxy-user:pr0xy-pass@127.0.0.1:3128").unwrap())
         .build()
         .expect("build a configured client");
+    assert!(
+        format!("{client:?}").contains("s3cret"),
+        "reqwest prints it"
+    );
     let core = ClientCore::with_client(client, "https://example.com").unwrap();
-    let injected = format!("{:?}", core.backend());
-    assert!(injected.starts_with("ReqwestBackend {"), "{injected}");
-    assert!(injected.contains("7s"), "{injected}");
-    let default = format!("{:?}", reqwest::Client::new());
-    assert!(!default.contains("7s"), "{default}");
+    for debug in [format!("{core:?}"), format!("{core:#?}")] {
+        assert!(!debug.contains("s3cret"), "{debug}");
+        assert!(!debug.contains("pr0xy"), "{debug}");
+        assert!(!debug.contains("127.0.0.1:3128"), "{debug}");
+    }
+    assert_eq!(format!("{:?}", core.backend()), "ReqwestBackend { .. }");
+}
+
+/// The client `with_config` builds its default backend on carries the configured connect and read
+/// timeouts: reqwest's `Debug` of the client itself, the one view of its configuration that needs
+/// no I/O, prints a read timeout only when one is set.
+#[test]
+fn the_client_a_core_builds_carries_the_transport_read_timeout() {
+    let built = |read_timeout| {
+        let client = super::http_client(&TransportConfig {
+            read_timeout,
+            ..TransportConfig::default()
+        })
+        .unwrap();
+        format!("{client:?}")
+    };
+    assert!(built(Some(Duration::from_secs(7))).contains("read_timeout: 7s"));
+    assert!(!built(None).contains("read_timeout"));
 }
 
 /// Issue #1130: the default client bounds connecting and stalled reads, and sets no total bound,
@@ -275,12 +320,13 @@ fn the_default_timeouts_are_a_30_s_connect_a_5_min_read_and_no_total() {
     assert_eq!(core.config().timeout, None);
     let built = format!("{:?}", core.backend());
     assert!(built.contains("read_timeout: 300s"), "{built}");
+    assert!(built.contains("connect_timeout: 30s"), "{built}");
 }
 
-/// The client a core builds for its default backend carries the read timeout of the
-/// `TransportConfig` it was built from: the default one's for `new`, the caller's for
-/// `with_config`. reqwest's `Debug` of a client prints its read timeout and only when one is set;
-/// its connect timeout is printed nowhere, so this is the one observable without I/O.
+/// The default backend a core builds is built from the `TransportConfig` it was given: the default
+/// one for `new`, the caller's for `with_config`. The backend's `Debug` prints the read timeout it
+/// built its client with, and only one that is set; that the client carries it is
+/// `the_client_a_core_builds_carries_the_transport_read_timeout`.
 #[test]
 fn the_built_client_carries_the_configured_read_timeout() {
     let default = format!(
@@ -308,8 +354,8 @@ fn the_built_client_carries_the_configured_read_timeout() {
     assert!(!unbounded.contains("read_timeout"), "{unbounded}");
 }
 
-/// `with_client` keeps the caller's client as it is: none of the configured timeouts is added to
-/// it.
+/// `with_client` keeps the caller's client as it is: no `TransportConfig` is read, so the backend
+/// it installs records none of the configured timeouts.
 #[test]
 fn with_client_adds_no_timeout_to_the_injected_client() {
     let core = ClientCore::with_client(reqwest::Client::new(), "https://example.com").unwrap();
