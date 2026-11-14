@@ -434,6 +434,20 @@ impl std::str::FromStr for Code {
     }
 }
 
+impl Code {
+    /// Look a code up as a person types it: surrounding whitespace trimmed and matched in any ASCII
+    /// case, so `" w009 "` names [`Code::OmittedConstruct`]. [`Code::from_str`] stays exact. A
+    /// string naming no code comes back in the [`UnknownCode`] as it was given, untrimmed.
+    pub(crate) fn from_str_any_case(s: &str) -> Result<Self, UnknownCode> {
+        let trimmed = s.trim();
+        Code::all()
+            .iter()
+            .copied()
+            .find(|code| code.as_str().eq_ignore_ascii_case(trimmed))
+            .ok_or_else(|| UnknownCode(s.to_owned()))
+    }
+}
+
 /// Error returned when a string does not name a known [`Code`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownCode(String);
