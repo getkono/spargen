@@ -1129,3 +1129,70 @@ fn deps_prints_a_human_rejection_only_on_stderr() {
     assert_eq!(stderr.lines().next(), Some("spargen: rejected"), "{stderr}");
     assert!(stderr.contains("E001"), "{stderr}");
 }
+
+/// Run the binary in `dir` with the stream `closed` names (`"stdout"` or `"stderr"`) connected to
+/// a pipe whose reader is already gone, so every write to it fails with `BrokenPipe`, as under
+/// `spargen … | head -1`. Returns the exit status and the other stream's text.
+fn spargen_with_a_closed(closed: &str, dir: &Path, args: &[&str]) -> (Option<i32>, String) {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut command = Command::new(spargen_bin());
+    command.current_dir(dir).args(args);
+    match closed {
+        "stdout" => command.stdout(writer).stderr(std::process::Stdio::piped()),
+        "stderr" => command.stderr(writer).stdout(std::process::Stdio::piped()),
+        other => panic!("no stream named {other}"),
+    };
+    let output = command.output().unwrap();
+    let other = if closed == "stdout" {
+        output.stderr
+    } else {
+        output.stdout
+    };
+    (output.status.code(), String::from_utf8(other).unwrap())
+}
+
+/// A closed stdout or stderr is no panic (#1429): the write that meets it fails quietly, and the
+/// command exits with the status it would have returned with the stream open.
+#[test]
+fn a_closed_output_stream_keeps_the_commands_own_status_without_a_panic() {
+    let temp = tempfile::tempdir().unwrap();
+    let good = spec_arg(temp.path(), "good.yaml", ONE_OPERATION);
+    let rejected = spec_arg(temp.path(), "rejected.yaml", REJECTED);
+
+    for (closed, args, status) in [
+        ("stdout", vec!["explain", EXPLAINED_CODE], 0),
+        (
+            "stdout",
+            vec!["explain", EXPLAINED_CODE, "--format", "json"],
+            0,
+        ),
+        ("stdout", vec!["deps", good.as_str()], 0),
+        (
+            "stdout",
+            vec!["deps", rejected.as_str(), "--format", "json"],
+            1,
+        ),
+        ("stdout", vec!["diff", good.as_str(), good.as_str()], 0),
+        ("stderr", vec!["check", rejected.as_str()], 1),
+        ("stderr", vec!["check", good.as_str()], 0),
+        ("stderr", vec!["explain", "E999"], 3),
+    ] {
+        let (actual, other) = spargen_with_a_closed(closed, temp.path(), &args);
+        assert!(
+            !other.contains("panicked"),
+            "a closed {closed} must not panic `spargen {args:?}`: {other}"
+        );
+        assert_eq!(
+            actual,
+            Some(status),
+            "a closed {closed} keeps `spargen {args:?}`'s own status: {other}"
+        );
+        if closed == "stdout" {
+            assert!(
+                other.is_empty(),
+                "a closed stdout is reported nowhere: `spargen {args:?}` wrote {other}"
+            );
+        }
+    }
+}
