@@ -353,11 +353,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.lower_union(schema, hint);
         }
 
-        if let Some(enumeration) = &schema.enum_values {
-            return self.lower_enum(enumeration, schema, hint);
-        }
-        if let Some(value) = &schema.const_value {
-            return self.lower_enum(std::slice::from_ref(value), schema, hint);
+        match (&schema.enum_values, &schema.const_value) {
+            (Some(enumeration), Some(value)) => {
+                let members = self.enum_meet_const(enumeration, value, schema)?;
+                return self.lower_enum(&members, schema, hint);
+            }
+            (Some(enumeration), None) => return self.lower_enum(enumeration, schema, hint),
+            (None, Some(value)) => {
+                return self.lower_enum(std::slice::from_ref(value), schema, hint);
+            }
+            (None, None) => {}
         }
 
         let non_null_types: Vec<JsonType> = schema
@@ -566,6 +571,50 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ))
     }
 
+    /// The members of a schema's own `enum` that equal its own `const`, in the `enum`'s order:
+    /// both keywords apply, so the schema's values are the ones both list, as the `allOf` set
+    /// meet reads the same pair written as two members (#1406). A `const` no set can hold (an
+    /// object, say) is the one member, which [`Self::lower_enum`] reports as it reports it alone.
+    /// None shared is `E013`.
+    fn enum_meet_const(
+        &mut self,
+        enumeration: &[SpannedValue],
+        value: &SpannedValue,
+        schema: &Schema,
+    ) -> Option<Vec<SpannedValue>> {
+        let integer = schema.types.types.contains(&JsonType::Integer);
+        let wanted = match &value.node {
+            Node::Null => None,
+            _ => match scalar_value(value, integer) {
+                Some(scalar) => Some(scalar),
+                None => return Some(vec![value.clone()]),
+            },
+        };
+        let shared: Vec<SpannedValue> = enumeration
+            .iter()
+            .filter(|member| match (&wanted, &member.node) {
+                (None, Node::Null) => true,
+                (None, _) | (Some(_), Node::Null) => false,
+                (Some(wanted), _) => scalar_value(member, integer).as_ref() == Some(wanted),
+            })
+            .cloned()
+            .collect();
+        if shared.is_empty() {
+            // E013 case: own-keywords-empty
+            Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+                .message(
+                    "this schema's own `enum` and `const` share no value, so no value satisfies \
+                     the schema",
+                )
+                .remedy(
+                    "make the `const` one of the `enum`'s values, or drop one of the two keywords",
+                )
+                .emit(self.diags);
+            return None;
+        }
+        Some(shared)
+    }
+
     fn lower_enum(&mut self, values: &[SpannedValue], schema: &Schema, hint: &str) -> Option<Ty> {
         // The enum/const admits `null` where its own `type`, `enum` and `const` all do — their
         // conjunction, the one decision ([`NullAdmission::of_own_keywords`]): a `"null"` in the
@@ -578,6 +627,47 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .iter()
             .filter(|value| !matches!(value.node, Node::Null))
             .collect();
+
+        // A member of a kind the schema's own `type` does not name satisfies `enum` and never
+        // `type`, so no value is it (#1406). Beside a member the schema admits, the set
+        // contradicts itself, as a member outside its `format` does: `E008`. Where no member is
+        // left, `null` included, no value satisfies the schema.
+        if let Some(excluded) = remainder
+            .iter()
+            .copied()
+            .find(|value| !type_admits_member(&schema.types.types, value))
+        {
+            let admitted = remainder
+                .iter()
+                .any(|value| type_admits_member(&schema.types.types, value));
+            if !admitted && !has_null {
+                // E013 case: own-keywords-empty
+                Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+                    .message(
+                        "every value this schema's own `enum` or `const` lists is of a kind its \
+                         `type` does not admit, so no value satisfies the schema",
+                    )
+                    .remedy(
+                        "write each value as the `type` names it (`\"1\"`, not `1`, under `type: \
+                         string`), or correct the `type`",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
+            Diagnostic::error(Code::NonScalarEnum, schema.provenance.clone())
+                .message(format!(
+                    "enum/const value {} is {}, which the schema's `type` does not admit, so no \
+                     value the schema admits is that member",
+                    member_text(excluded),
+                    member_kind(excluded),
+                ))
+                .remedy(
+                    "remove the value from the set, or write it as the `type` names it (`\"1\"`, \
+                     not `1`, under `type: string`)",
+                )
+                .emit(self.diags);
+            return None;
+        }
 
         // Only `null` members remained (`enum: [null]` / `const: null`): emit the exact JSON null
         // type (`()`), not a nullable unconstrained value that would also accept non-null content.
@@ -744,6 +834,53 @@ fn scalar_value(value: &SpannedValue, integer: bool) -> Option<ScalarValue> {
         }
         Node::String(value) => Some(ScalarValue::String(value.clone())),
         _ => None,
+    }
+}
+
+/// Whether a schema whose `type` names `types` admits the non-null member `value` by its kind, as
+/// JSON Schema's `type` does: an integer is also a `number`. A float is admitted by `integer` or
+/// `number` alike, and an object or array member by any `type`: [`scalar_value`] judges both, and
+/// its `E008` says why such a member has no variant. A schema naming no type admits every kind.
+fn type_admits_member(types: &[JsonType], value: &SpannedValue) -> bool {
+    if types.is_empty() {
+        return true;
+    }
+    let named = |ty: JsonType| types.contains(&ty);
+    match &value.node {
+        Node::Bool(_) => named(JsonType::Boolean),
+        Node::String(_) => named(JsonType::String),
+        Node::Number(Number::Int(_) | Number::UInt(_)) => {
+            named(JsonType::Integer) || named(JsonType::Number)
+        }
+        // A float under `integer` that is no integer is told apart by `scalar_value`'s own
+        // `E008`, which says why a float has no variant.
+        Node::Number(Number::Float(_)) => named(JsonType::Integer) || named(JsonType::Number),
+        _ => true,
+    }
+}
+
+/// The kind of the scalar member `value`, as the `E008` message for a member its `type` does not
+/// admit names it.
+fn member_kind(value: &SpannedValue) -> &'static str {
+    match &value.node {
+        Node::Bool(_) => "a boolean",
+        Node::String(_) => "a string",
+        Node::Number(Number::Int(_) | Number::UInt(_)) => "an integer",
+        Node::Number(Number::Float(_)) => "a number",
+        _ => "a value",
+    }
+}
+
+/// The scalar member `value` as the description writes it: a string quoted, so `"1"` and `1` read
+/// apart.
+fn member_text(value: &SpannedValue) -> String {
+    match &value.node {
+        Node::Bool(value) => value.to_string(),
+        Node::String(value) => format!("{value:?}"),
+        Node::Number(Number::Int(value)) => value.to_string(),
+        Node::Number(Number::UInt(value)) => value.to_string(),
+        Node::Number(Number::Float(value)) => value.to_string(),
+        _ => "value".to_owned(),
     }
 }
 

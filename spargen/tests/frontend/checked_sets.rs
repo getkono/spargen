@@ -350,7 +350,7 @@ fn e013s(report: &Report) -> Vec<(&str, &str)> {
 /// no value is it (#1406). Beside members the `type` does admit it is `E008`, naming the member,
 /// as a member outside the set's `format` is; where it leaves no value at all, `null` included,
 /// the schema is `E013`.
-// E013 case: own-keywords-disjoint
+// E013 case: own-keywords-empty
 #[test]
 fn a_member_the_schemas_own_type_excludes_is_rejected() {
     for (schema, member, kind) in [
@@ -460,7 +460,7 @@ fn an_enum_beside_a_const_is_their_intersection() {
 
 /// An `enum` and a `const` on one schema that share no value leave none to satisfy it: `E013`, as
 /// the `allOf` spelling of the same pair is.
-// E013 case: own-keywords-disjoint
+// E013 case: own-keywords-empty
 #[test]
 fn an_enum_and_a_const_sharing_no_value_are_irreconcilable() {
     for schema in [

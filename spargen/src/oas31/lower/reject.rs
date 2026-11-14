@@ -235,7 +235,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if !schema.all_of.is_empty() {
             return self.reject_all_of_scalars(schema);
         }
-        // E013 case: null-only-left
+        // E013 case: own-keywords-empty
         self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
