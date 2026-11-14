@@ -1,10 +1,12 @@
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Waker};
 
 use reqwest::header::{HeaderMap, HeaderValue};
 
 use super::{next_link, next_link_target, LinkPaginator};
-use crate::tests::{core, poll_ready, Reply, SequenceBackend};
-use crate::{ClientCore, Error};
+use crate::tests::{core, poll_ready, poll_to_completion, Chunk, Chunks, Reply, SequenceBackend};
+use crate::{ClientCore, Error, ExecuteFuture, HttpBackend, HttpBody};
 
 fn link_headers(values: &[&str]) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -638,6 +640,81 @@ fn a_header_seeded_paginator_holds_the_origin_of_its_first_fetch() {
         other => panic!("expected PaginationOriginChanged, got {other:?}"),
     }
     assert_eq!(backend.urls(), ["https://x/2?key=secret"]);
+}
+
+/// A `next_page` future dropped while its request is in flight (a timeout, a losing `select!`
+/// branch) leaves the paginator as it found it: still armed at the same URL, which the next pull
+/// fetches and yields rather than reporting the end of the chain or a `PaginationCycle`.
+#[test]
+fn a_dropped_next_page_future_leaves_the_paginator_armed() {
+    let (mut pager, backend) = paginator::<Vec<i64>>(
+        [
+            page(200, "[1]", None).pending(),
+            page(200, "[1]", Some(r#"<https://x/items?page=2>; rel="next""#)),
+        ],
+        "https://x/items?page=1",
+    );
+    {
+        let mut future = std::pin::pin!(pager.next_page());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(future.as_mut().poll(&mut context).is_pending());
+    }
+    assert_eq!(backend.calls(), 1, "the dropped pull had sent its request");
+    assert!(pager.has_next(), "a dropped pull disarms nothing");
+
+    let page = poll_ready(pager.next_page())
+        .expect("the retried pull fetches the same page")
+        .expect("the page decodes");
+    assert_eq!(page.into_inner(), vec![1]);
+    assert!(pager.has_next());
+    assert_eq!(
+        backend.urls(),
+        ["https://x/items?page=1", "https://x/items?page=1"]
+    );
+}
+
+/// Answers every request with a `200` whose `[1]` body is not ready on its first read, so a
+/// `next_page` future can be dropped after `send` returned and before the page decoded.
+#[derive(Debug, Default)]
+struct SlowBodyBackend {
+    calls: Mutex<usize>,
+}
+
+impl HttpBackend for SlowBodyBackend {
+    fn execute(&self, _request: http::Request<HttpBody>) -> ExecuteFuture<'_> {
+        *self.calls.lock().unwrap() += 1;
+        Box::pin(async {
+            Ok(http::Response::builder()
+                .status(200)
+                .body(HttpBody::wrap(Chunks::new([
+                    Chunk::Pending,
+                    Chunk::data("[1]"),
+                ])))
+                .expect("valid synthetic response"))
+        })
+    }
+}
+
+/// A `next_page` future dropped while the page body is still being read leaves the paginator
+/// armed too: the page was never yielded, so the next pull fetches it again.
+#[test]
+fn a_next_page_future_dropped_mid_body_leaves_the_paginator_armed() {
+    let backend = Arc::new(SlowBodyBackend::default());
+    let core = ClientCore::with_backend(backend.clone(), "https://x").unwrap();
+    let mut pager: LinkPaginator<Vec<i64>> =
+        core.paginate_links(reqwest::Url::parse("https://x/items").unwrap());
+    {
+        let mut future = std::pin::pin!(pager.next_page());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(future.as_mut().poll(&mut context).is_pending());
+    }
+    assert_eq!(*backend.calls.lock().unwrap(), 1);
+    assert!(pager.has_next(), "a pull dropped mid-body disarms nothing");
+
+    let (page, _) = poll_to_completion(pager.next_page());
+    assert_eq!(page.unwrap().unwrap().into_inner(), vec![1]);
+    assert_eq!(*backend.calls.lock().unwrap(), 2);
+    assert!(!pager.has_next());
 }
 
 /// A paginator seeded with no next link answers `None` on its first pull without building or
