@@ -572,6 +572,67 @@ components:
     );
 }
 
+/// One subschema referenced under two spellings of its fragment — a token percent-encoded in one
+/// and written plainly in the other — is one target and lowers to one type (#1451). Lowering
+/// memoises a bundle target on its `(file, pointer)` identity, which is the decoded pointer
+/// whatever the fragment's spelling, so the second spelling reuses the first's type rather than
+/// declaring a twin.
+#[test]
+fn two_percent_encoding_spellings_of_one_subschema_share_one_type() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/big%20cat' }
+  /v:
+    get:
+      operationId: getV
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/big cat' }
+components:
+  schemas:
+    Defs:
+      type: object
+      properties:
+        "big cat":
+          type: object
+          required: [purr]
+          properties: { purr: { type: string } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        declared_types(&code, "BigCat", |_| true),
+        ["BigCat"],
+        "the two spellings of one subschema must share one type: {}",
+        types_module(&code)
+    );
+    for operation in ["get_u", "get_v"] {
+        let signature = code
+            .split(&format!("fn {operation}("))
+            .nth(1)
+            .and_then(|rest| rest.split('{').next())
+            .unwrap_or_else(|| panic!("no `{operation}`: {code}"));
+        assert!(
+            signature.contains("ResponseValue<types::BigCat>"),
+            "`{operation}` must return the one shared type: {signature}"
+        );
+    }
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();

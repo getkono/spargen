@@ -12,7 +12,7 @@ use super::remote::{
     RefTarget, SelfIdentity,
 };
 use super::sha256::sha256_hex;
-use super::{parse_json, parse_yaml, SpannedValue};
+use super::{canonical_pointer, parse_json, parse_yaml, SpannedValue};
 
 /// A single loaded source file.
 #[derive(Debug, Clone)]
@@ -217,6 +217,12 @@ impl InputBundle {
 
     /// Resolve a `$ref` from `from` to a loaded document and JSON Pointer. All reachable files were
     /// loaded during bundle construction, so this performs no I/O and never reaches the network.
+    ///
+    /// The pointer is the fragment's [`canonical_pointer`]: each token percent-decoded and
+    /// RFC 6901-unescaped, then re-escaped, which is the spelling a walk of the value builds. So
+    /// every spelling of one node (`big%20cat` and `big cat`, `%7Bid%7D` and `{id}`) is one
+    /// `(file, pointer)` identity, the identity discriminator mappings are matched by and lowering
+    /// memoises a target under. A fragment with a malformed escape names no target.
     pub(crate) fn reference_target(
         &self,
         reference: &str,
@@ -239,7 +245,7 @@ impl InputBundle {
         let pointer = if fragment.is_empty() {
             JsonPointer::root()
         } else if fragment.starts_with('/') {
-            JsonPointer::from(fragment.to_owned())
+            canonical_pointer(&JsonPointer::from(fragment.to_owned()))?
         } else {
             // A non-empty fragment that is not a JSON Pointer is a named JSON Schema anchor
             // (`$anchor`), which spargen rejects rather than resolves (`E004`). Do not mistake one
@@ -807,6 +813,48 @@ mod tests {
         assert_eq!(file("sub/lib.yaml#/x"), file("./sub/./lib.yaml#/x"));
         assert_ne!(file("./lib.yaml#/x"), file("sub/lib.yaml#/x"));
         assert_ne!(file("./lib.yaml#/x"), Some(bundle.root_id()));
+    }
+
+    /// A fragment is one identity however its tokens are spelled (#1451): a percent-encoded token
+    /// and its plain spelling are one `(file, pointer)`, which is the decoded RFC 6901 pointer a
+    /// walk of the value builds. A `~0`/`~1` escape stays escaped, a `%2F` is a literal `/` inside
+    /// its token, and a malformed escape names no target.
+    #[test]
+    fn reference_target_is_one_identity_for_every_spelling_of_a_fragment() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\n",
+        )
+        .unwrap();
+        let bundle = load(&dir.join("openapi.yaml"));
+        let root = bundle.root_id();
+        let target = |reference: &str| bundle.reference_target(reference, root);
+        let pointer = |pointer: &str| Some((root, JsonPointer::from(pointer.to_owned())));
+        for (spellings, canonical) in [
+            (
+                [
+                    "#/components/schemas/Defs/properties/big%20cat",
+                    "#/components/schemas/Defs/properties/big cat",
+                ],
+                "/components/schemas/Defs/properties/big cat",
+            ),
+            (
+                ["#/paths/~1pets~1%7BpetId%7D", "#/paths/~1pets~1{petId}"],
+                "/paths/~1pets~1{petId}",
+            ),
+            (["#/a~0b/c%7E0d", "#/a~0b/c~0d"], "/a~0b/c~0d"),
+            (["#/a%2Fb", "#/a~1b"], "/a~1b"),
+        ] {
+            for spelling in spellings {
+                assert_eq!(target(spelling), pointer(canonical), "`{spelling}`");
+            }
+        }
+        assert_eq!(target("#"), pointer(""));
+        for malformed in ["#/a%2", "#/a%zz", "#/a~2b", "#/a~"] {
+            assert_eq!(target(malformed), None, "`{malformed}`");
+        }
     }
 
     /// A failed load records every file it read or tried to read, so a build that names them to
