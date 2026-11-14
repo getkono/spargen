@@ -1616,3 +1616,40 @@ fn a_discriminator_property_every_member_requires_generates_unchanged() {
         );
     }
 }
+
+/// An untyped member the tag selects requires no property, so in a 3.2 document with no
+/// `defaultMapping` it is the member leaving the tag optional; one whose only keyword is
+/// `required: [kind]` requires it, and the union generates, dispatched by tag.
+#[test]
+fn an_untyped_tag_selected_member_needs_the_tag_required_in_a_3_2_document() {
+    let spec = |anything: &str| {
+        format!(
+            "openapi: 3.2.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    Anything: {anything}\n    \
+             Cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }} }} }}\n    \
+             Pet: {{ oneOf: [{{ $ref: '#/components/schemas/Cat' }}, {{ $ref: \
+             '#/components/schemas/Anything' }}], discriminator: {{ propertyName: kind }} }}\n"
+        )
+    };
+    let report = generate(&spec("{}"));
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::NonDisjointUnion
+                && d.pointer.as_str() == "/components/schemas/Pet/discriminator"
+                && d.message
+                    .contains("`kind` is optional in union member 1 (`Anything`),")),
+        "{report:#?}"
+    );
+    let (report, code) = generate_with_code(&spec("{ required: [kind] }"));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let tags: Vec<Vec<String>> = discriminated_arms(&code, "Pet")
+        .decode
+        .into_iter()
+        .map(|(_, tags)| tags)
+        .collect();
+    assert_eq!(tags, [["Cat"], ["Anything"]], "{code}");
+}
