@@ -109,6 +109,21 @@ paths:
             text/event-stream:
               itemSchema:
                 $ref: "#/components/schemas/SseTextEvent"
+  # A secured SSE operation: its preparer attaches credentials through `support::Resend::attach`,
+  # which keeps the unsigned request a reconnect signs afresh, so that emission is compiled and
+  # linted in the consumer crate.
+  /events/secured:
+    get:
+      operationId: streamSecuredEvents
+      security:
+        - bearer: []
+      responses:
+        "200":
+          description: ok
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: "#/components/schemas/SseEnvelope"
   # 3.2 `additionalOperations`: a custom method token generates a client method and must reach the
   # wire verbatim. The reusable `components.mediaTypes` reference supplies its request body, and the
   # response is a discriminated union with `defaultMapping` — three constructs that each emit code
@@ -130,6 +145,10 @@ paths:
                 schema:
                   $ref: "#/components/schemas/CacheOutcome"
 components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
   schemas:
     Record:
       type: object
