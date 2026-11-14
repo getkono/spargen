@@ -12,7 +12,7 @@ use camino::Utf8PathBuf;
 
 use spargen::{
     CarriedDocs, Carve, ComponentKind, ConfigError, Narrowing, OmitMethod, OmitRule, Spec,
-    UnionTags, UnknownOmitToken, UuidMapping,
+    TestingModule, UnionTags, UnknownOmitToken, UuidMapping,
 };
 
 use super::args::SpecArgs;
@@ -72,6 +72,14 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
         CarriedDocs::Rewritten,
     ) {
         spec = spec.with_verbatim_docs(docs);
+    }
+    if let Some(module) = switch(
+        args.testing,
+        args.no_testing,
+        TestingModule::Emitted,
+        TestingModule::Omitted,
+    ) {
+        spec = spec.with_testing(module);
     }
     for path in &args.omit_path {
         spec = spec.omit_rule(OmitRule::path(path.clone()));
@@ -222,11 +230,11 @@ mod tests {
     fn each_switch_pair_overrides_the_config_file_either_way() {
         let (_on, on) = with_config(
             "carve = true\nuuid = true\nopen_narrowing = true\nopen_unions = true\n\
-             verbatim_docs = true\n",
+             verbatim_docs = true\ntesting = true\n",
         );
         let (_off, off) = with_config(
             "carve = false\nuuid = false\nopen_narrowing = false\nopen_unions = false\n\
-             verbatim_docs = false\n",
+             verbatim_docs = false\ntesting = false\n",
         );
         let file_on = Spec::new(on.join("openapi.yaml"))
             .config_file(on.join("spargen.toml"))
@@ -245,7 +253,8 @@ mod tests {
                     "--no-uuid",
                     "--no-open-narrowing",
                     "--no-open-unions",
-                    "--no-verbatim-docs"
+                    "--no-verbatim-docs",
+                    "--no-testing"
                 ]
             ),
             file_on
@@ -255,6 +264,7 @@ mod tests {
                 .with_open_narrowing(spargen::Narrowing::Exact)
                 .with_open_unions(spargen::UnionTags::Closed)
                 .with_verbatim_docs(spargen::CarriedDocs::Rewritten)
+                .with_testing(TestingModule::Omitted)
         );
         assert_eq!(
             resolved(
@@ -264,7 +274,8 @@ mod tests {
                     "--uuid",
                     "--open-narrowing",
                     "--open-unions",
-                    "--verbatim-docs"
+                    "--verbatim-docs",
+                    "--testing"
                 ]
             ),
             file_off
@@ -274,6 +285,7 @@ mod tests {
                 .with_open_narrowing(spargen::Narrowing::Open)
                 .with_open_unions(spargen::UnionTags::Open)
                 .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
+                .with_testing(TestingModule::Emitted)
         );
         // One flag of a pair moves only its own setting.
         assert_eq!(
@@ -282,17 +294,17 @@ mod tests {
         );
     }
 
-    /// Each of the ten switch flags, alone, moves its own setting off the file's value and leaves
-    /// the other four where the file put them.
+    /// Each of the twelve switch flags, alone, moves its own setting off the file's value and
+    /// leaves the other five where the file put them.
     #[test]
     fn each_switch_flag_moves_only_its_own_setting() {
         let (_on, on) = with_config(
             "carve = true\nuuid = true\nopen_narrowing = true\nopen_unions = true\n\
-             verbatim_docs = true\n",
+             verbatim_docs = true\ntesting = true\n",
         );
         let (_off, off) = with_config(
             "carve = false\nuuid = false\nopen_narrowing = false\nopen_unions = false\n\
-             verbatim_docs = false\n",
+             verbatim_docs = false\ntesting = false\n",
         );
         let file = |dir: &Utf8PathBuf| {
             Spec::new(dir.join("openapi.yaml"))
@@ -300,7 +312,7 @@ mod tests {
                 .unwrap()
         };
         type Moved = fn(Spec) -> Spec;
-        let rows: [(&str, &Utf8PathBuf, Moved); 10] = [
+        let rows: [(&str, &Utf8PathBuf, Moved); 12] = [
             ("--no-carve", &on, |spec| {
                 spec.with_carve(spargen::Carve::Off)
             }),
@@ -316,6 +328,9 @@ mod tests {
             ("--no-verbatim-docs", &on, |spec| {
                 spec.with_verbatim_docs(spargen::CarriedDocs::Rewritten)
             }),
+            ("--no-testing", &on, |spec| {
+                spec.with_testing(TestingModule::Omitted)
+            }),
             ("--carve", &off, |spec| {
                 spec.with_carve(spargen::Carve::Auto)
             }),
@@ -330,6 +345,9 @@ mod tests {
             }),
             ("--verbatim-docs", &off, |spec| {
                 spec.with_verbatim_docs(spargen::CarriedDocs::Verbatim)
+            }),
+            ("--testing", &off, |spec| {
+                spec.with_testing(TestingModule::Emitted)
             }),
         ];
         for (flag, dir, moved) in rows {
@@ -400,6 +418,8 @@ mod tests {
             "--no-open-unions",
             "--verbatim-docs",
             "--no-verbatim-docs",
+            "--testing",
+            "--no-testing",
         ] {
             assert_eq!(ignored(&[flag]), [flag]);
         }
@@ -439,6 +459,7 @@ mod tests {
             ("--open-narrowing", "--no-open-narrowing"),
             ("--open-unions", "--no-open-unions"),
             ("--verbatim-docs", "--no-verbatim-docs"),
+            ("--testing", "--no-testing"),
         ] {
             let error = Cli::try_parse_from(["spargen", "check", "openapi.yaml", on, off])
                 .expect_err(&format!("`{on} {off}` must not parse"));
