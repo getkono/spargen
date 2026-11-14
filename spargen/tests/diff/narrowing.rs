@@ -37,7 +37,8 @@ fn narrowed_problem(values: &str) -> String {
 fn an_open_enums_catch_all_is_a_variant_of_its_surface() {
     let open = |spec: Spec| spec.with_open_narrowing(spargen::Narrowing::Open);
 
-    // A new listed value is the additive rule's variant, as on a closed enum.
+    // A new listed value is an added variant, major as on a closed enum: the open enum is
+    // exhaustive too, so a consumer's exhaustive `match` breaks.
     let added = diff_configured(
         &narrowed_problem("a, b"),
         &narrowed_problem("a, b, c"),
@@ -45,7 +46,7 @@ fn an_open_enums_catch_all_is_a_variant_of_its_surface() {
         open,
     );
     assert_eq!(kinds(&added), vec![ChangeKind::VariantAdded], "{added:?}");
-    assert_eq!(added.bump, Impact::Minor);
+    assert_eq!(added.bump, Impact::Major);
 
     // A new listed value spelled `other` takes the catch-all's name, so the catch-all is renamed.
     let renamed = diff_configured(
@@ -66,8 +67,8 @@ fn an_open_enums_catch_all_is_a_variant_of_its_surface() {
     assert!(details.contains(&"variant added: `other`"), "{details:?}");
     assert_eq!(renamed.bump, Impact::Major);
 
-    // Turning the option on opens the same type in place: it gains the catch-all, which is the
-    // additive rule again, and turning it off removes it.
+    // Turning the option on opens the same type in place: it gains the catch-all, an added
+    // variant again, and turning it off removes it.
     let opened = diff_configured(
         &narrowed_problem("a, b"),
         &narrowed_problem("a, b"),
@@ -79,7 +80,7 @@ fn an_open_enums_catch_all_is_a_variant_of_its_surface() {
         opened.changes[0].detail,
         "variant added: `Other(String)`, holding any unlisted value"
     );
-    assert_eq!(opened.bump, Impact::Minor);
+    assert_eq!(opened.bump, Impact::Major);
     let closed = diff_configured(
         &narrowed_problem("a, b"),
         &narrowed_problem("a, b"),

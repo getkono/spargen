@@ -378,7 +378,8 @@ pub enum ChangeKind {
     /// A new required parameter was added. **Major** — a new positional argument: of the method
     /// for a path parameter, of `…Params::new` for any other.
     RequiredParamAdded,
-    /// A new optional parameter was added. **Minor** — a new `…Params` field defaulting to unset.
+    /// A new optional parameter was added. **Major** — a new `pub` field of the `…Params` struct,
+    /// so every struct literal of it stops compiling.
     OptionalParamAdded,
     /// A parameter was removed. **Major**.
     ParamRemoved,
@@ -394,7 +395,8 @@ pub enum ChangeKind {
     /// `empty enum`), or a `pub type` alias of the same name became one of those, or the reverse.
     /// **Major**.
     TypeKindChanged,
-    /// A new optional field was added to a struct. **Minor**.
+    /// A new optional field was added to a struct. **Major** — the field is `pub`, so every struct
+    /// literal of the type stops compiling.
     FieldAdded,
     /// A new required field was added to a struct. **Major** — every existing constructor breaks.
     RequiredFieldAdded,
@@ -406,8 +408,9 @@ pub enum ChangeKind {
     /// A struct field's required-ness flipped. **Major** — `T` ↔ `Option<T>`.
     FieldRequirednessChanged,
     /// A new variant was added to an enum/union, or a listed value (its associated `const`) to a
-    /// checked newtype. **Minor** — the documented additive rule (a value a consumer may now
-    /// receive), consistent for string enums, checked newtypes and unions alike.
+    /// checked newtype, or an open enum's catch-all to a closed one. **Major** — generated enums
+    /// and unions are exhaustive, an open enum included, so a consumer's exhaustive `match` over
+    /// the type stops compiling; a checked newtype's new value is classified alike.
     VariantAdded,
     /// A variant was removed from an enum/union, or a listed value from a checked newtype.
     /// **Major**.
@@ -420,8 +423,8 @@ pub enum ChangeKind {
     ResponseHeadersRemoved,
     /// A status's typed response-header struct was renamed. **Major**.
     ResponseHeadersRenamed,
-    /// A new optional header was added to a response-header struct. **Minor** — an `Option<T>`
-    /// field, the struct-field rule.
+    /// A new optional header was added to a response-header struct. **Major** — a new `pub`
+    /// `Option<T>` field, the struct-field rule.
     ResponseHeaderAdded,
     /// A new required header was added to a response-header struct. **Major** — reading the
     /// headers now fails on a response without it, and every literal of the struct breaks.
@@ -443,7 +446,7 @@ pub enum ChangeKind {
     /// A server variable's setter now takes another type: a free-form variable gained or lost its
     /// `enum`, or its variable enum was renamed. **Major**.
     ServerVariableTypeChanged,
-    /// A struct gained a typed `additionalProperties` map. **Minor** — a new public map field, the
+    /// A struct gained a typed `additionalProperties` map. **Major** — a new public map field, the
     /// optional-field rule.
     AdditionalPropertiesAdded,
     /// A struct lost its typed `additionalProperties` map. **Major** — reads of the field break.
@@ -494,15 +497,10 @@ impl ChangeKind {
         match self {
             ChangeKind::OperationAdded
             | ChangeKind::ApiErrorBodyAdded
-            | ChangeKind::OptionalParamAdded
             | ChangeKind::TypeAdded
-            | ChangeKind::FieldAdded
-            | ChangeKind::VariantAdded
             | ChangeKind::ResponseHeadersAdded
-            | ChangeKind::ResponseHeaderAdded
             | ChangeKind::ServerAdded
             | ChangeKind::ServerVariableAdded
-            | ChangeKind::AdditionalPropertiesAdded
             | ChangeKind::StreamTwinAdded
             | ChangeKind::CredentialSchemeAdded
             | ChangeKind::TestingModuleAdded
@@ -519,19 +517,23 @@ impl ChangeKind {
             | ChangeKind::ErrorTypeChanged
             | ChangeKind::ApiErrorBodyRemoved
             | ChangeKind::RequiredParamAdded
+            | ChangeKind::OptionalParamAdded
             | ChangeKind::ParamRemoved
             | ChangeKind::ParamTypeChanged
             | ChangeKind::ParamRequirednessChanged
             | ChangeKind::TypeRemoved
             | ChangeKind::TypeKindChanged
+            | ChangeKind::FieldAdded
             | ChangeKind::RequiredFieldAdded
             | ChangeKind::FieldRemoved
             | ChangeKind::FieldTypeChanged
             | ChangeKind::FieldRequirednessChanged
+            | ChangeKind::VariantAdded
             | ChangeKind::VariantRemoved
             | ChangeKind::VariantTypeChanged
             | ChangeKind::ResponseHeadersRemoved
             | ChangeKind::ResponseHeadersRenamed
+            | ChangeKind::ResponseHeaderAdded
             | ChangeKind::RequiredResponseHeaderAdded
             | ChangeKind::ResponseHeaderRemoved
             | ChangeKind::ResponseHeaderTypeChanged
@@ -539,6 +541,7 @@ impl ChangeKind {
             | ChangeKind::ServerRemoved
             | ChangeKind::ServerVariableRemoved
             | ChangeKind::ServerVariableTypeChanged
+            | ChangeKind::AdditionalPropertiesAdded
             | ChangeKind::AdditionalPropertiesRemoved
             | ChangeKind::AdditionalPropertiesTypeChanged
             | ChangeKind::StreamTwinRemoved

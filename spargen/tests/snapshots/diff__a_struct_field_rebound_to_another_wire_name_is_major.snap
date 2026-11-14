@@ -3,5 +3,5 @@ source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
 major|identifier-rebound|Pet.foo_bar|`foo_bar` now binds `foo_bar` (was `fooBar`)
-minor|field-added|Pet.foo_bar_0bcf79bf|optional field added: `String`
+major|field-added|Pet.foo_bar_0bcf79bf|optional field added: `String`
 bump=major
