@@ -581,3 +581,6 @@ fn params_constructor(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
