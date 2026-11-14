@@ -145,3 +145,65 @@ proptest::proptest! {
         }
     }
 }
+
+/// The field `allocate` gives each header of one `200` response documenting `headers` in that
+/// order, by header name.
+fn header_fields(headers: &[&str]) -> std::collections::BTreeMap<String, String> {
+    use crate::ir::{HeaderShape, Response, ResponseHeader, StatusSpec};
+    let mut api = api(Vec::new(), false);
+    let ty = Ty {
+        id: api.types.iter().next().expect("the text type").0,
+        nullable: false,
+        boxed: false,
+    };
+    let response = Response {
+        body: None,
+        media: None,
+        stream: None,
+        accept: None,
+        headers: headers
+            .iter()
+            .map(|name| ResponseHeader {
+                name: (*name).to_owned(),
+                ty,
+                required: false,
+                explode: false,
+                shape: HeaderShape::Scalar,
+                deprecated: false,
+                docs: Default::default(),
+            })
+            .collect(),
+    };
+    api.operations[0].responses.by_status = [(StatusSpec::Exact(200), response)].into();
+    let names = allocate(&api);
+    let record = &names.operations[&api.operations[0].id].response_headers["Status200"];
+    headers
+        .iter()
+        .map(|name| ((*name).to_owned(), record.field(name).as_str().to_owned()))
+        .collect()
+}
+
+/// A response-header struct's fields are ranked as a struct's are (#1453): a header spelled as its
+/// field keeps it, then the lexically smaller header name does, whatever order the response
+/// declares them in, and a loser's suffix moves only with its own header.
+#[test]
+fn response_header_fields_do_not_depend_on_declaration_order() {
+    let pair = header_fields(&["X_Rate_Limit", "X-Rate-Limit"]);
+    assert_eq!(pair, header_fields(&["X-Rate-Limit", "X_Rate_Limit"]));
+    assert_eq!(pair["X-Rate-Limit"], "x_rate_limit");
+    assert!(
+        pair["X_Rate_Limit"].starts_with("x_rate_limit_"),
+        "{pair:?}"
+    );
+
+    let triple = header_fields(&["X-Rate-Limit", "X_Rate_Limit", "x_rate_limit"]);
+    assert_eq!(
+        triple,
+        header_fields(&["x_rate_limit", "X_Rate_Limit", "X-Rate-Limit"])
+    );
+    assert_eq!(triple["x_rate_limit"], "x_rate_limit");
+    assert_eq!(
+        triple["X_Rate_Limit"], pair["X_Rate_Limit"],
+        "a loser's suffix is seeded from its own header name"
+    );
+}
