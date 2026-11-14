@@ -957,6 +957,70 @@ fn moderate_ref_chain_below_the_cap_still_lowers() {
     );
 }
 
+/// A fragment is percent-decoded exactly once. `%25` is a literal `%`, so `100%25` addresses the
+/// key `100%` and `a%2541` the key `a%41`, never `aA`: the identity a reference resolves to is the
+/// decoded pointer, and looking it up must not decode it again.
+#[test]
+fn a_percent_encoded_percent_sign_in_a_fragment_is_decoded_once() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/100%25' }
+  /v:
+    get:
+      operationId: getV
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/a%2541' }
+components:
+  schemas:
+    Defs:
+      type: object
+      properties:
+        "100%":
+          type: object
+          required: [purr]
+          properties: { purr: { type: string } }
+        "a%41":
+          type: object
+          required: [hiss]
+          properties: { hiss: { type: integer } }
+        aA: { type: boolean }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    for (operation, field) in [("get_u", "purr"), ("get_v", "hiss")] {
+        let signature = code
+            .split(&format!("fn {operation}("))
+            .nth(1)
+            .and_then(|rest| rest.split('{').next())
+            .unwrap_or_else(|| panic!("no `{operation}`: {code}"));
+        assert!(
+            !signature.contains("ResponseValue<bool>"),
+            "`{operation}` must not resolve to the twice-decoded key: {signature}"
+        );
+        assert!(
+            types_module(&code).contains(&format!("pub {field}:")),
+            "`{operation}`'s target declares `{field}`: {}",
+            types_module(&code)
+        );
+    }
+}
+
 #[test]
 fn percent_encoded_pointer_fragments_resolve() {
     // A `$ref` pointer travels in a URI fragment, so `{`/`}` must be percent-encoded there. The

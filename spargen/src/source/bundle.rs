@@ -222,7 +222,9 @@ impl InputBundle {
     /// RFC 6901-unescaped, then re-escaped, which is the spelling a walk of the value builds. So
     /// every spelling of one node (`big%20cat` and `big cat`, `%7Bid%7D` and `{id}`) is one
     /// `(file, pointer)` identity, the identity discriminator mappings are matched by and lowering
-    /// memoises a target under. A fragment with a malformed escape names no target.
+    /// memoises a target under. A fragment with a malformed escape names no target. The pointer is
+    /// decoded exactly once, here: [`SpannedValue::pointer`] reads it as a plain pointer, so
+    /// `100%25` addresses the key `100%`.
     pub(crate) fn reference_target(
         &self,
         reference: &str,
@@ -846,6 +848,9 @@ mod tests {
             ),
             (["#/a~0b/c%7E0d", "#/a~0b/c~0d"], "/a~0b/c~0d"),
             (["#/a%2Fb", "#/a~1b"], "/a~1b"),
+            // Decoded once: `%25` is a literal `%`, so `a%2541` is the key `a%41`, not `aA`.
+            (["#/100%25", "#/100%25"], "/100%"),
+            (["#/a%2541", "#/a%2541"], "/a%41"),
         ] {
             for spelling in spellings {
                 assert_eq!(target(spelling), pointer(canonical), "`{spelling}`");

@@ -863,6 +863,33 @@ components:
         assert!(invalid_rule_messages(&diags).is_empty());
     }
 
+    /// A rule's pointer is looked up as a plain RFC 6901 pointer, decoded once: a path holding a
+    /// literal `%` is removed by an exact path rule, and a pointer rule still reads a
+    /// percent-encoded token (`%20`) as the character it encodes.
+    #[test]
+    fn a_literal_percent_and_a_percent_encoded_pointer_token_each_remove_their_node() {
+        let spec = r#"
+openapi: 3.1.0
+info: { title: t, version: 1.0.0 }
+paths:
+  /100%:
+    get: { responses: { "200": { description: ok } } }
+  /a b:
+    get: { responses: { "200": { description: ok } } }
+  /kept:
+    get: { responses: { "200": { description: ok } } }
+"#;
+        let mut bundle = bundle_of(spec);
+        let mut diags = Diagnostics::default();
+        let omit = omit_of(vec![
+            OmitRule::path("/100%"),
+            pointer_rule(None, "/paths/~1a%20b"),
+        ]);
+        omit.apply(&mut bundle, &mut diags).unwrap();
+        assert_eq!(keys_under(&bundle, "paths", None), vec!["/kept".to_owned()]);
+        assert_eq!(omitted_count(&diags), 2, "{:#?}", diags.items());
+    }
+
     /// The empty pointer names the whole document, which no rule may remove.
     #[test]
     fn an_empty_pointer_rule_is_e019() {
