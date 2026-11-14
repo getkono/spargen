@@ -448,10 +448,11 @@ SIBLING
             "additionalProperties: false",
         ),
         ("items", "{ type: string }", "items: { type: integer }"),
+        // Closed by `items: false`: `prefixItems` with no `items` is `E015` before any meet (#1413).
         (
             "prefixItems",
             "{ type: string }",
-            "prefixItems: [{ type: integer }]",
+            "prefixItems: [{ type: integer }]\n                items: false",
         ),
         ("enum", "{ type: integer }", "enum: ['a']"),
         ("const", "{ type: integer }", "const: 'a'"),
@@ -544,7 +545,7 @@ SIBLING
         (
             "prefixItems",
             "",
-            "prefixItems: [{ type: integer }]",
+            "prefixItems: [{ type: integer }]\n      items: false",
             "{ type: array, items: { type: number } }",
         ),
         (
@@ -562,7 +563,7 @@ SIBLING
         (
             "prefixItems",
             "type: array",
-            "prefixItems: [{ type: integer }]",
+            "prefixItems: [{ type: integer }]\n      items: false",
             "{ type: array, items: { type: number } }",
         ),
         // `required` beside `properties` participates: `object_body` consumes it per declared

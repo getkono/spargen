@@ -534,25 +534,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Lower an array schema with `prefixItems` to a tuple of its entries' types, rejected
-    /// (`E015`) where an `items` other than `false` allows a typed remainder beside them.
+    /// (`E015`) unless `items: false` closes the array at the prefix: any other `items`, or
+    /// none, allows a remainder beside them.
     fn lower_tuple(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
-        // `items` beside `prefixItems` is the 2020-12 rest-element schema. A Rust tuple
-        // is fixed-length, so a typed remainder is not representable — except
-        // `items: false`, which closes the array at the prefix and *is* a tuple.
-        if let Some(rest) = &schema.items {
-            if !matches!(rest.as_ref(), SchemaOr::Bool(false)) {
-                Diagnostic::error(Code::TupleRestNotRepresentable, schema.provenance.clone())
-                    .message(
-                        "`items` beside `prefixItems` allows a typed variable-length \
-                         remainder, which no single Rust type expresses",
-                    )
-                    .remedy(
-                        "use `items: false` to close the tuple, describe the whole array \
-                         with `items`, or omit this API segment with spargen::omit!",
-                    )
-                    .emit(self.diags);
-                return None;
-            }
+        // `items` beside `prefixItems` is the 2020-12 rest-element schema, and an absent
+        // `items` admits any remainder, as `items: true` does (#1413). A Rust tuple is
+        // fixed-length, so a remainder is not representable — except under `items: false`,
+        // which closes the array at the prefix and *is* a tuple.
+        let message = match schema.items.as_deref() {
+            Some(SchemaOr::Bool(false)) => None,
+            Some(_) => Some(
+                "`items` beside `prefixItems` allows a typed variable-length remainder, which \
+                 no single Rust type expresses; only `items: false` closes the tuple",
+            ),
+            None => Some(
+                "`prefixItems` with no `items` allows any remainder after the prefix, as \
+                 `items: true` does, which no single Rust type expresses; only `items: false` \
+                 closes the tuple",
+            ),
+        };
+        if let Some(message) = message {
+            Diagnostic::error(Code::TupleRestNotRepresentable, schema.provenance.clone())
+                .message(message)
+                .remedy(
+                    "add `items: false` to close the tuple, describe the whole array with \
+                     `items`, or omit this API segment with spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
         }
         let mut items = Vec::new();
         for (index, child) in schema.prefix_items.iter().enumerate() {

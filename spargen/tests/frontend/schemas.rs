@@ -1224,8 +1224,8 @@ fn untyped_items_or_prefix_items_alone_lower_to_an_array() {
             vec!["String", "i64"],
         ),
         (
-            "prefixItems alone",
-            "      prefixItems: [ { type: boolean } ]\n",
+            "one prefixItems closed by items: false",
+            "      prefixItems: [ { type: boolean } ]\n      items: false\n",
             vec!["bool"],
         ),
     ] {
@@ -1287,21 +1287,25 @@ fn untyped_items_or_prefix_items_alone_lower_to_an_array() {
     }
 
     // A typed remainder beside `prefixItems` is the variable-length tuple `type: array` rejects,
-    // and the untyped spelling is rejected with the same code.
-    for ty in ["", "      type: array\n"] {
-        let spec = with_schemas(
-            "3.1.0",
-            &format!(
-                "    U:\n{ty}      prefixItems: [ {{ type: string }} ]\n      items: {{ type: \
-                 integer }}\n"
-            ),
-        );
-        let (report, _) = generate_with_code(&spec);
-        assert_eq!(report.outcome(), Outcome::Rejected, "{ty:?}: {report:#?}");
-        assert!(
-            has_code(&report, Code::TupleRestNotRepresentable),
-            "{ty:?}: {report:#?}"
-        );
+    // and so is the open remainder an absent `items` leaves (#1413); the untyped spelling is
+    // rejected with the same code.
+    for rest in ["      items: { type: integer }\n", ""] {
+        for ty in ["", "      type: array\n"] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!("    U:\n{ty}      prefixItems: [ {{ type: string }} ]\n{rest}"),
+            );
+            let (report, _) = generate_with_code(&spec);
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{ty:?} {rest:?}: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::TupleRestNotRepresentable),
+                "{ty:?} {rest:?}: {report:#?}"
+            );
+        }
     }
 
     // The component is an array wherever it is used, so a property referencing it is that array,
