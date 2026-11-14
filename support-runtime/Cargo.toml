@@ -9,7 +9,7 @@ repository.workspace = true
 description = "Freestanding runtime embedded into spargen-generated clients. Not published."
 publish = false
 
-# AGENTS.md's Workspace section names the dependency set this runtime may carry (generated models
+# .claude/rules/support-runtime.md states which dependencies this runtime may carry (generated models
 # may also reference `uuid`, which this crate does not carry). Each feature gates
 # one conditionally embedded module, and `stream` two (`chunked` and `stream`); the comment on each
 # `mod` in src/lib.rs says when a client carries it.

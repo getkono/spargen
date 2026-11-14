@@ -1,4 +1,4 @@
-# AGENTS.md's Releases section says how release-plz drives releases; its defaults tag each published
+# .claude/rules/releases.md says how release-plz drives releases; its defaults tag each published
 # crate and create a GitHub release. CHANGELOG.md is written by release-plz's embedded git-cliff;
 # do not add a cliff.toml.
 

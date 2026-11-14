@@ -1,6 +1,6 @@
 name: Supply chain
 
-# AGENTS.md's "Lockfiles and advisories" says why this runs daily and who responds to a red run.
+# .claude/rules/dependencies.md says why this runs daily and who responds to a red run.
 on:
   push:
     branches: [master]

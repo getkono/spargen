@@ -1426,7 +1426,7 @@ fn a_case_marker_counts_only_on_a_test_that_asserts_its_code_in_its_owning_suite
     );
 }
 
-/// CLAUDE.md: every code gets "a fixture in `spargen/tests/frontend/`", enforced by tests
+/// .claude/rules/diagnostics.md: every code gets "a fixture in `spargen/tests/frontend/`", enforced by tests
 /// rather than convention. Frontend codes are asserted there; the eight the frontend cannot
 /// produce — the `compat` omit rules, the facade's own Cargo-integration and runtime-audit
 /// diagnostics, and `spargen lock`'s fetch failure — are asserted in the suite that *can* produce

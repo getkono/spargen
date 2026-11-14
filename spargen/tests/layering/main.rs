@@ -1,4 +1,4 @@
-//! Structural invariants CLAUDE.md states but nothing checked: the subsystem layering DAG, the
+//! Structural invariants nothing else checks: the subsystem layering DAG, the
 //! shape of the embedded runtime sources, the file list that embeds them, that the published
 //! crate carries every file its sources include, that every integration test spawning the
 //! `cli`-gated binary is itself gated on `cli`, that no file outgrows the length baseline, and

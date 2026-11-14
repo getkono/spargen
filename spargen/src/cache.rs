@@ -1189,7 +1189,7 @@ components:
         );
     }
 
-    /// CLAUDE.md calls the fingerprint "complete". Every `Spec` field changes what is generated,
+    /// The fingerprint must be complete. Every `Spec` field changes what is generated,
     /// so every one must move the digest — otherwise a config change leaves a stale module in place
     /// with nothing to tell the consumer. `Spec` is destructured with no `..` rest pattern, so a new
     /// field fails to compile here until it is given a variant below.
