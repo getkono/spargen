@@ -400,6 +400,220 @@ fn no_testing_module_is_emitted_by_default() {
     assert!(on.contains("pub mod testing"), "{on}");
 }
 
+/// `readOnly` and `writeOnly` members at the top level, in a nested model, in an array of models,
+/// nullable and not, over JSON and XML, beside a request body carrying the same model (#1416).
+const DIRECTION_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: Pets, version: 1.0.0 }
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer, format: int64, readOnly: true }
+        name: { type: string }
+        password: { type: string, writeOnly: true }
+        owner: { $ref: "#/components/schemas/Owner" }
+        checked: { type: [string, "null"], readOnly: true }
+        hint: { type: [string, "null"], writeOnly: true }
+    Owner:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer, format: int64, readOnly: true }
+        secret: { type: string, writeOnly: true }
+    Tag:
+      type: object
+      required: [id, label]
+      properties:
+        id: { type: integer, format: int64, readOnly: true }
+        label: { type: string }
+        secret: { type: string, writeOnly: true }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        "200":
+          description: every pet
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Pet" } }
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Pet" }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+  /pets/{petId}:
+    parameters:
+      - { name: petId, in: path, required: true, schema: { type: integer, format: int64 } }
+    get:
+      operationId: getPet
+      responses:
+        "200":
+          description: found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+  /tag:
+    get:
+      operationId: getTag
+      responses:
+        "200":
+          description: a tag
+          content:
+            application/xml:
+              schema: { $ref: "#/components/schemas/Tag" }
+"##;
+
+/// A typed reply encodes its body in the response direction, as a server writes it: every
+/// `readOnly` member written and every `writeOnly` one left out, at any depth, over JSON and XML.
+/// A model serialized outside a reply, a request body included, keeps the request direction.
+#[test]
+fn a_typed_reply_writes_read_only_members_and_leaves_write_only_ones_out() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "pets.yaml", DIRECTION_SPEC);
+    let out = temp.path().join("client");
+    let report =
+        generate_configured_fixture_crate(&spec, &out, "direction_client", "2021", |spec| {
+            spec.with_testing(spargen::TestingModule::Emitted)
+        });
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    write_fixture_test(&out, "direction", DIRECTION_TEST);
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the response-direction encoding must pass clippy -D warnings"
+    );
+    let status = fixture_cargo(&out)
+        .args(["test", "--test", "direction"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "a typed reply must carry readOnly members and leave writeOnly ones out"
+    );
+}
+
+const DIRECTION_TEST: &str = r##"use std::future::Future;
+use std::sync::Arc;
+
+use direction_client::Nullable;
+use direction_client::{ops, testing, types};
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(output) => output,
+        std::task::Poll::Pending => panic!("a call over the mock never waits"),
+    }
+}
+
+fn client(mock: &testing::MockBackend) -> direction_client::Client {
+    direction_client::Client::with_backend(Arc::new(mock.clone()), "http://mock").unwrap()
+}
+
+/// A pet with every member set, `readOnly` and `writeOnly` ones included.
+fn pet(id: i64) -> types::Pet {
+    types::Pet::new("rex".to_owned())
+        .with_id(id)
+        .with_password("hunter2".to_owned())
+        .with_owner(types::Owner::new().with_id(3).with_secret("s3cret".to_owned()))
+        .with_checked("yes".to_owned())
+        .with_hint("h".to_owned())
+}
+
+/// What a client decodes from `pet(id)` written as a server writes it.
+fn assert_read_back(read: &types::Pet, id: i64) {
+    assert_eq!(read.id, Some(id), "{read:?}");
+    assert_eq!(read.name, "rex", "{read:?}");
+    assert_eq!(read.checked, Nullable::Value("yes".to_owned()), "{read:?}");
+    assert_eq!(read.password, None, "{read:?}");
+    assert_eq!(read.hint, Nullable::Absent, "{read:?}");
+    let owner = read.owner.as_ref().expect("the nested owner");
+    assert_eq!(owner.id, Some(3), "{read:?}");
+    assert_eq!(owner.secret, None, "{read:?}");
+}
+
+#[test]
+fn a_json_reply_carries_read_only_members_and_drops_write_only_ones() {
+    let mock = testing::MockBackend::new().on_get_pet(|_| testing::get_pet::Reply::status_200(&pet(7)));
+    let read = block_on(client(&mock).get_pet(7)).unwrap().into_inner();
+    assert_read_back(&read, 7);
+}
+
+#[test]
+fn an_array_reply_keeps_the_rule_for_every_member() {
+    let mock = testing::MockBackend::new()
+        .on_list_pets(|_| testing::list_pets::Reply::status_200(&vec![pet(1), pet(2)]));
+    let read = block_on(client(&mock).list_pets()).unwrap().into_inner();
+    assert_eq!(read.len(), 2);
+    assert_read_back(&read[0], 1);
+    assert_read_back(&read[1], 2);
+}
+
+#[test]
+fn an_xml_reply_carries_read_only_members_and_drops_write_only_ones() {
+    let tag = types::Tag::new("blue".to_owned()).with_id(5).with_secret("s".to_owned());
+    let mock = testing::MockBackend::new().on_get_tag(move |_| testing::get_tag::Reply::status_200(&tag));
+    let read = block_on(client(&mock).get_tag()).unwrap().into_inner();
+    assert_eq!(read.id, Some(5), "{read:?}");
+    assert_eq!(read.label, "blue", "{read:?}");
+    assert_eq!(read.secret, None, "{read:?}");
+}
+
+#[test]
+fn a_request_body_keeps_the_request_direction() {
+    let mock = testing::MockBackend::new().on_create_pet(|call| {
+        let sent: types::Pet = call.json().unwrap();
+        testing::create_pet::Reply::status_201(&sent.with_id(11).with_checked("yes".to_owned()))
+    });
+    let created = block_on(client(&mock).create_pet(&pet(99))).unwrap().into_inner();
+    assert_eq!(created.id, Some(11), "{created:?}");
+    assert_eq!(created.password, None, "{created:?}");
+
+    let calls = mock.calls(ops::CREATE_PET);
+    let sent: serde_json::Value = serde_json::from_slice(calls[0].body()).unwrap();
+    assert_eq!(
+        sent,
+        serde_json::json!({
+            "name": "rex",
+            "password": "hunter2",
+            "owner": { "secret": "s3cret" },
+            "hint": "h",
+        })
+    );
+}
+
+#[test]
+fn a_model_serialized_outside_a_reply_keeps_the_request_direction() {
+    let _ = testing::get_pet::Reply::status_200(&pet(7));
+    assert_eq!(
+        serde_json::to_value(pet(7)).unwrap(),
+        serde_json::json!({
+            "name": "rex",
+            "password": "hunter2",
+            "owner": { "secret": "s3cret" },
+            "hint": "h",
+        })
+    );
+}
+"##;
+
 const MOCK_TEST: &str = r##"use std::future::Future;
 use std::sync::Arc;
 
