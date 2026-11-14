@@ -32,6 +32,25 @@ fn with_query(names: &[&str]) -> String {
     )
 }
 
+/// `get /pets` taking one optional integer parameter per `(name, in)` pair, in that order.
+fn with_located(params: &[(&str, &str)]) -> String {
+    let params: String = params
+        .iter()
+        .map(|(name, location)| {
+            format!(
+                "        - name: {name}
+          in: {location}
+          schema: {{ type: integer }}
+"
+            )
+        })
+        .collect();
+    full(
+        &pets_get("listPets", &format!("      parameters:\n{params}"), PET_REF),
+        PET_SCHEMA,
+    )
+}
+
 /// A `Pet` whose optional string properties are `names`, in that order.
 fn pet_with(names: &[&str]) -> String {
     let props: String = names
@@ -77,6 +96,36 @@ fn a_params_field_rebound_to_another_wire_name_is_major() {
         report.changes
     );
     assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn a_params_field_rebound_to_a_parameter_of_another_location_is_major() {
+    // A header ranks before a cookie, so the new header `id` takes `id` (and `with_id`) from the
+    // cookie `id`, and a caller's `.with_id(7)` would now send a header instead of a cookie.
+    let report = diff(
+        &with_located(&[("id", "cookie")]),
+        &with_located(&[("id", "cookie"), ("id", "header")]),
+    );
+    assert!(
+        kinds(&report).contains(&ChangeKind::IdentifierRebound),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn a_parameter_moved_to_another_location_keeps_its_params_field() {
+    // The one parameter named `id` on each side moves, keeping `with_id`: no rebinding.
+    let report = diff(
+        &with_located(&[("id", "cookie")]),
+        &with_located(&[("id", "header")]),
+    );
+    assert!(
+        !kinds(&report).contains(&ChangeKind::IdentifierRebound),
+        "{:?}",
+        report.changes
+    );
 }
 
 #[test]
