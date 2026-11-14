@@ -123,7 +123,7 @@ pub use retry::{
 };
 #[cfg(feature = "stream")]
 pub use stream::{
-    EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
+    EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, Resend, StreamError,
 };
 pub use transport::{
     try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend, TotalTimeout,

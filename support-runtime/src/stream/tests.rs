@@ -5,12 +5,12 @@ use reqwest::Method;
 
 use super::{
     EventStream, FrameBuffer, FramePoll, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait,
-    SseMetadata,
+    Resend, SseMetadata,
 };
 use crate::tests::{
     core, poll_ready, poll_to_completion, Chunk, Chunks, PendingOnce, Reply, SequenceBackend,
 };
-use crate::{ClientCore, Error, HttpBody};
+use crate::{ClientCore, Error};
 
 /// A [`FrameBuffer`] holding `bytes`, with nothing searched yet.
 fn frame_buffer(bytes: &[u8]) -> FrameBuffer {
@@ -543,12 +543,12 @@ impl ReconnectPolicy for ImmediateReconnect {
     }
 }
 
-/// `request` as a streaming operation sends it and keeps it to reconnect: prepared on `core`.
-fn prepared(
-    core: &ClientCore,
-    request: http::Request<HttpBody>,
-) -> Option<http::Request<HttpBody>> {
-    Some(crate::prepare(core, request, true))
+/// What a streaming operation with no security requirement keeps of `request` to reconnect: its
+/// [`Resend`], carrying what the request it sends, prepared on `core`, carries.
+fn prepared(core: &ClientCore, request: crate::RequestBuilder) -> Option<Resend> {
+    let (request, _, resend) = poll_ready(Resend::attach(core, request, &[])).unwrap();
+    let sent = crate::prepare(core, request.build().unwrap(), true);
+    resend.map(|resend| resend.carrying(&sent))
 }
 
 fn reconnectable_stream(
@@ -568,9 +568,7 @@ fn reconnectable_stream_over(
 ) -> EventStream<serde_json::Value> {
     let core = ClientCore::with_backend(backend, "https://example.com").unwrap();
     let request = crate::tests::builder(Method::GET, "https://example.com/events")
-        .header(reqwest::header::COOKIE, "session=secret")
-        .build()
-        .unwrap();
+        .header(reqwest::header::COOKIE, "session=secret");
     let stream = EventStream::new_reconnectable(
         initial,
         Framing::SseJsonData,
@@ -656,9 +654,7 @@ fn a_reconnect_carries_the_cores_option_headers_and_extensions() {
     options.headers.insert("x-option", "set".parse().unwrap());
     options.extensions.insert(Tag(7));
     core.set_options(options);
-    let request = crate::tests::builder(Method::GET, "https://example.com/events")
-        .build()
-        .unwrap();
+    let request = crate::tests::builder(Method::GET, "https://example.com/events");
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response("data: {\"seq\":1}\n\n"),
         Framing::SseJsonData,
@@ -683,118 +679,6 @@ fn a_reconnect_carries_the_cores_option_headers_and_extensions() {
         backend.seen.lock().unwrap().as_slice(),
         &[(Some("set".to_owned()), Some(Tag(7)))]
     );
-}
-
-/// The bearer scheme the re-signing tests' operation requires.
-const BEARER: &[&[crate::AuthScheme]] = &[&[crate::AuthScheme {
-    name: "bearer",
-    kind: crate::AuthKind::Bearer,
-}]];
-
-/// Open a reconnectable SSE stream on `core` the way a generated streaming operation does: sign
-/// the request for [`BEARER`], prepare it, send it through [`crate::execute`] (which replays it
-/// once after a rejected refreshable credential), and hand the stream what it needs to reconnect.
-fn signed_stream(core: &ClientCore) -> EventStream<serde_json::Value> {
-    let request = crate::tests::builder(Method::GET, "https://example.com/events");
-    let (request, replay) =
-        poll_ready(crate::attach_auth_replayable(core, request, BEARER)).unwrap();
-    let request = crate::prepare(core, request.build().unwrap(), true);
-    let reconnect_request = crate::try_clone_request(&request);
-    let response = poll_ready(crate::execute(core, request, replay, true)).unwrap();
-    let policy = Arc::new(ImmediateReconnect {
-        max_attempts: 1,
-        ..ImmediateReconnect::default()
-    });
-    EventStream::new_reconnectable(response, Framing::SseJsonData, core, None)
-        .resending(core, reconnect_request)
-        .with_reconnect(policy)
-        .unwrap()
-}
-
-/// Issue #1398: a stream whose first request was rejected, refreshed and replayed reconnects with
-/// the refreshed token, not the one the server already rejected.
-#[test]
-fn a_reconnect_after_a_refreshed_replay_carries_the_refreshed_token() {
-    let backend = SequenceBackend::new([
-        Reply::status(401, ""),
-        sse_reply(200, "data: {\"seq\":1}\n\n"),
-        sse_reply(200, "data: {\"seq\":2}\n\n"),
-    ]);
-    let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
-    // `on_rejected` stores the fresh token where `token` reads it, as a refresh that outlives
-    // the replay does.
-    let current = Arc::new(Mutex::new("stale".to_owned()));
-    let read = Arc::clone(&current);
-    let store = Arc::clone(&current);
-    core.set_credential(
-        "bearer",
-        crate::Credential::refreshable(
-            crate::token_provider(move || {
-                let token = read.lock().unwrap().clone();
-                async move { Ok(crate::SecretString::from(token)) }
-            }),
-            |response| response.status() == 401,
-            move |_stale| {
-                *store.lock().unwrap() = "fresh".to_owned();
-                async { Ok(crate::SecretString::from("fresh")) }
-            },
-        ),
-    );
-    let mut stream = signed_stream(&core);
-
-    assert_eq!(
-        poll_ready(stream.next()).unwrap().unwrap(),
-        serde_json::json!({"seq": 1})
-    );
-    assert_eq!(
-        poll_ready(stream.next()).unwrap().unwrap(),
-        serde_json::json!({"seq": 2})
-    );
-    assert_eq!(
-        backend.header("authorization"),
-        [
-            Some("Bearer stale".to_owned()),
-            Some("Bearer fresh".to_owned()),
-            Some("Bearer fresh".to_owned()),
-        ]
-    );
-}
-
-/// Issue #1398: a [`crate::Credential::Provider`] is asked for a token again on each reconnect,
-/// so a long-lived stream reconnects with a current token rather than the first one.
-#[test]
-fn a_reconnect_asks_a_token_provider_again() {
-    let backend = SequenceBackend::new([
-        sse_reply(200, "data: {\"seq\":1}\n\n"),
-        sse_reply(200, "data: {\"seq\":2}\n\n"),
-    ]);
-    let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
-    let asked = Arc::new(Mutex::new(0_u32));
-    let counter = Arc::clone(&asked);
-    core.set_credential(
-        "bearer",
-        crate::Credential::Provider(crate::token_provider(move || {
-            let mut asked = counter.lock().unwrap();
-            *asked += 1;
-            let token = format!("t{asked}");
-            async move { Ok(crate::SecretString::from(token)) }
-        })),
-    );
-    let mut stream = signed_stream(&core);
-
-    assert_eq!(
-        poll_ready(stream.next()).unwrap().unwrap(),
-        serde_json::json!({"seq": 1})
-    );
-    assert_eq!(
-        poll_ready(stream.next()).unwrap().unwrap(),
-        serde_json::json!({"seq": 2})
-    );
-    assert_eq!(
-        backend.header("authorization"),
-        [Some("Bearer t1".to_owned()), Some("Bearer t2".to_owned())]
-    );
-    assert_eq!(*asked.lock().unwrap(), 2);
 }
 
 /// Each connection's body is its own SSE stream, so a byte order mark opening a reconnect's body
@@ -841,9 +725,7 @@ fn an_unsendable_sse_id_reconnects_without_last_event_id() {
     let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
     let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .header("last-event-id", "evt-0")
-        .header(reqwest::header::COOKIE, "session=secret")
-        .build()
-        .unwrap();
+        .header(reqwest::header::COOKIE, "session=secret");
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response("id: a\u{1}b\ndata: {\"seq\":1}\n\n"),
         Framing::SseJsonData,
@@ -883,9 +765,7 @@ fn an_empty_sse_id_reconnects_without_last_event_id() {
     let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
     let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .header("last-event-id", "evt-0")
-        .header(reqwest::header::COOKIE, "session=secret")
-        .build()
-        .unwrap();
+        .header(reqwest::header::COOKIE, "session=secret");
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response("id: evt-1\ndata: {\"seq\":1}\n\nid:\ndata: {\"seq\":2}\n\n"),
         Framing::SseJsonData,
@@ -953,9 +833,7 @@ fn a_rejected_reconnect_outlives_its_core_and_keeps_its_error_body_cap() {
     });
     let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
     core.config_mut().max_error_body = 4;
-    let request = crate::tests::builder(Method::GET, "https://example.com/events")
-        .build()
-        .unwrap();
+    let request = crate::tests::builder(Method::GET, "https://example.com/events");
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response(""),
         Framing::SseJsonData,
@@ -1121,8 +999,9 @@ fn with_reconnect_refuses_a_stream_that_holds_no_replayable_request() {
     }
 }
 
-/// A request whose body is a one-shot stream cannot be cloned for the replay. Once the policy's
-/// wait elapses, the stream yields that as `RequestConstruction`, sends nothing, and ends.
+/// A request whose body is a one-shot stream cannot be cloned for the replay. [`Resend::attach`]
+/// keeps no such request, so the stream is handed one directly here. Once the policy's wait
+/// elapses, the stream yields that as `RequestConstruction`, sends nothing, and ends.
 #[test]
 fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
     let backend = SequenceBackend::statuses([200]);
@@ -1131,19 +1010,21 @@ fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
         ..ImmediateReconnect::default()
     });
     let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
-    let request = crate::tests::builder(Method::POST, "https://example.com/events")
-        .body(crate::HttpBody::wrap(Chunks::new([Chunk::data(
-            "one-shot",
-        )])))
-        .build()
-        .unwrap();
-    assert!(crate::try_clone_request(&request).is_none());
-    let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
-        response(""),
-        Framing::SseJsonData,
-        &core,
-        prepared(&core, request),
-    );
+    let one_shot = || {
+        crate::tests::builder(Method::POST, "https://example.com/events").body(
+            crate::HttpBody::wrap(Chunks::new([Chunk::data("one-shot")])),
+        )
+    };
+    assert!(one_shot().try_clone().is_none());
+    assert!(prepared(&core, one_shot()).is_none());
+    let resend = Resend {
+        unsigned: one_shot(),
+        requirements: Vec::new(),
+        extensions: http::Extensions::new(),
+        last_event_id: None,
+    };
+    let stream: EventStream<serde_json::Value> =
+        EventStream::new_reconnectable(response(""), Framing::SseJsonData, &core, Some(resend));
     let mut stream = match stream.with_reconnect(policy.clone()) {
         Ok(stream) => stream,
         Err(error) => panic!("the stream holds a request, so reconnect is available: {error}"),
@@ -1288,9 +1169,7 @@ fn sse_frames_the_event_behind_one_that_dispatches_nothing() {
 fn a_reconnectable_stream_starts_from_the_requests_last_event_id() {
     let core = core();
     let request = crate::tests::builder(Method::GET, "https://example.com/events")
-        .header("last-event-id", "evt-0")
-        .build()
-        .unwrap();
+        .header("last-event-id", "evt-0");
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response("data: 1\n\n"),
         Framing::SseJsonData,
@@ -1378,9 +1257,7 @@ fn bounded_stream(
     let mut core = ClientCore::with_backend(backend, "https://example.com").unwrap();
     core.config_mut().max_stream_frame = max_stream_frame;
     core.config_mut().max_error_body = 4;
-    let request = crate::tests::builder(Method::GET, "https://example.com/events")
-        .build()
-        .unwrap();
+    let request = crate::tests::builder(Method::GET, "https://example.com/events");
     match EventStream::new_reconnectable(response(body), framing, &core, prepared(&core, request))
         .with_reconnect(policy)
     {
@@ -1677,3 +1554,4 @@ proptest::proptest! {
 }
 
 mod failure;
+mod reauth;

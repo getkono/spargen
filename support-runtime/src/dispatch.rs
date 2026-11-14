@@ -275,8 +275,8 @@ pub async fn send_streaming(
 
 /// Add `options`' headers and extensions to `request`, leaving whatever it already carries as it
 /// is: a header name it carries keeps exactly its own values, and an extension type it carries its
-/// own value. [`crate::EventStream`]'s reconnect applies them the same way to the request it
-/// resends.
+/// own value. [`crate::EventStream`]'s reconnect, which [`prepare`]s each request it sends,
+/// applies them the same way.
 pub(crate) fn apply_options(
     options: &crate::RequestOptions,
     request: &mut http::Request<HttpBody>,
@@ -380,8 +380,8 @@ async fn read_within<E>(
         .ok_or(Error::BodyTooLarge { limit, status })
 }
 
-/// [`send`] through the backend alone, for a caller that holds the backend and a request already
-/// on the seam rather than the whole [`ClientCore`]: a streaming response's reconnect.
+/// [`send`] through the backend alone, for a request already on the seam: the one send
+/// [`execute_once`] makes.
 pub(crate) async fn send_on(
     backend: &dyn HttpBackend,
     request: http::Request<HttpBody>,

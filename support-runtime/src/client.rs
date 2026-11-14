@@ -64,7 +64,7 @@ pub struct ClientConfig {
     /// streaming response is exempt,
     /// because a stream may rightly stay open indefinitely: an operation returning an
     /// `EventStream` sends its request with the runtime's `send_streaming`, which never applies
-    /// it, and each reconnect resends that same request.
+    /// it, and each reconnect is sent the same way.
     pub timeout: Option<Duration>,
     /// Maximum bytes of a success body a non-streaming operation reads before it fails with
     /// [`Error::BodyTooLarge`] (default `None`: a structured success body is read whole, however
