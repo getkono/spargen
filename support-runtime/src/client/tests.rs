@@ -199,6 +199,22 @@ fn a_bound_header_value_is_redacted_in_debug() {
     assert!(!debug.contains("tenant-secret-7781"), "{debug}");
 }
 
+/// Issue #1402: a base URL's `user:password@` prefix is a Basic credential the request builder
+/// takes off each request, and its query may carry an `apiKey`; `ClientCore`'s `Debug` printed
+/// both through `Url`'s own `Debug`. It now prints the base URL without either, and the getter
+/// still returns it as configured.
+#[test]
+fn a_base_urls_userinfo_and_query_stay_out_of_debug() {
+    let core = ClientCore::new("https://alice:pa55word@example.com/v1?api_key=k3y").unwrap();
+    for debug in [format!("{core:?}"), format!("{core:#?}")] {
+        assert!(!debug.contains("pa55word"), "{debug}");
+        assert!(!debug.contains("alice"), "{debug}");
+        assert!(!debug.contains("k3y"), "{debug}");
+        assert!(debug.contains("https://example.com/v1"), "{debug}");
+    }
+    assert_eq!(core.base_url().password(), Some("pa55word"));
+}
+
 /// Issue #1335: a value no request could carry as a header value (CR/LF, NUL, DEL, any other
 /// control character but a tab) is refused when it is bound, rather than failing every later
 /// request, and the value already bound stays bound. The refusal names the header and does not

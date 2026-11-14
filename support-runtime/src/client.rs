@@ -8,7 +8,8 @@ use url::Url;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::error::CrossOriginRedirect;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::paginate::{same_origin, without_credentials};
+use crate::paginate::same_origin;
+use crate::paginate::without_credentials;
 use crate::{
     Credential, Error, ExposeSecret, HttpBackend, LinkPaginator, ReqwestBackend, SecretString,
 };
@@ -195,7 +196,7 @@ pub struct RequestOptions {
 ///
 /// The generated `Client` wraps one of these and documents its own constructors; each of its
 /// operation methods delegates to the shared dispatch routines.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientCore {
     backend: Arc<dyn HttpBackend>,
     base_url: Url,
@@ -205,6 +206,25 @@ pub struct ClientCore {
     /// Bound header values, keyed by the header name in ASCII lowercase. Held as `SecretString`s,
     /// as credentials' secrets are, so `Debug` prints each bound name and redacts its value.
     bound_headers: HashMap<String, SecretString>,
+}
+
+/// Prints the base URL without its userinfo and query, the two places a URL carries a credential
+/// (a `user:password@` prefix the request builder sends as `Authorization: Basic`, an `apiKey`
+/// query parameter); [`ClientCore::base_url`] returns it as configured.
+impl std::fmt::Debug for ClientCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientCore")
+            .field("backend", &self.backend)
+            .field(
+                "base_url",
+                &without_credentials(self.base_url.clone()).as_str(),
+            )
+            .field("config", &self.config)
+            .field("options", &self.options)
+            .field("credentials", &self.credentials)
+            .field("bound_headers", &self.bound_headers)
+            .finish()
+    }
 }
 
 impl ClientCore {
