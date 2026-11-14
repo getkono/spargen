@@ -907,3 +907,6 @@ fn trial_match_rule_tokens(mode: UnionMode) -> TokenStream {
         UnionMode::AnyOf => quote! { match_count >= 1 },
     }
 }
+
+#[cfg(test)]
+mod tests;
