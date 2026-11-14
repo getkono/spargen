@@ -112,7 +112,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
     };
     let blocking_reexport = quote! {
         #blocking_cfg
-        pub use blocking::BlockingRuntime;
+        pub use blocking::{BlockingRuntime, NestedRuntime};
     };
     quote! {
         /// The freestanding runtime embedded into this output; no spargen crate is a runtime

@@ -365,7 +365,8 @@ It compiles only under the `blocking` feature on a non-wasm32 target, so a wasm3
 carries it. The feature resolves against the consumer crate, so leaving `blocking` undeclared
 compiles the facade out; [`spargen deps`](./cli.md#spargen-deps) prints the opt-in. A
 `BlockingClient` must not be called from inside another async runtime, where tokio's `block_on`
-panics; the [`blocking` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/blocking.rs)
+panics. `BlockingRuntime::try_block_on` returns the typed `NestedRuntime` error there instead of
+panicking, for code that drives a `BlockingRuntime` itself; the [`blocking` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/blocking.rs)
 says where to drive one instead. Building one inside an async runtime is fine, and so is dropping
 one there: the drop
 shuts its runtime down in the background without waiting, so a blocking client held in async
