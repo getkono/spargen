@@ -924,7 +924,7 @@ fn advisory_floors_are_manifest_requirements() {
         .as_table()
         .expect("spargen/Cargo.toml has a [features] table");
     for (name, floor) in floors {
-        // CLAUDE.md's shape for a floor: a direct requirement at exactly the patched release,
+        // .claude/rules/dependencies.md's shape for a floor: a direct requirement at exactly the patched release,
         // default features off (so it adds no feature to what the parent selects), optional and
         // enabled by the feature that reaches the crate (so it adds the crate to no build that
         // did not already link it), and nothing else.
@@ -1430,7 +1430,7 @@ fn runtime_requirements_admit_their_latest_release() {
     assert!(
         stale.is_empty(),
         "runtime requirements behind their crate's latest release; every release waits until \
-         they move (AGENTS.md, \"Releases\"):\n{}",
+         they move (.claude/rules/dependencies.md):\n{}",
         stale.join("\n")
     );
 }

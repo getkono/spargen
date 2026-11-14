@@ -96,7 +96,7 @@ const TOOLCHAIN_EXCEPTIONS: [(&str, &str, &str, &str); 2] = [
         "runtime-dependencies",
         "nightly",
         "`-Z direct-minimal-versions` exists only on nightly; the one floating toolchain, named \
-         in CLAUDE.md",
+         in .claude/rules/ci-gates.md",
     ),
 ];
 

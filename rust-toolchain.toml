@@ -1,5 +1,5 @@
-# A concrete release, held to every workflow's `dtolnay/rust-toolchain@` step; AGENTS.md's Quality
-# section says why and how to bump it.
+# A concrete release, held to every workflow's `dtolnay/rust-toolchain@` step;
+# .claude/rules/ci-gates.md says why and how to bump it.
 [toolchain]
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]

@@ -55,7 +55,7 @@ jobs:
 
   bench-build:
     name: Benchmarks (test mode)
-    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
+    # A slow gate pull requests skip (.claude/rules/ci-gates.md; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
@@ -79,7 +79,7 @@ jobs:
 
   msrv:
     name: MSRV
-    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
+    # A slow gate pull requests skip (.claude/rules/ci-gates.md; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -89,12 +89,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo +1.88.0 check --workspace --all-features --locked
-      # The generated petstore client's floor; unlocked like every example gate (AGENTS.md).
+      # The generated petstore client's floor; unlocked like every example gate.
       - run: cargo +1.88.0 check --manifest-path examples/petstore/Cargo.toml
 
   powerset:
     name: Feature combinations
-    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
+    # A slow gate pull requests skip (.claude/rules/ci-gates.md; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The one floating toolchain, a named exception in AGENTS.md: `-Z direct-minimal-versions`
+      # The one floating toolchain, named in `TOOLCHAIN_EXCEPTIONS`: `-Z direct-minimal-versions`
       # needs a nightly cargo, and the proof only resolves the lockfile with it.
       - uses: dtolnay/rust-toolchain@nightly
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -146,7 +146,7 @@ jobs:
 
   corpus-smoke:
     name: Corpus smoke
-    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
+    # A slow gate pull requests skip (.claude/rules/ci-gates.md; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
@@ -180,7 +180,7 @@ jobs:
 
   github-api:
     name: GitHub API generated client
-    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
+    # A slow gate pull requests skip (.claude/rules/ci-gates.md; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -198,7 +198,7 @@ jobs:
 
   example:
     name: Petstore example
-    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
+    # A slow gate pull requests skip (.claude/rules/ci-gates.md; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:

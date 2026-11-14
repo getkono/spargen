@@ -62,8 +62,8 @@ reqwest = { version = "0.12.28", default-features = false, features = [
     "rustls-tls",
 ], optional = true }
 # Advisory floors, never named in code, with default features off so none adds a feature to what
-# reqwest selects; each is mirrored by a `[bans] deny` entry in `deny.toml` (AGENTS.md, "Lockfiles
-# and advisories"). The TLS handshake test in `src/source/vendor/tests.rs` serves TLS through the
+# reqwest selects; each is mirrored by a `[bans] deny` entry in `deny.toml`
+# (.claude/rules/dependencies.md). The TLS handshake test in `src/source/vendor/tests.rs` serves TLS through the
 # rustls entry rather than through a dev-dependency, which would put a TLS crate in the
 # default-features graph `the_all_features_workspace_graph_carries_a_tls_stack` holds free of one:
 # removing that floor means giving the test another way to name rustls.

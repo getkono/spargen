@@ -1,5 +1,5 @@
 /// Git hooks, installed with `mise run hooks`; every step delegates to a `mise.toml` task, and
-/// AGENTS.md's Quality section says which hook runs what.
+/// .claude/rules/ci-gates.md states the rules they follow.
 amends "package://github.com/jdx/hk/releases/download/v1.50.0/hk@1.50.0#/Config.pkl"
 
 /// Matches the `amends` package above and the `hk` pin in `mise.toml`.
@@ -51,7 +51,7 @@ hooks {
         check = "mise run commit-range"
       }
       // Globbed, unlike the steps above, because the audit is not hermetic: unglobbed, a new
-      // advisory would block every push (AGENTS.md, "Lockfiles and advisories").
+      // advisory would block every push (.claude/rules/dependencies.md).
       ["deny"] {
         glob = List("**/Cargo.lock", "**/Cargo.toml", "deny.toml", "mise.toml")
         check = "mise run deny"

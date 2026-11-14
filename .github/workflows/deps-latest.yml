@@ -1,6 +1,6 @@
 name: Latest dependency releases
 
-# AGENTS.md's "Releases" says why this runs weekly and before every release, and who answers a red
+# .claude/rules/dependencies.md says why this runs weekly and before every release, and who answers a red
 # run. `release-plz.yml` calls it (`workflow_call`) as the job its release job needs.
 on:
   schedule:

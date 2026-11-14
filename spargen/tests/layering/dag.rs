@@ -1041,7 +1041,7 @@ fn the_declared_headers_agree_with_the_dag_table_in_lib_rs() {
 #[test]
 fn the_cli_declares_its_dependency_on_the_facade() {
     // `cli` has no `mod.rs`; its header rides on `run.rs`, and it depends on the facade rather
-    // than on any subsystem. CLAUDE.md still lists it as a subsystem, so the header must exist.
+    // than on any subsystem. It is still a subsystem, so the header must exist.
     // Inside `cli`, `crate::` names the binary crate, so the facade edge is a `spargen::` path; a
     // `crate::<subsystem>` path there would name a module the binary does not have.
     let root = workspace_root();

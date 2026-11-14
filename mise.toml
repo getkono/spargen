@@ -1,4 +1,4 @@
-# Dev tooling and the task runner; each gate task is held to its CI job (AGENTS.md, Quality).
+# Dev tooling and the task runner; each gate task is held to its CI job (.claude/rules/ci-gates.md).
 
 [tools]
 hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
@@ -46,7 +46,7 @@ run = [
 ]
 
 [tasks.deny]
-# CI's `deny` job in deny.yml runs these commands. AGENTS.md's "Lockfiles and advisories" states the
+# CI's `deny` job in deny.yml runs these commands. .claude/rules/dependencies.md states the
 # rules they implement; `the_deny_gate_states_the_feature_scope_it_audits` and
 # `the_lockfile_audit_reads_every_committed_lockfile` pin their shape. Why each part is there:
 # - `--all-features`: rustls enters the graph only under it, so without it an advisory against
@@ -83,7 +83,7 @@ run = [
 
 [tasks.deny-published]
 # Audits the `Cargo.lock` that `cargo install spargen --features cli --locked` installs (#178);
-# AGENTS.md's "Lockfiles and advisories" says when it runs and who fixes it.
+# .claude/rules/dependencies.md says when it runs and who fixes it.
 # `the_published_lockfile_audit_covers_every_shipped_binary` pins its shape. The empty `[workspace]`
 # appended to the extracted manifest keeps cargo from reading it as a member of this one, and
 # `--locked` fails the audit if the shipped lockfile would be rewritten. The `cargo audit`, its
@@ -113,7 +113,7 @@ echo "auditing the Cargo.lock published in spargen $version"
 # and the generated-client floors in `spargen/src/runtime_contract/requirements.rs`) against its
 # crate's newest stable release on the crates.io sparse index. It reads the manifests and changes
 # nothing. A requirement that rejects that release fails the run; one that admits it from an older
-# floor prints a notice. AGENTS.md's "Releases" says when it runs and who answers a red run.
+# floor prints a notice. .claude/rules/dependencies.md says when it runs and who answers a red run.
 # Needs curl and network access, so the test is ignored by `mise run test`.
 description = "Check each runtime dependency requirement against its crate's latest crates.io release (needs curl)"
 run = "cargo test -p spargen --test repo_gates supply_chain::runtime_requirements_admit_their_latest_release -- --exact --ignored --nocapture"

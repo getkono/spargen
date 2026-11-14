@@ -354,7 +354,7 @@ fn the_human_report_lists_each_change_then_the_summary_and_bump() {
     );
 }
 
-/// AGENTS.md asks the `diff` suite for "semver classification per change kind": every
+/// The `diff` suite owes semver classification per change kind: every
 /// [`ChangeKind`] has a fixture proving the classifier produces it, not only a policy row.
 ///
 /// A bare mention is not a fixture: `kinds(&report).contains(&ChangeKind::X)` passes beside

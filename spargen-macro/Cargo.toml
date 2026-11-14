@@ -1,5 +1,5 @@
-# The proc-macro front-end for spargen; AGENTS.md's Workspace section says why it is a crate of its
-# own and why `spargen` must never depend back on it.
+# The proc-macro front-end for spargen, a crate of its own as every proc-macro is; `spargen` must
+# never depend back on it (AGENTS.md, Workspace).
 [package]
 name = "spargen-macro"
 version.workspace = true

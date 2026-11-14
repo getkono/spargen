@@ -1,6 +1,6 @@
 //! `corpus/manifest.toml` as the single source of corpus expectations.
 //!
-//! CLAUDE.md names the manifest as where a pinned spec's expected outcome lives, and says
+//! .claude/rules/corpus.md names the manifest as where a pinned spec's expected outcome lives, and says
 //! expectations change "only with a reviewed reason". Nothing read it: the same expectations were
 //! restated by hand in the `corpus-smoke` mise task, again in the CI job, and again in
 //! `tests/snapshot.rs`. They had already drifted — `openai-openapi` was in the manifest and the
@@ -8,9 +8,7 @@
 //!
 //! This suite drives the manifest itself, and holds the other copies to it. The repository's
 //! assertions over its own gate configuration live in `tests/repo_gates/`, which reads `mise.toml`
-//! and `.github/workflows/` through the same `shared/repo.rs` readers this suite does. CLAUDE.md's
-//! corpus row names this file and every test here
-//! (`the_testing_strategy_table_names_every_test_in_its_suite`).
+//! and `.github/workflows/` through the same `shared/repo.rs` readers this suite does.
 //!
 //! One manifest field is held only to its `corpus/README.md` mirror, never to the files it hashes:
 //! `tree_sha256`, carried by `openapi-boilerplate` alone. How
@@ -162,7 +160,7 @@ fn names_case(haystack: &str, id: &str) -> bool {
 
 #[test]
 fn the_corpus_smoke_gate_covers_every_manifest_case() {
-    // CLAUDE.md points at `mise run corpus-smoke` for the corpus row, so a manifest case the task
+    // `mise run corpus-smoke` is the corpus gate, so a manifest case the task
     // never runs is a case that gate does not actually check, and a corpus file the task checks
     // that the manifest does not declare is one no expectation governs. The task is read as its
     // own commands, not as the whole file a path might appear anywhere in, and each case's command
@@ -475,7 +473,7 @@ fn assert_snapshot_tests_count_only_asserted_outcomes() {
 
 #[test]
 fn the_corpus_readme_mirrors_the_manifest() {
-    // CLAUDE.md says the manifest's expectations are "mirrored in `corpus/README.md`". Every cell
+    // `corpus/README.md` mirrors the manifest's expectations. Every cell
     // of each case's table row is read against the manifest field it restates, so a mirror that
     // names the case but states another outcome, upstream, revision, path or hash fails too.
     let rows = readme_rows(&read("corpus/README.md"));

@@ -1,5 +1,5 @@
-# cargo-deny policy for every committed lockfile, the examples' included; AGENTS.md's "Lockfiles
-# and advisories" says how `mise run deny` applies it.
+# cargo-deny policy for every committed lockfile, the examples' included;
+# .claude/rules/dependencies.md says how `mise run deny` applies it.
 
 [advisories]
 version = 2
@@ -33,8 +33,8 @@ wildcards = "deny"
 # Every example reaches `spargen` through a version-less path dependency on purpose; this exempts
 # path dependencies of `publish = false` crates only.
 allow-wildcard-paths = true
-# Advisory floors, each paired with a requirement in `spargen/Cargo.toml` (AGENTS.md, "Lockfiles
-# and advisories"). Keep the `name` + `version` form: cargo-deny reads `crate = "name@<X"` as the
+# Advisory floors, each paired with a requirement in `spargen/Cargo.toml`
+# (.claude/rules/dependencies.md). Keep the `name` + `version` form: cargo-deny reads `crate = "name@<X"` as the
 # exact release `X`.
 deny = [
     { name = "rustls", version = "<0.23.46", reason = "RUSTSEC-2026-0285, RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, RUSTSEC-2026-0349" },
