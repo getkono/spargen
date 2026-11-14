@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 
 use super::{ClientConfig, ClientCore, TransportConfig};
 use crate::tests::poll_ready;
@@ -183,9 +183,14 @@ fn a_bound_header_is_keyed_case_insensitively_and_the_last_binding_wins() {
     assert_eq!(core.bound_header("X-Api-Version"), Some("2"));
     assert_eq!(core.bound_header("X-Tenant"), None);
 
-    assert_eq!(core.unbind_header("x-api-VERSION"), Some("2".to_owned()));
+    assert_eq!(
+        core.unbind_header("x-api-VERSION")
+            .as_ref()
+            .map(ExposeSecret::expose_secret),
+        Some("2")
+    );
     assert_eq!(core.bound_header("X-Api-Version"), None);
-    assert_eq!(core.unbind_header("X-Api-Version"), None);
+    assert!(core.unbind_header("X-Api-Version").is_none());
 }
 
 /// A bound header's value is redacted in `ClientCore`'s `Debug`, as a credential's is, so a core
@@ -270,6 +275,22 @@ fn an_invalid_bound_header_name_is_refused_and_binds_nothing() {
     }
     assert_eq!(core.bound_header("x-tenant"), Some("acme"));
     assert_eq!(core.bound_header("X-Tenant "), None);
+}
+
+/// Issue #1433: `unbind_header` hands the removed value back as the `SecretString` the core held
+/// it as, so its `Debug` redacts it, as `ClientCore`'s does, rather than as a plain `String`.
+#[test]
+fn an_unbound_header_value_comes_back_as_a_secret() {
+    let mut core = ClientCore::new("https://example.com").unwrap();
+    core.bind_header("X-Tenant", "tenant-secret-9902").unwrap();
+    let old: Option<SecretString> = core.unbind_header("x-tenant");
+    let debug = format!("{old:?}");
+    assert!(!debug.contains("tenant-secret-9902"), "{debug}");
+    assert_eq!(
+        old.as_ref().map(ExposeSecret::expose_secret),
+        Some("tenant-secret-9902")
+    );
+    assert!(core.unbind_header("x-tenant").is_none());
 }
 
 /// The supplied client is the one requests run on: an `https_only` client refuses a plain `http`

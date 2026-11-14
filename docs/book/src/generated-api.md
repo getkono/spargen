@@ -114,8 +114,9 @@ use.
 - A header every operation repeats (an API version, a tenant) can be bound once on the client:
   `Spec::add_bound_header("X-Api-Version")` drops it from every operation's arguments, and
   `Client::with_bound_header(name, value)?` sets the value each operation declaring it sends,
-  refusing a value that is not a valid header value (a control character but a tab, such as CR or
-  LF) as `Error::RequestConstruction`. An operation that requires it while no value is bound fails
+  refusing a name that is not a valid header name (a space or a colon in it) or a value that is
+  not a valid header value (a control character but a tab, such as CR or LF) as
+  `Error::RequestConstruction`. An operation that requires it while no value is bound fails
   before anything is sent, as `RequestError::MissingBoundParameter`.
 - Cookie parameters share one `Cookie` header, and each value is checked before it joins it, so
   no value can split into a cookie the caller never declared. A `content` or `style: cookie`
