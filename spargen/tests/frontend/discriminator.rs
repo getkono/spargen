@@ -1357,3 +1357,155 @@ fn a_restricted_discriminated_union_whose_fallback_is_dropped_has_none() {
     assert!(wet.contains("missing discriminator field"), "{wet}");
     assert!(wet.contains("unknown discriminator value"), "{wet}");
 }
+
+/// A discriminated union whose member is itself a union, or untyped (#1400). Neither has a JSON
+/// category of its own, so the discriminator was dropped with no diagnostic and the union was
+/// trial-matched. Both can carry the tag property: the tag selects the member, and the member's
+/// own decoder reads the payload, so `Canine` decodes a `dog` payload by its own dispatch.
+#[test]
+fn a_union_or_untyped_member_is_dispatched_by_its_tag() {
+    let spec = |members: &str, mapping: &str| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths: {{}}\n\
+             components:\n  \
+             schemas:\n    \
+             Pet:\n      \
+             oneOf:\n{members}      \
+             discriminator: {{ propertyName: kind{mapping} }}\n    \
+             Canine:\n      \
+             oneOf: [{{ $ref: '#/components/schemas/Dog' }}, {{ $ref: '#/components/schemas/Wolf' }}]\n      \
+             discriminator: {{ propertyName: kind, mapping: {{ dog: Dog, wolf: Wolf }} }}\n    \
+             Anything: {{}}\n    \
+             Cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }} }} }}\n    \
+             Dog: {{ type: object, required: [kind, bark], properties: {{ kind: {{ type: string }}, bark: {{ type: boolean }} }} }}\n    \
+             Wolf: {{ type: object, required: [kind, pack], properties: {{ kind: {{ type: string }}, pack: {{ type: integer }} }} }}\n"
+        )
+    };
+    let tags = |tags: &[&str]| tags.iter().map(|tag| (*tag).to_owned()).collect::<Vec<_>>();
+    for (what, members, mapping, member, member_tags) in [
+        (
+            "union member",
+            "        - { $ref: '#/components/schemas/Cat' }\n        \
+             - { $ref: '#/components/schemas/Canine' }\n",
+            ", mapping: { dog: Canine, wolf: Canine }",
+            "Canine",
+            tags(&["dog", "wolf", "Canine"]),
+        ),
+        (
+            "untyped member",
+            "        - { $ref: '#/components/schemas/Cat' }\n        \
+             - { $ref: '#/components/schemas/Anything' }\n",
+            "",
+            "Anything",
+            tags(&["Anything"]),
+        ),
+    ] {
+        let (report, code) = generate_with_code(&spec(members, mapping));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::NonDisjointUnion)
+                && !has_code(&report, Code::DeclarationHasNoEffect),
+            "{what}: {report:#?}"
+        );
+        let arms = discriminated_arms(&code, "Pet");
+        assert_eq!(
+            arms.decode,
+            vec![
+                ("Cat".to_owned(), tags(&["Cat"])),
+                (member.to_owned(), member_tags.clone()),
+            ],
+            "{what}: {code}"
+        );
+        assert_eq!(
+            arms.encode,
+            vec![
+                ("Cat".to_owned(), Some("Cat".to_owned())),
+                (member.to_owned(), member_tags.first().cloned()),
+            ],
+            "{what}: {code}"
+        );
+    }
+}
+
+/// A `mapping` entry naming a member that cannot carry the tag property (#1400), as GitHub's
+/// `repos/get-content` maps `array` to its directory listing: no payload of that member holds a
+/// tag, so the entry selects nothing, and it did so with no diagnostic. It is `W011` at the entry,
+/// and the member is decoded exactly as it is unmapped: by its JSON category, beside the tagged
+/// members.
+// W011 case: uncarried-mapping-entry
+#[test]
+fn a_mapping_entry_naming_a_member_that_cannot_carry_the_tag_is_w011_at_the_entry() {
+    let spec = |mapping: &str| {
+        discriminated_pet(
+            "3.1.0",
+            "        - { $ref: '#/components/schemas/Cat' }\n        \
+             - { $ref: '#/components/schemas/Listing' }\n",
+            &format!(
+                "        propertyName: kind\n{mapping}    \
+                 Listing: {{ type: array, items: {{ type: string }} }}\n"
+            ),
+        )
+    };
+    let (mapped, mapped_code) = generate_with_code(&spec("        mapping: { array: Listing }\n"));
+    assert_ne!(mapped.outcome(), Outcome::Rejected, "{mapped:#?}");
+    let w011: Vec<_> = mapped
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::DeclarationHasNoEffect)
+        .collect();
+    assert_eq!(w011.len(), 1, "{mapped:#?}");
+    assert_eq!(
+        w011[0].pointer.as_str(),
+        "/components/schemas/Pet/discriminator/mapping/array"
+    );
+    assert!(
+        w011[0].message.contains(
+            "`discriminator.mapping` entry `array` names `Listing`, union member 1, which cannot \
+             carry the discriminator property `kind`"
+        ),
+        "{}",
+        w011[0].message
+    );
+    let (unmapped, code) = generate_with_code(&spec(""));
+    assert!(
+        !has_code(&unmapped, Code::DeclarationHasNoEffect),
+        "{unmapped:#?}"
+    );
+    let pet = deserialize_impl(&code, "Pet");
+    assert!(pet.contains("if value.is_array()"), "{pet}");
+    assert_eq!(pet, deserialize_impl(&mapped_code, "Pet"));
+    assert_eq!(
+        discriminated_arms(&code, "Pet").decode,
+        vec![("Cat".to_owned(), vec!["Cat".to_owned()])],
+        "{code}"
+    );
+}
+
+/// Two members of one non-object category beside a tagged one (#1400): no category tells the
+/// two apart, so the discriminator was dropped with no diagnostic and the whole union was
+/// trial-matched, letting a `oneOf` payload whose tag names `Cat` fail as matching two members.
+/// The tag still dispatches to `Cat`, and the two strings are tried by their own schemas only on
+/// a payload that carries no tag.
+#[test]
+fn members_sharing_a_non_object_category_are_tried_beside_the_tag_dispatch() {
+    let spec = discriminated_pet(
+        "3.1.0",
+        "        - { $ref: '#/components/schemas/Cat' }\n        \
+         - { type: string, maxLength: 3 }\n        \
+         - { type: string, format: uuid }\n",
+        "        propertyName: kind\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    assert_eq!(
+        discriminated_arms(&code, "Pet").decode,
+        vec![("Cat".to_owned(), vec!["Cat".to_owned()])],
+        "{code}"
+    );
+    let pet = deserialize_impl(&code, "Pet");
+    assert!(pet.contains("Pet::PetVariant1(inner)"), "{pet}");
+    assert!(pet.contains("Pet::PetVariant2(inner)"), "{pet}");
+}

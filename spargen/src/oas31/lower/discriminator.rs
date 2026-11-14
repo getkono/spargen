@@ -1,10 +1,12 @@
 //! A union's Discriminator Object: resolving its `mapping` against the union's members, the
 //! standalone-discriminator warning, and the discriminated dispatch strategy.
 
+use std::collections::HashSet;
+
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{
-    AdditionalProps, JsonCategory, ScalarValue, Ty, TypeId, TypeKind, UnionMode, UnionStrategy,
-    VariantDispatch,
+    AdditionalProps, JsonCategory, ScalarValue, Ty, TypeId, TypeKind, Union, UnionMode,
+    UnionStrategy, UnionVariant, VariantDispatch,
 };
 use crate::name::hint_segment;
 use crate::oas31::discriminator::{
@@ -14,8 +16,8 @@ use crate::oas31::discriminator::{
 use crate::oas31::{Resolver, Schema, SchemaOr};
 
 use super::shape::schema_has_union;
-use super::strategy::UnionDispatch;
-use super::union::LoweredVariant;
+use super::strategy::{retain_strategy, UnionDispatch};
+use super::union::{HeldUntypedWarning, LoweredVariant};
 use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -133,15 +135,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         .emit(self.diags);
     }
 
-    /// Build the discriminated fast path. Objects route by tag; a non-object variant routes by its
-    /// unique JSON category. An object variant is selected by every `discriminator.mapping` key
-    /// naming its member, in document order, and then by its own `$ref` component name unless a
-    /// mapping key claims that value; the first is the tag serialization writes. One left with
-    /// neither is selected by the one string its own required tag property admits, where no other
-    /// value claims it ([`Self::pinned_tag`]). Every variant
-    /// starts with no `untagged` priority: the caller refuses a component variant left with no
-    /// tag ([`Self::reject_unselectable_discriminated_variant`]) and decides how any other is
-    /// reached.
+    /// Build the discriminated fast path. A variant that can carry the tag property
+    /// ([`Self::carries_tag`]: an object, an untyped member, or a union of such) routes by tag,
+    /// and its own decoder reads the payload the tag selects; any other variant routes by its JSON
+    /// category where no other such variant shares it, and is otherwise tried by its own schema
+    /// on a payload no tag selects. A tag-carrying variant is selected by every
+    /// `discriminator.mapping` key naming its member, in document order, and then by its own
+    /// `$ref` component name unless a mapping key claims that value; the first is the tag
+    /// serialization writes. One left with neither is selected by the one string its own
+    /// required tag property admits, where no other value claims it ([`Self::pinned_tag`]). Every
+    /// tag-carrying variant starts with no `untagged` priority: the caller refuses a component
+    /// variant left with no tag ([`Self::reject_unselectable_discriminated_variant`]) and decides
+    /// how any other is reached.
+    ///
+    /// A `mapping` entry naming a variant that cannot carry the tag property describes a tag no
+    /// payload of that variant holds, so it selects nothing ([`Self::uncarried_mapping_entries`]).
     pub(super) fn discriminated_strategy(
         &self,
         lowered: &[LoweredVariant],
@@ -149,18 +157,38 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         discriminator: &DiscriminatorMembers,
         default_variant: Option<usize>,
         mode: UnionMode,
-    ) -> Option<UnionDispatch> {
+    ) -> UnionDispatch {
+        let carries: Vec<bool> = lowered
+            .iter()
+            .map(|lowered| self.carries_tag(lowered.ty, &mut HashSet::new()))
+            .collect();
+        // The JSON category of each variant that cannot carry the tag, which selects it where no
+        // other such variant shares it.
+        let categories: Vec<Option<JsonCategory>> = lowered
+            .iter()
+            .zip(&carries)
+            .map(|(lowered, carries)| (!carries).then(|| self.json_category(lowered.ty)).flatten())
+            .collect();
         let mut tags = Vec::new();
-        let mut categories = Vec::new();
-        for lowered in lowered {
+        let mut dispatch_categories = Vec::new();
+        let mut untagged = Vec::new();
+        for (index, lowered) in lowered.iter().enumerate() {
             let (ty, member) = (lowered.ty, lowered.member());
-            if !matches!(self.kind_of(ty.id), Some(TypeKind::Struct(_))) {
-                let category = self.json_category(ty)?;
-                if category == JsonCategory::Object || categories.contains(&Some(category)) {
-                    return None;
-                }
+            if !carries[index] {
+                let category = categories[index].filter(|category| {
+                    categories
+                        .iter()
+                        .filter(|other| **other == Some(*category))
+                        .count()
+                        == 1
+                });
                 tags.push(Vec::new());
-                categories.push(Some(category));
+                dispatch_categories.push(category);
+                untagged.push(
+                    category
+                        .is_none()
+                        .then(|| self.type_specificity(ty, &mut HashSet::new())),
+                );
                 continue;
             }
             // Every explicit mapping entry naming this variant's member — already resolved by
@@ -187,7 +215,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
             tags.push(accepted);
-            categories.push(None);
+            dispatch_categories.push(None);
+            untagged.push(None);
         }
         // An object member left with no tag — no component name, no mapping key — may still pin
         // the tag property to exactly one string itself (#1001): a required, non-nullable `const`
@@ -205,8 +234,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // only that other member accepts to the pinned one instead.
         let untagged_objects: Vec<bool> = tags
             .iter()
-            .zip(&categories)
-            .map(|(accepted, category)| category.is_none() && accepted.is_empty())
+            .zip(&carries)
+            .map(|(accepted, carries)| *carries && accepted.is_empty())
             .collect();
         let variants: Vec<Ty> = lowered.iter().map(|lowered| lowered.ty).collect();
         let pinned: Vec<Option<String>> = variants
@@ -233,14 +262,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 )
                 || default_variant.is_some_and(|fallback| {
                     fallback != index
-                        && categories[fallback].is_none()
+                        && carries[fallback]
                         && self.admits_tag(variants[fallback], tag_field, value)
                 });
             if !claimed {
                 tags[index].push(value.clone());
             }
         }
-        Some(UnionDispatch {
+        UnionDispatch {
             strategy: UnionStrategy::Discriminated {
                 tag_field: tag_field.to_owned(),
                 default_variant,
@@ -251,14 +280,109 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             },
             variants: tags
                 .into_iter()
-                .zip(categories)
-                .map(|(tags, category)| VariantDispatch::Discriminated {
-                    tags,
-                    category,
-                    untagged: None,
-                })
+                .zip(dispatch_categories)
+                .zip(untagged)
+                .map(
+                    |((tags, category), untagged)| VariantDispatch::Discriminated {
+                        tags,
+                        category,
+                        untagged,
+                    },
+                )
                 .collect(),
-        })
+        }
+    }
+
+    /// Whether every payload of `ty` is an object that can hold the discriminator property, so a
+    /// tag can select it: a struct, an untyped member (whose objects are among its values), a map
+    /// or other object-category type, or a union every variant of which can. A union member is
+    /// then decoded by its own `Deserialize`, which applies its own dispatch to the payload the
+    /// outer tag selected. `visiting` guards a union cycle, which finds nothing against it.
+    fn carries_tag(&self, ty: Ty, visiting: &mut HashSet<TypeId>) -> bool {
+        if !visiting.insert(ty.id) {
+            return true;
+        }
+        match self.kind_of(ty.id) {
+            Some(TypeKind::Reserved) | None => false,
+            Some(TypeKind::Struct(_) | TypeKind::Any) => true,
+            Some(TypeKind::Union(union)) => union
+                .variants
+                .iter()
+                .all(|variant| self.carries_tag(variant.ty, visiting)),
+            Some(_) => self.json_category(ty) == Some(JsonCategory::Object),
+        }
+    }
+
+    /// Whether `ty` is, or is a union reaching through its variants, a reservation still being
+    /// lowered: nothing is known yet of what its payloads are, so neither whether it can carry a
+    /// tag nor its JSON category can be decided until lowering has filled it.
+    pub(super) fn awaits_reservation(&self, ty: Ty, visiting: &mut HashSet<TypeId>) -> bool {
+        if !visiting.insert(ty.id) {
+            return false;
+        }
+        match self.kind_of(ty.id) {
+            Some(TypeKind::Reserved) => true,
+            Some(TypeKind::Union(union)) => union
+                .variants
+                .iter()
+                .any(|variant| self.awaits_reservation(variant.ty, visiting)),
+            _ => false,
+        }
+    }
+
+    /// The `mapping` entries naming a variant that cannot carry the tag property
+    /// ([`Self::carries_tag`]), in document order: no payload of that variant holds a tag, so the
+    /// entry selects nothing, and the variant is reached by its JSON category or its own schema
+    /// ([`Self::discriminated_strategy`]).
+    pub(super) fn uncarried_mapping_entries(
+        &self,
+        lowered: &[LoweredVariant],
+        discriminator: &DiscriminatorMembers,
+    ) -> Vec<UncarriedTag> {
+        discriminator
+            .mapping
+            .iter()
+            .filter(|(_, member)| {
+                lowered.iter().any(|lowered| {
+                    lowered.members.contains(member)
+                        && !self.carries_tag(lowered.ty, &mut HashSet::new())
+                })
+            })
+            .map(|(tag, member)| UncarriedTag {
+                tag: tag.clone(),
+                member: *member,
+            })
+            .collect()
+    }
+
+    /// Report a `mapping` entry naming a member that cannot carry the tag property
+    /// ([`UncarriedTag`]) as `W011` at the entry: the member is still generated and decoded, by
+    /// its JSON category or its own schema, and only the entry has no effect.
+    pub(super) fn warn_uncarried_tag(
+        &mut self,
+        schema: &Schema,
+        discriminator: &crate::oas31::Discriminator,
+        uncarried: &UncarriedTag,
+    ) {
+        let UncarriedTag { tag, member } = uncarried;
+        let (provenance, value) = match discriminator.mapping.get(tag) {
+            Some(target) => (target.provenance.clone(), target.value.as_str()),
+            None => (schema.provenance.clone(), tag.as_str()),
+        };
+        let property = &discriminator.property_name;
+        // W011 case: uncarried-mapping-entry
+        Diagnostic::warning(Code::DeclarationHasNoEffect, provenance)
+            .message(format!(
+                "`discriminator.mapping` entry `{tag}` names `{value}`, union member {member}, \
+                 which cannot carry the discriminator property `{property}`: not every payload it \
+                 accepts is an object, so no payload of it holds a tag and the entry selects \
+                 nothing; the member is decoded by its JSON category, or by its own schema"
+            ))
+            .remedy(
+                "remove the entry, or make the member an object schema that declares the \
+                 discriminator property",
+            )
+            .emit(self.diags);
     }
 
     /// The one string an object variant's own `tag_field` admits: the field is required, not
@@ -344,22 +468,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 continue;
             }
             let numbered = format!("{hint}Variant{member}");
-            let fresh: Vec<TypeId> = [
-                members.member_lowerings.get(member),
-                members.meet_inserts.get(member),
-            ]
-            .into_iter()
-            .flatten()
-            .flat_map(Clone::clone)
-            .map(TypeId)
-            .filter(|id| {
-                !self.reserved_types.contains(id)
-                    && self
-                        .graph
+            let fresh: Vec<TypeId> = members
+                .fresh
+                .get(member)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| {
+                    self.graph
                         .get(*id)
                         .is_some_and(|def| def.name_hint.starts_with(&numbered))
-            })
-            .collect();
+                })
+                .collect();
             if !fresh.contains(&variant.ty.id) {
                 continue;
             }
@@ -397,6 +517,132 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if matches!(object.additional, AdditionalProps::Allow) {
                     object.fields.retain(|field| field.name.wire != tag_field);
                 }
+            }
+        }
+    }
+
+    /// The ids each real member's own lowering (`member_lowerings`) and its sibling meet
+    /// (`meet_inserts`) inserted, indexed by the member's position, leaving out those inside the
+    /// body of a reservation that lowering opened ([`Self::reserved_types`]): a component first
+    /// lowered there keeps its own name.
+    pub(super) fn fresh_member_ids(
+        &self,
+        member_lowerings: &[std::ops::Range<u32>],
+        meet_inserts: &[std::ops::Range<u32>],
+    ) -> Vec<Vec<TypeId>> {
+        (0..member_lowerings.len().max(meet_inserts.len()))
+            .map(|member| {
+                [member_lowerings.get(member), meet_inserts.get(member)]
+                    .into_iter()
+                    .flatten()
+                    .flat_map(Clone::clone)
+                    .map(TypeId)
+                    .filter(|id| !self.reserved_types.contains(id))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Decide the dispatch of every discriminated union [`Self::union_strategy`] deferred because
+    /// a variant reached an open reservation. Run once every reservation is filled, so the
+    /// declaration order of the components decides nothing: the union gets the dispatch, the
+    /// pinned variant names and the reports it would have had were each variant lowered before
+    /// it. Every union definition carrying the union's [`VariantDispatch::Deferred`] markers takes
+    /// the decision over the variants it kept: the union itself, and each copy a meet, a collapse
+    /// or a re-emit made of it before the decision, exactly as a copy made after it would have
+    /// kept the decided dispatch. A refusal is reported here, and the document is rejected.
+    pub(super) fn decide_deferred_discriminators(&mut self) {
+        for deferred in std::mem::take(&mut self.deferred_discriminators) {
+            let DeferredDiscriminator {
+                id: deferred_id,
+                schema,
+                hint,
+                mode,
+                mut lowered,
+                discriminator,
+                real,
+                fresh,
+                reports_untyped,
+            } = deferred;
+            // Each definition whose every variant is a marker of this union, with the position
+            // in the union each of its variants stands for.
+            let targets: Vec<(TypeId, Vec<usize>)> = self
+                .graph
+                .iter()
+                .filter_map(|(id, def)| {
+                    let TypeKind::Union(union) = &def.kind else {
+                        return None;
+                    };
+                    let members: Option<Vec<usize>> = union
+                        .variants
+                        .iter()
+                        .map(|variant| match variant.dispatch {
+                            VariantDispatch::Deferred { union, member } if union == deferred_id => {
+                                Some(member)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    members
+                        .filter(|members| !members.is_empty())
+                        .map(|members| (id, members))
+                })
+                .collect();
+            if targets.is_empty() {
+                continue;
+            }
+            let Some((dispatch, _)) =
+                self.union_strategy(&schema, &lowered, mode, Some(&discriminator), false)
+            else {
+                continue;
+            };
+            let UnionDispatch {
+                strategy,
+                variants: dispatches,
+            } = dispatch;
+            if let UnionStrategy::Discriminated { tag_field, .. } = &strategy {
+                let real: Vec<&SchemaOr> = real.iter().collect();
+                self.name_pinned_variants(
+                    &hint,
+                    tag_field,
+                    &mut lowered,
+                    &dispatches,
+                    &PinnedMembers {
+                        real: &real,
+                        fresh: &fresh,
+                    },
+                );
+            }
+            for (id, members) in targets {
+                if let Some(TypeKind::Union(union)) =
+                    self.graph.get_mut(id).map(|def| &mut def.kind)
+                {
+                    union.strategy = retain_strategy(&strategy, &members);
+                    for (variant, &member) in union.variants.iter_mut().zip(&members) {
+                        variant.name_hint.clone_from(&lowered[member].name_hint);
+                        variant.dispatch = dispatches[member].clone();
+                    }
+                }
+            }
+            if reports_untyped {
+                let labels: Vec<usize> = lowered.iter().map(LoweredVariant::member).collect();
+                let union = Union {
+                    variants: lowered
+                        .iter()
+                        .zip(dispatches)
+                        .map(|(variant, dispatch)| UnionVariant {
+                            name_hint: variant.name_hint.clone(),
+                            ty: variant.ty,
+                            dispatch,
+                        })
+                        .collect(),
+                    strategy,
+                };
+                let untyped = self.untyped_one_of_variants(&union, &labels);
+                self.report_untyped_one_of(HeldUntypedWarning {
+                    provenance: schema.provenance.clone(),
+                    untyped,
+                });
             }
         }
     }
@@ -577,9 +823,40 @@ pub(super) struct DiscriminatorMembers {
 
 /// What [`LowerCtx::name_pinned_variants`] reads of a union's real members, each indexed by the
 /// member's position: the member itself, and the ids its own lowering and its sibling meet
-/// inserted.
+/// inserted outside the body of a reservation they opened ([`LowerCtx::fresh_member_ids`]).
 pub(super) struct PinnedMembers<'m, 's> {
     pub(super) real: &'m [&'s SchemaOr],
-    pub(super) member_lowerings: &'m [std::ops::Range<u32>],
-    pub(super) meet_inserts: &'m [std::ops::Range<u32>],
+    pub(super) fresh: &'m [Vec<TypeId>],
+}
+
+/// A `mapping` entry naming a union member that cannot carry the discriminator property
+/// ([`LowerCtx::discriminated_strategy`]): the entry's tag, and the member it names.
+pub(super) struct UncarriedTag {
+    pub(super) tag: String,
+    pub(super) member: usize,
+}
+
+/// A discriminated union whose dispatch waits for lowering to fill a reservation one of its
+/// variants reaches ([`LowerCtx::awaits_reservation`]): everything [`LowerCtx::union_strategy`]
+/// and [`LowerCtx::name_pinned_variants`] read, held until
+/// [`LowerCtx::decide_deferred_discriminators`] decides it. Until then the union, and every copy
+/// a meet, a collapse or a re-emit makes of it, carries [`VariantDispatch::Deferred`] markers,
+/// which no strategy admits, so a copy the decision missed is an `E011` invariant failure rather
+/// than an emitted dispatch.
+pub(super) struct DeferredDiscriminator {
+    /// The number [`LowerCtx::union_strategy`] gave the union, which its variants' markers carry.
+    pub(super) id: usize,
+    /// The union schema, whose discriminator is decided and at whose provenance it reports.
+    pub(super) schema: Schema,
+    pub(super) hint: String,
+    pub(super) mode: UnionMode,
+    pub(super) lowered: Vec<LoweredVariant>,
+    pub(super) discriminator: DiscriminatorMembers,
+    /// The union's real members, as [`PinnedMembers::real`] reads them.
+    pub(super) real: Vec<SchemaOr>,
+    /// [`PinnedMembers::fresh`], as it was when the union was lowered.
+    pub(super) fresh: Vec<Vec<TypeId>>,
+    /// Whether the union reports its untyped `oneOf` variants itself
+    /// ([`LowerCtx::report_untyped_one_of`]).
+    pub(super) reports_untyped: bool,
 }
