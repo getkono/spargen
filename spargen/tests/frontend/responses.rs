@@ -1179,3 +1179,52 @@ paths:
         "{code}"
     );
 }
+
+/// The `content` a bodyless response drops is still resolved: a reference there naming nothing is
+/// a broken document wherever it sits, so it is `E004` under `generate` and `check` alike, whether
+/// it is the media's `schema` itself, a reference nested in an inline schema, or a Media Type
+/// Object `$ref`.
+#[test]
+fn e004_a_bodyless_response_still_resolves_its_dropped_content() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    head:
+      operationId: probePets
+      responses:
+        "200":
+          description: the pets exist
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/MissingHead" } }
+    get:
+      operationId: listPets
+      responses:
+        "200":
+          description: the pets
+          content:
+            application/json: { schema: { type: array, items: { type: string } } }
+        "204":
+          description: no pets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { nested: { $ref: "#/components/schemas/MissingNested" } }
+        "304":
+          description: unchanged
+          content:
+            application/json: { $ref: "#/components/mediaTypes/MissingMedia" }
+"##;
+    for report in [&generate(spec), &check(spec)] {
+        let pointers = e004_pointers(report, "bodyless content");
+        for expected in [
+            "/paths/~1pets/head/responses/200/content/application~1json/schema",
+            "/paths/~1pets/get/responses/204/content/application~1json/schema/properties/nested",
+            "/paths/~1pets/get/responses/304/content/application~1json",
+        ] {
+            assert!(pointers.contains(&expected), "{expected}\n{report:#?}");
+        }
+    }
+}
