@@ -688,6 +688,8 @@ mod open_narrowing;
 mod open_unions;
 #[path = "e2e/read_write_only.rs"]
 mod read_write_only;
+#[path = "e2e/redirects.rs"]
+mod redirects;
 #[path = "e2e/roundtrip.rs"]
 mod roundtrip;
 #[path = "e2e/schemaless_bodies.rs"]
