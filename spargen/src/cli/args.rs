@@ -114,10 +114,10 @@ pub(crate) struct SpecArgs {
     #[arg(long = "keep-operation", value_name = "METHOD /path")]
     pub(crate) keep_operation: Vec<String>,
     /// Bind a header parameter once on the client instead of taking it at every call
-    /// (repeatable), e.g. `--bind-header X-Api-Version`; added to `bind_headers` in
+    /// (repeatable), e.g. `--bound-header X-Api-Version`; added to `bound_headers` in
     /// `spargen.toml`.
-    #[arg(long = "bind-header", value_name = "NAME")]
-    pub(crate) bind_header: Vec<String>,
+    #[arg(long = "bound-header", value_name = "NAME")]
+    pub(crate) bound_header: Vec<String>,
 }
 
 impl SpecArgs {
@@ -150,7 +150,7 @@ impl SpecArgs {
             omit_component,
             omit_pointer,
             keep_operation,
-            bind_header,
+            bound_header,
         } = self;
         [
             (*carve, "--carve"),
@@ -172,7 +172,7 @@ impl SpecArgs {
             (!omit_component.is_empty(), "--omit-component"),
             (!omit_pointer.is_empty(), "--omit-pointer"),
             (!keep_operation.is_empty(), "--keep-operation"),
-            (!bind_header.is_empty(), "--bind-header"),
+            (!bound_header.is_empty(), "--bound-header"),
         ]
         .into_iter()
         .filter_map(|(given, flag)| given.then_some(flag))
@@ -224,7 +224,7 @@ pub(crate) struct DiffArgs {
     pub(crate) old: Utf8PathBuf,
     /// Path to the NEW (candidate) OpenAPI document.
     pub(crate) new: Utf8PathBuf,
-    /// Exit non-zero (status 1) when the diff is a breaking (`major`) change — a CI gate. Without
+    /// Exit non-zero (status 4) when the diff is a breaking (`major`) change — a CI gate. Without
     /// this flag a completed comparison exits 0 whatever its bump; a spec that fails to lower
     /// exits 1, and a configuration error 3, either way.
     #[arg(long)]

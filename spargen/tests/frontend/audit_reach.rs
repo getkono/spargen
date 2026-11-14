@@ -580,7 +580,8 @@ fn a_ref_under_a_validation_only_keyword_is_followed_into_other_files() {
 /// #424: a `discriminator` inside a subschema lowering never reads was never checked, so a
 /// `mapping` or `defaultMapping` value naming no schema went unreported. Each is resolved as a
 /// lowered discriminator's would be, and one naming nothing is `E004` at the entry; a value naming
-/// a schema that exists is not.
+/// a schema that exists is not. The document declares 3.2, the version that defines
+/// `defaultMapping`.
 #[test]
 fn a_discriminator_under_a_validation_only_keyword_resolves_its_mapping() {
     let site = |target: &str| {
@@ -595,7 +596,10 @@ fn a_discriminator_under_a_validation_only_keyword_resolves_its_mapping() {
              - {{ $ref: '#/components/schemas/Present' }}\n"
         )
     };
-    let dangling = validation_ref_spec(&site("Missing"));
+    let spec = |target: &str| {
+        validation_ref_spec(&site(target)).replace("openapi: 3.1.0", "openapi: 3.2.0")
+    };
+    let dangling = spec("Missing");
     for (entry, report) in [
         ("generate", generate(&dangling)),
         ("check", check(&dangling)),
@@ -614,7 +618,7 @@ fn a_discriminator_under_a_validation_only_keyword_resolves_its_mapping() {
         );
     }
     for target in ["Present", "'#/components/schemas/Present'"] {
-        let clean = validation_ref_spec(&site(target));
+        let clean = spec(target);
         let report = generate(&clean);
         assert_ne!(report.outcome(), Outcome::Rejected, "{target}: {report:#?}");
         assert!(

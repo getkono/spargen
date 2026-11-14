@@ -900,6 +900,116 @@ paths:
     );
 }
 
+/// An absent `items` beside `prefixItems` admits any remainder, as `items: true` and `items: {}`
+/// do under JSON Schema 2020-12, so it is the same variable-length tuple and the same `E015`
+/// (#1413): the closed tuple is `items: false`, which the message names.
+#[test]
+fn e015_prefix_items_without_items() {
+    for items in [
+        "",
+        "                items: true\n",
+        "                items: {}\n",
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                prefixItems:
+                  - {{ type: string }}
+                  - {{ type: integer }}
+{items}"##
+        );
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{items:?}: {report:#?}"
+        );
+        let diagnostic = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::TupleRestNotRepresentable)
+            .unwrap_or_else(|| panic!("{items:?}: {report:#?}"));
+        assert!(
+            diagnostic.message.contains("`items: false`"),
+            "{items:?}: {diagnostic:#?}"
+        );
+        // The absent-`items` case has a message of its own, which names the missing `items`
+        // rather than an `items` the document never wrote.
+        assert_eq!(
+            diagnostic.message.contains("with no `items`"),
+            items.is_empty(),
+            "{items:?}: {diagnostic:#?}"
+        );
+    }
+}
+
+/// `maxItems` at or below the prefix length, or `unevaluatedItems: false` with no `items`, closes
+/// the array at the prefix as `items: false` does, so it is a tuple and no `E015`. This is the
+/// spelling schemars 1.x (and so aide) emits for a Rust tuple: `prefixItems` with `minItems` and
+/// `maxItems` both the prefix length. A `maxItems` past the prefix still leaves a remainder open.
+#[test]
+fn a_bound_or_unevaluated_items_false_closes_a_prefix_items_tuple() {
+    for (closing, closed) in [
+        (
+            "                minItems: 2\n                maxItems: 2\n",
+            true,
+        ),
+        ("                maxItems: 1\n", true),
+        (
+            "                items: { type: string }\n                maxItems: 2\n",
+            true,
+        ),
+        ("                unevaluatedItems: false\n", true),
+        ("                maxItems: 3\n", false),
+        (
+            "                items: { type: string }\n                unevaluatedItems: false\n",
+            false,
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                prefixItems:
+                  - {{ type: string }}
+                  - {{ type: integer }}
+{closing}"##
+        );
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome() == Outcome::Rejected,
+            !closed,
+            "{closing:?}: {report:#?}"
+        );
+        assert_eq!(
+            has_code(&report, Code::TupleRestNotRepresentable),
+            !closed,
+            "{closing:?}: {report:#?}"
+        );
+    }
+}
+
 #[test]
 fn items_false_beside_prefix_items_is_a_closed_tuple() {
     let spec = r##"
@@ -1177,8 +1287,8 @@ fn untyped_items_or_prefix_items_alone_lower_to_an_array() {
             vec!["String", "i64"],
         ),
         (
-            "prefixItems alone",
-            "      prefixItems: [ { type: boolean } ]\n",
+            "one prefixItems closed by items: false",
+            "      prefixItems: [ { type: boolean } ]\n      items: false\n",
             vec!["bool"],
         ),
     ] {
@@ -1240,21 +1350,25 @@ fn untyped_items_or_prefix_items_alone_lower_to_an_array() {
     }
 
     // A typed remainder beside `prefixItems` is the variable-length tuple `type: array` rejects,
-    // and the untyped spelling is rejected with the same code.
-    for ty in ["", "      type: array\n"] {
-        let spec = with_schemas(
-            "3.1.0",
-            &format!(
-                "    U:\n{ty}      prefixItems: [ {{ type: string }} ]\n      items: {{ type: \
-                 integer }}\n"
-            ),
-        );
-        let (report, _) = generate_with_code(&spec);
-        assert_eq!(report.outcome(), Outcome::Rejected, "{ty:?}: {report:#?}");
-        assert!(
-            has_code(&report, Code::TupleRestNotRepresentable),
-            "{ty:?}: {report:#?}"
-        );
+    // and so is the open remainder an absent `items` leaves (#1413); the untyped spelling is
+    // rejected with the same code.
+    for rest in ["      items: { type: integer }\n", ""] {
+        for ty in ["", "      type: array\n"] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!("    U:\n{ty}      prefixItems: [ {{ type: string }} ]\n{rest}"),
+            );
+            let (report, _) = generate_with_code(&spec);
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{ty:?} {rest:?}: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::TupleRestNotRepresentable),
+                "{ty:?} {rest:?}: {report:#?}"
+            );
+        }
     }
 
     // The component is an array wherever it is used, so a property referencing it is that array,

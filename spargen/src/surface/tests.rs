@@ -251,7 +251,9 @@ fn every_impact_serializes_and_displays_as_its_lowercase_label() {
     }
 }
 
-/// Additive changes are minor and everything else is major. Stated as a closed list so that
+/// Additions that leave every existing literal and exhaustive `match` compiling are minor, and
+/// everything else is major: an added variant, field, optional parameter, response header or
+/// `additionalProperties` map breaks one of those. Stated as a closed list so that
 /// reclassifying a kind — which changes the version bump spargen recommends — is a deliberate
 /// edit here rather than a silent consequence of moving a match arm.
 #[test]
@@ -259,15 +261,10 @@ fn only_the_additive_kinds_are_minor() {
     const MINOR: &[ChangeKind] = &[
         ChangeKind::OperationAdded,
         ChangeKind::ApiErrorBodyAdded,
-        ChangeKind::OptionalParamAdded,
         ChangeKind::TypeAdded,
-        ChangeKind::FieldAdded,
-        ChangeKind::VariantAdded,
         ChangeKind::ResponseHeadersAdded,
-        ChangeKind::ResponseHeaderAdded,
         ChangeKind::ServerAdded,
         ChangeKind::ServerVariableAdded,
-        ChangeKind::AdditionalPropertiesAdded,
         ChangeKind::StreamTwinAdded,
         ChangeKind::CredentialSchemeAdded,
         ChangeKind::TestingModuleAdded,

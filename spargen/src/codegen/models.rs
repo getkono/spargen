@@ -886,6 +886,7 @@ fn emit_struct_constructors(
         impl #ident {
             #[doc = #new_doc]
             #[allow(clippy::too_many_arguments)]
+            #[must_use]
             pub fn new(#(#params),*) -> Self {
                 Self {
                     #(#inits)*

@@ -212,13 +212,14 @@ fn removed_operation_is_major() {
 }
 
 #[test]
-fn added_optional_param_is_minor() {
+fn added_optional_param_is_major() {
     // A header leaves the URL accessor's arguments alone; an optional query parameter is the
-    // accessor's change too (`a_change_to_the_url_accessors_arguments_is_major`).
+    // accessor's change too (`a_change_to_the_url_accessors_arguments_is_major`). The new
+    // parameter is a new `pub` field of `…Params`, so every struct literal of it breaks.
     let header = PARAM_OPTIONAL_INT.replace("in: query", "in: header");
     let report = diff(&base(), &spec(&header, "id", PET_PROPS, ""));
     assert_eq!(kinds(&report), vec![ChangeKind::OptionalParamAdded]);
-    assert_eq!(report.bump, Impact::Minor);
+    assert_eq!(report.bump, Impact::Major);
 }
 
 #[test]
@@ -246,11 +247,12 @@ fn changed_param_type_is_major() {
 }
 
 #[test]
-fn added_optional_field_is_minor() {
+fn added_optional_field_is_major() {
+    // The field is `pub`, so a literal `Pet { id, name }` stops compiling (E0063).
     let with_tag = "        id: { type: integer }\n        name: { type: string }\n        tag: { type: string }\n";
     let report = diff(&base(), &spec("", "id", with_tag, ""));
     assert_eq!(kinds(&report), vec![ChangeKind::FieldAdded]);
-    assert_eq!(report.bump, Impact::Minor);
+    assert_eq!(report.bump, Impact::Major);
 }
 
 #[test]
@@ -280,7 +282,7 @@ fn changed_field_type_is_major() {
 
 #[test]
 fn overall_bump_is_max_impact_across_mixed_changes() {
-    // New spec: adds an optional param (minor) AND removes a field (major) AND adds an operation
+    // New spec: adds an optional param (major) AND removes a field (major) AND adds an operation
     // (minor). The overall bump is the max — major — and every change is reported.
     let only_id = "        id: { type: integer }\n";
     let old = base();
@@ -290,9 +292,9 @@ fn overall_bump_is_max_impact_across_mixed_changes() {
         kinds(&report),
         vec![
             ChangeKind::UrlAccessorArgsChanged,
+            ChangeKind::OptionalParamAdded,
             ChangeKind::FieldRemoved,
             ChangeKind::OperationAdded,
-            ChangeKind::OptionalParamAdded,
         ],
         "{:?}",
         report.changes
@@ -663,6 +665,8 @@ mod keywords;
 mod labels;
 #[path = "diff/narrowing.rs"]
 mod narrowing;
+#[path = "diff/omit.rs"]
+mod omit;
 #[path = "diff/operations.rs"]
 mod operations;
 #[path = "diff/rebinding.rs"]

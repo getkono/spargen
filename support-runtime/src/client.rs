@@ -8,7 +8,8 @@ use url::Url;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::error::CrossOriginRedirect;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::paginate::{same_origin, without_credentials};
+use crate::paginate::same_origin;
+use crate::paginate::without_credentials;
 use crate::{
     Credential, Error, ExposeSecret, HttpBackend, LinkPaginator, ReqwestBackend, SecretString,
 };
@@ -195,7 +196,7 @@ pub struct RequestOptions {
 ///
 /// The generated `Client` wraps one of these and documents its own constructors; each of its
 /// operation methods delegates to the shared dispatch routines.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientCore {
     backend: Arc<dyn HttpBackend>,
     base_url: Url,
@@ -205,6 +206,25 @@ pub struct ClientCore {
     /// Bound header values, keyed by the header name in ASCII lowercase. Held as `SecretString`s,
     /// as credentials' secrets are, so `Debug` prints each bound name and redacts its value.
     bound_headers: HashMap<String, SecretString>,
+}
+
+/// Prints the base URL without its userinfo and query, the two places a URL carries a credential
+/// (a `user:password@` prefix the request builder sends as `Authorization: Basic`, an `apiKey`
+/// query parameter); [`ClientCore::base_url`] returns it as configured.
+impl std::fmt::Debug for ClientCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientCore")
+            .field("backend", &self.backend)
+            .field(
+                "base_url",
+                &without_credentials(self.base_url.clone()).as_str(),
+            )
+            .field("config", &self.config)
+            .field("options", &self.options)
+            .field("credentials", &self.credentials)
+            .field("bound_headers", &self.bound_headers)
+            .finish()
+    }
 }
 
 impl ClientCore {
@@ -229,7 +249,10 @@ impl ClientCore {
         transport: TransportConfig,
     ) -> Result<Self, Error<Infallible>> {
         let base_url = parse_base_url(base_url)?;
-        let backend = Arc::new(ReqwestBackend::new(http_client(&transport)?));
+        let backend = Arc::new(ReqwestBackend::built_from(
+            http_client(&transport)?,
+            transport,
+        ));
         Ok(Self::assemble(backend, base_url, config))
     }
 
@@ -336,38 +359,44 @@ impl ClientCore {
 
     /// Bind `value` to the header `name`, matched in any letter case, replacing any value already
     /// bound to it. An operation of a generated client whose header parameter the build bound
-    /// (`Spec::bind_header`) sends this value, as written, instead of taking an argument for it.
-    /// `ClientCore`'s `Debug` prints the bound name and redacts the value, and the operation sends
-    /// it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts it
-    /// too.
+    /// (`Spec::add_bound_header`) sends this value, as written, instead of taking an argument for
+    /// it. `ClientCore`'s `Debug` prints the bound name and redacts the value, and the operation
+    /// sends it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts
+    /// it too.
     ///
-    /// Returns a request-construction error, leaving any value already bound to `name` in place,
-    /// if `value` is not a valid header value: it holds a control character other than a tab,
-    /// such as CR, LF, NUL or DEL. The error does not quote the value.
+    /// Returns a request-construction error, binding nothing and leaving any value already bound
+    /// in place, if `name` is not a valid header name (an empty name, or one holding a space, a
+    /// colon, a control character or a byte past ASCII), or if `value` is not a valid header
+    /// value: it holds a control character other than a tab, such as CR, LF, NUL or DEL. The
+    /// error names the header and does not quote the value.
     pub fn bind_header(
         &mut self,
         name: &str,
         value: impl Into<String>,
     ) -> Result<(), Error<Infallible>> {
-        let value = value.into();
-        if http::HeaderValue::from_str(&value).is_err() {
+        let Ok(header) = http::HeaderName::from_bytes(name.as_bytes()) else {
+            return Err(Error::request_message(format!(
+                "`{}` is not a valid header name to bind a value to",
+                name.escape_debug()
+            )));
+        };
+        let value = SecretString::from(value.into());
+        if http::HeaderValue::from_str(value.expose_secret()).is_err() {
             return Err(Error::request_message(format!(
                 "the value bound to the header `{}` is not a valid header value",
                 name.escape_debug()
             )));
         }
-        self.bound_headers
-            .insert(name.to_ascii_lowercase(), SecretString::from(value));
+        self.bound_headers.insert(header.as_str().to_owned(), value);
         Ok(())
     }
 
     /// Unbind the header `name`, matched in any letter case, returning the value bound to it if
-    /// there was one. An operation that requires the header then fails with
-    /// [`crate::RequestError::MissingBoundParameter`] before anything is sent.
-    pub fn unbind_header(&mut self, name: &str) -> Option<String> {
-        self.bound_headers
-            .remove(&name.to_ascii_lowercase())
-            .map(|value| value.expose_secret().to_owned())
+    /// there was one, as the secret the core held it as, so its `Debug` redacts it. An operation
+    /// that requires the header then fails with [`crate::RequestError::MissingBoundParameter`]
+    /// before anything is sent.
+    pub fn unbind_header(&mut self, name: &str) -> Option<SecretString> {
+        self.bound_headers.remove(&name.to_ascii_lowercase())
     }
 
     /// The value bound to the header `name`, matched in any letter case.
@@ -379,6 +408,7 @@ impl ClientCore {
 
     /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
     /// See the `paginate` module's docs for the full pattern and the authentication caveat.
+    #[must_use]
     pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
         LinkPaginator::new(self.clone(), first)
     }

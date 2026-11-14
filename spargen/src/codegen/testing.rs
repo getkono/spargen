@@ -153,6 +153,7 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 /// # Panics
                 ///
                 /// When `status` is not a status code (`100..=999`).
+                #[must_use]
                 pub fn new(status: u16) -> Self {
                     let Ok(status) = ::http::StatusCode::from_u16(status) else {
                         panic!("testing::Reply: {status} is not an HTTP status code");
@@ -369,6 +370,7 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
 
             impl MockBackend {
                 /// A mock with no handler registered and no call recorded.
+                #[must_use]
                 pub fn new() -> Self {
                     Self::default()
                 }
@@ -507,6 +509,7 @@ fn reply_module(operation: &Operation, api: &Api, names: &Names) -> TokenStream 
             impl Reply {
                 /// Answer with `reply` as built, for a response the description does not document
                 /// or a body its constructor cannot express.
+                #[must_use]
                 pub fn from_reply(reply: super::Reply) -> Self {
                     Self(reply)
                 }
@@ -664,6 +667,7 @@ fn constructor(
         let doc = normalize_rustdoc(&format!("The bodyless response {selector}.{panics}"));
         return quote! {
             #[doc = #doc]
+            #[must_use]
             pub fn #ident(#status_param) -> Self {
                 Self(super::Reply::new(#status))
             }
@@ -733,6 +737,7 @@ fn constructor(
     ));
     quote! {
         #[doc = #doc]
+        #[must_use]
         pub fn #ident(#status_param #param) -> Self {
             Self(#encode)
         }

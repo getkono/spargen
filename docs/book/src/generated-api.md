@@ -100,8 +100,10 @@ use.
   disambiguated name instead. Operation `security` requirements pick the first satisfiable
   alternative and attach bearer/basic/apiKey credentials. A missing required credential is a
   request-construction error — typed as `RequestError::MissingCredential`, listing for each
-  security alternative the schemes with no registered credential; an `http basic` username
-  holding `:` (which RFC 7617 §2 forbids) as `RequestError::CredentialMismatch`; and a failed
+  security alternative the schemes with no registered credential; a credential of a kind its
+  scheme cannot carry as `RequestError::CredentialMismatch`, naming the scheme, the
+  `SchemeCarrier` it requires and the `CredentialKind` registered; an `http basic` username
+  holding `:` (which RFC 7617 §2 forbids) as `RequestError::InvalidBasicUsername`; and a failed
   token provider as `RequestError::CredentialProvider` — never a silent 401. A failure inside the
   selected alternative never falls through to a later one; `without_<scheme>()` unregisters a
   scheme, so a client derived with it (`client.clone().without_oauth()`) selects the next fully
@@ -112,10 +114,11 @@ use.
   runtime asks it for a fresh token and sends the call once more, returning the original response
   when the body cannot be cloned, the refresh fails, or the replay is rejected again.
 - A header every operation repeats (an API version, a tenant) can be bound once on the client:
-  `Spec::bind_header("X-Api-Version")` drops it from every operation's arguments, and
+  `Spec::add_bound_header("X-Api-Version")` drops it from every operation's arguments, and
   `Client::with_bound_header(name, value)?` sets the value each operation declaring it sends,
-  refusing a value that is not a valid header value (a control character but a tab, such as CR or
-  LF) as `Error::RequestConstruction`. An operation that requires it while no value is bound fails
+  refusing a name that is not a valid header name (a space or a colon in it) or a value that is
+  not a valid header value (a control character but a tab, such as CR or LF) as
+  `Error::RequestConstruction`. An operation that requires it while no value is bound fails
   before anything is sent, as `RequestError::MissingBoundParameter`.
 - Cookie parameters share one `Cookie` header, and each value is checked before it joins it, so
   no value can split into a cookie the caller never declared. A `content` or `style: cookie`
@@ -126,7 +129,7 @@ use.
   anything is sent, as `Error::RequestConstruction` whose `RequestError::Other` source downcasts
   to `ParameterError::InvalidCookie`, which names the parameter and never the value.
 - A closed error taxonomy, identical across all spargen output: request-construction
-  (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
+  (`Error::RequestConstruction`, carrying a `RequestError` — one of the four credential causes
   above, the missing bound header above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
   (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
   error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
@@ -222,4 +225,7 @@ use.
 The semver surface is the public API of generated output: changes that alter generated
 signatures, type shapes, or variant sets are major; output changes invisible to that API are
 minor; generator-internal fixes are patch. [`spargen diff`](./cli.md#spargen-diff) classifies a
-spec change the same way.
+spec change the same way. Generated enums and unions are exhaustive, an open enum included, and
+model, `…Params` and response-header fields are `pub`, so a spec adding a variant, a field (an
+optional one or an `additionalProperties` map included), an optional parameter or an optional
+response header breaks a consumer's exhaustive `match` or struct literal: `major`.

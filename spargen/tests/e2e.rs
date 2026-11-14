@@ -596,6 +596,87 @@ fn basic_spec_module_is_pinned() {
     insta::assert_snapshot!("basic_spec_module", basic_spec_module(|spec| spec));
 }
 
+/// Every by-value constructor the generated API emits outside the embedded runtime (each model's
+/// `new`, each server-variables builder's `new` and `url`, `servers::default_url`, and in the
+/// `testing` module every `pub fn` returning `Self`: `Reply::new`, `MockBackend::new`, and each
+/// typed reply constructor and builder) carries `#[must_use]`, so a consumer that discards the
+/// value it built is warned. The runtime's own builders carry it in source, which the golden file
+/// above pins.
+#[test]
+fn generated_constructors_and_server_urls_are_must_use() {
+    let written = generate_text(BASIC_SPEC, |spec| {
+        spec.with_testing(spargen::TestingModule::Emitted)
+    });
+    let lines: Vec<&str> = written.lines().collect();
+    // The embedded runtime is the `mod support { … }` block, closed at column 0.
+    let support = lines
+        .iter()
+        .position(|line| line.starts_with("mod support {"))
+        .expect("the module embeds the support runtime");
+    let support_end = support
+        + lines[support..]
+            .iter()
+            .position(|line| *line == "}")
+            .expect("the support module closes");
+    // The `testing` module is the `pub mod testing { … }` block, closed at its own indentation.
+    let testing = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("pub mod testing {"))
+        .expect("BASIC_SPEC generated with the testing module emits it");
+    let close = format!(
+        "{}}}",
+        &lines[testing][..lines[testing].len() - lines[testing].trim_start().len()]
+    );
+    let testing_end = testing
+        + lines[testing..]
+            .iter()
+            .position(|line| *line == close)
+            .expect("the testing module closes");
+    let mut seen = [0usize; 4];
+    for (index, line) in lines.iter().enumerate().skip(support_end) {
+        let line = line.trim_start();
+        let returns_self = || {
+            let end = index
+                + lines[index..]
+                    .iter()
+                    .position(|line| line.trim_end().ends_with('{'))
+                    .expect("a signature opens its body");
+            lines[end].trim().ends_with("-> Self {")
+        };
+        let kind = if (testing..testing_end).contains(&index) && line.starts_with("pub fn ") {
+            if !returns_self() {
+                continue;
+            }
+            3
+        } else if line.starts_with("pub fn new(") {
+            // `Client::new` returns a `Result`, which is already `#[must_use]`.
+            if !returns_self() {
+                continue;
+            }
+            0
+        } else if line.starts_with("pub fn url(&self) -> String") {
+            1
+        } else if line.starts_with("pub fn default_url() -> String") {
+            2
+        } else {
+            continue;
+        };
+        seen[kind] += 1;
+        let attributes = lines[..index]
+            .iter()
+            .rev()
+            .map(|line| line.trim())
+            .take_while(|line| line.starts_with("#[") || line.starts_with("///"));
+        let marked = attributes.into_iter().any(|line| line == "#[must_use]");
+        assert!(marked, "line {}: `{line}` has no `#[must_use]`", index + 1);
+    }
+    assert!(
+        seen.iter().all(|count| *count > 0),
+        "BASIC_SPEC emits a model `new`, a server `url`, `default_url` and a testing \
+         constructor: {seen:?}"
+    );
+}
+
 /// The provenance header names the spargen that wrote the module, this crate's own version, which
 /// the golden files above normalize away.
 #[test]

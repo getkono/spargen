@@ -268,9 +268,10 @@ pub(super) fn with_bound_header_tokens(api: &Api, body: TokenStream) -> Option<T
         /// as written. An operation that requires a bound header fails before anything is sent,
         /// with `RequestError::MissingBoundParameter`, while no value is bound to it; one that
         /// declares it optional leaves it off. A name no operation sends is held and never read.
-        /// Fails with `Error::RequestConstruction`, which does not quote `value`, if `value` is
-        /// not a valid header value: one holding a control character other than a tab, such as
-        /// CR, LF, NUL or DEL.
+        /// Fails with `Error::RequestConstruction`, which does not quote `value`, if `name` is
+        /// not a valid header name (an empty name, or one holding a space, a colon, a control
+        /// character or a byte past ASCII), or if `value` is not a valid header value: one
+        /// holding a control character other than a tab, such as CR, LF, NUL or DEL.
         ///
         #[doc = #headers_doc]
         pub fn with_bound_header(
@@ -660,6 +661,7 @@ fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStre
 
             impl #ident {
                 /// Every server variable at its declared default.
+                #[must_use]
                 pub fn new() -> Self {
                     Self::default()
                 }
@@ -667,6 +669,7 @@ fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStre
                 #(#setters)*
 
                 /// The server URL with every variable substituted.
+                #[must_use]
                 pub fn url(&self) -> String {
                     let mut url = String::new();
                     #(#pieces)*
@@ -683,6 +686,7 @@ fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStre
             #(#builders)*
 
             /// The first declared server, with every server variable at its declared default.
+            #[must_use]
             pub fn default_url() -> String {
                 #first::new().url()
             }

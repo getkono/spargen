@@ -144,6 +144,18 @@ paths:
               application/json:
                 schema:
                   $ref: "#/components/schemas/CacheOutcome"
+  # A discriminated union whose 3.2 `defaultMapping` member overlaps an untagged one; the fixture's
+  # `wire` test drives its serde.
+  /rides:
+    get:
+      operationId: getRide
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ride"
 components:
   securitySchemes:
     bearer:
@@ -208,6 +220,32 @@ components:
         # `null` tag reads as an absent one, so it decodes into the fallback too.
         outcome: { type: [string, "null"] }
         detail: { type: string }
+    Car:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+        wheels: { type: integer }
+    RideOther:
+      type: object
+      properties:
+        kind: { type: string }
+        label: { type: string }
+        note: { type: string }
+    Ride:
+      oneOf:
+        - $ref: "#/components/schemas/Car"
+        - type: object
+          required: [label]
+          properties:
+            kind: { type: string }
+            label: { type: string }
+        - $ref: "#/components/schemas/RideOther"
+      discriminator:
+        propertyName: kind
+        mapping:
+          car: "#/components/schemas/Car"
+        defaultMapping: "#/components/schemas/RideOther"
   mediaTypes:
     QueryBody:
       schema:
