@@ -1196,3 +1196,27 @@ fn a_closed_output_stream_keeps_the_commands_own_status_without_a_panic() {
         }
     }
 }
+
+/// A stdout that fails for a reason other than a closed reader (here `/dev/full`, which refuses
+/// every write with `ENOSPC`) is a failed run: the command exits `1` whatever its outcome, and
+/// stderr names the write it could not make.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_stdout_write_exits_one_and_says_so_on_stderr() {
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let output = Command::new(spargen_bin())
+        .args(["explain", EXPLAINED_CODE])
+        .stdout(full)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with("error: failed writing to stdout: "),
+        "{stderr}"
+    );
+}
