@@ -596,6 +596,15 @@ mod tests {
                     "{strategy:?} admitting {dispatch:?}"
                 );
             }
+            // A dispatch lowering left undecided is admitted by no strategy, so it is caught.
+            let deferred = VariantDispatch::Deferred {
+                union: 0,
+                member: 0,
+            };
+            assert!(
+                !strategy.admits(&deferred),
+                "{strategy:?} admitting {deferred:?}"
+            );
         }
         let mut api = api_with_header_ty(ty(0));
         api.types.insert(def(

@@ -7,6 +7,7 @@ use crate::ir::{
 };
 use indexmap::IndexMap;
 
+mod members;
 mod null_setters;
 
 fn parameter(name: &str, location: ParamLoc, required: bool) -> Parameter {

@@ -16,8 +16,8 @@ mod synth;
 use std::collections::HashMap;
 
 use crate::ir::{
-    AdditionalProps, Api, CredentialShape, MultipartFileParts, OperationId, ScalarRepr, SchemeId,
-    TypeId, TypeKind,
+    AdditionalProps, Api, CredentialShape, MultipartFileParts, OperationId, ScalarRepr,
+    ScalarValue, SchemeId, TypeId, TypeKind,
 };
 
 pub(crate) use casing::hint_segment;
@@ -749,11 +749,19 @@ pub(crate) fn allocate(api: &Api) -> Names {
         match &def.kind {
             TypeKind::Struct(object) => {
                 let mut scope = Scope::default();
-                for field in &object.fields {
-                    names.fields.insert(
-                        (id, field.name.wire.clone()),
-                        scope.alloc(&field.name.wire, IdentRole::Field, &def.provenance.pointer),
-                    );
+                let wires: Vec<&str> = object
+                    .fields
+                    .iter()
+                    .map(|field| field.name.wire.as_str())
+                    .collect();
+                let fields = allocate_members(
+                    &mut scope,
+                    &wires,
+                    IdentRole::Field,
+                    &def.provenance.pointer.push("properties"),
+                );
+                for (wire, ident) in wires.into_iter().zip(fields) {
+                    names.fields.insert((id, wire.to_owned()), ident);
                 }
                 // The flatten overflow field shares the struct's field scope, so it is disambiguated
                 // against any declared property (e.g. one named `additional`) instead of emitting a
@@ -789,12 +797,17 @@ pub(crate) fn allocate(api: &Api) -> Names {
                 if enumeration.repr == ScalarRepr::String && !enumeration.is_open() {
                     scope.reserve_exact(CLOSED_ENUM_ALL);
                 }
-                for variant in &enumeration.variants {
-                    let value = variant.wire();
-                    names.variants.insert(
-                        (id, value.clone()),
-                        scope.alloc(&value, IdentRole::Variant, &def.provenance.pointer),
-                    );
+                let values: Vec<String> =
+                    enumeration.variants.iter().map(ScalarValue::wire).collect();
+                let wires: Vec<&str> = values.iter().map(String::as_str).collect();
+                let variants = allocate_members(
+                    &mut scope,
+                    &wires,
+                    IdentRole::Variant,
+                    &def.provenance.pointer.push("enum"),
+                );
+                for (value, ident) in values.into_iter().zip(variants) {
+                    names.variants.insert((id, value), ident);
                 }
                 if enumeration.is_open() {
                     names.open_variants.insert(
@@ -808,15 +821,19 @@ pub(crate) fn allocate(api: &Api) -> Names {
                 // A type id is either an enum or a union, so the two never collide; hints are made
                 // unique per union at lowering time, keeping this allocation injective in scope.
                 let mut scope = Scope::default();
-                for variant in &union.variants {
-                    names.variants.insert(
-                        (id, variant.name_hint.clone()),
-                        scope.alloc(
-                            &variant.name_hint,
-                            IdentRole::Variant,
-                            &def.provenance.pointer,
-                        ),
-                    );
+                let hints: Vec<&str> = union
+                    .variants
+                    .iter()
+                    .map(|variant| variant.name_hint.as_str())
+                    .collect();
+                let variants = allocate_members(
+                    &mut scope,
+                    &hints,
+                    IdentRole::Variant,
+                    &def.provenance.pointer.push("variants"),
+                );
+                for (hint, ident) in hints.into_iter().zip(variants) {
+                    names.variants.insert((id, hint.to_owned()), ident);
                 }
                 if union.is_open() {
                     names.open_variants.insert(
@@ -844,6 +861,37 @@ fn is_declared_schema(pointer: &crate::diag::JsonPointer) -> bool {
     let tokens = pointer.tokens();
     tokens.is_empty()
         || matches!(tokens.as_slice(), [components, schemas, _] if components == "components" && schemas == "schemas")
+}
+
+/// Allocate one identifier per member of one type, in `wires` order: a struct's fields by wire
+/// property name, a string enum's variants by wire value, or a union's variants by name hint, each
+/// unique within the type.
+///
+/// The members are one ranked batch, so who keeps a contested spelling depends on the set of
+/// members and not on the order the spec declares them in (#1422): first a member whose wire name
+/// already is its identifier (`foo_bar` for a field, `FooBar` for a variant, a keyword taken as its
+/// raw identifier), then the lexically smaller wire name. A member spelled as its identifier
+/// therefore keeps it whatever is added beside it. A loser's suffix is seeded from `pointer` and
+/// its own wire name, so it moves only with that member.
+fn allocate_members(
+    scope: &mut Scope,
+    wires: &[&str],
+    role: IdentRole,
+    pointer: &crate::diag::JsonPointer,
+) -> Vec<Ident> {
+    let seeds: Vec<crate::diag::JsonPointer> =
+        wires.iter().map(|wire| pointer.push(wire)).collect();
+    let requests: Vec<_> = wires
+        .iter()
+        .zip(&seeds)
+        .enumerate()
+        .map(|(index, (wire, provenance))| RankedRequest {
+            hint: wire,
+            provenance,
+            rank: (escape(wire, role).unraw() != *wire, *wire, index),
+        })
+        .collect();
+    scope.alloc_ranked(&requests, role)
 }
 
 /// One method per operation that has a `_stream` twin

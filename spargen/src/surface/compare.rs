@@ -4,9 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    param_key_label, Change, ChangeKind, DiffReport, HeadersSurface, Impact, MemberSurface,
-    OpSurface, OverflowSurface, ParamKey, ServerSurface, ServerVariableSurface, Surface,
-    TypeSurface, UrlArgSurface,
+    param_key_label, Bindings, Change, ChangeKind, DiffReport, HeadersSurface, Impact,
+    MemberSurface, OpSurface, OverflowSurface, ParamKey, ServerSurface, ServerVariableSurface,
+    Surface, TypeSurface, UrlArgSurface,
 };
 
 /// Diff two surfaces into a classified, deterministically ordered [`DiffReport`].
@@ -270,7 +270,50 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             (old_param, new_param) => diff_member(&PARAM, location, old_param, new_param, changes),
         }
     }
+    // A `…Params` field binds a parameter by name and location. One that now binds another
+    // parameter is a rebinding, unless the two are the one parameter `moved_param` pairs across a
+    // location move, which keeps its field.
+    for (field, old_param) in &old.param_fields {
+        match new.param_fields.get(field) {
+            Some(new_param)
+                if new_param != old_param
+                    && moved_param(old_param, &old.params, &new.params) != Some(new_param) =>
+            {
+                changes.push(Change::new(
+                    ChangeKind::IdentifierRebound,
+                    format!("{key} params field `{field}`"),
+                    format!(
+                        "`{field}` now binds {} (was {})",
+                        param_key_label(new_param),
+                        param_key_label(old_param)
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
     diff_response_headers(key, &old.response_headers, &new.response_headers, changes);
+}
+
+/// Report each identifier both sides generate that binds another wire name on each, at the
+/// location `location` names for it. An identifier on one side only is an addition or a removal,
+/// which the member's own comparison reports.
+fn diff_bindings(
+    old: &Bindings,
+    new: &Bindings,
+    location: impl Fn(&str) -> String,
+    changes: &mut Vec<Change>,
+) {
+    for (ident, old_wire) in old {
+        match new.get(ident) {
+            Some(new_wire) if new_wire != old_wire => changes.push(Change::new(
+                ChangeKind::IdentifierRebound,
+                location(ident),
+                format!("`{ident}` now binds `{new_wire}` (was `{old_wire}`)"),
+            )),
+            _ => {}
+        }
+    }
 }
 
 /// The changes to an operation's `{method}_stream` twin other than its companions' renames, which
@@ -626,15 +669,30 @@ fn diff_types(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
 fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec<Change>) {
     match (old, new) {
         (
-            TypeSurface::Struct(old_fields, old_overflow),
-            TypeSurface::Struct(new_fields, new_overflow),
+            TypeSurface::Struct(old_fields, old_overflow, old_bindings),
+            TypeSurface::Struct(new_fields, new_overflow, new_bindings),
         ) => {
             diff_struct(name, old_fields, new_fields, changes);
             diff_overflow(name, old_overflow.as_ref(), new_overflow.as_ref(), changes);
+            diff_bindings(
+                old_bindings,
+                new_bindings,
+                |field| format!("{name}.{field}"),
+                changes,
+            );
         }
-        (TypeSurface::Enum(old_variants, old_open), TypeSurface::Enum(new_variants, new_open)) => {
+        (
+            TypeSurface::Enum(old_variants, old_open, old_bindings),
+            TypeSurface::Enum(new_variants, new_open, new_bindings),
+        ) => {
             diff_variant_set(name, old_variants, new_variants, changes);
             diff_open_variant(name, old_open.as_deref(), new_open.as_deref(), changes);
+            diff_bindings(
+                old_bindings,
+                new_bindings,
+                |variant| format!("{name}::{variant}"),
+                changes,
+            );
         }
         (
             TypeSurface::Checked(old_scalar, old_values),

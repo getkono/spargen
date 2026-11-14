@@ -142,6 +142,12 @@ struct OpSurface {
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
     params: BTreeMap<ParamKey, MemberSurface>,
+    /// The `(wire name, location)` of the parameter each `…Params` field identifier (and its
+    /// `with_` setter) binds, keyed by the identifier: a path parameter is passed by position, so
+    /// only the bundled ones are here. The location is part of the binding, since a same-named
+    /// parameter of another location can take the identifier; a parameter that `params` pairs as
+    /// moved to another location keeps its field, and that move is not a rebinding.
+    param_fields: BTreeMap<String, ParamKey>,
     /// The request body, or `None` for a bodyless operation or a body without a type. An optional
     /// multipart body with file parts is taken as a `MultipartBody`, which its type renders.
     request_body: Option<MemberSurface>,
@@ -237,12 +243,17 @@ type ParamKey = (String, &'static str);
 /// scalar the consumer already sees at every use site, so they are compared structurally there
 /// rather than as standalone entries.
 enum TypeSurface {
-    /// A `struct`: fields keyed by generated field name, and its typed `additionalProperties` map,
-    /// when it has one.
-    Struct(BTreeMap<String, MemberSurface>, Option<OverflowSurface>),
-    /// A string `enum`: the set of variant wire values, and for an open enum (`open_narrowing`)
-    /// the generated name of the variant holding any other string.
-    Enum(BTreeSet<String>, Option<String>),
+    /// A `struct`: fields keyed by generated field name, its typed `additionalProperties` map,
+    /// when it has one, and the wire property name each field binds, keyed by field name.
+    Struct(
+        BTreeMap<String, MemberSurface>,
+        Option<OverflowSurface>,
+        Bindings,
+    ),
+    /// A string `enum`: the set of variant wire values, for an open enum (`open_narrowing`) the
+    /// generated name of the variant holding any other string, and the wire value each listed
+    /// variant binds, keyed by variant name.
+    Enum(BTreeSet<String>, Option<String>, Bindings),
     /// An integer or boolean set's checked newtype (#1327): the scalar it holds (what `get`
     /// returns and `TryFrom` takes), and the listed values, each an associated `const`. Whether it
     /// is open changes what it decodes, not its API.
@@ -271,6 +282,11 @@ impl TypeSurface {
         }
     }
 }
+
+/// The wire name each generated identifier of one item sends and reads, keyed by the identifier.
+/// The same identifier bound to another wire name on the other side is a rebinding: code using it
+/// still compiles and silently means another member.
+type Bindings = BTreeMap<String, String>;
 
 /// A struct's typed `additionalProperties` map, emitted as a public `#[serde(flatten)]` field of
 /// type `BTreeMap<String, T>`.
@@ -459,6 +475,12 @@ pub enum ChangeKind {
     /// — calls to it break, and where the body has no file part left, so does passing a
     /// `MultipartBody`.
     FileNameSetterRemoved,
+    /// A generated identifier now binds another wire name: a `…Params` field and its setter (bound
+    /// by name and location, so a same-named parameter of another location can take it), a
+    /// struct field, or a string enum variant, which another member's spelling outranked for its
+    /// identifier. **Major** — code using it still compiles, and silently sends or reads the other
+    /// member.
+    IdentifierRebound,
 }
 
 impl ChangeKind {
@@ -518,7 +540,8 @@ impl ChangeKind {
             | ChangeKind::CredentialSchemeRemoved
             | ChangeKind::CredentialSettersChanged
             | ChangeKind::TestingModuleRemoved
-            | ChangeKind::FileNameSetterRemoved => Impact::Major,
+            | ChangeKind::FileNameSetterRemoved
+            | ChangeKind::IdentifierRebound => Impact::Major,
         }
     }
 
@@ -579,6 +602,7 @@ impl ChangeKind {
             ChangeKind::TestingModuleRemoved => "testing-module-removed",
             ChangeKind::FileNameSetterAdded => "file-name-setter-added",
             ChangeKind::FileNameSetterRemoved => "file-name-setter-removed",
+            ChangeKind::IdentifierRebound => "identifier-rebound",
         }
     }
 }

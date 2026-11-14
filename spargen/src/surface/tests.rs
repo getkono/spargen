@@ -64,6 +64,7 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::TestingModuleRemoved,
         ChangeKind::FileNameSetterAdded,
         ChangeKind::FileNameSetterRemoved,
+        ChangeKind::IdentifierRebound,
     ];
     for kind in every {
         // Exhaustive by construction: adding a variant to `ChangeKind` fails to compile here
@@ -122,7 +123,8 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::TestingModuleAdded
             | ChangeKind::TestingModuleRemoved
             | ChangeKind::FileNameSetterAdded
-            | ChangeKind::FileNameSetterRemoved => {}
+            | ChangeKind::FileNameSetterRemoved
+            | ChangeKind::IdentifierRebound => {}
         }
     }
     every.to_vec()
@@ -185,6 +187,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::TestingModuleRemoved => "TestingModuleRemoved",
         ChangeKind::FileNameSetterAdded => "FileNameSetterAdded",
         ChangeKind::FileNameSetterRemoved => "FileNameSetterRemoved",
+        ChangeKind::IdentifierRebound => "IdentifierRebound",
     }
 }
 
@@ -192,7 +195,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
 fn the_kind_list_covers_the_whole_enum() {
     assert_eq!(
         all_kinds().len(),
-        54,
+        55,
         "a `ChangeKind` variant reached the exhaustive match without joining the list"
     );
 }
@@ -308,8 +311,14 @@ fn the_surface_spellings_follow_the_table() {
     );
     assert_eq!(UrlArgSurface::Params.to_string(), "parameters bundle");
     let kinds = [
-        (TypeSurface::Struct(BTreeMap::new(), None), "struct"),
-        (TypeSurface::Enum(BTreeSet::new(), None), "enum"),
+        (
+            TypeSurface::Struct(BTreeMap::new(), None, BTreeMap::new()),
+            "struct",
+        ),
+        (
+            TypeSurface::Enum(BTreeSet::new(), None, BTreeMap::new()),
+            "enum",
+        ),
         (TypeSurface::Union(BTreeMap::new()), "union"),
         (TypeSurface::Newtype("String".to_owned()), "newtype"),
         (TypeSurface::Never, "empty enum"),

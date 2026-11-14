@@ -1312,7 +1312,8 @@ fn moving_a_parameter_to_another_location_compares_it_as_one_parameter() {
 
     // A name declared in two locations on a side is ambiguous: its keys are not paired, so the
     // query `id` that became a header `id` beside an unchanged cookie `id` is a removal and an
-    // addition, and the URL accessor no longer takes the bundle.
+    // addition, and the URL accessor no longer takes the bundle. A header ranks before a cookie as
+    // a query did, so the header `id` takes the query `id`'s field `id`: a rebinding.
     let report = diff(
         &optional_params(&[("id", "cookie", "string"), ("id", "query", "string")]),
         &optional_params(&[("id", "cookie", "string"), ("id", "header", "string")]),
@@ -1322,6 +1323,7 @@ fn moving_a_parameter_to_another_location_compares_it_as_one_parameter() {
         vec![
             (ChangeKind::UrlAccessorArgsChanged, "GET /pets"),
             (ChangeKind::ParamRemoved, "GET /pets param `id` (query)"),
+            (ChangeKind::IdentifierRebound, "GET /pets params field `id`"),
             (
                 ChangeKind::OptionalParamAdded,
                 "GET /pets param `id` (header)"

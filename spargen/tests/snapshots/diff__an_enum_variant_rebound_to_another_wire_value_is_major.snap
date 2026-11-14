@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|identifier-rebound|Kind::AB|`AB` now binds `A_B` (was `a-b`)
+minor|variant-added|Kind|variant added: `A_B`
+bump=major
