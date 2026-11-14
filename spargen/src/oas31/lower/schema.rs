@@ -353,11 +353,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.lower_union(schema, hint);
         }
 
-        if let Some(enumeration) = &schema.enum_values {
-            return self.lower_enum(enumeration, schema, hint);
-        }
-        if let Some(value) = &schema.const_value {
-            return self.lower_enum(std::slice::from_ref(value), schema, hint);
+        match (&schema.enum_values, &schema.const_value) {
+            (Some(enumeration), Some(value)) => {
+                let members = self.enum_meet_const(enumeration, value, schema)?;
+                return self.lower_enum(&members, schema, hint);
+            }
+            (Some(enumeration), None) => return self.lower_enum(enumeration, schema, hint),
+            (None, Some(value)) => {
+                return self.lower_enum(std::slice::from_ref(value), schema, hint);
+            }
+            (None, None) => {}
         }
 
         let non_null_types: Vec<JsonType> = schema
@@ -566,12 +571,61 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ))
     }
 
-    fn lower_enum(&mut self, values: &[SpannedValue], schema: &Schema, hint: &str) -> Option<Ty> {
+    /// The members of a schema's own `enum` that equal its own `const`, in the `enum`'s order:
+    /// both keywords apply, so the schema's values are the ones both list, as the `allOf` set
+    /// meet reads the same pair written as two members (#1406). The `enum` is first judged by
+    /// [`Self::enum_set`]'s rules, as it is alone, so a member no set can hold is reported rather
+    /// than dropped by the intersection. A `const` no set can hold (an object, say) is the one
+    /// member, which [`Self::lower_enum`] reports as it reports it alone. None shared is `E013`.
+    fn enum_meet_const(
+        &mut self,
+        enumeration: &[SpannedValue],
+        value: &SpannedValue,
+        schema: &Schema,
+    ) -> Option<Vec<SpannedValue>> {
+        self.enum_set(enumeration, schema)?;
+        let integer = schema.types.types.contains(&JsonType::Integer);
+        let wanted = match &value.node {
+            Node::Null => None,
+            _ => match scalar_value(value, integer) {
+                Some(scalar) => Some(scalar),
+                None => return Some(vec![value.clone()]),
+            },
+        };
+        let shared: Vec<SpannedValue> = enumeration
+            .iter()
+            .filter(|member| match (&wanted, &member.node) {
+                (None, Node::Null) => true,
+                (None, _) | (Some(_), Node::Null) => false,
+                (Some(wanted), _) => scalar_value(member, integer).as_ref() == Some(wanted),
+            })
+            .cloned()
+            .collect();
+        if shared.is_empty() {
+            // E013 case: own-keywords-empty
+            Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+                .message(
+                    "this schema's own `enum` and `const` share no value, so no value satisfies \
+                     the schema",
+                )
+                .remedy(
+                    "make the `const` one of the `enum`'s values, or drop one of the two keywords",
+                )
+                .emit(self.diags);
+            return None;
+        }
+        Some(shared)
+    }
+
+    /// The set the `enum`/`const` members `values` of `schema` lower to, its `null` members
+    /// stripped, or `None` once the `E008` or `E013` that says why it has none is emitted. It
+    /// inserts nothing, so [`Self::enum_meet_const`] judges an `enum` by it before intersecting.
+    fn enum_set(&mut self, values: &[SpannedValue], schema: &Schema) -> Option<EnumSet> {
         // The enum/const admits `null` where its own `type`, `enum` and `const` all do — their
         // conjunction, the one decision ([`NullAdmission::of_own_keywords`]): a `"null"` in the
         // type array beside an `enum` that leaves it out admits none (#666), and nor does a `null`
-        // member beside a `type` that leaves it out. Strip the nulls, lower the remaining scalars
-        // as the enum, and wrap the result in `Option` where it admits `null`.
+        // member beside a `type` that leaves it out. Strip the nulls and read the remaining
+        // scalars as the set.
         let has_null = NullAdmission::of_own_keywords(schema) == NullAdmission::Admits;
         // Declared order is preserved (minus nulls) so double generation stays byte-identical.
         let remainder: Vec<&SpannedValue> = values
@@ -579,10 +633,54 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .filter(|value| !matches!(value.node, Node::Null))
             .collect();
 
-        // Only `null` members remained (`enum: [null]` / `const: null`): emit the exact JSON null
-        // type (`()`), not a nullable unconstrained value that would also accept non-null content.
+        // A member of a kind the schema's own `type` does not name satisfies `enum` and never
+        // `type`, so no value is it (#1406). Beside a member the schema admits, the set
+        // contradicts itself, as a member outside its `format` does: `E008`. Where no member is
+        // left, `null` included, no value satisfies the schema.
+        if let Some(excluded) = remainder
+            .iter()
+            .copied()
+            .find(|value| !type_admits_member(&schema.types.types, value))
+        {
+            let admitted = remainder
+                .iter()
+                .any(|value| type_admits_member(&schema.types.types, value));
+            if !admitted && !has_null {
+                // E013 case: own-keywords-empty
+                Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+                    .message(
+                        "every value this schema's own `enum` or `const` lists is of a kind its \
+                         `type` does not admit, so no value satisfies the schema",
+                    )
+                    .remedy(
+                        "write each value as the `type` names it (`\"1\"`, not `1`, under `type: \
+                         string`), or correct the `type`",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
+            Diagnostic::error(Code::NonScalarEnum, schema.provenance.clone())
+                .message(format!(
+                    "enum/const value {} is {}, which the schema's `type` does not admit, so no \
+                     value the schema admits is that member",
+                    member_text(excluded),
+                    member_kind(excluded),
+                ))
+                .remedy(
+                    "remove the value from the set, or write it as the `type` names it (`\"1\"`, \
+                     not `1`, under `type: string`)",
+                )
+                .emit(self.diags);
+            return None;
+        }
+
+        // Only `null` members remained (`enum: [null]` / `const: null`): no scalar set.
         if remainder.is_empty() {
-            return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
+            return Some(EnumSet {
+                repr: ScalarRepr::String,
+                variants: Vec::new(),
+                width: Prim::String,
+            });
         }
 
         // On a schema whose `type` names `integer`, an integral float member is the integer it
@@ -621,8 +719,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             variants.push(scalar);
         }
-        // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate
-        // (last-insert invariant: `lower_into_reservation`).
         let repr = repr.unwrap_or(ScalarRepr::String);
         // An integer set is held in the width its `format` names, as a plain `integer` is, so a
         // member that width cannot hold satisfies `enum` and never `format`: no value the schema
@@ -646,6 +742,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
             return None;
         }
+        Some(EnumSet {
+            repr,
+            variants,
+            width,
+        })
+    }
+
+    fn lower_enum(&mut self, values: &[SpannedValue], schema: &Schema, hint: &str) -> Option<Ty> {
+        // Wrap the set in `Option` where the schema admits `null` ([`Self::enum_set`]).
+        let has_null = NullAdmission::of_own_keywords(schema) == NullAdmission::Admits;
+        let EnumSet {
+            repr,
+            variants,
+            width,
+        } = self.enum_set(values, schema)?;
+        // Only `null` members remained (`enum: [null]` / `const: null`): emit the exact JSON null
+        // type (`()`), not a nullable unconstrained value that would also accept non-null content.
+        if variants.is_empty() {
+            return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
+        }
+        // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate
+        // (last-insert invariant: `lower_into_reservation`).
+        //
         // A string set whose own schema names a `uuid` or date format is narrowed against that
         // format exactly as an `allOf` member declaring it would narrow it (`narrowed_set`).
         let formatted = matches!(
@@ -731,6 +850,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 }
 
+/// An `enum`/`const` set as [`LowerCtx::enum_set`] reads it: no `variants` where only `null`
+/// members were listed.
+struct EnumSet {
+    repr: ScalarRepr,
+    variants: Vec<ScalarValue>,
+    width: Prim,
+}
+
 /// The enum variant an `enum`/`const` member becomes, or `None` where it has none. `integer` says
 /// the schema's `type` names `integer`: a float member is then read by [`exact_integer`], the rule
 /// an integral float `default` is read by, so `1.0` is the variant `1`.
@@ -744,6 +871,53 @@ fn scalar_value(value: &SpannedValue, integer: bool) -> Option<ScalarValue> {
         }
         Node::String(value) => Some(ScalarValue::String(value.clone())),
         _ => None,
+    }
+}
+
+/// Whether a schema whose `type` names `types` admits the non-null member `value` by its kind, as
+/// JSON Schema's `type` does: an integer is also a `number`. A float is admitted by `integer` or
+/// `number` alike, and an object or array member by any `type`: [`scalar_value`] judges both, and
+/// its `E008` says why such a member has no variant. A schema naming no type admits every kind.
+fn type_admits_member(types: &[JsonType], value: &SpannedValue) -> bool {
+    if types.is_empty() {
+        return true;
+    }
+    let named = |ty: JsonType| types.contains(&ty);
+    match &value.node {
+        Node::Bool(_) => named(JsonType::Boolean),
+        Node::String(_) => named(JsonType::String),
+        Node::Number(Number::Int(_) | Number::UInt(_)) => {
+            named(JsonType::Integer) || named(JsonType::Number)
+        }
+        // A float under `integer` that is no integer is told apart by `scalar_value`'s own
+        // `E008`, which says why a float has no variant.
+        Node::Number(Number::Float(_)) => named(JsonType::Integer) || named(JsonType::Number),
+        _ => true,
+    }
+}
+
+/// The kind of the scalar member `value`, as the `E008` message for a member its `type` does not
+/// admit names it.
+fn member_kind(value: &SpannedValue) -> &'static str {
+    match &value.node {
+        Node::Bool(_) => "a boolean",
+        Node::String(_) => "a string",
+        Node::Number(Number::Int(_) | Number::UInt(_)) => "an integer",
+        Node::Number(Number::Float(_)) => "a number",
+        _ => "a value",
+    }
+}
+
+/// The scalar member `value` as the description writes it: a string quoted, so `"1"` and `1` read
+/// apart.
+fn member_text(value: &SpannedValue) -> String {
+    match &value.node {
+        Node::Bool(value) => value.to_string(),
+        Node::String(value) => format!("{value:?}"),
+        Node::Number(Number::Int(value)) => value.to_string(),
+        Node::Number(Number::UInt(value)) => value.to_string(),
+        Node::Number(Number::Float(value)) => value.to_string(),
+        _ => "value".to_owned(),
     }
 }
 

@@ -37,7 +37,9 @@ pub enum Error<E> {
     /// connection cut short is not this class but [`Error::InterruptedBody`]; on `wasm32`, a
     /// non-streamed one is this class, as [`Error::InterruptedBody`] describes.
     Protocol(ProtocolError),
-    /// #5 — redirect-policy exhaustion (per the injected client's policy).
+    /// #5 — a redirect not followed: the default backend refuses one to another origin
+    /// ([`RedirectError::cross_origin_target`]) or past ten hops; an injected client or backend
+    /// reports one as its own policy decides.
     Redirect(RedirectError),
     /// #6 — a documented non-success status parsed into the operation's typed error body.
     Api(ResponseValue<E>),
@@ -491,7 +493,7 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
             Error::Transport(_) => f.write_str("transport failed"),
             Error::Timeout(kind) => write!(f, "{kind:?} timeout elapsed"),
             Error::Protocol(_) => f.write_str("protocol error"),
-            Error::Redirect(_) => f.write_str("redirect policy exhausted"),
+            Error::Redirect(_) => f.write_str("redirect not followed"),
             Error::Api(value) => write!(f, "documented API error ({})", value.status()),
             Error::UnexpectedStatus { status, .. } => {
                 write!(f, "unexpected response status {status}")
@@ -826,7 +828,8 @@ impl TransportError {
         Self::new(TransportClass::Protocol, source)
     }
 
-    /// Redirect-policy exhaustion. It becomes [`Error::Redirect`], which is not transient.
+    /// A redirect the backend's policy did not follow. It becomes [`Error::Redirect`], which is
+    /// not transient.
     pub fn redirect(source: impl Into<BoxError>) -> Self {
         Self::new(TransportClass::Redirect, source)
     }
@@ -1031,11 +1034,45 @@ pub struct ProtocolError {
     source: BoxError,
 }
 
-/// Redirect-policy exhaustion (taxonomy #5).
+/// A redirect not followed (taxonomy #5): refused by the policy of the backend that executed the
+/// request, or past its hop limit. The cause is [`std::error::Error::source`].
 #[derive(Debug)]
 pub struct RedirectError {
     source: BoxError,
 }
+
+impl RedirectError {
+    /// The target of the hop refused for leaving the origin of the request, without its userinfo
+    /// and query: `Some` exactly when the default backend (`ClientCore::new` or `with_config`)
+    /// refused a redirect to another scheme, host or port. `None` for a redirect chain past the
+    /// hop limit, and for whatever an injected client's or backend's own policy reports.
+    pub fn cross_origin_target(&self) -> Option<&url::Url> {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(self.source.as_ref());
+        while let Some(current) = cause {
+            if let Some(refused) = current.downcast_ref::<CrossOriginRedirect>() {
+                return Some(&refused.target);
+            }
+            cause = current.source();
+        }
+        None
+    }
+}
+
+/// The cause the default backend's redirect policy fails a hop to another origin with, read back
+/// by [`RedirectError::cross_origin_target`]. `target` has its userinfo and query taken off before
+/// it is stored, so neither reaches `Display` or `Debug`.
+#[derive(Debug)]
+pub(crate) struct CrossOriginRedirect {
+    pub(crate) target: url::Url,
+}
+
+impl std::fmt::Display for CrossOriginRedirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "refused a redirect to another origin, {}", self.target)
+    }
+}
+
+impl std::error::Error for CrossOriginRedirect {}
 
 /// The `FromStr` error of a generated closed string enum: the text is none of the values the
 /// enum lists. It carries the rejected text and the enum's Rust name.

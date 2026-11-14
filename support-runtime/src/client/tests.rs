@@ -444,3 +444,102 @@ fn send_streaming_leaves_the_configured_total_timeout_off() {
 
     assert_eq!(backend.timeouts(), [None, Some(Duration::from_secs(2))]);
 }
+
+/// Issue #1397: the default backend's redirect policy follows a hop only within the origin of the
+/// request (a spelling the URL parser normalises away included), refuses one to another scheme,
+/// host or port as a cross-origin refusal naming the target without its userinfo and query, and
+/// refuses the eleventh hop as too many.
+#[test]
+fn the_default_redirect_policy_follows_only_within_the_origin() {
+    use super::{redirect_verdict, MAX_REDIRECTS};
+    let url = |text: &str| url::Url::parse(text).unwrap();
+    let first = [url("https://api.example.com/files/42?api_key=s3cret")];
+
+    for same in [
+        "https://api.example.com/elsewhere",
+        "https://API.example.com:443/elsewhere?q=1",
+    ] {
+        assert!(redirect_verdict(&url(same), &first).is_ok(), "{same}");
+    }
+
+    for (other, shown) in [
+        (
+            "https://u:PASSWORD@cdn.example.net/blob/42?sig=QUERYSECRET#part",
+            "https://cdn.example.net/blob/42#part",
+        ),
+        (
+            "http://api.example.com/files/42",
+            "http://api.example.com/files/42",
+        ),
+        (
+            "https://api.example.com:8443/files/42",
+            "https://api.example.com:8443/files/42",
+        ),
+    ] {
+        let refusal = redirect_verdict(&url(other), &first).unwrap_err();
+        let refused = refusal
+            .downcast_ref::<crate::error::CrossOriginRedirect>()
+            .unwrap_or_else(|| panic!("{other}: {refusal}"));
+        assert_eq!(refused.target.as_str(), shown);
+        for rendered in [refusal.to_string(), format!("{refusal:?}")] {
+            assert!(!rendered.contains("PASSWORD") && !rendered.contains("QUERYSECRET"));
+        }
+        assert!(refusal.to_string().contains(shown), "{refusal}");
+    }
+
+    // A later hop is judged against the first URL's origin, not the previous one's.
+    let mut chain = first.to_vec();
+    chain.push(url("https://api.example.com/moved"));
+    assert!(redirect_verdict(&url("https://cdn.example.net/x"), &chain).is_err());
+
+    // Ten hops are followed; the eleventh is refused, and not as a cross-origin one.
+    let mut chain = first.to_vec();
+    chain.extend((1..MAX_REDIRECTS).map(|hop| url(&format!("https://api.example.com/{hop}"))));
+    assert!(redirect_verdict(&url("https://api.example.com/next"), &chain).is_ok());
+    chain.push(url("https://api.example.com/tenth"));
+    let refusal = redirect_verdict(&url("https://api.example.com/next"), &chain).unwrap_err();
+    assert!(refusal
+        .downcast_ref::<crate::error::CrossOriginRedirect>()
+        .is_none());
+    assert_eq!(refusal.to_string(), "too many redirects (more than 10)");
+}
+
+/// `RedirectError::cross_origin_target` reads the refused target through any wrapper between it
+/// and the policy's cause (reqwest's own error, in the default backend), and is `None` otherwise.
+#[test]
+fn a_redirect_error_names_the_cross_origin_target_it_carries() {
+    use std::convert::Infallible;
+
+    use crate::error::CrossOriginRedirect;
+    use crate::TransportError;
+
+    #[derive(Debug)]
+    struct Wrapper(CrossOriginRedirect);
+    impl std::fmt::Display for Wrapper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("wrapped")
+        }
+    }
+    impl std::error::Error for Wrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    let target = url::Url::parse("https://cdn.example.net/blob/42").unwrap();
+    let wrapped = Wrapper(CrossOriginRedirect {
+        target: target.clone(),
+    });
+    let error = Error::<Infallible>::from_transport(TransportError::redirect(wrapped));
+    let Error::Redirect(redirect) = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(redirect.cross_origin_target(), Some(&target));
+
+    let error = Error::<Infallible>::from_transport(TransportError::redirect("too many redirects"));
+    let Error::Redirect(redirect) = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(redirect.cross_origin_target(), None);
+    assert_eq!(error.to_string(), "redirect not followed");
+}

@@ -5,6 +5,10 @@ use std::time::Duration;
 
 use url::Url;
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::error::CrossOriginRedirect;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::paginate::{same_origin, without_credentials};
 use crate::{
     Credential, Error, ExposeSecret, HttpBackend, LinkPaginator, ReqwestBackend, SecretString,
 };
@@ -114,6 +118,12 @@ impl Default for ClientConfig {
 /// [`ClientCore::with_client`] keeps its own timeouts instead, and a backend installed with
 /// [`ClientCore::with_backend`] executes requests on its own terms. reqwest's `fetch` backend has
 /// neither timeout, so on `wasm32` both are ignored.
+///
+/// The client built from it follows a redirect only within the origin of the request (the same
+/// scheme, host and port), up to ten hops, and refuses one to another origin with
+/// [`Error::Redirect`], whose [`crate::RedirectError::cross_origin_target`] names the target
+/// without its userinfo and query; nothing is sent there. On `wasm32` the browser's fetch follows
+/// redirects by its own policy instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportConfig {
     /// How long establishing a connection may take — name resolution, the TCP handshake and TLS —
@@ -228,6 +238,11 @@ impl ClientCore {
     /// as [`Self::with_backend`] would with `Arc::new(ReqwestBackend::new(client))`. The client's
     /// own connect and read timeouts apply, and no [`TransportConfig`] is read;
     /// [`ClientConfig::timeout`] still applies to each request the runtime's `send` sends.
+    ///
+    /// The client keeps its own redirect policy too, not the same-origin one [`TransportConfig`]
+    /// describes: under reqwest's default it follows a redirect to any origin, and every header
+    /// reqwest does not strip on a cross-origin hop (an `apiKey` header, a bound header, a
+    /// [`RequestOptions::headers`] entry) travels with it.
     pub fn with_client(client: reqwest::Client, base_url: &str) -> Result<Self, Error<Infallible>> {
         Self::with_backend(Arc::new(ReqwestBackend::new(client)), base_url)
     }
@@ -237,8 +252,9 @@ impl ClientCore {
     /// [`ClientConfig`]; nothing else is built, so several cores can share one backend. Every
     /// request is executed by `backend`, so connecting and reading are bounded however `backend`
     /// bounds them. [`ClientConfig::timeout`] travels on each request the runtime's `send` sends,
-    /// as a [`crate::TotalTimeout`] extension, for `backend` to enforce. Returns a
-    /// request-construction error if the base URL is not an `http` or `https` URL.
+    /// as a [`crate::TotalTimeout`] extension, for `backend` to enforce. Redirects are followed,
+    /// or not, as `backend` decides, not by the same-origin policy [`TransportConfig`] describes.
+    /// Returns a request-construction error if the base URL is not an `http` or `https` URL.
     pub fn with_backend(
         backend: Arc<dyn HttpBackend>,
         base_url: &str,
@@ -389,13 +405,20 @@ pub(crate) fn require_http_base(url: Url) -> Result<Url, Error<Infallible>> {
 }
 
 /// The `reqwest::Client` a core's default backend runs on, with `config`'s connect and read
-/// timeouts.
-/// reqwest's `fetch` backend has neither, so on `wasm32` `config` is not read.
+/// timeouts and the same-origin redirect policy [`redirect_verdict`] decides.
+/// reqwest's `fetch` backend has none of the three, so on `wasm32` `config` is not read and the
+/// browser follows redirects as its own fetch policy decides.
 fn http_client(config: &TransportConfig) -> Result<reqwest::Client, Error<Infallible>> {
     let builder = reqwest::Client::builder();
     #[cfg(not(target_arch = "wasm32"))]
     let builder = {
-        let mut builder = builder;
+        let mut builder =
+            builder.redirect(reqwest::redirect::Policy::custom(
+                |attempt| match redirect_verdict(attempt.url(), attempt.previous()) {
+                    Ok(()) => attempt.follow(),
+                    Err(refusal) => attempt.error(refusal),
+                },
+            ));
         if let Some(timeout) = config.connect_timeout {
             builder = builder.connect_timeout(timeout);
         }
@@ -407,6 +430,35 @@ fn http_client(config: &TransportConfig) -> Result<reqwest::Client, Error<Infall
     #[cfg(target_arch = "wasm32")]
     let _ = config;
     builder.build().map_err(Error::request_construction)
+}
+
+/// How many redirects the default backend follows for one request, as reqwest's default policy
+/// does.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_REDIRECTS: usize = 10;
+
+/// Whether the default backend follows a redirect to `next`, `previous` being every URL already
+/// requested in the chain, the request's own first. It follows one only within the origin of the
+/// request it was sent as (the same scheme, host and port), since every header the request carries
+/// travels with the hop: an `apiKey` credential, a bound header, a `RequestOptions` header. A hop
+/// to another origin is refused with a [`CrossOriginRedirect`] naming the target without its
+/// userinfo and query, and a hop past the [`MAX_REDIRECTS`]th as too many redirects.
+#[cfg(not(target_arch = "wasm32"))]
+fn redirect_verdict(
+    next: &Url,
+    previous: &[Url],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(origin) = previous.first() {
+        if !same_origin(origin, next) {
+            return Err(Box::new(CrossOriginRedirect {
+                target: without_credentials(next.clone()),
+            }));
+        }
+    }
+    if previous.len() > MAX_REDIRECTS {
+        return Err(format!("too many redirects (more than {MAX_REDIRECTS})").into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
