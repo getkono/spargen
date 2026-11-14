@@ -39,9 +39,9 @@ fn bundle_file_ids() -> (spargen::FileId, spargen::FileId) {
 
 /// A warning for the oracles' own fixtures, at `pointer` with `span` in file `file`.
 ///
-/// It takes the diagnostic a real `check` run reports for an unsupported `openapi` version, since
-/// a `Diagnostic` reaches a caller from a run, and overwrites every field: what a fixture asserts
-/// on is the values set here, never the run's own.
+/// It takes the diagnostic a real `check` run reports for an unsupported `openapi` version, and
+/// its span, since a `Diagnostic` and a `Span` reach a caller from a run, and overwrites every
+/// field of both: what a fixture asserts on is the values set here, never the run's own.
 fn located(
     code: Code,
     pointer: &str,
@@ -50,16 +50,17 @@ fn located(
     message: &str,
 ) -> Diagnostic {
     let (line, start, end) = span;
-    let span = spargen::Span::new(
-        file,
-        spargen::Loc::new(line, 1, start),
-        spargen::Loc::new(line, 1, end),
-    );
     let mut diagnostic = check("openapi: 3.0.0\n")
         .diagnostics()
         .first()
         .cloned()
         .expect("an unsupported version is reported");
+    let mut span = diagnostic
+        .span
+        .unwrap_or_else(|| panic!("an unsupported version is located: {diagnostic:#?}"));
+    span.file = file;
+    (span.start.line, span.start.col, span.start.offset) = (line, 1, start);
+    (span.end.line, span.end.col, span.end.offset) = (line, 1, end);
     diagnostic.code = code;
     diagnostic.severity = Severity::Warning;
     diagnostic.pointer = spargen::JsonPointer::from(pointer);

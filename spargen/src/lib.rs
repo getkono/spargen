@@ -51,9 +51,9 @@
 //! accessors, and `Spec` and `Build` are set through chained setters, so a new field or knob is
 //! additive. A type with public fields or variants that may grow — [`Diagnostic`], [`Outcome`],
 //! [`Code`], [`CargoIntegration`], [`ConfigError`], [`Loc`] and [`Span`] among them — is
-//! `#[non_exhaustive]` instead, with a constructor where a caller builds one ([`Loc::new`],
-//! [`Span::new`], [`ConfigError::flag`]). [`Severity`]
-//! stays exhaustive: its two variants are the error/warning partition every [`Report`] splits on.
+//! `#[non_exhaustive]` instead, so a new field or variant is additive; a caller reads a
+//! `Diagnostic`, `Loc` or `Span` off a run's [`Report`]. [`Severity`] stays exhaustive: its two
+//! variants are the error/warning partition every [`Report`] splits on.
 
 mod diag;
 
@@ -81,9 +81,11 @@ pub use config::{
     Build, CargoIntegration, CarriedDocs, Carve, ConfigError, Narrowing, Spec, TestingModule,
     UnionTags, UuidMapping,
 };
-pub use diag::{
-    Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, OutcomeClaim, Severity, Span, UnknownCode,
-};
+pub use diag::{Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, Severity, Span, UnknownCode};
+// The internal claim oracle `spargen/tests/frontend/` and `spargen/tests/corpus_manifest.rs`
+// hold every run to, hidden and outside semver like `Outcome::admits` and `Diagnostic::claim`.
+#[doc(hidden)]
+pub use diag::OutcomeClaim;
 pub use diff_api::{DiffRejection, DiffSides, Side};
 pub use ir::{DateTimeBackend, UnknownDateTimeBackend};
 pub use report::{Outcome, Report};
