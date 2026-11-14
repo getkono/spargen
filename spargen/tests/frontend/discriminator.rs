@@ -1509,3 +1509,147 @@ fn members_sharing_a_non_object_category_are_tried_beside_the_tag_dispatch() {
     assert!(pet.contains("Pet::PetVariant1(inner)"), "{pet}");
     assert!(pet.contains("Pet::PetVariant2(inner)"), "{pet}");
 }
+
+/// A union of `Cat` and `Dog` under `version`, each declaring the tag property `kind` and
+/// requiring it as `cat_required` and `dog_required` say, with `discriminator` appended to the
+/// Discriminator Object's `propertyName` and `union_extra` written beside the `oneOf`.
+fn optional_tag_pet(
+    version: &str,
+    cat_required: bool,
+    dog_required: bool,
+    discriminator: &str,
+    union_extra: &str,
+) -> String {
+    let required = |required: bool| if required { "required: [kind], " } else { "" };
+    format!(
+        "openapi: {version}\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         paths: {{}}\n\
+         components:\n  \
+         schemas:\n    \
+         Cat: {{ type: object, {cat}properties: {{ kind: {{ type: string }}, meow: {{ type: string }} }} }}\n    \
+         Dog: {{ type: object, {dog}properties: {{ kind: {{ type: string }}, bark: {{ type: string }} }} }}\n    \
+         Pet:\n      \
+         oneOf: [{{ $ref: '#/components/schemas/Cat' }}, {{ $ref: '#/components/schemas/Dog' }}]\n\
+         {union_extra}      \
+         discriminator: {{ propertyName: kind{discriminator} }}\n",
+        cat = required(cat_required),
+        dog = required(dog_required),
+    )
+}
+
+/// #1421: a discriminator whose property a member the tag selects leaves optional, with no
+/// `defaultMapping`, generated a tag dispatch that fails to decode a payload of that member with
+/// no tag, though the payload satisfies the schema. OpenAPI 3.2 requires a `defaultMapping` for
+/// an optional discriminating property, so the union is rejected at the Discriminator Object,
+/// naming the member and the property, and the remedy offers both ways out.
+// E007 case: optional-discriminator-property
+#[test]
+fn an_optional_discriminator_property_without_default_mapping_is_e007_at_the_discriminator() {
+    let spec = optional_tag_pet("3.2.0", true, false, "", "");
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let rejection = report
+        .diagnostics()
+        .iter()
+        .find(|d| {
+            d.code == Code::NonDisjointUnion
+                && d.pointer.as_str() == "/components/schemas/Pet/discriminator"
+        })
+        .unwrap_or_else(|| panic!("{report:#?}"));
+    assert!(
+        rejection
+            .message
+            .contains("the discriminator property `kind` is optional in union member 1 (`Dog`)"),
+        "{rejection:#?}"
+    );
+    let remedy = rejection.remedy.as_deref().unwrap_or_default();
+    assert!(
+        remedy.contains("require `kind` in every member")
+            && remedy.contains("add a `discriminator.defaultMapping`"),
+        "{rejection:#?}"
+    );
+}
+
+/// The same union in a 3.1 document generates: 3.1 has no `defaultMapping`, says only that the
+/// property SHOULD be required, and leaves an absent one's behaviour undefined, so the decoder's
+/// error naming the missing tag is a disposition the specification allows.
+#[test]
+fn an_optional_discriminator_property_in_a_3_1_document_generates() {
+    let spec = optional_tag_pet("3.1.0", true, false, "", "");
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let pet = deserialize_impl(&code, "Pet");
+    assert!(pet.contains("missing discriminator field"), "{pet}");
+}
+
+/// The 3.2 remedy for the rejection above: a `defaultMapping` takes the payload with no tag, so the
+/// optional property needs no requirement.
+#[test]
+fn an_optional_discriminator_property_with_default_mapping_generates() {
+    let spec = optional_tag_pet("3.2.0", false, false, ", defaultMapping: Dog", "");
+    let report = generate(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+}
+
+/// The other remedy, in both of its spellings: every member requiring the property itself, or a
+/// `required` beside the `oneOf` that the union's sibling meet carries into each member. Neither
+/// changes what is generated: each member keeps the tag it always had.
+#[test]
+fn a_discriminator_property_every_member_requires_generates_unchanged() {
+    let own = optional_tag_pet("3.2.0", true, true, "", "");
+    let beside = optional_tag_pet("3.2.0", false, false, "", "      required: [kind]\n");
+    for (what, spec) in [("own", own), ("beside the union", beside)] {
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::NonDisjointUnion),
+            "{what}: {report:#?}"
+        );
+        let decode = discriminated_arms(&code, "Pet").decode;
+        assert_eq!(decode.len(), 2, "{what}: {code}");
+        assert!(
+            decode.iter().all(|(_, tags)| tags.len() == 1),
+            "{what}: {code}"
+        );
+    }
+}
+
+/// An untyped member the tag selects requires no property, so in a 3.2 document with no
+/// `defaultMapping` it is the member leaving the tag optional; one whose only keyword is
+/// `required: [kind]` requires it, and the union generates, dispatched by tag.
+#[test]
+fn an_untyped_tag_selected_member_needs_the_tag_required_in_a_3_2_document() {
+    let spec = |anything: &str| {
+        format!(
+            "openapi: 3.2.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    Anything: {anything}\n    \
+             Cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }} }} }}\n    \
+             Pet: {{ oneOf: [{{ $ref: '#/components/schemas/Cat' }}, {{ $ref: \
+             '#/components/schemas/Anything' }}], discriminator: {{ propertyName: kind }} }}\n"
+        )
+    };
+    let report = generate(&spec("{}"));
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::NonDisjointUnion
+                && d.pointer.as_str() == "/components/schemas/Pet/discriminator"
+                && d.message
+                    .contains("`kind` is optional in union member 1 (`Anything`),")),
+        "{report:#?}"
+    );
+    let (report, code) = generate_with_code(&spec("{ required: [kind] }"));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let tags: Vec<Vec<String>> = discriminated_arms(&code, "Pet")
+        .decode
+        .into_iter()
+        .map(|(_, tags)| tags)
+        .collect();
+    assert_eq!(tags, [["Cat"], ["Anything"]], "{code}");
+}

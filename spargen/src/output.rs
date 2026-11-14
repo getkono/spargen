@@ -17,7 +17,9 @@ pub(crate) fn write_output(path: &Utf8Path, contents: &str) -> Result<(), String
 }
 
 /// Write `bytes` to `path` through a temporary file beside it, renamed into place, so a reader sees
-/// the old contents or the new ones and never a partial write.
+/// the old contents or the new ones and never a partial write. Where `path` is a symbolic link, the
+/// write goes to the file its chain of links ends at, which is created if missing, and the link
+/// stays a link.
 pub(crate) fn atomic_write(path: &Utf8Path, bytes: &[u8]) -> std::io::Result<()> {
     Staged::new(path, bytes)?.commit()
 }
@@ -36,9 +38,8 @@ pub(crate) fn atomic_write_all(
     for (path, bytes) in files {
         staged.push(Staged::new(path, bytes).map_err(|error| (path.clone(), error))?);
     }
-    for file in staged {
-        let path = file.path.clone();
-        file.commit().map_err(|error| (path, error))?;
+    for (file, (path, _)) in staged.into_iter().zip(files) {
+        file.commit().map_err(|error| (path.clone(), error))?;
     }
     Ok(())
 }
@@ -51,8 +52,41 @@ struct Staged {
     committed: bool,
 }
 
+/// How many symbolic links [`resolve_links`] follows before it refuses the path as a cycle: Linux's
+/// own limit for one path lookup.
+const MAX_LINK_HOPS: usize = 40;
+
+/// The path a write to `path` lands on: `path` itself unless it is a symbolic link, else the end
+/// of its chain of links, each relative target read against its link's directory. The end need
+/// not exist, so a dangling link resolves to the file the write creates, where
+/// `std::fs::canonicalize` would fail.
+fn resolve_links(path: &Utf8Path) -> std::io::Result<Utf8PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_LINK_HOPS {
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = Utf8PathBuf::try_from(std::fs::read_link(&current)?)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                current = match current.parent() {
+                    Some(parent) if target.is_relative() => parent.join(target),
+                    _ => target,
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other(format!(
+        "more than {MAX_LINK_HOPS} symbolic links to follow from `{path}`"
+    )))
+}
+
 impl Staged {
+    /// Stage `bytes` for `path`, resolved through [`resolve_links`] so the rename replaces the
+    /// link's target rather than the link.
     fn new(path: &Utf8Path, bytes: &[u8]) -> std::io::Result<Self> {
+        let path = &resolve_links(path)?;
         let parent = path.parent().unwrap_or_else(|| Utf8Path::new("."));
         std::fs::create_dir_all(parent)?;
         let name = path.file_name().unwrap_or("spargen-output");
@@ -173,5 +207,94 @@ mod tests {
         atomic_write(&dir.join("a"), b"new").unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("a")).unwrap(), "new");
         assert_eq!(listing(&dir), ["a"]);
+    }
+
+    /// `src/api.rs -> ../generated/api.rs`: the write lands in the link's target, the link
+    /// survives, and no temporary is left beside either.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_writes_through_a_symlinked_path() {
+        let (_temp, dir) = dir();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("generated")).unwrap();
+        std::fs::write(dir.join("generated/api.rs"), "old").unwrap();
+        std::os::unix::fs::symlink("../generated/api.rs", dir.join("src/api.rs")).unwrap();
+        atomic_write(&dir.join("src/api.rs"), b"new").unwrap();
+        assert!(std::fs::symlink_metadata(dir.join("src/api.rs"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("generated/api.rs")).unwrap(),
+            "new"
+        );
+        assert_eq!(listing(&dir.join("src")), ["api.rs"]);
+        assert_eq!(listing(&dir.join("generated")), ["api.rs"]);
+    }
+
+    /// A chain of links, the last one dangling: the write follows every hop and creates the file
+    /// the chain ends at.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_follows_a_link_chain_to_a_missing_target() {
+        let (_temp, dir) = dir();
+        std::os::unix::fs::symlink("b", dir.join("a")).unwrap();
+        std::os::unix::fs::symlink(dir.join("c"), dir.join("b")).unwrap();
+        atomic_write(&dir.join("a"), b"new").unwrap();
+        assert!(std::fs::symlink_metadata(dir.join("a"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(dir.join("c")).unwrap(), "new");
+        assert_eq!(listing(&dir), ["a", "b", "c"]);
+    }
+
+    /// A link cycle is refused rather than followed forever, and nothing is written.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_refuses_a_link_cycle() {
+        let (_temp, dir) = dir();
+        std::os::unix::fs::symlink("b", dir.join("a")).unwrap();
+        std::os::unix::fs::symlink("a", dir.join("b")).unwrap();
+        atomic_write(&dir.join("a"), b"new").unwrap_err();
+        assert_eq!(listing(&dir), ["a", "b"]);
+    }
+
+    /// `atomic_write_all` writes through a link too, and a staging failure still names the path
+    /// the caller passed, not the link's target.
+    #[cfg(all(unix, feature = "remote-fetch"))]
+    #[test]
+    fn atomic_write_all_writes_through_a_link_and_names_the_given_path() {
+        let (_temp, dir) = dir();
+        std::fs::write(dir.join("target"), "old").unwrap();
+        std::os::unix::fs::symlink("target", dir.join("link")).unwrap();
+        atomic_write_all(&[(dir.join("link"), b"new".to_vec())]).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("target")).unwrap(), "new");
+        assert_eq!(listing(&dir), ["link", "target"]);
+
+        std::fs::write(dir.join("blocked"), "a file, not a directory").unwrap();
+        std::os::unix::fs::symlink("blocked/c", dir.join("into-blocked")).unwrap();
+        let (path, _) =
+            atomic_write_all(&[(dir.join("into-blocked"), b"new".to_vec())]).unwrap_err();
+        assert_eq!(path, dir.join("into-blocked"));
+    }
+
+    /// A link to a directory stages beside the directory, so only the rename fails: that error
+    /// names the path the caller passed, not the directory the link resolves to, and the earlier
+    /// file is already replaced.
+    #[cfg(all(unix, feature = "remote-fetch"))]
+    #[test]
+    fn a_failed_rename_names_the_given_path_not_the_resolved_target() {
+        let (_temp, dir) = dir();
+        std::fs::create_dir_all(dir.join("directory")).unwrap();
+        std::os::unix::fs::symlink("directory", dir.join("link")).unwrap();
+        let files = vec![
+            (dir.join("a"), b"new a".to_vec()),
+            (dir.join("link"), b"new".to_vec()),
+        ];
+        let (path, _) = atomic_write_all(&files).unwrap_err();
+        assert_eq!(path, dir.join("link"));
+        assert_eq!(std::fs::read_to_string(dir.join("a")).unwrap(), "new a");
+        assert_eq!(listing(&dir), ["a", "directory", "link"]);
     }
 }

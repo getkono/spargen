@@ -112,9 +112,12 @@ An unknown key is a configuration error (exit status `3`).
 | Status | Meaning |
 | --- | --- |
 | `0` | Success, including a run that reported only warnings, and `--help` / `--version`. |
-| `1` | An error-severity diagnostic was reported (`check`, `deps`, `lock`, or a `diff` spec that cannot lower), or `diff --exit-code` found a breaking (`major`) change. |
+| `1` | An error-severity diagnostic was reported (`check`, `deps`, `lock`, or a `diff` spec that cannot lower), `diff --exit-code` found a breaking (`major`) change, or output could not be written for a reason other than a closed stream. |
 | `2` | The command line did not parse: an unknown subcommand or flag, a missing argument, or two conflicting flags. |
 | `3` | A configuration or flag value was rejected (a missing `--config` target, a malformed `spargen.toml`, bad `--omit-*` or `--keep-operation` syntax), or `explain` was given an unknown code. |
+
+A closed stdout or stderr (`spargen diff old.yaml new.yaml --format json | head -1`) is no failure:
+what would have gone to it is dropped, and the command exits with the status its outcome maps to.
 
 ## `spargen check`
 
