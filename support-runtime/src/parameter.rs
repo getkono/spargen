@@ -84,6 +84,12 @@ pub enum ParameterError {
     /// A style defined only for arrays and objects (`spaceDelimited`, `pipeDelimited`) received a
     /// scalar or undefined value.
     ExpectedComposite,
+    /// A cookie parameter's serialized pair holds a byte its `CookieValue` rule refuses
+    /// (`cookie_pair`). It names the parameter and never the value, which may be a secret.
+    InvalidCookie {
+        /// The parameter's declared name.
+        parameter: String,
+    },
 }
 
 impl fmt::Display for ParameterError {
@@ -106,6 +112,10 @@ impl fmt::Display for ParameterError {
                 "`style: spaceDelimited` and `style: pipeDelimited` require an array or object \
                  parameter value",
             ),
+            Self::InvalidCookie { parameter } => write!(
+                formatter,
+                "cookie parameter `{parameter}` holds a byte RFC 6265 does not admit in a cookie"
+            ),
         }
     }
 }
@@ -118,7 +128,8 @@ impl std::error::Error for ParameterError {
             | Self::ExpectedObject
             | Self::FormBodyNotObject
             | Self::DeepObjectInMultipart
-            | Self::ExpectedComposite => None,
+            | Self::ExpectedComposite
+            | Self::InvalidCookie { .. } => None,
         }
     }
 }
@@ -344,6 +355,86 @@ pub fn serialize_form<T: Serialize>(
         )]),
         value => Ok(vec![format!("{name}={}", scalar(&value, encoding)?)]),
     }
+}
+
+/// Which bytes a cookie pair may carry, by how its parameter was serialized; [`cookie_pair`]
+/// holds a pair to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CookieValue {
+    /// A `style: form` pair, already percent-encoded: only a `;` or a CTL that `allowReserved`
+    /// left literal can break it, so those are refused anywhere in the pair.
+    Encoded,
+    /// A `content` or `explode: true` `style: cookie` pair, sent verbatim: an RFC 6265
+    /// `cookie-name` (a `token`), `=`, and a `cookie-value`, which is `*cookie-octet`, bare or
+    /// between two `"`.
+    Octets,
+    /// An `explode: false` `style: cookie` pair: as [`Octets`](Self::Octets), but the value may
+    /// also carry the `,` that style joins array items and object members with.
+    OctetList,
+}
+
+/// Check one `name=value` cookie pair of the parameter declared as `parameter` against `rule`,
+/// and return it unchanged where it holds, so it can be joined into the `Cookie` header.
+///
+/// A pair it refuses fails as `ParameterError::InvalidCookie`, which names `parameter` and not
+/// the value: a `;` would otherwise split one value into a second cookie the caller never
+/// declared, and a cookie may be a secret.
+pub fn cookie_pair(
+    parameter: &str,
+    pair: String,
+    rule: CookieValue,
+) -> Result<String, ParameterError> {
+    let admitted = match pair.split_once('=') {
+        None => false,
+        Some(_) if rule == CookieValue::Encoded => pair
+            .bytes()
+            .all(|byte| byte != b';' && !byte.is_ascii_control()),
+        Some((name, value)) => {
+            let value = value
+                .strip_prefix('"')
+                .and_then(|quoted| quoted.strip_suffix('"'))
+                .unwrap_or(value);
+            !name.is_empty()
+                && name.bytes().all(is_token_byte)
+                && value.bytes().all(|byte| {
+                    is_cookie_octet(byte) || (byte == b',' && rule == CookieValue::OctetList)
+                })
+        }
+    };
+    if admitted {
+        Ok(pair)
+    } else {
+        Err(ParameterError::InvalidCookie {
+            parameter: parameter.to_owned(),
+        })
+    }
+}
+
+/// RFC 6265 §4.1.1 `cookie-octet`: visible US-ASCII but `"`, `,`, `;` and `\`.
+fn is_cookie_octet(byte: u8) -> bool {
+    matches!(byte, 0x21 | 0x23..=0x2B | 0x2D..=0x3A | 0x3C..=0x5B | 0x5D..=0x7E)
+}
+
+/// RFC 9110 §5.6.2 `tchar`, the bytes of the `token` a cookie name is.
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 /// Serialize one `style: spaceDelimited` or `style: pipeDelimited` query parameter.

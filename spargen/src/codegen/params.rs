@@ -294,7 +294,7 @@ pub(super) fn querystring_param_tokens(
 }
 
 /// The statement extending `binding` with the `name=value` fragments `support::serialize_form`
-/// renders for `value`: a `form`-style query or cookie parameter, or a form-encoded whole-query
+/// renders for `value`: a `form`-style query parameter, or a form-encoded whole-query
 /// value (whose empty `name` makes each member its own pair).
 fn form_fragments_tokens(
     binding: &crate::name::Ident,
@@ -314,6 +314,11 @@ fn form_fragments_tokens(
 /// Emit serialization of one cookie parameter into the operation's cookie fragments.
 ///
 /// `serialize_form` already returns `name=value` fragments; the caller joins them with `"; "`.
+/// Every pair, whatever its style, passes through `support::cookie_pair` on its way in, so no
+/// value carries a `;` that would split it into a second cookie: a `style: form` pair is held
+/// only to that (its percent-encoding did the rest), and a `content` or `style: cookie` pair,
+/// sent verbatim, to RFC 6265's `cookie-value`, plus the `,` an `explode: false` `style: cookie`
+/// value joins its items with.
 pub(super) fn cookie_param_tokens(
     param: &crate::ir::Parameter,
     name: &str,
@@ -321,13 +326,34 @@ pub(super) fn cookie_param_tokens(
     cookies_binding: &crate::name::Ident,
 ) -> TokenStream {
     let encoding = percent_encoding_tokens(param);
+    let checked = |pair: TokenStream, rule: &str| {
+        let rule = proc_macro2::Ident::new(rule, proc_macro2::Span::call_site());
+        quote! {
+            support::cookie_pair(#name, #pair, support::CookieValue::#rule)
+                .map_err(support::Error::request_construction)?
+        }
+    };
     match &param.style {
         crate::ir::ParamStyle::Form | crate::ir::ParamStyle::Cookie => {
-            form_fragments_tokens(cookies_binding, name, value, param.explode, &encoding)
+            let rule = match (&param.style, param.explode) {
+                (crate::ir::ParamStyle::Form, _) => "Encoded",
+                (_, true) => "Octets",
+                (_, false) => "OctetList",
+            };
+            let pair = checked(quote! { pair }, rule);
+            let explode = param.explode;
+            quote! {
+                for pair in support::serialize_form(#name, #value, #explode, #encoding)
+                    .map_err(support::Error::request_construction)?
+                {
+                    #cookies_binding.push(#pair);
+                }
+            }
         }
         crate::ir::ParamStyle::Content(_) => {
             let rendered = param_value_tokens(param, value);
-            quote! { #cookies_binding.push(format!("{}={}", #name, #rendered)); }
+            let pair = checked(quote! { format!("{}={}", #name, #rendered) }, "Octets");
+            quote! { #cookies_binding.push(#pair); }
         }
         crate::ir::ParamStyle::Simple
         | crate::ir::ParamStyle::Matrix

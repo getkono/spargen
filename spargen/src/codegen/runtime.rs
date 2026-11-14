@@ -134,7 +134,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
             pub use middleware::{Middleware, MiddlewareBackend, Next};
             pub use nullable::Nullable;
             pub use header::{parse_header, require_header, HeaderError, HeaderShape};
-            pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
+            pub use parameter::{cookie_pair, encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, CookieValue, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
             pub use paginate::{next_link, LinkPaginator};
             pub use request::{AsMultipartBody, MultipartBody, MultipartForm, MultipartPart, RequestBuilder};
             pub use response::{stream_success_bytes, ByteStream, ResponseValue};
