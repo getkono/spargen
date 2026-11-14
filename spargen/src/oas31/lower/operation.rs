@@ -122,7 +122,7 @@ pub(super) fn lower_operation(
         .and_then(|body| ctx.resolve_request_body(body))
         .and_then(|body| ctx.lower_request_body(&body, &crate::name::request_body_hint(&id)));
 
-    let responses = ctx.lower_responses(&operation.responses);
+    let responses = ctx.lower_responses(&operation.responses, *method == Method::Head);
     // XML decode is scoped to the single-body success/error paths. An XML body beside a
     // second bodied status on the same side — a response enum that decodes two or more
     // bodies — is rejected cleanly (narrowed `E009`) rather than silently decoded as JSON.
