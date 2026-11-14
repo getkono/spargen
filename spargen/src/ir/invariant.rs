@@ -1,6 +1,9 @@
 use crate::diag::{Code, Diagnostic, Diagnostics};
 
-use super::{AdditionalProps, Api, BytesEncoding, MediaType, Ty, TypeKind, UnionStrategy};
+use super::{
+    AdditionalProps, Api, BytesEncoding, MediaType, ParamLoc, ScalarRepr, ScalarValue, Ty,
+    TypeKind, UnionStrategy,
+};
 
 /// The prefix of every message [`check_invariants`] emits. The fuzz harness
 /// (`tests/fuzz_frontend.rs`) declares the same literal to recognise a report that carries one,
@@ -9,7 +12,7 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 
 /// Check the IR's well-formedness invariants, reporting any violation through `diags`.
 ///
-/// Run unconditionally after every lowering, on every entry point. It checks six invariants:
+/// Run unconditionally after every lowering, on every entry point. It checks ten invariants:
 ///
 /// 1. Referential integrity of the type graph: every [`super::Ty`] reachable from the API —
 ///    operation parameters, request bodies, response bodies, response headers, and, transitively,
@@ -29,6 +32,19 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 ///    raw, as `bytes::Bytes`, which the base64 newtype is not.
 /// 6. Every request body has a type: the emitter gives an operation a body argument, and sends a
 ///    body, only for a typed one, so an untyped body would be dropped from the request.
+/// 7. A discriminated union's `defaultMapping` position ([`UnionStrategy::Discriminated`]'s
+///    `default_variant`) is less than its number of variants: the emitter indexes the variants by
+///    it.
+/// 8. Every value a [`super::ScalarEnum`] lists is of its [`ScalarRepr`]: a string set's are
+///    strings, an integer set's integers and a boolean set's booleans, the kind the emitter reads
+///    each value as.
+/// 9. An operation has at most one [`ParamLoc::QueryString`] parameter: the emitter sets the raw
+///    query from the first one it finds. Lowering reports a second one against the document as
+///    `E011`, in `oas31::lower`.
+/// 10. An operation's [`super::Responses::by_status`] holds each [`super::StatusSpec`] at most
+///     once: the emitter names a response variant after its selector, and the decode-precedence
+///     sort is total only over distinct selectors. Lowering parses distinct `Responses` keys to
+///     distinct selectors.
 ///
 /// A failure here is a frontend bug, not a spec problem, so it is reported as
 /// [`Code::InvalidInput`] against the construct that carries the violation.
@@ -79,6 +95,44 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                         ))
                         .emit(diags);
                 }
+            }
+        }
+        // The emitter sets the raw query from the first `in: querystring` parameter it finds.
+        let querystrings = operation
+            .params
+            .iter()
+            .filter(|parameter| parameter.location == ParamLoc::QueryString)
+            .count();
+        if querystrings > 1 {
+            Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                .message(format!(
+                    "{INVARIANT_FAILURE}: operation `{}` has {querystrings} `in: querystring` \
+                     parameters, but its method sends only one",
+                    operation.id.0
+                ))
+                .emit(diags);
+        }
+        // The emitter names each response variant after its selector, and orders the entries by a
+        // key that is total only over distinct selectors.
+        for (at, (status, _)) in operation.responses.by_status.iter().enumerate() {
+            let first = operation
+                .responses
+                .by_status
+                .iter()
+                .position(|(other, _)| other == status);
+            if first == Some(at)
+                && operation.responses.by_status[at + 1..]
+                    .iter()
+                    .any(|(other, _)| other == status)
+            {
+                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                    .message(format!(
+                        "{INVARIANT_FAILURE}: operation `{}` lists the status selector \
+                         `{status:?}` more than once, so two of its response variants would \
+                         share a name",
+                        operation.id.0
+                    ))
+                    .emit(diags);
             }
         }
         for (_, response) in &operation.responses.by_status {
@@ -143,6 +197,23 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                         ))
                         .emit(diags);
                 }
+                // The emitter indexes the variants by the `defaultMapping` position unchecked.
+                if let UnionStrategy::Discriminated {
+                    default_variant: Some(index),
+                    ..
+                } = union.strategy
+                {
+                    if index >= union.variants.len() {
+                        Diagnostic::error(Code::InvalidInput, def.provenance.clone())
+                            .message(format!(
+                                "{INVARIANT_FAILURE}: union `{}`'s `defaultMapping` names \
+                                 variant {index}, but it has {} variants",
+                                def.name_hint,
+                                union.variants.len()
+                            ))
+                            .emit(diags);
+                    }
+                }
                 for variant in &union.variants {
                     check_ty(
                         api,
@@ -178,8 +249,30 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                     ))
                     .emit(diags);
             }
+            // The emitter reads each value as its set's kind: a string enum's as a string (an
+            // `unreachable!` otherwise), an integer or boolean set's as its newtype's constant.
+            TypeKind::Enum(enumeration) => {
+                let of_its_kind = |value: &ScalarValue| {
+                    matches!(
+                        (enumeration.repr, value),
+                        (ScalarRepr::String, ScalarValue::String(_))
+                            | (ScalarRepr::Int, ScalarValue::Int(_))
+                            | (ScalarRepr::Bool, ScalarValue::Bool(_))
+                    )
+                };
+                for value in enumeration.variants.iter().filter(|v| !of_its_kind(v)) {
+                    Diagnostic::error(Code::InvalidInput, def.provenance.clone())
+                        .message(format!(
+                            "{INVARIANT_FAILURE}: enum `{}` of {:?} values lists `{}`, a value \
+                             of another kind",
+                            def.name_hint,
+                            enumeration.repr,
+                            value.wire()
+                        ))
+                        .emit(diags);
+                }
+            }
             TypeKind::Primitive(_)
-            | TypeKind::Enum(_)
             | TypeKind::Bytes(_)
             | TypeKind::Null
             | TypeKind::Never
