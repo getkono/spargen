@@ -51,9 +51,9 @@
 //! accessors, and `Spec` and `Build` are set through chained setters, so a new field or knob is
 //! additive. A type with public fields or variants that may grow — [`Diagnostic`], [`Outcome`],
 //! [`Code`], [`CargoIntegration`], [`ConfigError`], [`Loc`] and [`Span`] among them — is
-//! `#[non_exhaustive]` instead, with a constructor where a caller builds one ([`Loc::new`],
-//! [`Span::new`], [`ConfigError::flag`]). [`Severity`]
-//! stays exhaustive: its two variants are the error/warning partition every [`Report`] splits on.
+//! `#[non_exhaustive]` instead, so a new field or variant is additive; a caller reads a
+//! `Diagnostic`, `Loc` or `Span` off a run's [`Report`]. [`Severity`] stays exhaustive: its two
+//! variants are the error/warning partition every [`Report`] splits on.
 
 mod diag;
 
