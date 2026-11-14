@@ -555,12 +555,11 @@ fn constructor_name(spec: StatusSpec, response: &Response) -> String {
     }
 }
 
-/// The `(selector, constructor)` pairs of the operation's exact entries `keep` admits and of its
-/// range entries `keep_range` admits, as the `unclaimed` check's two slices.
+/// The `(selector, constructor)` pairs of the operation's exact entries `keep` admits and of all
+/// its range entries, as the `unclaimed` check's two slices.
 fn claims(
     responses: &Responses,
     keep: impl Fn(u16) -> bool,
-    keep_range: impl Fn(u8) -> bool,
 ) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let mut exact = Vec::new();
     let mut ranges = Vec::new();
@@ -568,7 +567,7 @@ fn claims(
         let name = constructor_name(spec, response);
         match spec {
             StatusSpec::Exact(code) if keep(code) => exact.push(quote! { (#code, #name) }),
-            StatusSpec::Range(prefix) if keep_range(prefix) => {
+            StatusSpec::Range(prefix) => {
                 let prefix = u16::from(prefix);
                 ranges.push(quote! { (#prefix, #name) });
             }
@@ -600,7 +599,7 @@ fn constructor(
             String::new(),
         ),
         StatusSpec::Range(prefix) => {
-            let (exact, _) = claims(responses, |code| code / 100 == u16::from(prefix), |_| false);
+            let (exact, _) = claims(responses, |code| code / 100 == u16::from(prefix));
             let prefix = u16::from(prefix);
             let in_range = quote! { super::Reply::in_range(status, #prefix) };
             let (status, panics) = if exact.is_empty() {
@@ -627,7 +626,7 @@ fn constructor(
             )
         }
         StatusSpec::Default => {
-            let (exact, ranges) = claims(responses, |_| true, |_| true);
+            let (exact, ranges) = claims(responses, |_| true);
             let (status, panics) = if exact.is_empty() && ranges.is_empty() {
                 (
                     quote! { status },
@@ -745,8 +744,8 @@ mod tests {
     /// One operation per reply shape: an exact JSON body beside a `4XX` text range and a bodyless
     /// `default` (`getItem`), an XML body (`getXml`), a top-level XML sequence beside a bodyless
     /// `204`, both claimed from the `2XX` range beside them, and a `5XX` nothing claims from (`getList`), raw octets
-    /// (`getRaw`), and a streamed body (`watch`). `Item` holds a `readOnly` and a `writeOnly`
-    /// member, nullable and not.
+    /// (`getRaw`), a streamed body (`watch`), and a `default` beside an exact entry alone
+    /// (`getPlain`). `Item` holds a `readOnly` and a `writeOnly` member, nullable and not.
     const REPLIES: &str = r##"openapi: 3.1.0
 info: {title: T, version: '1'}
 components:
@@ -790,6 +789,12 @@ paths:
       operationId: watch
       responses:
         '200': {description: ok, content: {application/x-ndjson: {schema: {$ref: '#/components/schemas/Item'}}}}
+  /plain:
+    get:
+      operationId: getPlain
+      responses:
+        '200': {description: ok, content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        default: {description: failed}
 "##;
 
     /// The module `REPLIES` generates, with or without `testing`, with every run of whitespace
@@ -824,7 +829,8 @@ paths:
             "matchSelf::in_response_direction(||::serde_json::to_value(body)){",
             "pubfnstatus_2xx(status:u16)->Self{Self(super::Reply::new(super::Reply::unclaimed(super::Reply::in_range(status,2u16),&[(200u16,\"status_200\"),(204u16,\"status_204\")],&[],),),)}",
             "pubfnstatus_5xx(status:u16)->Self{Self(super::Reply::new(super::Reply::in_range(status,5u16)))}",
-            "#[allow(clippy::module_inception)]pubmodget_item{",
+            "#[allow(clippy::module_inception)]pubmodget_item{#[allow(unused_imports)]usesuper::super::*;",
+            "pubfndefault(status:u16)->Self{Self(super::Reply::new(super::Reply::unclaimed(status,&[(200u16,\"status_200\")],&[]),),)}",
             "pubfnstatus_200(body:implInto<::bytes::Bytes>)->Self{Self(super::Reply::octets(200u16,body))}",
             "pubfnon_get_item(self,handler:implFn(&Call)->get_item::Reply+Send+Sync+'static,)->Self{self.route(super::ops::GET_ITEM.id,",
             "pubfnon_watch(self,handler:implFn(&Call)->watch::Reply+Send+Sync+'static,)->Self",
@@ -835,7 +841,7 @@ paths:
         let watch = &watch[..watch.find("implFrom<Reply>").expect("its conversion")];
         assert!(watch.contains("pubfnfrom_reply("), "{watch}");
         assert!(!watch.contains("pubfnstatus_200"), "{watch}");
-        assert_eq!(generated.matches("pubfnfrom_reply(").count(), 5);
+        assert_eq!(generated.matches("pubfnfrom_reply(").count(), 6);
         // A top-level object keeps its own root element, unwrapped.
         let xml = &generated[generated.find("pubmodget_xml{").expect("the XML replies")..];
         let xml = &xml[..xml.find("implFrom<Reply>").expect("its conversion")];
