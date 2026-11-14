@@ -680,6 +680,76 @@ components:
     );
 }
 
+#[test]
+fn path_item_ref_accepts_extension_siblings() {
+    // Specification extensions cannot change the wire, and `Paths` and `Responses` skip `x-` keys
+    // for the same reason, so an `x-` key beside a Path Item `$ref` is not a structural sibling.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    $ref: "#/components/pathItems/Pets"
+    x-internal: true
+    x-codeSamples: [{ lang: shell, source: "curl /pets" }]
+components:
+  pathItems:
+    Pets:
+      get:
+        operationId: listPets
+        responses:
+          "204": { description: No Content }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::SpecUndefinedBehavior),
+        "{report:#?}"
+    );
+    assert!(
+        code.contains("list_pets"),
+        "the referenced Path Item's operation was not generated:\n{code}"
+    );
+}
+
+#[test]
+fn path_item_ref_with_extension_and_structural_siblings_names_only_the_structural_one() {
+    // Skipping `x-` keys must not mask a structural sibling declared beside them.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    $ref: "#/components/pathItems/Pets"
+    x-internal: true
+    post:
+      operationId: createPet
+      responses:
+        "204": { description: No Content }
+components:
+  pathItems:
+    Pets:
+      get:
+        operationId: listPets
+        responses:
+          "204": { description: No Content }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::SpecUndefinedBehavior);
+    assert!(
+        messages.iter().any(|message| message
+            .contains("a Path Item `$ref` declared alongside `post` has undefined behavior")),
+        "{report:#?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| !message.contains("x-internal")),
+        "{report:#?}"
+    );
+}
+
 // E004 case: declined-hop
 #[test]
 fn e004_a_chained_path_item_ref_is_rejected_at_the_path() {

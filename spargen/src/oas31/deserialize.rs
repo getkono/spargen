@@ -387,12 +387,16 @@ pub(super) fn parse_path_item(
         .unwrap_or_default();
     // `$ref` on a Path Item is not a Reference Object: the specification explicitly leaves the
     // behavior of adjacent fields undefined. `summary`/`description` are documentation and cannot
-    // change the wire, so they are allowed to override; anything structural is refused.
+    // change the wire, so they are allowed to override; specification extensions (`x-`) cannot
+    // either, and are skipped as `parse_paths` skips them; anything structural is refused.
     let reference = reference_object(value, pointer);
     let reference_siblings = if reference.is_some() {
         map.iter()
             .map(|(key, _)| key.name.clone())
-            .filter(|key| !matches!(key.as_str(), "$ref" | "summary" | "description"))
+            .filter(|key| {
+                !key.starts_with("x-")
+                    && !matches!(key.as_str(), "$ref" | "summary" | "description")
+            })
             .collect()
     } else {
         Vec::new()

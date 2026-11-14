@@ -481,3 +481,88 @@ fn e011_a_yaml_alias_whose_copy_reaches_past_the_nesting_cap_is_rejected_at_the_
     assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
     assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
 }
+
+/// The UTF-8 byte-order mark (U+FEFF) some Windows tooling writes before a document's first
+/// character, such as Windows PowerShell 5's `Out-File`.
+pub(super) const BOM: &str = "\u{feff}";
+
+/// A leading byte-order mark is skipped, as RFC 8259 §8.1 allows a parser to, whichever format a
+/// document's name selects: YAML, JSON, and both readings of an extensionless name (#1425). It
+/// used to become part of the first key (`\u{feff}openapi`), malformed JSON, or, through the
+/// extensionless fallback, a YAML string.
+#[test]
+fn a_leading_byte_order_mark_is_skipped_in_every_format() {
+    let yaml = "openapi: 3.1.0\ninfo: {title: T, version: 1.0.0}\npaths: {}\n";
+    let json = r#"{"openapi": "3.1.0", "info": {"title": "T", "version": "1.0.0"}, "paths": {}}"#;
+    for (name, text) in [
+        ("openapi.yaml", yaml),
+        ("openapi.yml", yaml),
+        ("openapi.json", json),
+        ("spec.txt", yaml),
+        ("spec.txt", json),
+    ] {
+        let text = format!("{BOM}{text}");
+        let (generated, checked, _) = generate_and_check_files(&[(name, &text)]);
+        assert_eq!(
+            generated.outcome(),
+            Outcome::Generated,
+            "{name}: {generated:#?}"
+        );
+        assert_eq!(checked.outcome(), Outcome::Clean, "{name}: {checked:#?}");
+    }
+}
+
+/// Only one byte-order mark is skipped: a second is the document's first character, and a JSON
+/// document cannot start with it.
+#[test]
+fn e011_a_second_byte_order_mark_is_not_skipped() {
+    let json = r#"{"openapi": "3.1.0", "info": {"title": "T", "version": "1.0.0"}, "paths": {}}"#;
+    let text = format!("{BOM}{BOM}{json}");
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.json", &text)]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(report, Code::InvalidInput);
+        assert!(
+            messages.iter().any(|m| m.starts_with("malformed JSON")),
+            "{report:#?}"
+        );
+    }
+}
+
+/// The byte-order mark is not part of the text a diagnostic's span counts: line, column and byte
+/// offset are those of the document after it, so line 1 column 1 is its first character, where
+/// an editor that hides the mark shows it (#1425).
+#[test]
+fn e022_a_span_in_a_document_with_a_byte_order_mark_counts_from_after_the_mark() {
+    for (name, body) in [
+        (
+            "openapi.json",
+            r#"{"openapi": "3.1.0", "openapi": "3.1.0", "info": {"title": "T", "version": "1.0.0"}, "paths": {}}"#,
+        ),
+        (
+            "openapi.yaml",
+            "{openapi: 3.1.0, openapi: 3.1.0, info: {title: T, version: 1.0.0}, paths: {}}\n",
+        ),
+    ] {
+        let text = format!("{BOM}{body}");
+        let (generated, checked, _) = generate_and_check_files(&[(name, &text)]);
+        let second = body.match_indices("openapi").nth(1).expect("second key").0;
+        for report in [&generated, &checked] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{name}: {report:#?}");
+            let diag = report
+                .diagnostics()
+                .iter()
+                .find(|d| d.code == Code::DuplicateObjectKey)
+                .unwrap_or_else(|| panic!("{name}: no E022 in {report:#?}"));
+            let start = diag.span.expect("span").start;
+            assert_eq!(start.line, 1, "{name}: {diag:#?}");
+            // JSON spans a key from its opening quote, YAML from its first character.
+            assert!(
+                [second, second - 1].contains(&start.offset),
+                "{name}: offset {} for the key at {second}: {diag:#?}",
+                start.offset
+            );
+            assert_eq!(start.col as usize, start.offset + 1, "{name}: {diag:#?}");
+        }
+    }
+}
