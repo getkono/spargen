@@ -169,6 +169,55 @@ paths:
     );
 }
 
+/// Path arguments follow the URL template, not the declaration: `getRepo` declares `{repo}` on
+/// its path item before `{owner}` on the operation, and `getTeam` declares `{team}` before
+/// `{org}` in one list, yet each method, blocking twin and URL accessor takes them as the URL
+/// names them.
+#[test]
+fn path_arguments_follow_the_url_template_whatever_order_they_are_declared_in() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /repos/{owner}/{repo}:
+    parameters:
+      - { name: repo, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getRepo
+      parameters:
+        - { name: owner, in: path, required: true, schema: { type: string } }
+      responses: { '204': { description: ok } }
+  /orgs/{org}/teams/{team}:
+    get:
+      operationId: getTeam
+      parameters:
+        - { name: team, in: path, required: true, schema: { type: integer } }
+        - { name: org, in: path, required: true, schema: { type: string } }
+      responses: { '204': { description: ok } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    let repo_args = "( &self, owner: impl Into<types::Owner>, repo: impl Into<types::Repo>, )";
+    let team_args = "( &self, org: impl Into<types::Org>, team: types::Team, )";
+    for signature in [
+        format!("pub async fn get_repo{repo_args}"),
+        format!("pub fn get_repo_request{repo_args}"),
+        format!("pub fn get_repo_url{repo_args}"),
+        format!("pub async fn get_team{team_args}"),
+        format!("pub fn get_team_request{team_args}"),
+        format!("pub fn get_team_url{team_args}"),
+    ] {
+        assert!(flat.contains(&signature), "{signature}\n{flat}");
+    }
+    // Every emitted signature, the blocking twin's included, takes the template's order.
+    assert!(
+        !flat.contains("repo: impl Into<types::Repo>, owner"),
+        "{flat}"
+    );
+    assert!(!flat.contains("team: types::Team, org"), "{flat}");
+}
+
 /// Each `parameters` list may name a `name`/`in` pair once. The two lists are checked apart,
 /// because a pair the operation repeats from its path item is an override, not a duplicate.
 #[test]

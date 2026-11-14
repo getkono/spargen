@@ -1362,6 +1362,33 @@ fn reordering_two_required_parameters_is_major() {
     assert_eq!(report.bump, Impact::Patch);
 }
 
+/// A spec whose one operation, `GET /orgs/{org}/teams/{team}`, declares its two integer path
+/// parameters in the order `names` gives.
+fn path_params_declared(names: [&str; 2]) -> String {
+    let mut spec = String::from(
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n  /orgs/{org}/teams/{team}:\n    get:\n      operationId: getTeam\n      parameters:\n",
+    );
+    for name in names {
+        spec.push_str(&format!(
+            "        - {{ name: {name}, in: path, required: true, schema: {{ type: integer }} }}\n"
+        ));
+    }
+    spec.push_str("      responses:\n        '204': { description: ok }\n");
+    spec
+}
+
+#[test]
+fn reordering_path_parameter_declarations_changes_nothing() {
+    // Path arguments follow the URL template, so swapping the declarations of `org` and `team`
+    // leaves `get_team(org, team)` and `get_team_url(org, team)` as they were.
+    let report = diff(
+        &path_params_declared(["org", "team"]),
+        &path_params_declared(["team", "org"]),
+    );
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
+}
+
 /// A 3.2 spec whose one path, `/items`, declares each `(method, operationId)` pair as an
 /// `additionalOperations` entry answering `204`.
 fn additional_operations(methods: &[(&str, &str)]) -> String {
