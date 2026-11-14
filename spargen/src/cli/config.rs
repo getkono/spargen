@@ -24,7 +24,7 @@ use super::args::SpecArgs;
 /// each switch pair in either direction and only when one of its flags was given, and omit, keep
 /// and bound-header flags are unioned with the file's `[[omit]]`, `[[keep]]` and `bound_headers`
 /// rather than replacing them.
-pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, ConfigError> {
+pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, ResolveError> {
     let mut spec = match &args.config {
         Some(config) => Spec::new(path).config_file(config)?,
         None => Spec::new(path).discover_config_file()?,
@@ -115,13 +115,13 @@ fn switch<T>(on: bool, off: bool, on_value: T, off_value: T) -> Option<T> {
 }
 
 /// Parse a `--omit-operation "METHOD /path"` value into an [`OmitRule::Operation`].
-fn parse_operation_flag(value: &str) -> Result<OmitRule, ConfigError> {
+fn parse_operation_flag(value: &str) -> Result<OmitRule, ResolveError> {
     let (method, path) = parse_method_and_path("--omit-operation", value)?;
     Ok(OmitRule::operation(method, path))
 }
 
 /// Split a `flag`'s `"METHOD /path"` value into its method and path.
-fn parse_method_and_path(flag: &str, value: &str) -> Result<(OmitMethod, String), ConfigError> {
+fn parse_method_and_path(flag: &str, value: &str) -> Result<(OmitMethod, String), ResolveError> {
     let mut parts = value.split_whitespace();
     let method = parts.next().ok_or_else(|| {
         error(format!(
@@ -142,7 +142,7 @@ fn parse_method_and_path(flag: &str, value: &str) -> Result<(OmitMethod, String)
 }
 
 /// Parse a `--omit-component "kind:name"` value into an [`OmitRule::Component`].
-fn parse_component_flag(value: &str) -> Result<OmitRule, ConfigError> {
+fn parse_component_flag(value: &str) -> Result<OmitRule, ResolveError> {
     let (kind, name) = value.split_once(':').ok_or_else(|| {
         error(format!(
             "--omit-component `{value}`: expected `kind:name` (e.g. `schema:LegacyPet`)"
@@ -175,7 +175,7 @@ fn parse_pointer_flag(value: &str) -> OmitRule {
 
 /// Parse an omit HTTP method through the shared `FromStr`, whose error already names every
 /// accepted method.
-fn parse_method(method: &str) -> Result<OmitMethod, ConfigError> {
+fn parse_method(method: &str) -> Result<OmitMethod, ResolveError> {
     method
         .parse()
         .map_err(|parse_error: UnknownOmitToken| error(parse_error.to_string()))
@@ -183,13 +183,51 @@ fn parse_method(method: &str) -> Result<OmitMethod, ConfigError> {
 
 /// Parse an omit component kind. Snake_case is canonical (it is what `omit!` writes), and the
 /// singular and camelCase OAS spellings are accepted so one rule reads the same everywhere.
-fn parse_component_kind(kind: &str) -> Result<ComponentKind, ConfigError> {
+fn parse_component_kind(kind: &str) -> Result<ComponentKind, ResolveError> {
     kind.parse()
         .map_err(|parse_error: UnknownOmitToken| error(parse_error.to_string()))
 }
 
-fn error(message: String) -> ConfigError {
-    ConfigError::flag(message)
+fn error(message: String) -> ResolveError {
+    ResolveError::Flag(message)
+}
+
+/// Why [`resolve`] could not build a [`Spec`]: the library's error for the config file, or a flag
+/// value whose syntax this CLI rejects. Both render as a usage error.
+///
+/// [`Display`](std::fmt::Display) and [`source`](std::error::Error::source) are the config
+/// error's own for [`Config`](Self::Config), so a reporter walking the chain writes what the
+/// library's error alone would; a [`Flag`](Self::Flag) error is its message and has no source.
+#[derive(Debug)]
+pub(crate) enum ResolveError {
+    /// The config file could not be read or is not a valid `spargen.toml`.
+    Config(ConfigError),
+    /// A flag value this CLI's own syntax rejects, as the message `Display` writes.
+    Flag(String),
+}
+
+impl From<ConfigError> for ResolveError {
+    fn from(error: ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Config(error) => error.fmt(formatter),
+            Self::Flag(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Config(error) => error.source(),
+            Self::Flag(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -558,8 +596,37 @@ mod tests {
         assert_eq!(spec.bound_headers(), ["X-Tenant", "X-Api-Version"]);
     }
 
+    /// A config error renders through [`ResolveError`] exactly as the library's error does, its
+    /// `source` included, and a flag error is its message alone, with no source.
+    #[test]
+    fn a_resolve_error_renders_a_config_error_unchanged_and_a_flag_error_as_its_message() {
+        use std::error::Error as _;
+
+        let missing = || {
+            Spec::new("openapi.yaml")
+                .config_file("/nonexistent/spargen-1436/spargen.toml")
+                .unwrap_err()
+        };
+        let wrapped = ResolveError::from(missing());
+        assert!(matches!(wrapped, ResolveError::Config(_)), "{wrapped:?}");
+        assert_eq!(wrapped.to_string(), missing().to_string());
+        assert_eq!(
+            wrapped.source().map(ToString::to_string),
+            missing().source().map(ToString::to_string)
+        );
+        assert!(wrapped.source().is_some());
+
+        let flag = parse_component_flag("LegacyPet").unwrap_err();
+        assert!(matches!(&flag, ResolveError::Flag(_)), "{flag:?}");
+        assert_eq!(
+            flag.to_string(),
+            "--omit-component `LegacyPet`: expected `kind:name` (e.g. `schema:LegacyPet`)"
+        );
+        assert!(flag.source().is_none());
+    }
+
     /// The message a rejected flag value reports, which is what the user reads on stderr.
-    fn message(result: Result<OmitRule, ConfigError>) -> String {
+    fn message(result: Result<OmitRule, ResolveError>) -> String {
         result
             .expect_err("the flag value must be rejected")
             .to_string()

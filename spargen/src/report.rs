@@ -54,6 +54,11 @@ impl Outcome {
     /// A diagnostic's [`Diagnostic::claim`] records what its message asserts. Every diagnostic a
     /// run reports must make a claim its outcome admits, through `check` and through `generate`
     /// alike. Any other combination is a message that says something false about the run.
+    ///
+    /// Hidden from the documented API: it is the oracle `spargen/tests/frontend/` and
+    /// `spargen/tests/corpus_manifest.rs` hold every run to, public only so those suites, outside
+    /// the crate, can call it, and outside semver.
+    #[doc(hidden)]
     pub fn admits(self, claim: OutcomeClaim) -> bool {
         match claim {
             OutcomeClaim::Independent => true,

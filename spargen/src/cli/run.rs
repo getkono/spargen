@@ -9,10 +9,10 @@ use std::io::{self, Write as _};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use spargen::{check, explain, ConfigError, Report, Spec};
+use spargen::{check, explain, Report, Spec};
 
 use super::args::{Cli, Command, Format};
-use super::config;
+use super::config::{self, ResolveError};
 use super::exit::ExitStatus;
 
 /// Execute a parsed CLI invocation and return the process exit code.
@@ -143,7 +143,7 @@ fn spec_pair(
     old: camino::Utf8PathBuf,
     new: camino::Utf8PathBuf,
     options: &super::args::SpecArgs,
-) -> Result<(Spec, Spec), ConfigError> {
+) -> Result<(Spec, Spec), ResolveError> {
     Ok((
         config::resolve(old, options)?,
         config::resolve(new, options)?,
@@ -173,7 +173,7 @@ fn warn_ignored(flags: &[&str], format: Format) {
 
 /// Render a config/flag error, followed by each error in its `source` chain, to stderr and exit
 /// with a usage status — never a panic.
-fn config_error(error: ConfigError) -> ExitCode {
+fn config_error(error: ResolveError) -> ExitCode {
     let mut rendered = error.to_string();
     let mut source = std::error::Error::source(&error);
     while let Some(cause) = source {

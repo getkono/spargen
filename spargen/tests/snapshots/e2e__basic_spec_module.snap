@@ -66,7 +66,7 @@ mod support {
         use std::future::Future;
         use std::sync::Arc;
         use bytes::Bytes;
-        use http::header::{HeaderValue, AUTHORIZATION, COOKIE};
+        use http::header::{HeaderName, HeaderValue, AUTHORIZATION, COOKIE};
         use super::wasm::{BoxFuture, MaybeSend, MaybeSync};
         use super::{ClientCore, Error, HttpBody, RequestBuilder, RequestError};
         use secrecy::zeroize::Zeroizing;
@@ -216,7 +216,8 @@ mod support {
             Bearer,
             /// `Authorization: Basic <base64>`.
             Basic,
-            /// An `apiKey` sent as the named request header.
+            /// An `apiKey` sent as the named request header, replacing any value the request already
+            /// carries under that name.
             ApiKeyHeader(&'static str),
             /// An `apiKey` sent as the named query parameter.
             ApiKeyQuery(&'static str),
@@ -671,12 +672,7 @@ mod support {
                 }
                 AuthKind::ApiKeyHeader(name) => {
                     match token {
-                        Some(token) => {
-                            Ok(
-                                request
-                                    .header(name, sensitive_value(token.expose_secret())?),
-                            )
-                        }
+                        Some(token) => set_header(request, name, token.expose_secret()),
                         None => {
                             Err(credential_mismatch(scheme.name, "apiKey", credential))
                         }
@@ -751,6 +747,25 @@ mod support {
                 .map_err(Error::request_construction)?;
             value.set_sensitive(true);
             Ok(value)
+        }
+        /// Set the request's header `name` to `value`, marked sensitive, replacing any value it already
+        /// carries under that name, as [`set_authorization`] does for `Authorization`: a header `apiKey`
+        /// named `Authorization` supersedes the `Basic` value a userinfo URL set, and one named after a
+        /// header the operation already sent is sent once. A name or value that does not convert fails
+        /// the call before anything is sent; a builder that already failed is left as it is, for `build`
+        /// to report its failure.
+        fn set_header(
+            mut request: RequestBuilder,
+            name: &str,
+            value: &str,
+        ) -> Result<RequestBuilder, Error<Infallible>> {
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(Error::request_construction)?;
+            let value = sensitive_value(value)?;
+            if let Some(headers) = request.headers_mut() {
+                headers.insert(name, value);
+            }
+            Ok(request)
         }
         /// Set the request's one `Authorization` header to `value`, marked sensitive, replacing any value
         /// it already carries: the field is a singleton, and a request built from a URL with userinfo
@@ -1175,16 +1190,28 @@ mod support {
             /// sends it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts
             /// it too.
             ///
-            /// Returns a request-construction error, leaving any value already bound to `name` in place,
-            /// if `value` is not a valid header value: it holds a control character other than a tab,
-            /// such as CR, LF, NUL or DEL. The error does not quote the value.
+            /// Returns a request-construction error, binding nothing and leaving any value already bound
+            /// in place, if `name` is not a valid header name (an empty name, or one holding a space, a
+            /// colon, a control character or a byte past ASCII), or if `value` is not a valid header
+            /// value: it holds a control character other than a tab, such as CR, LF, NUL or DEL. The
+            /// error names the header and does not quote the value.
             pub fn bind_header(
                 &mut self,
                 name: &str,
                 value: impl Into<String>,
             ) -> Result<(), Error<Infallible>> {
-                let value = value.into();
-                if http::HeaderValue::from_str(&value).is_err() {
+                let Ok(header) = http::HeaderName::from_bytes(name.as_bytes()) else {
+                    return Err(
+                        Error::request_message(
+                            format!(
+                                "`{}` is not a valid header name to bind a value to", name
+                                .escape_debug()
+                            ),
+                        ),
+                    );
+                };
+                let value = SecretString::from(value.into());
+                if http::HeaderValue::from_str(value.expose_secret()).is_err() {
                     return Err(
                         Error::request_message(
                             format!(
@@ -1194,17 +1221,15 @@ mod support {
                         ),
                     );
                 }
-                self.bound_headers
-                    .insert(name.to_ascii_lowercase(), SecretString::from(value));
+                self.bound_headers.insert(header.as_str().to_owned(), value);
                 Ok(())
             }
             /// Unbind the header `name`, matched in any letter case, returning the value bound to it if
-            /// there was one. An operation that requires the header then fails with
-            /// [`super::RequestError::MissingBoundParameter`] before anything is sent.
-            pub fn unbind_header(&mut self, name: &str) -> Option<String> {
-                self.bound_headers
-                    .remove(&name.to_ascii_lowercase())
-                    .map(|value| value.expose_secret().to_owned())
+            /// there was one, as the secret the core held it as, so its `Debug` redacts it. An operation
+            /// that requires the header then fails with [`super::RequestError::MissingBoundParameter`]
+            /// before anything is sent.
+            pub fn unbind_header(&mut self, name: &str) -> Option<SecretString> {
+                self.bound_headers.remove(&name.to_ascii_lowercase())
             }
             /// The value bound to the header `name`, matched in any letter case.
             pub fn bound_header(&self, name: &str) -> Option<&str> {
