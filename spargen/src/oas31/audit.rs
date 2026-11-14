@@ -60,7 +60,8 @@ type SchemaKey = (FileId, JsonPointer);
 struct Audit<'a, 'doc> {
     document: &'doc Document,
     resolver: &'a Resolver<'doc>,
-    /// The `contentSchema` sites an SSE envelope consumes, which lowering reads.
+    /// The `contentMediaType`/`contentSchema` sites lowering reads
+    /// ([`consumed_content_annotations`]).
     consumed_content: HashSet<AnnotationKey>,
     /// Every schema node [`Audit::resolve_unlowered`] has already walked, by `(file, pointer)`,
     /// so a subtree reached twice is walked once and a cycle of references terminates.
@@ -86,7 +87,7 @@ struct Audit<'a, 'doc> {
 /// in every subschema lowering never reads ([`Audit::resolve_unlowered`]). Other rejections fire
 /// during parsing and lowering.
 pub(crate) fn audit(document: &Document, resolver: &Resolver<'_>, diags: &mut Diagnostics) {
-    let consumed_content = consumed_sse_content(document, resolver, diags);
+    let consumed_content = consumed_content_annotations(document, resolver, diags);
     let mut audit = Audit {
         document,
         resolver,
@@ -409,15 +410,17 @@ impl Audit<'_, '_> {
         {
             // W001 case: content-annotation
             Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
-            .message(
-                "`contentMediaType`/`contentSchema` are decoded only on an OpenAPI 3.2 SSE \
-                 envelope's string `data` property",
-            )
-            .remedy(
-                "place the annotations on the `data` property of a text/event-stream itemSchema, \
-                 or decode the string content in application code",
-            )
-            .emit(diags);
+                .message(
+                    "`contentMediaType`/`contentSchema` do not change the type generated here: \
+                 spargen reads them on an OpenAPI 3.2 SSE envelope's string `data` property, \
+                 and reads `contentMediaType` alone on an untyped `multipart/form-data` part and \
+                 on a body whose media type it restates",
+                )
+                .remedy(
+                    "decode the annotated content in application code, or drop the annotations \
+                 where the schema's own type already describes the value",
+                )
+                .emit(diags);
         }
 
         // A `patternProperties` key regex is a validation-only constraint: the generated typed overflow
@@ -558,44 +561,168 @@ impl Audit<'_, '_> {
     }
 }
 
-fn consumed_sse_content(
+/// The `Content-Type` an untyped multipart part's `contentMediaType` gives it, canonicalized: the
+/// schema says nothing but `contentMediaType` (annotations and validation keywords aside, which
+/// leave its lowered type untyped), and the value is one concrete, sendable media type. Lowering
+/// sends it as the part's default `Content-Type`, so the audit treats it as read there.
+pub(super) fn raw_part_media(schema: &Schema) -> Option<String> {
+    let media = schema.content_media_type.as_deref()?;
+    let mut rest = schema.clone();
+    rest.content_media_type = None;
+    rest.validation = super::schema::ValidationKeywords::default();
+    if !rest.constrains_nothing() {
+        return None;
+    }
+    let essence = super::media::media_essence(media);
+    if essence.contains('*') || !super::media::media_type_is_well_formed(essence) {
+        return None;
+    }
+    super::media::media_type_with_parameters(media).ok()
+}
+
+/// Each property of a `multipart/form-data` body schema written inline on it whose
+/// `contentMediaType` [`raw_part_media`] reads: its name, the part's default `Content-Type`, and
+/// the property schema's provenance. A body schema that is a `$ref` is followed to its target, as
+/// lowering follows it; a miss yields nothing, since lowering reports it.
+pub(super) fn raw_part_media_types(
+    resolver: &Resolver<'_>,
+    body: &RefOr<Schema>,
+) -> Vec<(String, String, Provenance)> {
+    let Some(schema) = resolve_body_schema(resolver, body) else {
+        return Vec::new();
+    };
+    schema
+        .properties
+        .iter()
+        .filter_map(|(name, property)| match property {
+            SchemaOr::Schema(property) => raw_part_media(property)
+                .map(|media| (name.clone(), media, property.provenance.clone())),
+            SchemaOr::Bool(_) => None,
+        })
+        .collect()
+}
+
+/// A body's schema, through one `$ref` to its target where it is one.
+fn resolve_body_schema<'s>(
+    resolver: &Resolver<'s>,
+    body: &'s RefOr<Schema>,
+) -> Option<Cow<'s, Schema>> {
+    match body {
+        RefOr::Item(schema) => Some(Cow::Borrowed(schema)),
+        RefOr::Ref(reference) => resolver
+            .resolve(
+                &reference.reference,
+                &reference.provenance,
+                &mut Diagnostics::new(0),
+            )
+            .ok()
+            .map(|resolved| resolved.schema),
+    }
+}
+
+/// The `contentMediaType`/`contentSchema` sites lowering reads, so the audit raises no `W001` on
+/// them: the string `data` property of an SSE envelope, an untyped multipart part's
+/// `contentMediaType` ([`raw_part_media_types`]), and a body schema's `contentMediaType` that
+/// restates the body's own media type, which OpenAPI calls redundant rather than ignored.
+fn consumed_content_annotations(
     document: &Document,
     resolver: &Resolver<'_>,
     diags: &mut Diagnostics,
 ) -> HashSet<AnnotationKey> {
     let mut consumed = HashSet::new();
-    let mut inspect = |content: &indexmap::IndexMap<String, MediaTypeObject>| {
+    let mut inspect = |content: &indexmap::IndexMap<String, MediaTypeObject>, request: bool| {
+        // A request generates only the entry lowering selects; the others are `W014`, and a part
+        // annotation reached only through one of them is never read.
+        let selected = request
+            .then(|| super::lower::selected_request_media(content))
+            .flatten();
         for (media_name, media) in content {
             // The classification lowering selects a body by, so a key it consumes here is one
             // lowering reads as a stream, in whatever letter case it is spelled (#709).
-            let classified = super::media::classify_media(super::media::media_essence(media_name));
-            if classified.is_some_and(|(media, _)| media == crate::ir::MediaType::EventStream) {
-                let media = follow_media(resolver, media, &HashSet::new());
+            let essence = super::media::media_essence(media_name);
+            let classified = super::media::classify_media(essence).map(|(media, _)| media);
+            let media = follow_media(resolver, media, &HashSet::new());
+            if classified == Some(crate::ir::MediaType::EventStream) {
                 if let Some(item) = media.as_ref().and_then(|media| media.item_schema.as_ref()) {
                     if let Some(json) = super::sse::json_data_schema(item, resolver, diags) {
                         consumed.insert(annotation_key(&json.annotation_site));
                     }
                 }
             }
+            let Some(body) = media.as_ref().and_then(|media| media.schema.as_ref()) else {
+                continue;
+            };
+            if let Some(schema) = resolve_body_schema(resolver, body) {
+                let restates = schema.content_schema.is_none()
+                    && schema
+                        .content_media_type
+                        .as_deref()
+                        .is_some_and(|declared| {
+                            super::media::media_essence(declared).eq_ignore_ascii_case(essence)
+                        });
+                if restates {
+                    consumed.insert(annotation_key(&schema.provenance));
+                }
+            }
+            if selected == Some(media_name.as_str())
+                && classified == Some(crate::ir::MediaType::Multipart)
+            {
+                for (_, _, at) in raw_part_media_types(resolver, body) {
+                    consumed.insert(annotation_key(&at));
+                }
+            }
         }
     };
-    // Every response lowering reads, followed as lowering follows it — into another file as well
-    // (#495), since the walk audits a response written there too.
-    let mut inspect_response = |response: &RefOr<ResponseObject>| match response {
-        RefOr::Item(response) => inspect(&response.content),
-        RefOr::Ref(reference) => {
-            if let Some(response) = follow_object(
+    // Every request body and response lowering reads, followed as lowering follows it — into
+    // another file as well (#495), since the walk audits one written there too.
+    type Content = indexmap::IndexMap<String, MediaTypeObject>;
+    fn follow_request<'b>(
+        resolver: &Resolver<'_>,
+        body: &'b RefOr<RequestBodyObject>,
+    ) -> Option<Cow<'b, Content>> {
+        match body {
+            RefOr::Item(body) => Some(Cow::Borrowed(&body.content)),
+            RefOr::Ref(reference) => follow_object(
+                resolver,
+                reference,
+                super::deserialize::parse_request_body,
+                &HashSet::new(),
+            )
+            .map(|body| Cow::Owned(body.content)),
+        }
+    }
+    fn follow_response<'b>(
+        resolver: &Resolver<'_>,
+        response: &'b RefOr<ResponseObject>,
+    ) -> Option<Cow<'b, Content>> {
+        match response {
+            RefOr::Item(response) => Some(Cow::Borrowed(&response.content)),
+            RefOr::Ref(reference) => follow_object(
                 resolver,
                 reference,
                 super::deserialize::parse_response,
                 &HashSet::new(),
-            ) {
-                inspect(&response.content);
-            }
+            )
+            .map(|response| Cow::Owned(response.content)),
         }
-    };
-    for response in document.components.responses.values() {
-        inspect_response(response);
+    }
+    let follow_request = |body| follow_request(resolver, body);
+    let follow_response = |response| follow_response(resolver, response);
+    for content in document
+        .components
+        .request_bodies
+        .values()
+        .filter_map(follow_request)
+    {
+        inspect(&content, true);
+    }
+    for content in document
+        .components
+        .responses
+        .values()
+        .filter_map(follow_response)
+    {
+        inspect(&content, false);
     }
     // Every Path Item the walk audits (#715): the root's, inline in `paths` or in
     // `components.pathItems`, and the one each Path Item `$ref` among them names, followed one hop
@@ -623,11 +750,17 @@ fn consumed_sse_content(
     }
     for item in &items {
         for operation in item.operations.values() {
-            for response in operation.responses.by_status.values() {
-                inspect_response(response);
+            if let Some(content) = operation.request_body.as_ref().and_then(follow_request) {
+                inspect(&content, true);
             }
-            if let Some(response) = &operation.responses.default {
-                inspect_response(response);
+            for content in operation
+                .responses
+                .by_status
+                .values()
+                .chain(operation.responses.default.as_ref())
+                .filter_map(follow_response)
+            {
+                inspect(&content, false);
             }
         }
     }

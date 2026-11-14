@@ -707,7 +707,6 @@ fn e009_a_multipart_json_rendered_part_declaring_a_non_json_content_type() {
             "application/xml",
             "application/xml",
         ),
-        ("{}", "application/xml", "application/xml"),
     ];
     for (schema, declared, sent) in cases {
         let spec = multipart_part_declaring(schema, declared);
@@ -754,6 +753,8 @@ fn a_multipart_part_keeps_a_declared_content_type_its_bytes_agree_with() {
             "application/xml",
             "Part::bytes(",
         ),
+        // An untyped part is raw bytes (#1410), which carry any declaration.
+        ("{}", "application/xml", "Part::bytes("),
     ];
     for (schema, declared, rendering) in cases {
         let spec = multipart_part_declaring(schema, declared);
