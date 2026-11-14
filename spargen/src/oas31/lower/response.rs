@@ -42,7 +42,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Lower one response. Where `bodyless` names why the response carries no body by RFC 9110,
     /// its declared `content` is acknowledged as having no effect (`W011`) and not lowered, so the
-    /// response is read as bodyless, its documented headers still typed.
+    /// response is read as bodyless, its documented headers still typed. The references in that
+    /// content are still resolved, so one naming nothing is `E004`.
     fn lower_response(
         &mut self,
         response: &ResponseObject,
@@ -63,6 +64,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Diagnostic::warning(Code::DeclarationHasNoEffect, response.provenance.clone())
                 .message(message)
                 .emit(self.diags);
+            // The dropped content is not lowered, but a reference in it that names nothing is
+            // still a broken document: each Media Type Object is resolved, and every reference in
+            // its schemas, as a schema lowering never reads is (`E004`).
+            for (media_name, object) in &response.content {
+                let Some(object) = self.resolve_media_object(object, media_name) else {
+                    continue;
+                };
+                for schema in object.schema.iter().chain(&object.item_schema) {
+                    crate::oas31::audit::resolve_dropped_schema(
+                        self.document,
+                        self.resolver,
+                        schema,
+                        self.diags,
+                    );
+                }
+            }
             return Response {
                 media: None,
                 body: None,

@@ -101,6 +101,33 @@ pub(crate) fn audit(document: &Document, resolver: &Resolver<'_>, diags: &mut Di
     audit.follow_references();
 }
 
+/// Resolve every reference in `schema`, a schema position lowering drops unread (the `content` of
+/// a bodyless response), as [`Audit::resolve_unlowered`] resolves one under a keyword lowering
+/// never reads: a reference naming nothing is `E004` wherever it sits.
+pub(super) fn resolve_dropped_schema(
+    document: &Document,
+    resolver: &Resolver<'_>,
+    schema: &RefOr<Schema>,
+    diags: &mut Diagnostics,
+) {
+    let mut audit = Audit {
+        document,
+        resolver,
+        consumed_content: HashSet::new(),
+        unlowered_walked: HashSet::new(),
+        audited: HashSet::new(),
+        objects: HashSet::new(),
+        pending: Vec::new(),
+        diags,
+    };
+    match schema {
+        RefOr::Item(schema) => audit.resolve_unlowered(schema),
+        RefOr::Ref(reference) => {
+            audit.resolve_unlowered_ref(&reference.reference, &reference.provenance);
+        }
+    }
+}
+
 impl Audit<'_, '_> {
     fn walk(&mut self) {
         let document = self.document;
