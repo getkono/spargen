@@ -61,8 +61,9 @@ fn dispatch(cli: Cli) -> ExitCode {
                 Err(error) => return config_error(error),
             };
             match spargen::diff(&old, &new) {
-                // A spec that fails to lower is a hard error regardless of `--exit-code`;
-                // a breaking diff fails only when the caller opted into the CI gate.
+                // A spec that fails to lower is a hard error regardless of `--exit-code`; a
+                // breaking diff fails, with a status of its own, only when the caller opted into
+                // the CI gate.
                 Err(rejection) => {
                     emit(&rejection, args.format, Stream::Stderr);
                     ExitStatus::Diagnostics.into()
@@ -75,7 +76,7 @@ fn dispatch(cli: Cli) -> ExitCode {
                     let breaking = report.bump == spargen::Impact::Major;
                     emit(&report, args.format, Stream::Stdout);
                     if args.exit_code && breaking {
-                        ExitStatus::Diagnostics.into()
+                        ExitStatus::Breaking.into()
                     } else {
                         ExitStatus::Ok.into()
                     }
