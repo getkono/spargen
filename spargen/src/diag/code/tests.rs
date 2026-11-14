@@ -474,8 +474,8 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
             },
             Case {
                 tag: "content-annotation",
-                stated_as: "`contentMediaType`/`contentSchema` are consumed without this \
-                                warning only on the string `data` property",
+                stated_as: "for `contentMediaType`/`contentSchema` wherever spargen does not \
+                                read them",
                 reserved_wording: None,
             },
             Case {

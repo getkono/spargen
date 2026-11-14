@@ -275,7 +275,10 @@ paths:
         messages_for(&report, Code::ValidationKeywordIgnored)
             .iter()
             .any(|message| message.contains(
-                "are decoded only on an OpenAPI 3.2 SSE envelope's string `data` property"
+                "`contentMediaType`/`contentSchema` do not change the type generated here: \
+                 spargen reads them on an OpenAPI 3.2 SSE envelope's string `data` property, \
+                 and reads `contentMediaType` alone on an untyped `multipart/form-data` part and \
+                 on a body whose media type it restates"
             )),
         "{report:#?}"
     );

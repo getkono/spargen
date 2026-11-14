@@ -3,7 +3,7 @@
 
 use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{
-    AdditionalProps, BodyEncoding, Delimiter, EncodingMode, MediaType, ParamStyle,
+    AdditionalProps, BodyEncoding, BytesEncoding, Delimiter, EncodingMode, MediaType, ParamStyle,
     PropertyEncoding, Ty, TypeKind,
 };
 use crate::oas31::media::{
@@ -118,10 +118,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .emit(self.diags);
             }
         }
+        let raw_part_media = if media == MediaType::Multipart {
+            self.retype_untyped_parts(&fields);
+            object
+                .schema
+                .as_ref()
+                .map(|schema| crate::oas31::audit::raw_part_media_types(self.resolver, schema))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut properties = Vec::with_capacity(fields.len());
         for (name, field_ty) in fields {
             let declared = object.encoding.get(&name);
-            let mode = self.encoding_mode(declared, field_ty, media, &name, at)?;
+            // An untyped part's `contentMediaType` is its default `Content-Type`; a declared
+            // `contentType` still overrides it, as it overrides any default.
+            let default = raw_part_media
+                .iter()
+                .find(|(part, _, _)| *part == name)
+                .filter(|_| self.is_bytes(field_ty))
+                .map(|(_, media, _)| media.clone());
+            let mode = self.encoding_mode(declared, field_ty, default, media, &name, at)?;
             let headers = self.encoding_headers(declared, media, &name)?;
             properties.push(PropertyEncoding {
                 name,
@@ -134,9 +151,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // they take the default for their value type, under the same rules as an undeclared
         // property (a binary overflow on form-urlencoded is refused, as a binary property is).
         let additional = match overflow {
-            Some(overflow_ty) => {
-                Some(self.encoding_mode(None, overflow_ty, media, "additionalProperties", at)?)
-            }
+            Some(overflow_ty) => Some(self.encoding_mode(
+                None,
+                overflow_ty,
+                None,
+                media,
+                "additionalProperties",
+                at,
+            )?),
             None => None,
         };
         Some(BodyEncoding {
@@ -145,8 +167,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         })
     }
 
+    /// Retype each untyped part of a `multipart/form-data` body as raw bytes, in place: a property
+    /// whose schema lowered to `serde_json::Value` (`{}`, `true`, or a schema with no `type` such
+    /// as `{contentMediaType: image/png}`). OpenAPI 3.1 and 3.2 both default such a part's
+    /// `Content-Type` to `application/octet-stream`, and 3.2 spells a raw file part as
+    /// `contentMediaType` with no `type`, so the part is a file part, as a `format: binary` one is.
+    ///
+    /// A property that names an untyped component keeps it: rewriting a named component would
+    /// retype it for every other reference in the document, as [`Self::opaque_octets`] holds for
+    /// a body.
+    fn retype_untyped_parts(&mut self, fields: &[(String, Ty)]) {
+        for (_, ty) in fields {
+            if matches!(self.kind_of(ty.id), Some(TypeKind::Any)) && !self.is_component_root(ty.id)
+            {
+                if let Some(definition) = self.graph.get_mut(ty.id) {
+                    definition.kind = TypeKind::Bytes(BytesEncoding::Raw);
+                }
+            }
+        }
+    }
+
     /// Apply the Encoding Object's mode switch for one property, or `None` once a refusal is
-    /// reported.
+    /// reported. `default` is the `Content-Type` the property's own schema gives it, which
+    /// stands in for the type's default ([`Self::encoding_media_mode`]).
     ///
     /// Any of `style`, `explode` or `allowReserved` selects style mode
     /// ([`Self::encoding_style_mode`]); otherwise media mode ([`Self::encoding_media_mode`]).
@@ -154,6 +197,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         &mut self,
         declared: Option<&EncodingObject>,
         field_ty: Ty,
+        default: Option<String>,
         media: MediaType,
         name: &str,
         at: &Provenance,
@@ -168,7 +212,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self.encoding_style_mode(encoding, field_ty, media, name);
             }
         }
-        self.encoding_media_mode(declared, field_ty, media, name, at)
+        self.encoding_media_mode(declared, field_ty, default, media, name, at)
     }
 
     /// Style mode for one property. It refuses (`E009`) a delimited style with `explode: true`,
@@ -309,8 +353,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Media mode for one property: a part's bytes come from the property's lowered type and its
-    /// declared `contentType` ([`Self::declared_content_type`]), else the default for the type,
-    /// rides on it as the header. A declared `contentType` is refused (`E009`) where it and the
+    /// declared `contentType` ([`Self::declared_content_type`]), else `default` (an untyped
+    /// part's `contentMediaType`), else the default for the type, rides on it as the header. A
+    /// declared `contentType` is refused (`E009`) where it and the
     /// bytes cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose
     /// declared type is not JSON, on multipart (the part's header) and on form-urlencoded (the
     /// field's serialization syntax) alike. A binary property on form-urlencoded is refused
@@ -319,6 +364,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         &mut self,
         declared: Option<&EncodingObject>,
         field_ty: Ty,
+        default: Option<String>,
         media: MediaType,
         name: &str,
         at: &Provenance,
@@ -326,7 +372,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let explicit = declared.and_then(|encoding| encoding.content_type.as_deref());
         let content_type = match explicit {
             Some(list) => self.declared_content_type(list, declared, media, name, at)?,
-            None => self.default_content_type(field_ty),
+            None => default.unwrap_or_else(|| self.default_content_type(field_ty)),
         };
         // The declared `contentType` is a wire *header*; how the value is rendered into bytes is
         // decided by the property's own lowered type. That is what lets a part declare
