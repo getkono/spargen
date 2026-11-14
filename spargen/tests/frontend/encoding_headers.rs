@@ -509,3 +509,46 @@ paths:
         "{report:#?}"
     );
 }
+
+/// The client writes a `multipart` part's `Content-Disposition` itself, naming the part after its
+/// property, as OpenAPI 3.2 § Encoding Object requires. A pinned `Content-Disposition` was emitted
+/// as a second one beside it, which the runtime refuses when the request is built, so every call
+/// failed (#1384). It is acknowledged as having no effect and dropped, in any letter case.
+#[test]
+fn w011_an_encoding_header_pinning_content_disposition_has_no_effect() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                profile: { type: string }
+            encoding:
+              profile:
+                headers:
+                  content-disposition:
+                    schema: { type: string, const: "form-data; name=decoy" }
+                  X-Part-Kind:
+                    schema: { type: string, const: profile }
+      responses:
+        '204': { description: ok }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert!(!code.contains("decoy"), "{code}");
+    assert!(code.contains("X-Part-Kind"), "{code}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::DeclarationHasNoEffect),
+        [
+            "`encoding.profile.headers.content-disposition` has no effect: the client writes \
+             the part's `Content-Disposition` itself, naming the part after its property"
+        ],
+        "{report:#?}"
+    );
+}
