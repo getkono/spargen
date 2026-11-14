@@ -115,7 +115,10 @@ assert_eq!(mock.calls(ops::GET_PET).len(), 1);
   `status_4xx(status, &body)` for a range, `default(status, &body)` for `default`, and no body
   argument for a bodyless response. Each encodes its body with the codec the client decodes that
   status with (JSON, `text/plain`, XML, or raw octets), so the client reads it as the typed success
-  or the typed `Error::Api`, never as `Error::Decode`. A streamed body, or a response the
+  or the typed `Error::Api`, never as `Error::Decode`. The body is written as a server writes it,
+  at any depth: each `readOnly` member that is set is sent, and each `writeOnly` member is left
+  out, while a model serialized anywhere else, a request body included, keeps the request
+  direction. A streamed body, or a response the
   description does not document, is built with `Reply::from_reply(testing::Reply::new(status)…)`.
 - **Recording.** Every request is recorded as a `testing::Call` (its operation, method, URI,
   headers and body, with `json::<T>()` to decode the body) before it is routed; `calls(op)` and
