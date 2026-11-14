@@ -209,9 +209,10 @@ Show the extended documentation behind a stable diagnostic code.
 spargen explain E013 [--format <human|json>]
 ```
 
-The human format prints the code's explanation text to stdout: what the code means and, for a
-code with several causes, each case it covers. `--format json` prints one object,
-`{ "code": …, "explain": … }`, holding the code as given and the same text. The
+The code is matched with surrounding whitespace trimmed and in any case, so `spargen explain e013`
+works too. The human format prints the code's explanation text to stdout: what the code means and,
+for a code with several causes, each case it covers. `--format json` prints one object,
+`{ "code": …, "explain": … }`, holding the canonical upper-case code and the same text. The
 [diagnostic index](./errors.md) lists each code's severity and title; the explanation itself is
 what `explain` prints, the same text the library's `spargen::explain` returns. An unknown code
 prints an error to stderr and exits `3`.

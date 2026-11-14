@@ -86,9 +86,14 @@ fn dispatch(cli: Cli) -> ExitCode {
             Ok(text) => {
                 match args.format {
                     Format::Human => write_line(Fd::Stdout, text),
+                    // `explain` resolved the code trimmed and in any case, and every code is
+                    // upper-case ASCII, so this is the canonical code rather than the spelling given.
                     Format::Json => write_line(
                         Fd::Stdout,
-                        serde_json::json!({ "code": args.code, "explain": text }),
+                        serde_json::json!({
+                            "code": args.code.trim().to_ascii_uppercase(),
+                            "explain": text,
+                        }),
                     ),
                 }
                 ExitStatus::Ok.into()

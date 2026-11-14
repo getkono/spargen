@@ -336,6 +336,58 @@ fn explain_json_carries_the_code_and_its_explain_text() {
     );
 }
 
+/// A code is matched with surrounding whitespace trimmed and in any ASCII case: each spelling
+/// prints exactly what its canonical upper-case form prints, and `--format json` echoes the
+/// canonical form rather than the spelling given.
+#[test]
+fn explain_accepts_a_code_in_any_case_with_surrounding_whitespace() {
+    for (given, canonical) in [("e001", "E001"), (" W009 ", "W009"), ("\tw009\n", "W009")] {
+        let human = Command::new(spargen_bin())
+            .args(["explain", given])
+            .output()
+            .unwrap();
+        assert_eq!(
+            human.status.code(),
+            Some(0),
+            "explaining {given:?} must succeed: {}",
+            String::from_utf8_lossy(&human.stderr)
+        );
+        let canonical_human = Command::new(spargen_bin())
+            .args(["explain", canonical])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(human.stdout).unwrap(),
+            String::from_utf8(canonical_human.stdout).unwrap(),
+            "{given:?} must print what {canonical:?} prints"
+        );
+
+        let json = Command::new(spargen_bin())
+            .args(["explain", given, "--format", "json"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            json.status.code(),
+            Some(0),
+            "explaining {given:?} as JSON must succeed: {}",
+            String::from_utf8_lossy(&json.stderr)
+        );
+        let stdout = String::from_utf8(json.stdout).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|error| panic!("--format json must emit JSON: {error}: {stdout}"));
+        assert_eq!(
+            value.get("code").and_then(serde_json::Value::as_str),
+            Some(canonical),
+            "`code` must echo the canonical code, not the spelling given: {stdout}"
+        );
+        assert_eq!(
+            value.get("explain").and_then(serde_json::Value::as_str),
+            spargen::explain(canonical).ok(),
+            "`explain` must carry the canonical code's explain text: {stdout}"
+        );
+    }
+}
+
 #[test]
 fn explain_rejects_an_unresolvable_code() {
     // Shaped like a code but assigned to none, so this exercises the lookup rather than the

@@ -76,8 +76,6 @@ mod surface;
 #[cfg(test)]
 mod test_support;
 
-use std::str::FromStr;
-
 pub use compat::{ComponentKind, KeepRule, Omit, OmitMethod, OmitRule, UnknownOmitToken};
 pub use config::{
     Build, CargoIntegration, CarriedDocs, Carve, ConfigError, Narrowing, Spec, TestingModule,
@@ -232,8 +230,11 @@ pub fn requirements(spec: &Spec) -> Result<(Requirements, Report), Report> {
 
 /// Extended documentation for a stable diagnostic code, backing `spargen explain E###`. The
 /// published errors index, `docs/errors.md`, lists each code's severity and title.
+///
+/// The code is matched with surrounding whitespace trimmed and in any ASCII case, so `"e001"` and
+/// `" W009 "` resolve; the error names the string as it was given.
 pub fn explain(code: &str) -> Result<&'static str, UnknownCode> {
-    Code::from_str(code).map(Code::explain)
+    Code::from_str_any_case(code).map(Code::explain)
 }
 
 /// Fetch, vendor, and hash-pin every remote (`http`/`https`) `$ref` reachable from `spec.path`,

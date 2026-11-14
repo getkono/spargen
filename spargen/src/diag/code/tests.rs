@@ -260,6 +260,20 @@ fn an_unknown_code_hands_back_the_string_it_was_given() {
     assert_eq!(unknown.to_string(), "unknown diagnostic code: e001");
 }
 
+/// The lookup `spargen explain` uses resolves every code trimmed and in either case, and hands back
+/// a string naming no code as it was given, untrimmed.
+#[test]
+fn the_any_case_lookup_trims_and_folds_case_but_reports_the_input_as_given() {
+    for code in Code::all() {
+        let lower = format!(" {}\t", code.as_str().to_ascii_lowercase());
+        assert_eq!(Code::from_str_any_case(&lower).unwrap(), *code);
+        assert_eq!(Code::from_str_any_case(code.as_str()).unwrap(), *code);
+    }
+    let unknown = Code::from_str_any_case(" e999 ").unwrap_err();
+    assert_eq!(unknown.code(), " e999 ");
+    assert!(Code::from_str_any_case("E0 01").is_err());
+}
+
 /// The Rust identifier of each variant. The match is exhaustive, so a variant added to `Code`
 /// does not compile until it is named here — which is what makes the two tests below closed
 /// over the whole enum rather than over whatever `all()` happens to list.
