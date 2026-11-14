@@ -30,9 +30,12 @@ mod rule;
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
-use crate::diag::{fnv1a64, Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance, Span};
-use crate::source::InputBundle;
+use crate::diag::{
+    fnv1a64, Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance, Span,
+};
+use crate::source::{InputBundle, SpannedValue};
 
 pub(crate) use carve::{carve_rules, MAX_CARVE_ROUNDS};
 use rule::RuleMatch;
@@ -61,6 +64,11 @@ impl Omit {
 
     /// Apply the profile to the loaded input bundle: resolve the keep rules against the document
     /// as written, apply the omit rules, then narrow what remains to the kept operations.
+    ///
+    /// The omit rules apply in declaration order, a rule equal to an earlier one only once. A rule
+    /// that removes nothing is satisfied, not an `E019`, when everything it matches in the
+    /// document as written lies at or beneath a construct an earlier rule removed: an exact rule
+    /// under a glob that already took its target, or a glob whose every match went before it.
     pub(crate) fn apply(
         &self,
         bundle: &mut InputBundle,
@@ -73,8 +81,22 @@ impl Omit {
             // to the rules that did resolve would only add an `E020` for an empty `paths`.
             Some(keep::resolve(&self.keep, bundle, diags))
         };
-        for rule in &self.rules {
-            apply_rule(rule, bundle, diags);
+        let mut seen = HashSet::new();
+        let rules: Vec<&OmitRule> = self
+            .rules
+            .iter()
+            .filter(|rule| seen.insert(*rule))
+            .collect();
+        // What each rule after the first matches before any rule removes anything: the first
+        // has no earlier rule to be covered by.
+        let as_written: Vec<Option<Targets>> = rules
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| (index > 0).then(|| targets_as_written(rule, bundle)))
+            .collect();
+        let mut removed = HashSet::new();
+        for (rule, as_written) in rules.into_iter().zip(as_written) {
+            apply_rule(rule, as_written.as_ref(), &mut removed, bundle, diags);
         }
         if let Some(Some(kept)) = &kept {
             keep::retain(kept, bundle, diags);
@@ -148,15 +170,65 @@ impl Omit {
     }
 }
 
-/// Remove what `rule` matches from `bundle`, emitting a `W009` per removed construct, or the one
-/// `E019` that says why the rule removed nothing.
-fn apply_rule(rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics) {
+/// The constructs a rule matches in one file: the file and every matching pointer.
+type Targets = (FileId, Vec<JsonPointer>);
+
+/// What `rule` matches in `bundle` as it stands: an exact rule's pointer where a value is there,
+/// every pointer a glob matches, and nothing for a rule that does not resolve.
+fn targets_as_written(rule: &OmitRule, bundle: &InputBundle) -> Targets {
+    match rule.resolve(bundle) {
+        Ok(RuleMatch::Exact { file, pointer }) => {
+            let present = value_at_pointer(bundle.value_at(file), &pointer).is_some();
+            (file, present.then_some(pointer).into_iter().collect())
+        }
+        Ok(RuleMatch::Glob { file, pointers }) => (file, pointers),
+        Err(_) => (bundle.root_id(), Vec::new()),
+    }
+}
+
+/// The value `pointer` names below `value`, read the way `remove_pointer` reads it: object
+/// members by key, array items by index.
+fn value_at_pointer<'a>(
+    value: &'a SpannedValue,
+    pointer: &JsonPointer,
+) -> Option<&'a SpannedValue> {
+    pointer
+        .tokens()
+        .iter()
+        .try_fold(value, |current, token| match current.as_array() {
+            Some(items) => items.get(token.parse::<usize>().ok()?),
+            None => current.get(token),
+        })
+}
+
+/// Whether every one of `targets` (at least one) lies at or beneath a pointer in `removed`.
+fn covered(targets: &Targets, removed: &HashSet<(FileId, JsonPointer)>) -> bool {
+    let (file, pointers) = targets;
+    !pointers.is_empty()
+        && pointers.iter().all(|pointer| {
+            std::iter::successors(Some(pointer.clone()), JsonPointer::parent)
+                .any(|ancestor| removed.contains(&(*file, ancestor)))
+        })
+}
+
+/// Remove what `rule` matches from `bundle`, recording each removed construct in `removed` and
+/// emitting a `W009` for it, or the one `E019` that says why the rule removed nothing. A rule
+/// that removes nothing because earlier rules removed everything it matched `as_written`
+/// emits nothing.
+fn apply_rule(
+    rule: &OmitRule,
+    as_written: Option<&Targets>,
+    removed: &mut HashSet<(FileId, JsonPointer)>,
+    bundle: &mut InputBundle,
+    diags: &mut Diagnostics,
+) {
     let applied = match rule.resolve(bundle) {
         Err(invalid) => Err(invalid),
         Ok(RuleMatch::Exact { file, pointer }) => {
             match bundle.value_at_mut(file).remove_pointer(&pointer) {
                 Some(value) => {
                     emit_omitted(diags, &pointer, value.span(), &rule.describe());
+                    removed.insert((file, pointer));
                     Ok(())
                 }
                 None => Err("omit rule did not match any source construct".into()),
@@ -173,6 +245,7 @@ fn apply_rule(rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics
                 if let Some(value) = bundle.value_at_mut(file).remove_pointer(&pointer) {
                     removed_any = true;
                     emit_omitted(diags, &pointer, value.span(), &describe);
+                    removed.insert((file, pointer));
                 }
             }
             if removed_any {
@@ -183,7 +256,9 @@ fn apply_rule(rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics
         }
     };
     if let Err(message) = applied {
-        emit_invalid_rule(rule, bundle, diags, message);
+        if !as_written.is_some_and(|targets| covered(targets, removed)) {
+            emit_invalid_rule(rule, bundle, diags, message);
+        }
     }
 }
 

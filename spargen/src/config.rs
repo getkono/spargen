@@ -25,6 +25,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::codegen::DEFAULT_ERROR_BODY_CAP;
 use crate::compat::{KeepRule, Omit, OmitMethod, OmitRule, UnknownOmitToken};
 use crate::ir::DateTimeBackend;
+use crate::source::{local_identity, working_dir};
 
 /// The default cap on diagnostics collected before batching stops.
 const DEFAULT_BATCH_CAP: usize = 100;
@@ -526,8 +527,10 @@ impl Spec {
     ///
     /// The spec records `path`, so an edit to the file reruns the build:
     /// [`generate`](crate::generate) names it as a `cargo:rerun-if-changed` path and fingerprints
-    /// its bytes, and `generate_api!` tracks it. Applying a path already applied, spelled the same,
-    /// sets the file's keys again but appends neither its rules nor a second record of the path.
+    /// its bytes, and `generate_api!` tracks it. Applying a path already applied, however it is
+    /// spelled (paths compare made absolute against the working directory, with `.` and `..`
+    /// segments resolved lexically), sets the file's keys again but appends neither its rules nor
+    /// a second record of the path.
     pub fn config_file(self, path: impl AsRef<Utf8Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let text =
@@ -535,7 +538,12 @@ impl Spec {
                 path: path.to_path_buf(),
                 source,
             })?;
-        let applied = self.config_files.iter().any(|applied| applied == path);
+        let working_dir = working_dir();
+        let identity = local_identity(working_dir.as_deref(), path);
+        let applied = self
+            .config_files
+            .iter()
+            .any(|applied| local_identity(working_dir.as_deref(), applied) == identity);
         let mut spec = self.apply_config(&text, path, !applied)?;
         if !applied {
             spec.config_files.push(path.to_path_buf());
