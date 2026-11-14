@@ -49,7 +49,8 @@ paths:
 
 fn generated() -> String {
     generated_with(OPERATIONS, |spec| {
-        spec.bind_header("X-Tenant").bind_header("X-Trace")
+        spec.add_bound_header("X-Tenant")
+            .add_bound_header("X-Trace")
     })
 }
 

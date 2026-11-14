@@ -1246,7 +1246,8 @@ paths:
     /// What `SERVED` generates with `X-Tenant` and `X-Trace` bound.
     fn served() -> String {
         crate::codegen::test_harness::generated_with(SERVED, |spec| {
-            spec.bind_header("X-Tenant").bind_header("X-Trace")
+            spec.add_bound_header("X-Tenant")
+                .add_bound_header("X-Trace")
         })
     }
 
@@ -1267,7 +1268,7 @@ paths:
                 r#"#[derive(Debug,Clone)]pubstructServer0{region:Server0Region,base:String,tier:String,}"#,
                 r#"implDefaultforServer0{fndefault()->Self{Self{region:<Server0RegionasDefault>::default(),"#,
                 r#"base:"v1".to_owned(),tier:"a".to_owned(),}}}"#,
-                r#"implServer0{///Everyservervariableatitsdeclareddefault.pubfnnew()->Self{Self::default()}"#,
+                r#"implServer0{///Everyservervariableatitsdeclareddefault.#[must_use]pubfnnew()->Self{Self::default()}"#,
                 r#"///Setthe`region`servervariable.Theregion.#[must_use]pubfnregion(mutself,value:Server0Region)->Self"#,
                 r#"{self.region=value;self}///Setthe`base`servervariable.#[must_use]pubfnbase(mutself,value:implInto<String>)"#,
                 r#"->Self{self.base=value.into();self}"#,
@@ -1277,12 +1278,12 @@ paths:
             &served(),
             &[
                 concat!(
-                    r#"///TheserverURLwitheveryvariablesubstituted.pubfnurl(&self)->String{letmuturl=String::new();"#,
+                    r#"///TheserverURLwitheveryvariablesubstituted.#[must_use]pubfnurl(&self)->String{letmuturl=String::new();"#,
                     r#"url.push_str("https://");url.push_str(self.region.as_str());url.push_str(".example.com/");"#,
                     r#"url.push_str(&self.base);url.push('/');url.push_str(&self.tier);url}}"#,
                     r#"///Server`https://fixed.example.com`.#[derive(Debug,Clone,Default)]pubstructServer1{}"#,
                 ),
-                r#"///Thefirstdeclaredserver,witheveryservervariableatitsdeclareddefault.pubfndefault_url()->String{Server0::new().url()}}"#,
+                r#"///Thefirstdeclaredserver,witheveryservervariableatitsdeclareddefault.#[must_use]pubfndefault_url()->String{Server0::new().url()}}"#,
             ],
         );
     }

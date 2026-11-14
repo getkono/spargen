@@ -321,7 +321,7 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
             concat!(
                 r#"implThing{///A`Thing`holdingtherequiredmembersgiven,indeclarationorder,andeveryoptionalmemberas"#,
                 r#"decodinganabsentonesetsit:itsschema`default`whereithasone,elseunset."#,
-                r#"#[allow(clippy::too_many_arguments)]pubfnnew(label:ThingLabel,maybe:Option<ThingMaybe>,"#,
+                r#"#[allow(clippy::too_many_arguments)]#[must_use]pubfnnew(label:ThingLabel,maybe:Option<ThingMaybe>,"#,
                 r#"secret:ThingSecret,hint:Option<ThingHint>,)->Self{Self{id:None,label,maybe,secret:Some(secret),"#,
                 r#"hint:matchhint{Some(value)=>super::support::Nullable::Value(value),None=>super::support::Nullable::Null,},"#,
                 r#"both:None,note:super::support::Nullable::Absent,count:self::default_8_count(),"#,
@@ -341,7 +341,7 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
             concat!(
                 r#"implLoose{///A`Loose`witheveryoptionalmemberasdecodinganabsentonesetsit:itsschema`default`"#,
                 r#"whereithasone,elseunset.`Default`buildsthesamevalue.#[allow(clippy::too_many_arguments)]"#,
-                r#"pubfnnew()->Self{Self{x:None}}"#,
+                r#"#[must_use]pubfnnew()->Self{Self{x:None}}"#,
             ),
             "#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]pubstructDefaulted{",
             "pubfnnew()->Self{Self{n:self::default_21_n(),s:self::default_21_s(),b:self::default_21_b(),}}",
@@ -349,7 +349,7 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
             concat!(
                 r#"#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]pubstructOnly{#[serde(rename="a")]puba:OnlyA,}"#,
                 r#"implOnly{///A`Only`holdingeverymembergiven,indeclarationorder.#[allow(clippy::too_many_arguments)]"#,
-                r#"pubfnnew(a:OnlyA)->Self{Self{a}}}"#,
+                r#"#[must_use]pubfnnew(a:OnlyA)->Self{Self{a}}}"#,
             ),
         ],
     );
