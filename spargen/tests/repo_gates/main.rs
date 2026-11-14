@@ -1,20 +1,17 @@
 //! This repository's assertions over its own gate configuration: `mise.toml`,
-//! `.github/workflows/`, `hk.pkl`, `rust-toolchain.toml`, `deny.toml`, and CLAUDE.md. Each module
-//! holds one kind of gate: `supply_chain` the advisory audits, `pairing` each CI job and each git
-//! hook against its mise tasks, `toolchain` the Rust toolchain and tool pins, and `claude_md`
-//! CLAUDE.md's Quality list and testing-strategy table. This file holds the workflow readers more
-//! than one of them uses, and
-//! `shared/repo.rs` the `mise.toml` and file readers this suite shares with `corpus_manifest.rs`.
-//!
-//! CLAUDE.md's "repository gates" row names this suite and every test in it
-//! (`the_testing_strategy_table_names_every_test_in_its_suite`).
+//! `.github/workflows/`, `hk.pkl`, `rust-toolchain.toml`, `deny.toml`, and the agent
+//! instructions. Each module holds one kind of gate: `supply_chain` the advisory audits, `pairing`
+//! each CI job and each git hook against its mise tasks, `toolchain` the Rust toolchain and tool
+//! pins, and `agent_docs` the length and scoping of `AGENTS.md` and `.claude/rules/`. This file
+//! holds the workflow readers more than one of them uses, and `shared/repo.rs` the `mise.toml` and
+//! file readers this suite shares with `corpus_manifest.rs`.
 
 use std::collections::BTreeSet;
 
 #[path = "../shared/repo.rs"]
 mod repo;
 
-mod claude_md;
+mod agent_docs;
 mod pairing;
 mod supply_chain;
 mod toolchain;
