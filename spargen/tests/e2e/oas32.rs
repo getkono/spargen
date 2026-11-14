@@ -73,6 +73,13 @@ fn assert_reconnect_policy_is_public<P: ReconnectPolicy>() {}
         "a custom method should be built from its token bytes"
     );
 
+    // A secured streaming operation signs through `support::Resend::attach`, the emission the
+    // compile and clippy gates above reach only through this operation.
+    assert!(
+        generated.contains("support::Resend::attach("),
+        "a secured streaming operation should attach credentials through `Resend::attach`"
+    );
+
     // The OpenAPI 3.2 streaming response recognizes the standard SSE envelope annotation and types
     // the stream as its JSON `data.contentSchema`, not as the envelope object.
     let flat: String = generated.split_whitespace().collect::<Vec<_>>().join(" ");
