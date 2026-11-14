@@ -669,7 +669,8 @@ impl Spec {
 pub enum CargoIntegration {
     /// Integrate when running under a build script, degrading with `W012` (audit skipped) when
     /// that build script locates no consumer manifest; outside a build script, degrade with
-    /// `W013` (no directives, audit skipped). The right choice for a `build.rs`.
+    /// `W013` (no directives, audit skipped). A `check` degrades the same way but reports neither
+    /// warning. The right choice for a `build.rs`.
     #[default]
     Auto,
     /// Integrate, or fail with `E024`. Use this when a missing rebuild trigger would ship a
