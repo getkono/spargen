@@ -1062,6 +1062,34 @@ fn hook_steps(pkl: &str) -> Vec<HookStep> {
     steps
 }
 
+/// The pre-push hook runs the fast checks and nothing heavier: clippy (`mise run lint`) and the
+/// test suite (`mise run test`) take minutes, and CI gates both on every pull request, as
+/// `hk.pkl`, `AGENTS.md` and `.claude/rules/ci-gates.md` state. A step added here is a reviewed
+/// change to all three.
+#[test]
+fn the_pre_push_hook_runs_only_the_fast_checks() {
+    let mut pre_push: Vec<(String, Vec<String>)> = hook_steps(&read("hk.pkl"))
+        .into_iter()
+        .filter(|step| step.hook == "pre-push")
+        .map(|step| (step.step, step.commands))
+        .collect();
+    pre_push.sort();
+    assert_eq!(
+        pre_push,
+        [
+            ("convco", vec!["mise run commit-range"]),
+            ("deny", vec!["mise run deny"]),
+            ("fmt", vec!["mise run fmt-check"]),
+        ]
+        .map(|(step, commands)| (
+            step.to_owned(),
+            commands.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        )),
+        "`hk.pkl`'s pre-push hook runs exactly `fmt-check`, `commit-range` and `deny`; CI is the \
+         gate for `lint` and `test`"
+    );
+}
+
 /// `hk.pkl` says every step delegates to a `mise.toml` task, so the hooks and `mise run …` cannot
 /// drift apart: each step must run at least one command, and each command must be `mise run`
 /// naming a task that exists. Each of the three hooks must declare a step, so a reader that
