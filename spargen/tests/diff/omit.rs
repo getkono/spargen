@@ -112,3 +112,59 @@ fn a_rule_matching_neither_spec_is_e019_on_each_side_that_carries_it() {
         assert!(rejection.new_report().is_none(), "{rejection}");
     }
 }
+
+/// A spec root under `dir`, one `GET /pN` per entry of `refs`, each answering with the schema that
+/// reference names, and an object schema declaring `pet_field` at each of `files`.
+fn write_multi_file_spec(dir: &std::path::Path, files: &[&str], refs: &[&str]) -> Spec {
+    let mut root = String::from("openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n");
+    for (index, reference) in refs.iter().enumerate() {
+        root.push_str(&format!(
+            "  /p{index}:\n    get:\n      operationId: get{index}\n      responses:\n        \
+             \"200\":\n          description: OK\n          content:\n            \
+             application/json:\n              schema: {{ $ref: \"{reference}\" }}\n"
+        ));
+    }
+    for file in files {
+        let path = dir.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            "type: object\nproperties:\n  pet_field: { type: string }\n  keep: { type: string }\n",
+        )
+        .unwrap();
+    }
+    Spec::new(write_spec(dir, "openapi.yaml", &root))
+}
+
+/// A file-scoped pointer rule whose file is ambiguous in one spec stays an `E019` there even
+/// though the other spec, where the file is unique, matches it: an ambiguous file is a rule that
+/// names no one construct, not a construct that side lacks.
+#[test]
+fn an_ambiguous_file_rule_is_e019_even_where_the_other_spec_matches_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let (old_dir, new_dir) = (temp.path().join("old"), temp.path().join("new"));
+    let rule = || OmitRule::pointer(Some("pet.yaml".into()), "/properties/pet_field");
+    let old = write_multi_file_spec(
+        &old_dir,
+        &["a/pet.yaml", "b/pet.yaml"],
+        &["./a/pet.yaml", "./b/pet.yaml"],
+    )
+    .add_omit_rule(rule());
+    let new =
+        write_multi_file_spec(&new_dir, &["a/pet.yaml"], &["./a/pet.yaml"]).add_omit_rule(rule());
+
+    let rejection = spargen::diff(&old, &new)
+        .expect_err("the old side's file-scoped rule is ambiguous, so that side is rejected");
+    let old_report = rejection.old_report().expect("the old side is rejected");
+    assert_eq!(codes(old_report), ["E019"], "{rejection}");
+    assert!(
+        old_report
+            .errors()
+            .next()
+            .unwrap()
+            .message
+            .contains("matches more than one loaded file"),
+        "{rejection}"
+    );
+    assert!(rejection.new_report().is_none(), "{rejection}");
+}
