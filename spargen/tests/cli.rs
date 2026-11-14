@@ -735,8 +735,9 @@ fn diff_exit_code_fails_exactly_a_breaking_change() {
     let (status, stdout, stderr) = spargen(temp.path(), &["diff", &two, &one, "--exit-code"]);
     assert_eq!(
         status,
-        Some(1),
-        "a major diff fails the gate: stdout {stdout} stderr {stderr}"
+        Some(4),
+        "a major diff fails the gate with its own status, apart from a rejection's 1: stdout \
+         {stdout} stderr {stderr}"
     );
     assert!(
         stdout.contains("recommended bump: major"),
@@ -816,7 +817,7 @@ fn diff_classifies_a_setting_only_one_sides_config_file_changes() {
     let (status, stdout, stderr) = spargen(temp.path(), &["diff", &old, &new, "--exit-code"]);
     assert_eq!(
         status,
-        Some(1),
+        Some(4),
         "a retyped success body fails the gate: stdout {stdout} stderr {stderr}"
     );
     assert!(

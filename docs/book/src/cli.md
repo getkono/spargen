@@ -117,9 +117,10 @@ An unknown key is a configuration error (exit status `3`).
 | Status | Meaning |
 | --- | --- |
 | `0` | Success, including a run that reported only warnings, and `--help` / `--version`. |
-| `1` | An error-severity diagnostic was reported (`check`, `deps`, `lock`, or a `diff` spec that cannot lower), `diff --exit-code` found a breaking (`major`) change, or output could not be written for a reason other than a closed stream. |
+| `1` | An error-severity diagnostic was reported (`check`, `deps`, `lock`, or a `diff` spec that cannot lower, with or without `--exit-code`), or output could not be written for a reason other than a closed stream. |
 | `2` | The command line did not parse: an unknown subcommand or flag, a missing argument, or two conflicting flags. |
 | `3` | A configuration or flag value was rejected (a missing `--config` target, a malformed `spargen.toml`, bad `--omit-*` or `--keep-operation` syntax), or `explain` was given an unknown code. |
+| `4` | `diff --exit-code` compared both specs and found a breaking (`major`) change. |
 
 A closed stdout or stderr (`spargen diff old.yaml new.yaml --format json | head -1`) is no failure:
 what would have gone to it is dropped, and the command exits with the status its outcome maps to.
@@ -237,8 +238,9 @@ spargen diff <OLD> <NEW> [--exit-code] [OPTIONS]
 ```
 
 It accepts `--format <human|json>` plus the shared spec options, applied to both specs.
-`--exit-code` exits `1` for a breaking (`major`) change; without it a successful comparison exits
-`0` whatever its bump. A spec that cannot lower is always a hard error and exits `1`. When either
+`--exit-code` exits `4` for a breaking (`major`) change; without it a successful comparison exits
+`0` whatever its bump. A spec that cannot lower is always a hard error and exits `1`, so a CI gate
+tells a breaking change from a broken spec by status alone. When either
 spec lowers with warnings, the comparison is printed on stdout as usual and those warnings go to
 stderr in the same format: each warning side's report under an `old spec:` / `new spec:` heading,
 or, under `--format json`, one object keyed `old` and `new`.
