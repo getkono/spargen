@@ -38,7 +38,7 @@ derives from a document are escaped for you, so carving one operation never wide
 siblings.
 
 ```rust
-let spec = spargen::Spec::new("api/openapi.yaml").omit(spargen::omit! {
+let spec = spargen::Spec::new("api/openapi.yaml").add_omit(spargen::omit! {
     paths { "/admin/**"; }
     operations { get "/internal/*"; }
     components { schemas { "Legacy*"; } }
@@ -54,9 +54,9 @@ rather than omitting everything else:
 use spargen::OmitMethod;
 
 let spec = spargen::Spec::new("api/openapi.yaml")
-    .keep_operation(OmitMethod::Get, "/v1/sync")
-    .keep_operation(OmitMethod::Get, "/v1/blob/{address}")
-    .keep_operation(OmitMethod::Post, "/v1/federation/capabilities/refresh");
+    .add_keep_operation(OmitMethod::Get, "/v1/sync")
+    .add_keep_operation(OmitMethod::Get, "/v1/blob/{address}")
+    .add_keep_operation(OmitMethod::Post, "/v1/federation/capabilities/refresh");
 ```
 
 Once any keep rule is present:
@@ -80,7 +80,7 @@ A `paths` entry written as a `$ref` is kept **whole** once one of its target's o
 because the target can be shared by other entries; a keep rule names such an operation by the
 `paths` key that refers to it.
 
-Keep rules are part of the `Omit` profile and its fingerprint: `Spec::omit` appends a profile's keep
+Keep rules are part of the `Omit` profile and its fingerprint: `Spec::add_omit` appends a profile's keep
 rules as it appends its omit rules, and `Spec::clear_omissions` removes both. In `spargen.toml` each
 is a `[[keep]]` entry with both keys required:
 
@@ -128,7 +128,7 @@ gaps). For a committed, reviewed subset, prefer explicit omit rules.
 Library API:
 
 ```rust
-let spec = spargen::Spec::new("api/openapi.yaml").omit(spargen::omit! {
+let spec = spargen::Spec::new("api/openapi.yaml").add_omit(spargen::omit! {
     operations {
         post "/repos/{owner}/{repo}/releases/{release_id}/assets";
     }

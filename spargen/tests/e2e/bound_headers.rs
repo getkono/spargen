@@ -1,4 +1,4 @@
-//! Header bindings (#1262): a client generated with `Spec::bind_header`, compiled and linted, that
+//! Header bindings (#1262): a client generated with `Spec::add_bound_header`, compiled and linted, that
 //! sends the bound value from every operation declaring the header and refuses a required one
 //! while none is bound.
 
@@ -33,7 +33,7 @@ fn a_bound_header_is_sent_from_the_client_and_required_where_declared() {
     let spec = write_spec(temp.path(), "versioned.yaml", BOUND_HEADERS_SPEC);
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "bound_headers", "2021", |spec| {
-        spec.bind_header("X-Api-Version")
+        spec.add_bound_header("X-Api-Version")
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 

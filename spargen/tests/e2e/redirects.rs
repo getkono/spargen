@@ -30,7 +30,7 @@ fn the_default_backend_refuses_a_redirect_to_another_origin() {
     let spec = write_spec(temp.path(), "redirected.yaml", REDIRECTS_SPEC);
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "redirects", "2021", |spec| {
-        spec.bind_header("X-Tenant")
+        spec.add_bound_header("X-Tenant")
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
