@@ -344,8 +344,8 @@ const EXPLICIT_NULL_FIELD_DOC: &str =
 
 /// The emitted doc of an explicit-null parameter's setter, the same contract seen from the
 /// setter's argument.
-const EXPLICIT_NULL_SETTER_DOC: &str =
-    "`None` sends the JSON `null`; leaving the parameter unset omits it.";
+const EXPLICIT_NULL_SETTER_DOC: &str = "A value, or `Nullable::Null` to send the JSON `null`; \
+     leaving the parameter unset omits it.";
 
 /// Emit an operation's `…Params` struct, which holds every parameter but a path one in a public
 /// field, plus an `impl` of fluent `#[must_use]` consuming setters — one per optional param, named
@@ -362,7 +362,12 @@ pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names
         .params(operation)
         .filter(|(param, _)| !param.is_positional())
         .collect();
-    let optional = bundled.iter().filter(|(param, _)| !param.required);
+    // Each optional one beside its index in `Operation::params`, which keys its null setter.
+    let optional = operation_names
+        .params(operation)
+        .enumerate()
+        .filter(|(_, (param, _))| !param.is_positional() && !param.required)
+        .map(|(index, (param, ident))| (index, param, ident));
     let fields = bundled.iter().map(|(param, ident)| {
         let wire = &param.name;
         if param.required {
@@ -422,8 +427,9 @@ pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names
     // `Option<T>`, nullable or not, takes the bare `T` by value and stores `Some` of it; by value
     // (not `impl Into<T>`) keeps inference trivial for every generated field type. One that sends
     // an explicit `null` takes `impl Into<Nullable<T>>`, as a nullable model member's setter does,
-    // so `value`, `Some(value)` and `None` (that `null`) all fit.
-    let setters = optional.clone().map(|(param, ident)| {
+    // so a value or `Nullable::Null` fits, and is followed by its `{field}_null` setter storing
+    // that `null`: `Nullable` has no `From<Option<T>>`, so no `None` reaches the wire as `null`.
+    let setters = optional.map(|(index, param, ident)| {
         let inner = ty_tokens(
             Ty {
                 nullable: false,
@@ -434,6 +440,8 @@ pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names
         );
         let doc = format!("Set the `{}` parameter.", param.name);
         if param.sends_explicit_null() {
+            let null_setter = operation_names.null_setter(index);
+            let null_doc = format!("Send the `{}` parameter as the JSON `null`.", param.name);
             quote! {
                 #[doc = #doc]
                 #[doc = ""]
@@ -441,6 +449,13 @@ pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names
                 #[must_use]
                 pub fn #ident(mut self, value: impl Into<support::Nullable<#inner>>) -> Self {
                     self.#ident = value.into();
+                    self
+                }
+
+                #[doc = #null_doc]
+                #[must_use]
+                pub fn #null_setter(mut self) -> Self {
+                    self.#ident = support::Nullable::Null;
                     self
                 }
             }
