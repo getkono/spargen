@@ -944,6 +944,69 @@ paths:
             diagnostic.message.contains("`items: false`"),
             "{items:?}: {diagnostic:#?}"
         );
+        // The absent-`items` case has a message of its own, which names the missing `items`
+        // rather than an `items` the document never wrote.
+        assert_eq!(
+            diagnostic.message.contains("with no `items`"),
+            items.is_empty(),
+            "{items:?}: {diagnostic:#?}"
+        );
+    }
+}
+
+/// `maxItems` at or below the prefix length, or `unevaluatedItems: false` with no `items`, closes
+/// the array at the prefix as `items: false` does, so it is a tuple and no `E015`. This is the
+/// spelling schemars 1.x (and so aide) emits for a Rust tuple: `prefixItems` with `minItems` and
+/// `maxItems` both the prefix length. A `maxItems` past the prefix still leaves a remainder open.
+#[test]
+fn a_bound_or_unevaluated_items_false_closes_a_prefix_items_tuple() {
+    for (closing, closed) in [
+        (
+            "                minItems: 2\n                maxItems: 2\n",
+            true,
+        ),
+        ("                maxItems: 1\n", true),
+        (
+            "                items: { type: string }\n                maxItems: 2\n",
+            true,
+        ),
+        ("                unevaluatedItems: false\n", true),
+        ("                maxItems: 3\n", false),
+        (
+            "                items: { type: string }\n                unevaluatedItems: false\n",
+            false,
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                prefixItems:
+                  - {{ type: string }}
+                  - {{ type: integer }}
+{closing}"##
+        );
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome() == Outcome::Rejected,
+            !closed,
+            "{closing:?}: {report:#?}"
+        );
+        assert_eq!(
+            has_code(&report, Code::TupleRestNotRepresentable),
+            !closed,
+            "{closing:?}: {report:#?}"
+        );
     }
 }
 
