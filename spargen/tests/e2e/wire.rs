@@ -337,6 +337,30 @@ paths:
               additionalProperties: { $ref: '#/components/schemas/Metainfo' }
       responses:
         '204': { description: ok }
+  /pair-front:
+    post:
+      operationId: uploadPairFront
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/Pair' }
+            encoding:
+              back: { style: form }
+      responses:
+        '204': { description: ok }
+  /pair-back:
+    post:
+      operationId: uploadPairBack
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/Pair' }
+            encoding:
+              front: { style: form }
+      responses:
+        '204': { description: ok }
 components:
   schemas:
     Metainfo:
@@ -356,6 +380,12 @@ components:
       required: [file]
       properties:
         file: { $ref: '#/components/schemas/Metainfo' }
+    Pair:
+      type: object
+      required: [front, back]
+      properties:
+        front: { $ref: '#/components/schemas/Metainfo' }
+        back: { $ref: '#/components/schemas/Metainfo' }
 "##;
 
 /// `contentEncoding: base64` must reach the wire as base64 text wherever a JSON body carries it
@@ -507,6 +537,90 @@ fn a_binary_overflow_part_carries_its_key_as_its_filename() {
         body.contains("Content-Disposition: form-data; name=\"a%22b\"; filename=\"a%22b\"\r\n"),
         "the overflow part must carry its key as its filename: {body}"
     );
+}
+
+/// Issue #1385: the method takes its body as a `MultipartBody`, whose typed setter sends the
+/// `filename` the caller gives a binary property's part, escaped as the runtime escapes it.
+#[test]
+fn a_file_part_sends_the_file_name_its_caller_sets() {
+    let (base, server) = common::serve_no_content();
+    let client = base64_client::BlockingClient::new(&base).unwrap();
+    let upload = types::Upload {
+        file: bytes::Bytes::from_static(b"d4:infoe").into(),
+    };
+    client
+        .upload(base64_client::MultipartBody::new(&upload).file_file_name("photo \"1\".torrent"))
+        .expect("upload sends");
+
+    let body = String::from_utf8_lossy(&server.join().unwrap().body).into_owned();
+    assert!(
+        body.contains(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"photo %221%22.torrent\"\r\n"
+        ),
+        "the part must carry the filename its caller set: {body}"
+    );
+}
+
+/// Issue #1385: a binary `additionalProperties` member's part sends the `filename` its caller
+/// sets for its key, and a member given none keeps its key.
+#[test]
+fn an_overflow_part_sends_the_file_name_its_caller_sets_and_another_keeps_its_key() {
+    let (base, server) = common::serve_no_content();
+    let client = base64_client::BlockingClient::new(&base).unwrap();
+    let mut upload = types::UploadManyBody::new();
+    for key in ["named", "plain"] {
+        upload
+            .additional
+            .insert(key.to_owned(), bytes::Bytes::from_static(b"d4:infoe").into());
+    }
+    client
+        .upload_many(
+            base64_client::MultipartBody::new(&upload)
+                .additional_file_name("named", "ubuntu.torrent"),
+        )
+        .expect("upload sends");
+
+    let body = String::from_utf8_lossy(&server.join().unwrap().body).into_owned();
+    assert!(
+        body.contains("Content-Disposition: form-data; name=\"named\"; filename=\"ubuntu.torrent\"\r\n"),
+        "the named member must carry the filename its caller set: {body}"
+    );
+    assert!(
+        body.contains("Content-Disposition: form-data; name=\"plain\"; filename=\"plain\"\r\n"),
+        "a member given no filename must keep its key: {body}"
+    );
+}
+
+/// Two operations send one body type with different Encoding Objects, each sending a different
+/// property as a file part: the type's `MultipartBody` carries every operation's setter, so each
+/// operation's documented setter exists and names its own part's `filename`.
+#[test]
+fn a_body_type_two_operations_send_carries_each_operations_file_name_setter() {
+    let pair = types::Pair {
+        front: bytes::Bytes::from_static(b"front").into(),
+        back: bytes::Bytes::from_static(b"back").into(),
+    };
+    for back in [false, true] {
+        let (base, server) = common::serve_no_content();
+        let client = base64_client::BlockingClient::new(&base).unwrap();
+        let wire = if back {
+            let body = base64_client::MultipartBody::new(&pair).back_file_name("back.torrent");
+            client.upload_pair_back(body).expect("upload sends");
+            "back"
+        } else {
+            let body = base64_client::MultipartBody::new(&pair).front_file_name("front.torrent");
+            client.upload_pair_front(body).expect("upload sends");
+            "front"
+        };
+
+        let body = String::from_utf8_lossy(&server.join().unwrap().body).into_owned();
+        let disposition =
+            format!("Content-Disposition: form-data; name=\"{wire}\"; filename=\"{wire}.torrent\"\r\n");
+        assert!(
+            body.contains(&disposition),
+            "the `{wire}` part must carry the filename its caller set: {body}"
+        );
+    }
 }
 "##;
 

@@ -13,15 +13,15 @@ expression: surface
     clippy::nursery
 )]
 pub use support::{
-    ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
-    Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
-    LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next, Nullable,
-    ParameterError, ProblemDetails, ProtocolError, RedirectError, RejectionCheck,
-    RequestCause, RequestError, RequestOptions, ReqwestBackend, ResponseValue,
-    RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
-    TokenFuture, TokenProvider, TokenRefresher, TotalTimeout, TransportConfig,
-    TransportError, UnknownVariant, exponential_backoff, full_jitter, next_link,
-    token_provider,
+    ApiErrorBody, ApiErrorProblem, AsMultipartBody, AuthError, ByteStream, ClientConfig,
+    ClientCore, Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend,
+    HttpBody, LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend,
+    MultipartBody, Next, Nullable, ParameterError, ProblemDetails, ProtocolError,
+    RedirectError, RejectionCheck, RequestCause, RequestError, RequestOptions,
+    ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+    SecretString, TimeoutKind, TokenFuture, TokenProvider, TokenRefresher, TotalTimeout,
+    TransportConfig, TransportError, UnknownVariant, exponential_backoff, full_jitter,
+    next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -44,15 +44,15 @@ pub use __spargen_blocking::*;
     clippy::nursery
 )]
 pub use support::{
-    ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
-    Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
-    LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next, Nullable,
-    ParameterError, ProblemDetails, ProtocolError, RedirectError, RejectionCheck,
-    RequestCause, RequestError, RequestOptions, ReqwestBackend, ResponseValue,
-    RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
-    TokenFuture, TokenProvider, TokenRefresher, TotalTimeout, TransportConfig,
-    TransportError, UnknownVariant, exponential_backoff, full_jitter, next_link,
-    token_provider,
+    ApiErrorBody, ApiErrorProblem, AsMultipartBody, AuthError, ByteStream, ClientConfig,
+    ClientCore, Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend,
+    HttpBody, LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend,
+    MultipartBody, Next, Nullable, ParameterError, ProblemDetails, ProtocolError,
+    RedirectError, RejectionCheck, RequestCause, RequestError, RequestOptions,
+    ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+    SecretString, TimeoutKind, TokenFuture, TokenProvider, TokenRefresher, TotalTimeout,
+    TransportConfig, TransportError, UnknownVariant, exponential_backoff, full_jitter,
+    next_link, token_provider,
 };
 #[allow(
     unused_imports,

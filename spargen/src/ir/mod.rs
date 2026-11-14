@@ -45,6 +45,18 @@ pub(crate) use types::{
     XmlField,
 };
 
+/// The parts of an operation's `multipart/form-data` body that carry a `filename`, as
+/// [`Api::multipart_file_parts`] finds them.
+#[derive(Debug)]
+pub(crate) struct MultipartFileParts<'a> {
+    /// The body's type, a struct.
+    pub(crate) body: Ty,
+    /// Each declared property sent as a file part, in field order.
+    pub(crate) fields: Vec<&'a Field>,
+    /// Whether the typed `additionalProperties` members are sent as file parts.
+    pub(crate) overflow: bool,
+}
+
 /// The whole lowered API: the single artifact frontends produce and backends consume.
 #[derive(Debug, Clone)]
 pub(crate) struct Api {
@@ -164,6 +176,48 @@ impl Api {
         operation
             .typed_body()
             .is_some_and(|(_, ty)| self.is_raw_bytes(ty))
+    }
+
+    /// The file parts of `operation`'s `multipart/form-data` body, or `None` where it sends none:
+    /// each media-mode, sent (not `readOnly`) property holding bytes, in field order, and whether
+    /// the typed `additionalProperties` members hold bytes. Each is a part carrying a `filename`,
+    /// so its method takes the body as a `MultipartBody` a caller sets that name on. An RFC 6570
+    /// mode property is sent as text parts, which carry none.
+    pub(crate) fn multipart_file_parts<'a>(
+        &'a self,
+        operation: &'a Operation,
+    ) -> Option<MultipartFileParts<'a>> {
+        let (body, ty) = operation.typed_body()?;
+        if body.media != MediaType::Multipart {
+            return None;
+        }
+        let Some(TypeKind::Struct(object)) = self.types.get(ty.id).map(|def| &def.kind) else {
+            return None;
+        };
+        let holds_bytes = |ty: &Ty| {
+            matches!(
+                self.types.get(ty.id).map(|def| &def.kind),
+                Some(TypeKind::Bytes(_))
+            )
+        };
+        let fields: Vec<&Field> = object
+            .fields
+            .iter()
+            .filter(|field| !field.read_only && holds_bytes(&field.ty))
+            .filter(|field| {
+                !body.encoding.properties.iter().any(|property| {
+                    property.name == field.name.wire
+                        && matches!(property.mode, EncodingMode::Style { .. })
+                })
+            })
+            .collect();
+        let overflow = body.encoding.additional.is_some()
+            && matches!(&object.additional, AdditionalProps::Typed(value) if holds_bytes(value));
+        (!fields.is_empty() || overflow).then_some(MultipartFileParts {
+            body: ty,
+            fields,
+            overflow,
+        })
     }
 
     /// Whether `ty` is a non-nullable raw `bytes` value (`bytes::Bytes` itself).
@@ -1055,6 +1109,129 @@ mod tests {
                 ),
             ],
             |api| api.sends_binary_body(&api.operations[0]),
+        );
+    }
+
+    /// A multipart body over one `field` holding `field`'s type, sent in media mode unless
+    /// `style` puts the field in RFC 6570 mode, with overflow members holding `additional` sent
+    /// in media mode.
+    fn multipart(api: &mut Api, field: Ty, style: bool, additional: Option<Ty>) {
+        let overflow = additional.map_or(AdditionalProps::Deny, |ty| {
+            AdditionalProps::Typed(Box::new(ty))
+        });
+        let ty = object(api, field, overflow);
+        request(api, MediaType::Multipart, ty);
+        let media = super::EncodingMode::Media {
+            content_type: "application/octet-stream".to_owned(),
+            codec: MediaType::OctetStream,
+        };
+        let mode = if style {
+            super::EncodingMode::Style {
+                style: ParamStyle::Form,
+                explode: true,
+                allow_reserved: false,
+            }
+        } else {
+            media.clone()
+        };
+        let encoding = &mut api.operations[0]
+            .request_body
+            .as_mut()
+            .expect("a request body")
+            .encoding;
+        encoding.properties.push(super::PropertyEncoding {
+            name: "field".to_owned(),
+            mode,
+            headers: Vec::new(),
+        });
+        encoding.additional = additional.map(|_| media);
+    }
+
+    /// Issue #1385: a multipart body has file parts, which a caller names, exactly where it sends
+    /// bytes as a media-mode part, declared or `additionalProperties`.
+    #[test]
+    fn multipart_file_parts_follows_the_table() {
+        check(
+            &[
+                ("no body", |_| {}, false),
+                (
+                    "a JSON body holding bytes",
+                    |api| {
+                        let field = bytes(api);
+                        let ty = object(api, field, AdditionalProps::Deny);
+                        request(api, MediaType::Json, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a multipart bytes property",
+                    |api| {
+                        let field = bytes(api);
+                        multipart(api, field, false, None);
+                    },
+                    true,
+                ),
+                (
+                    "a multipart base64 property",
+                    |api| {
+                        let field = insert(api, TypeKind::Bytes(super::BytesEncoding::Base64));
+                        multipart(api, field, false, None);
+                    },
+                    true,
+                ),
+                (
+                    "a multipart text property",
+                    |api| {
+                        let field = string(api);
+                        multipart(api, field, false, None);
+                    },
+                    false,
+                ),
+                (
+                    "a multipart bytes property in RFC 6570 mode",
+                    |api| {
+                        let field = bytes(api);
+                        multipart(api, field, true, None);
+                    },
+                    false,
+                ),
+                (
+                    "a readOnly multipart bytes property",
+                    |api| {
+                        let field = bytes(api);
+                        multipart(api, field, false, None);
+                        let ty = api.operations[0].request_body.as_ref().unwrap().ty.unwrap();
+                        let Some(TypeDef {
+                            kind: TypeKind::Struct(object),
+                            ..
+                        }) = api.types.get_mut(ty.id)
+                        else {
+                            unreachable!("the body is a struct");
+                        };
+                        object.fields[0].read_only = true;
+                    },
+                    false,
+                ),
+                (
+                    "multipart bytes overflow members",
+                    |api| {
+                        let field = string(api);
+                        let overflow = bytes(api);
+                        multipart(api, field, false, Some(overflow));
+                    },
+                    true,
+                ),
+                (
+                    "multipart text overflow members",
+                    |api| {
+                        let field = string(api);
+                        let overflow = string(api);
+                        multipart(api, field, false, Some(overflow));
+                    },
+                    false,
+                ),
+            ],
+            |api| api.multipart_file_parts(&api.operations[0]).is_some(),
         );
     }
 

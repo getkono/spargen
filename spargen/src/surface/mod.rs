@@ -142,8 +142,12 @@ struct OpSurface {
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
     params: BTreeMap<ParamKey, MemberSurface>,
-    /// The request body, or `None` for a bodyless operation or a body without a type.
+    /// The request body, or `None` for a bodyless operation or a body without a type. An optional
+    /// multipart body with file parts is taken as a `MultipartBody`, which its type renders.
     request_body: Option<MemberSurface>,
+    /// The `MultipartBody` setters naming the `filename` of each file part of a multipart body,
+    /// empty where the body has none.
+    file_name_setters: BTreeSet<String>,
     /// Canonical rendering of the success return type.
     success: String,
     /// Canonical rendering of the error type.
@@ -447,6 +451,14 @@ pub enum ChangeKind {
     /// The generated module lost its `testing` module. **Major** — code naming
     /// `testing::MockBackend` or a `Reply` breaks.
     TestingModuleRemoved,
+    /// A multipart body's `MultipartBody` gained a setter naming a file part's `filename`: a
+    /// property or its `additionalProperties` members became binary, or the body became
+    /// multipart. **Minor** — a required body still takes `&T`.
+    FileNameSetterAdded,
+    /// A multipart body's `MultipartBody` lost a setter naming a file part's `filename`. **Major**
+    /// — calls to it break, and where the body has no file part left, so does passing a
+    /// `MultipartBody`.
+    FileNameSetterRemoved,
 }
 
 impl ChangeKind {
@@ -466,7 +478,8 @@ impl ChangeKind {
             | ChangeKind::AdditionalPropertiesAdded
             | ChangeKind::StreamTwinAdded
             | ChangeKind::CredentialSchemeAdded
-            | ChangeKind::TestingModuleAdded => Impact::Minor,
+            | ChangeKind::TestingModuleAdded
+            | ChangeKind::FileNameSetterAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::UrlAccessorArgsChanged
@@ -504,7 +517,8 @@ impl ChangeKind {
             | ChangeKind::StreamTwinRemoved
             | ChangeKind::CredentialSchemeRemoved
             | ChangeKind::CredentialSettersChanged
-            | ChangeKind::TestingModuleRemoved => Impact::Major,
+            | ChangeKind::TestingModuleRemoved
+            | ChangeKind::FileNameSetterRemoved => Impact::Major,
         }
     }
 
@@ -563,6 +577,8 @@ impl ChangeKind {
             ChangeKind::CredentialSettersChanged => "credential-setters-changed",
             ChangeKind::TestingModuleAdded => "testing-module-added",
             ChangeKind::TestingModuleRemoved => "testing-module-removed",
+            ChangeKind::FileNameSetterAdded => "file-name-setter-added",
+            ChangeKind::FileNameSetterRemoved => "file-name-setter-removed",
         }
     }
 }

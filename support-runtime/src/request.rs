@@ -414,6 +414,96 @@ impl MultipartPart {
     }
 }
 
+/// A `multipart/form-data` request body as an operation sends it: the typed body, borrowed, and
+/// the `filename` each of its file parts sends where the caller sets one.
+///
+/// A generated operation whose multipart body has a binary part takes its body as
+/// `impl AsMultipartBody<T>`, so `&body` sends every file part under its part name as its
+/// `filename`, and `MultipartBody::new(&body)` with a file name set sends that one instead. The
+/// generated client gives each body a typed setter per binary property, `{property}_file_name`, and
+/// one for its binary `additionalProperties` entries by key; [`Self::file_name_for`] sets one by
+/// its part name. The body's fields read through it as through `&T`.
+#[derive(Debug)]
+pub struct MultipartBody<'a, T> {
+    body: &'a T,
+    /// `(part name, filename)`, at most one entry per part name.
+    file_names: Vec<(String, String)>,
+}
+
+impl<'a, T> MultipartBody<'a, T> {
+    /// `body`, with every file part sending its part name as its `filename`.
+    pub fn new(body: &'a T) -> Self {
+        Self {
+            body,
+            file_names: Vec::new(),
+        }
+    }
+
+    /// Send `file_name` as the `filename` of the file part named `part`, replacing any set for it
+    /// before. Only the body's file parts read it.
+    #[must_use]
+    pub fn file_name_for(mut self, part: impl Into<String>, file_name: impl Into<String>) -> Self {
+        let part = part.into();
+        let file_name = file_name.into();
+        match self.file_names.iter_mut().find(|(name, _)| *name == part) {
+            Some(entry) => entry.1 = file_name,
+            None => self.file_names.push((part, file_name)),
+        }
+        self
+    }
+
+    /// The `filename` set for the part named `part`, if one is.
+    pub fn file_name_of(&self, part: &str) -> Option<&str> {
+        self.file_names
+            .iter()
+            .find(|(name, _)| name == part)
+            .map(|(_, file_name)| file_name.as_str())
+    }
+}
+
+impl<T> Clone for MultipartBody<'_, T> {
+    fn clone(&self) -> Self {
+        Self {
+            body: self.body,
+            file_names: self.file_names.clone(),
+        }
+    }
+}
+
+impl<'a, T> From<&'a T> for MultipartBody<'a, T> {
+    fn from(body: &'a T) -> Self {
+        Self::new(body)
+    }
+}
+
+impl<T> std::ops::Deref for MultipartBody<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.body
+    }
+}
+
+/// What a generated operation takes a multipart body with file parts as: `&T`, every file part
+/// sending its part name as its `filename`, or a [`MultipartBody`] over `T`, sending the ones
+/// set on it.
+pub trait AsMultipartBody<T> {
+    /// The body as a [`MultipartBody`], with the file names set on it.
+    fn as_multipart_body(&self) -> MultipartBody<'_, T>;
+}
+
+impl<T> AsMultipartBody<T> for &T {
+    fn as_multipart_body(&self) -> MultipartBody<'_, T> {
+        MultipartBody::new(self)
+    }
+}
+
+impl<T> AsMultipartBody<T> for MultipartBody<'_, T> {
+    fn as_multipart_body(&self) -> MultipartBody<'_, T> {
+        self.clone()
+    }
+}
+
 /// Append `value` to `head` quoted, with `"`, CR and LF percent-encoded and every other byte as
 /// it is, as [`MultipartPart`] writes a `Content-Disposition` parameter.
 fn quote_parameter(head: &mut Vec<u8>, value: &str) {

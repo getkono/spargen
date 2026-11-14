@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+minor|file-name-setter-added|GET /pets|file name setter `photo_file_name` added
+bump=minor

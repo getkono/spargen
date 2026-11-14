@@ -136,7 +136,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
             pub use header::{parse_header, require_header, HeaderError, HeaderShape};
             pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
             pub use paginate::{next_link, LinkPaginator};
-            pub use request::{MultipartForm, MultipartPart, RequestBuilder};
+            pub use request::{AsMultipartBody, MultipartBody, MultipartForm, MultipartPart, RequestBuilder};
             pub use response::{stream_success_bytes, ByteStream, ResponseValue};
             pub use retry::{exponential_backoff, full_jitter, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
             pub use transport::{try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend, TotalTimeout};

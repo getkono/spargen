@@ -3,7 +3,7 @@ use http::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use http::Method;
 use url::Url;
 
-use super::{boundary, MultipartForm, MultipartPart, RequestBuilder};
+use super::{boundary, MultipartBody, MultipartForm, MultipartPart, RequestBuilder};
 use crate::tests::{poll_ready, Chunk, Chunks};
 use crate::{Error, HttpBody};
 
@@ -346,6 +346,28 @@ fn a_part_file_name_is_written_after_its_name_and_escaped_like_it() {
         "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a%22b%0D%0Ac%d é.png\"\r\n\
          Content-Type: image/png\r\n\r\n\u{0}\r\n--B--\r\n"
     );
+}
+
+/// A multipart body reads its fields through to the body it borrows, holds one `filename` per
+/// part name, the last one set for it, and reports none for a part it was given none for.
+#[test]
+fn a_multipart_body_keeps_the_last_file_name_set_for_each_part() {
+    let body = String::from("payload");
+    let plain = MultipartBody::from(&body);
+    assert_eq!(plain.len(), 7);
+    assert_eq!(plain.file_name_of("file"), None);
+
+    let named = MultipartBody::new(&body)
+        .file_name_for("file", "first.png")
+        .file_name_for("thumb", "small.png")
+        .file_name_for("file", "photo.png");
+    let cloned = named.clone();
+    for body in [&named, &cloned] {
+        assert_eq!(body.file_name_of("file"), Some("photo.png"));
+        assert_eq!(body.file_name_of("thumb"), Some("small.png"));
+        assert_eq!(body.file_name_of("caption"), None);
+        assert_eq!(**body, "payload");
+    }
 }
 
 /// A part header map holding `Content-Disposition`, in any case, is refused as request

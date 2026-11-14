@@ -17,15 +17,15 @@ expression: basic_spec_module(|spec| spec)
     clippy::nursery
 )]
 pub use support::{
-    ApiErrorBody, ApiErrorProblem, AuthError, ByteStream, ClientConfig, ClientCore,
-    Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
-    LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next, Nullable,
-    ParameterError, ProblemDetails, ProtocolError, RedirectError, RejectionCheck,
-    RequestCause, RequestError, RequestOptions, ReqwestBackend, ResponseValue,
-    RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
-    TokenFuture, TokenProvider, TokenRefresher, TotalTimeout, TransportConfig,
-    TransportError, UnknownVariant, exponential_backoff, full_jitter, next_link,
-    token_provider,
+    ApiErrorBody, ApiErrorProblem, AsMultipartBody, AuthError, ByteStream, ClientConfig,
+    ClientCore, Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend,
+    HttpBody, LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend,
+    MultipartBody, Next, Nullable, ParameterError, ProblemDetails, ProtocolError,
+    RedirectError, RejectionCheck, RequestCause, RequestError, RequestOptions,
+    ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+    SecretString, TimeoutKind, TokenFuture, TokenProvider, TokenRefresher, TotalTimeout,
+    TransportConfig, TransportError, UnknownVariant, exponential_backoff, full_jitter,
+    next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -5085,6 +5085,89 @@ mod support {
                 head
             }
         }
+        /// A `multipart/form-data` request body as an operation sends it: the typed body, borrowed, and
+        /// the `filename` each of its file parts sends where the caller sets one.
+        ///
+        /// A generated operation whose multipart body has a binary part takes its body as
+        /// `impl AsMultipartBody<T>`, so `&body` sends every file part under its part name as its
+        /// `filename`, and `MultipartBody::new(&body)` with a file name set sends that one instead. The
+        /// generated client gives each body a typed setter per binary property, `{property}_file_name`, and
+        /// one for its binary `additionalProperties` entries by key; [`Self::file_name_for`] sets one by
+        /// its part name. The body's fields read through it as through `&T`.
+        #[derive(Debug)]
+        pub struct MultipartBody<'a, T> {
+            body: &'a T,
+            /// `(part name, filename)`, at most one entry per part name.
+            file_names: Vec<(String, String)>,
+        }
+        impl<'a, T> MultipartBody<'a, T> {
+            /// `body`, with every file part sending its part name as its `filename`.
+            pub fn new(body: &'a T) -> Self {
+                Self {
+                    body,
+                    file_names: Vec::new(),
+                }
+            }
+            /// Send `file_name` as the `filename` of the file part named `part`, replacing any set for it
+            /// before. Only the body's file parts read it.
+            #[must_use]
+            pub fn file_name_for(
+                mut self,
+                part: impl Into<String>,
+                file_name: impl Into<String>,
+            ) -> Self {
+                let part = part.into();
+                let file_name = file_name.into();
+                match self.file_names.iter_mut().find(|(name, _)| *name == part) {
+                    Some(entry) => entry.1 = file_name,
+                    None => self.file_names.push((part, file_name)),
+                }
+                self
+            }
+            /// The `filename` set for the part named `part`, if one is.
+            pub fn file_name_of(&self, part: &str) -> Option<&str> {
+                self.file_names
+                    .iter()
+                    .find(|(name, _)| name == part)
+                    .map(|(_, file_name)| file_name.as_str())
+            }
+        }
+        impl<T> Clone for MultipartBody<'_, T> {
+            fn clone(&self) -> Self {
+                Self {
+                    body: self.body,
+                    file_names: self.file_names.clone(),
+                }
+            }
+        }
+        impl<'a, T> From<&'a T> for MultipartBody<'a, T> {
+            fn from(body: &'a T) -> Self {
+                Self::new(body)
+            }
+        }
+        impl<T> std::ops::Deref for MultipartBody<'_, T> {
+            type Target = T;
+            fn deref(&self) -> &T {
+                self.body
+            }
+        }
+        /// What a generated operation takes a multipart body with file parts as: `&T`, every file part
+        /// sending its part name as its `filename`, or a [`MultipartBody`] over `T`, sending the ones
+        /// set on it.
+        pub trait AsMultipartBody<T> {
+            /// The body as a [`MultipartBody`], with the file names set on it.
+            fn as_multipart_body(&self) -> MultipartBody<'_, T>;
+        }
+        impl<T> AsMultipartBody<T> for &T {
+            fn as_multipart_body(&self) -> MultipartBody<'_, T> {
+                MultipartBody::new(self)
+            }
+        }
+        impl<T> AsMultipartBody<T> for MultipartBody<'_, T> {
+            fn as_multipart_body(&self) -> MultipartBody<'_, T> {
+                self.clone()
+            }
+        }
         /// Append `value` to `head` quoted, with `"`, CR and LF percent-encoded and every other byte as
         /// it is, as [`MultipartPart`] writes a `Content-Disposition` parameter.
         fn quote_parameter(head: &mut Vec<u8>, value: &str) {
@@ -7809,7 +7892,9 @@ mod support {
         FormStyle, ParameterError, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
-    pub use request::{MultipartForm, MultipartPart, RequestBuilder};
+    pub use request::{
+        AsMultipartBody, MultipartBody, MultipartForm, MultipartPart, RequestBuilder,
+    };
     pub use response::{stream_success_bytes, ByteStream, ResponseValue};
     pub use retry::{
         exponential_backoff, full_jitter, RetryBackend, RetryOutcome, RetryPolicy,
@@ -17431,11 +17516,12 @@ Response `409`: Conflict*/
     #[inline]
     async fn prepare_upload_file(
         &self,
-        body: &types::UploadFileBody,
+        body: impl support::AsMultipartBody<types::UploadFileBody>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let body = support::AsMultipartBody::as_multipart_body(&body);
         let mut path = "/upload".to_owned();
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
@@ -17443,7 +17529,7 @@ Response `409`: Conflict*/
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         let mut form = support::MultipartForm::new();
         let mut part = support::MultipartPart::bytes(body.file.to_vec())
-            .file_name("file");
+            .file_name(body.file_name_of("file").unwrap_or("file"));
         part = part.mime_str("application/octet-stream").map_err(support::Error::widen)?;
         form = form.part("file", part);
         let mut part = support::MultipartPart::text(body.caption.to_string());
@@ -17479,10 +17565,11 @@ Response `409`: Conflict*/
         Ok((request, replay))
     }
     ///Response `204`: No Content
+    ///Each binary part of the request body is sent as a file part whose `filename` is its part name; to send another, pass a `MultipartBody` built from the body and set it with `file_file_name`.
     #[inline]
     pub async fn upload_file(
         &self,
-        body: &types::UploadFileBody,
+        body: impl support::AsMultipartBody<types::UploadFileBody>,
     ) -> Result<support::ResponseValue<()>, support::Error<UploadFileError>> {
         let (request, replay) = self
             .prepare_upload_file(body)
@@ -17497,7 +17584,7 @@ Response `409`: Conflict*/
     #[inline]
     pub async fn upload_file_request(
         &self,
-        body: &types::UploadFileBody,
+        body: impl support::AsMultipartBody<types::UploadFileBody>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -17853,11 +17940,12 @@ Response `409`: Conflict*/
     #[inline]
     async fn prepare_post_nullable_parts(
         &self,
-        body: &types::PostNullablePartsBody,
+        body: impl support::AsMultipartBody<types::PostNullablePartsBody>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let body = support::AsMultipartBody::as_multipart_body(&body);
         let mut path = "/nullable-parts".to_owned();
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
@@ -17866,7 +17954,7 @@ Response `409`: Conflict*/
         let mut form = support::MultipartForm::new();
         if let Some(value) = &body.file {
             let mut part = support::MultipartPart::bytes(value.to_vec())
-                .file_name("file");
+                .file_name(body.file_name_of("file").unwrap_or("file"));
             part = part
                 .mime_str("application/octet-stream")
                 .map_err(support::Error::widen)?;
@@ -17874,7 +17962,7 @@ Response `409`: Conflict*/
         }
         if let support::Nullable::Value(value) = &body.thumb {
             let mut part = support::MultipartPart::bytes(value.to_vec())
-                .file_name("thumb");
+                .file_name(body.file_name_of("thumb").unwrap_or("thumb"));
             part = part
                 .mime_str("application/octet-stream")
                 .map_err(support::Error::widen)?;
@@ -17888,10 +17976,11 @@ Response `409`: Conflict*/
         Ok((request, replay))
     }
     ///Response `204`: No Content
+    ///Each binary part of the request body is sent as a file part whose `filename` is its part name; to send another, pass a `MultipartBody` built from the body and set it with `file_file_name`, `thumb_file_name`.
     #[inline]
     pub async fn post_nullable_parts(
         &self,
-        body: &types::PostNullablePartsBody,
+        body: impl support::AsMultipartBody<types::PostNullablePartsBody>,
     ) -> Result<support::ResponseValue<()>, support::Error<PostNullablePartsError>> {
         let (request, replay) = self
             .prepare_post_nullable_parts(body)
@@ -17906,7 +17995,7 @@ Response `409`: Conflict*/
     #[inline]
     pub async fn post_nullable_parts_request(
         &self,
-        body: &types::PostNullablePartsBody,
+        body: impl support::AsMultipartBody<types::PostNullablePartsBody>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -21329,6 +21418,27 @@ Response `5XX`: Any server error*/
         support::build_url_on(&self.core, None, &path, &query)
     }
 }
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
+impl support::MultipartBody<'_, types::UploadFileBody> {
+    ///Send `file_name` as the `filename` of the `file` part, in place of its part name.
+    #[must_use]
+    pub fn file_file_name(self, file_name: impl Into<String>) -> Self {
+        self.file_name_for("file", file_name)
+    }
+}
+#[allow(missing_docs, unreachable_pub, dead_code, clippy::pedantic, clippy::nursery)]
+impl support::MultipartBody<'_, types::PostNullablePartsBody> {
+    ///Send `file_name` as the `filename` of the `file` part, in place of its part name.
+    #[must_use]
+    pub fn file_file_name(self, file_name: impl Into<String>) -> Self {
+        self.file_name_for("file", file_name)
+    }
+    ///Send `file_name` as the `filename` of the `thumb` part, in place of its part name.
+    #[must_use]
+    pub fn thumb_file_name(self, file_name: impl Into<String>) -> Self {
+        self.file_name_for("thumb", file_name)
+    }
+}
 #[allow(
     unexpected_cfgs,
     unused_imports,
@@ -22457,10 +22567,11 @@ Response `409`: Conflict*/
             self.inner.get_alias_shared_url()
         }
         ///Response `204`: No Content
+        ///Each binary part of the request body is sent as a file part whose `filename` is its part name; to send another, pass a `MultipartBody` built from the body and set it with `file_file_name`.
         #[inline]
         pub fn upload_file(
             &self,
-            body: &types::UploadFileBody,
+            body: impl support::AsMultipartBody<types::UploadFileBody>,
         ) -> Result<support::ResponseValue<()>, support::Error<UploadFileError>> {
             self.runtime.block_on(self.inner.upload_file(body))
         }
@@ -22468,7 +22579,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn upload_file_request(
             &self,
-            body: &types::UploadFileBody,
+            body: impl support::AsMultipartBody<types::UploadFileBody>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -22607,10 +22718,11 @@ Response `409`: Conflict*/
             self.inner.post_nullable_bytes_url(params)
         }
         ///Response `204`: No Content
+        ///Each binary part of the request body is sent as a file part whose `filename` is its part name; to send another, pass a `MultipartBody` built from the body and set it with `file_file_name`, `thumb_file_name`.
         #[inline]
         pub fn post_nullable_parts(
             &self,
-            body: &types::PostNullablePartsBody,
+            body: impl support::AsMultipartBody<types::PostNullablePartsBody>,
         ) -> Result<support::ResponseValue<()>, support::Error<PostNullablePartsError>> {
             self.runtime.block_on(self.inner.post_nullable_parts(body))
         }
@@ -22618,7 +22730,7 @@ Response `409`: Conflict*/
         #[inline]
         pub fn post_nullable_parts_request(
             &self,
-            body: &types::PostNullablePartsBody,
+            body: impl support::AsMultipartBody<types::PostNullablePartsBody>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
