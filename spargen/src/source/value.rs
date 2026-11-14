@@ -91,7 +91,10 @@ impl SpannedValue {
         self.as_object()?.get(key)
     }
 
-    /// Navigate an RFC 6901 `pointer` (as in a `$ref` fragment), returning the addressed value.
+    /// Navigate a plain RFC 6901 `pointer`, returning the addressed value. Each token is
+    /// `~`-unescaped and nothing else: a `%` is a literal `%`, as in a pointer built by walking a
+    /// value or returned by [`canonical_pointer`]. A `$ref` fragment, whose tokens are
+    /// percent-encoded, goes through [`canonical_pointer`] first.
     pub(crate) fn pointer(&self, pointer: &JsonPointer) -> Option<&SpannedValue> {
         if pointer.as_str().is_empty() {
             return Some(self);
@@ -205,12 +208,13 @@ impl SpannedMap {
 }
 
 /// The node a `$ref` fragment's `pointer` addresses, spelled as the plain RFC 6901 pointer every
-/// other consumer uses: each token decoded exactly as [`SpannedValue::pointer`] decodes it, then
-/// re-escaped by [`JsonPointer::push`]. `None` where a token is malformed, as there.
+/// other consumer uses: each token percent-decoded and `~`-unescaped by [`decode_fragment_token`],
+/// then re-escaped by [`JsonPointer::push`]. `None` where a token is malformed.
 ///
-/// A fragment and a plain pointer spell one node differently (`#/a%20b` against `/a b`), so code
-/// that looks a fragment up outside [`SpannedValue::pointer`], or compares it with pointers built
-/// by walking a value, must go through this first.
+/// A fragment and a plain pointer spell one node differently (`#/a%20b` against `/a b`), so a
+/// fragment goes through this before it is looked up with [`SpannedValue::pointer`] or compared
+/// with pointers built by walking a value. The result is never decoded again: a `%` in it is a
+/// literal `%` (`#/100%25` is `/100%`).
 pub(crate) fn canonical_pointer(pointer: &JsonPointer) -> Option<JsonPointer> {
     let Some(tokens) = pointer.as_str().strip_prefix('/') else {
         return pointer.as_str().is_empty().then(JsonPointer::root);
@@ -218,11 +222,11 @@ pub(crate) fn canonical_pointer(pointer: &JsonPointer) -> Option<JsonPointer> {
     tokens
         .split('/')
         .try_fold(JsonPointer::root(), |canonical, token| {
-            Some(canonical.push(&unescape_pointer_token(token)?))
+            Some(canonical.push(&decode_fragment_token(token)?))
         })
 }
 
-/// Decode one JSON Pointer reference token.
+/// Decode one reference token of a `$ref` fragment.
 ///
 /// A `$ref` carries its pointer in a URI fragment, so characters that are not legal there are
 /// percent-encoded — `#/paths/~1pets~1%7BpetId%7D` is the spec-mandated spelling of the path item
@@ -230,10 +234,15 @@ pub(crate) fn canonical_pointer(pointer: &JsonPointer) -> Option<JsonPointer> {
 /// unescaping `~1`/`~0`. Decoding the whole fragment first would make a `%2F` behave as a pointer
 /// separator instead of a literal `/`; per-token decoding resolves a strict superset and matches
 /// what the wider OpenAPI toolchain does.
+fn decode_fragment_token(token: &str) -> Option<String> {
+    unescape_pointer_token(&percent_decode(token)?)
+}
+
+/// Unescape one plain RFC 6901 reference token: `~0` to `~` and `~1` to `/`, `None` for a `~`
+/// escaping anything else. A `%` stands for itself.
 fn unescape_pointer_token(token: &str) -> Option<String> {
-    let decoded = percent_decode(token)?;
     let mut out = String::new();
-    let mut chars = decoded.chars();
+    let mut chars = token.chars();
     while let Some(ch) = chars.next() {
         if ch == '~' {
             match chars.next()? {

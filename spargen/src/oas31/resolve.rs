@@ -115,9 +115,10 @@ impl<'doc> Resolver<'doc> {
     /// first — and every other reference is the bundle's own answer from the file it is written
     /// in. Reads no schema and emits nothing.
     ///
-    /// The root's answer is the bundle's reading of the fragment from the root, which keeps the
-    /// fragment's characters verbatim: a `~0`/`~1` escape is neither decoded nor re-encoded, so it
-    /// equals the pointer assembled from the stripped name (pinned by this file's tests).
+    /// The root's answer is the bundle's reading of the fragment from the root, its canonical
+    /// pointer: a `~0`/`~1` escape is decoded and re-escaped to the same spelling, so for a key
+    /// structural validation admits it equals the pointer assembled from the stripped name (pinned
+    /// by this file's tests).
     pub(super) fn schema_reference_identity(
         &self,
         reference: &str,
@@ -423,9 +424,11 @@ components:
 
     /// FE-IMPL-005: the two root-component branches lowering spelled — the resolver's answer for
     /// the fragment read from the root, and a pointer assembled from the stripped name — agree for
-    /// every declared key, `~`-escaped spellings included, from the root and from a sub-file. Both
-    /// read the reference's characters verbatim, so a `~0`/`~1` in the reference is neither
-    /// decoded nor re-encoded by either. A name only the sub-file declares is its own.
+    /// every declared key, `~`-escaped spellings included, from the root and from a sub-file. The
+    /// resolver's answer is the canonical pointer, which decodes a `~0`/`~1` and re-escapes it, so
+    /// it equals the stripped name's verbatim spelling. A key no well-formed pointer token spells
+    /// (`a~b`, whose `~` escapes nothing) is no identity: its pointer is malformed, so it names no
+    /// node either. A name only the sub-file declares is its own.
     #[test]
     fn root_component_identity_agrees_with_the_assembled_pointer_for_escaped_names() {
         let (_dir, bundle) = load();
@@ -447,7 +450,12 @@ components:
             .file;
         assert_ne!(lib, root);
         for at in [&document.provenance, &in_lib] {
-            for name in ["Plain", "a~0b", "a~1b", "a~b"] {
+            assert_eq!(
+                resolver
+                    .schema_reference_identity("#/components/schemas/a~b", resolver.written_in(at)),
+                None
+            );
+            for name in ["Plain", "a~0b", "a~1b"] {
                 let reference = format!("#/components/schemas/{name}");
                 let assembled = (
                     root,

@@ -572,6 +572,67 @@ components:
     );
 }
 
+/// One subschema referenced under two spellings of its fragment — a token percent-encoded in one
+/// and written plainly in the other — is one target and lowers to one type (#1451). Lowering
+/// memoises a bundle target on its `(file, pointer)` identity, which is the decoded pointer
+/// whatever the fragment's spelling, so the second spelling reuses the first's type rather than
+/// declaring a twin.
+#[test]
+fn two_percent_encoding_spellings_of_one_subschema_share_one_type() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/big%20cat' }
+  /v:
+    get:
+      operationId: getV
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/big cat' }
+components:
+  schemas:
+    Defs:
+      type: object
+      properties:
+        "big cat":
+          type: object
+          required: [purr]
+          properties: { purr: { type: string } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        declared_types(&code, "BigCat", |_| true),
+        ["BigCat"],
+        "the two spellings of one subschema must share one type: {}",
+        types_module(&code)
+    );
+    for operation in ["get_u", "get_v"] {
+        let signature = code
+            .split(&format!("fn {operation}("))
+            .nth(1)
+            .and_then(|rest| rest.split('{').next())
+            .unwrap_or_else(|| panic!("no `{operation}`: {code}"));
+        assert!(
+            signature.contains("ResponseValue<types::BigCat>"),
+            "`{operation}` must return the one shared type: {signature}"
+        );
+    }
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
@@ -894,6 +955,70 @@ fn moderate_ref_chain_below_the_cap_still_lowers() {
         !has_code(&report, Code::SchemaNestingTooDeep),
         "a 32-deep chain must lower without E014: {report:#?}"
     );
+}
+
+/// A fragment is percent-decoded exactly once. `%25` is a literal `%`, so `100%25` addresses the
+/// key `100%` and `a%2541` the key `a%41`, never `aA`: the identity a reference resolves to is the
+/// decoded pointer, and looking it up must not decode it again.
+#[test]
+fn a_percent_encoded_percent_sign_in_a_fragment_is_decoded_once() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/100%25' }
+  /v:
+    get:
+      operationId: getV
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/a%2541' }
+components:
+  schemas:
+    Defs:
+      type: object
+      properties:
+        "100%":
+          type: object
+          required: [purr]
+          properties: { purr: { type: string } }
+        "a%41":
+          type: object
+          required: [hiss]
+          properties: { hiss: { type: integer } }
+        aA: { type: boolean }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    for (operation, field) in [("get_u", "purr"), ("get_v", "hiss")] {
+        let signature = code
+            .split(&format!("fn {operation}("))
+            .nth(1)
+            .and_then(|rest| rest.split('{').next())
+            .unwrap_or_else(|| panic!("no `{operation}`: {code}"));
+        assert!(
+            !signature.contains("ResponseValue<bool>"),
+            "`{operation}` must not resolve to the twice-decoded key: {signature}"
+        );
+        assert!(
+            types_module(&code).contains(&format!("pub {field}:")),
+            "`{operation}`'s target declares `{field}`: {}",
+            types_module(&code)
+        );
+    }
 }
 
 #[test]
