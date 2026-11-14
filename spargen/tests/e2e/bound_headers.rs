@@ -133,4 +133,17 @@ fn an_invalid_bound_value_is_refused_when_it_is_bound() {
     let error = blocking.with_bound_header("X-Api-Version", "nul\0").unwrap_err();
     assert!(matches!(error, bound_headers::Error::RequestConstruction(_)), "{error:?}");
 }
+
+/// Issue #1433: a name that is not a valid header name is refused when it is bound, on the async
+/// and the blocking client alike, instead of being held under a name no operation reads.
+#[test]
+fn an_invalid_bound_name_is_refused_when_it_is_bound() {
+    let client = bound_headers::Client::new("http://127.0.0.1:1").unwrap();
+    let error = client.with_bound_header("X-Api-Version ", "2").unwrap_err();
+    assert!(matches!(error, bound_headers::Error::RequestConstruction(_)), "{error:?}");
+
+    let blocking = bound_headers::BlockingClient::new("http://127.0.0.1:1").unwrap();
+    let error = blocking.with_bound_header("x:api-version", "2").unwrap_err();
+    assert!(matches!(error, bound_headers::Error::RequestConstruction(_)), "{error:?}");
+}
 "##;
