@@ -148,9 +148,14 @@ switch!(TestingModule, off = Omitted, on = Emitted);
 /// Each knob is read by a getter named for it ([`uuid`](Self::uuid),
 /// [`batch_cap`](Self::batch_cap), …) and set by a `with_` setter of the same name
 /// ([`with_uuid`](Self::with_uuid), [`with_batch_cap`](Self::with_batch_cap), …), which replaces
-/// the value; [`omit`](Self::omit), [`omit_rule`](Self::omit_rule),
-/// [`keep_operation`](Self::keep_operation) and [`bind_header`](Self::bind_header) append to a
-/// list instead, which its own getter reads back. Every setter returns the spec by value, which
+/// the value. A list knob is appended to by an `add_` setter instead
+/// ([`add_omit`](Self::add_omit), [`add_omit_rule`](Self::add_omit_rule),
+/// [`add_keep_operation`](Self::add_keep_operation) and
+/// [`add_bound_header`](Self::add_bound_header)), and read back by its own getter
+/// ([`omissions`](Self::omissions), [`bound_headers`](Self::bound_headers)); its `spargen.toml`
+/// key, `generate_api!` argument and CLI flag share that getter's stem (`[[omit]]`, `omit { … }`,
+/// `--omit-*`; `[[keep]]`, `keep { … }`, `--keep-operation`; `bound_headers`,
+/// `bound_header = "…"`, `--bound-header`). Every setter returns the spec by value, which
 /// `#[must_use]` holds a caller to using.
 ///
 /// ```no_run
@@ -173,9 +178,9 @@ pub struct Spec {
     pub(crate) open_unions: UnionTags,
     pub(crate) verbatim_docs: CarriedDocs,
     pub(crate) testing: TestingModule,
-    /// The header names [`Spec::bind_header`] bound, in the order bound, no two equal in any
+    /// The header names [`Spec::add_bound_header`] bound, in the order bound, no two equal in any
     /// letter case.
-    pub(crate) bind_headers: Vec<String>,
+    pub(crate) bound_headers: Vec<String>,
     /// Every config file applied through [`Spec::config_file`] (and so through
     /// [`Spec::discover_config_file`]), in the order applied. Generation reads them, so `build.rs`
     /// names each as a `cargo:rerun-if-changed` path and `generate_api!` tracks each.
@@ -202,7 +207,7 @@ impl Spec {
             open_unions: UnionTags::Closed,
             verbatim_docs: CarriedDocs::Rewritten,
             testing: TestingModule::Omitted,
-            bind_headers: Vec::new(),
+            bound_headers: Vec::new(),
             config_files: Vec::new(),
         }
     }
@@ -223,9 +228,9 @@ impl Spec {
         self.datetime
     }
 
-    /// The compatibility omissions and keep rules, in chained order: [`omit`](Self::omit),
-    /// [`omit_rule`](Self::omit_rule), [`keep_operation`](Self::keep_operation) and each applied
-    /// config file append to them, and [`clear_omissions`](Self::clear_omissions) empties them.
+    /// The compatibility omissions and keep rules, in chained order:
+    /// [`add_omit`](Self::add_omit), [`add_omit_rule`](Self::add_omit_rule),
+    /// [`add_keep_operation`](Self::add_keep_operation) and each applied config file append to them, and [`clear_omissions`](Self::clear_omissions) empties them.
     pub fn omissions(&self) -> &Omit {
         &self.omit
     }
@@ -271,9 +276,9 @@ impl Spec {
         self.testing
     }
 
-    /// The header names [`bind_header`](Self::bind_header) bound, in the order bound.
+    /// The header names [`add_bound_header`](Self::add_bound_header) bound, in the order bound.
     pub fn bound_headers(&self) -> &[String] {
-        &self.bind_headers
+        &self.bound_headers
     }
 
     /// Every config file applied through [`config_file`](Self::config_file) or
@@ -309,16 +314,16 @@ impl Spec {
 
     /// Add every omit and keep rule of `omit` to the compatibility omissions applied before
     /// OpenAPI validation and lowering, after the rules already set, as
-    /// [`omit_rule`](Self::omit_rule), [`keep_operation`](Self::keep_operation) and each applied
-    /// config file add theirs. [`clear_omissions`](Self::clear_omissions) empties the set.
+    /// [`add_omit_rule`](Self::add_omit_rule), [`add_keep_operation`](Self::add_keep_operation)
+    /// and each applied config file add theirs. [`clear_omissions`](Self::clear_omissions) empties the set.
     ///
     /// ```no_run
     /// let spec = spargen::Spec::new("api/openapi.yaml")
     ///     .discover_config_file()?
-    ///     .omit(spargen::omit! { paths { "/internal/**"; } });
+    ///     .add_omit(spargen::omit! { paths { "/internal/**"; } });
     /// # Ok::<(), spargen::ConfigError>(())
     /// ```
-    pub fn omit(mut self, omit: Omit) -> Self {
+    pub fn add_omit(mut self, omit: Omit) -> Self {
         self.omit.rules.extend(omit.rules);
         self.omit.keep.extend(omit.keep);
         self
@@ -331,7 +336,7 @@ impl Spec {
     }
 
     /// Add one omission to the existing set.
-    pub fn omit_rule(mut self, rule: OmitRule) -> Self {
+    pub fn add_omit_rule(mut self, rule: OmitRule) -> Self {
         self.omit.rules.push(rule);
         self
     }
@@ -346,10 +351,10 @@ impl Spec {
     /// use spargen::OmitMethod;
     ///
     /// let spec = spargen::Spec::new("api/openapi.yaml")
-    ///     .keep_operation(OmitMethod::Get, "/v1/sync")
-    ///     .keep_operation(OmitMethod::Get, "/v1/blob/{address}");
+    ///     .add_keep_operation(OmitMethod::Get, "/v1/sync")
+    ///     .add_keep_operation(OmitMethod::Get, "/v1/blob/{address}");
     /// ```
-    pub fn keep_operation(
+    pub fn add_keep_operation(
         mut self,
         method: OmitMethod,
         path: impl Into<Cow<'static, str>>,
@@ -499,17 +504,17 @@ impl Spec {
     ///
     /// ```no_run
     /// let spec = spargen::Spec::new("api/openapi.yaml")
-    ///     .bind_header("X-Api-Version")
-    ///     .bind_header("X-Tenant");
+    ///     .add_bound_header("X-Api-Version")
+    ///     .add_bound_header("X-Tenant");
     /// ```
-    pub fn bind_header(mut self, name: impl Into<String>) -> Self {
+    pub fn add_bound_header(mut self, name: impl Into<String>) -> Self {
         let name = name.into();
         if !self
-            .bind_headers
+            .bound_headers
             .iter()
             .any(|bound| bound.eq_ignore_ascii_case(&name))
         {
-            self.bind_headers.push(name);
+            self.bound_headers.push(name);
         }
         self
     }
@@ -605,6 +610,15 @@ impl Spec {
                     .to_owned(),
             ));
         }
+        if file.bind_headers.is_some() {
+            // Renamed to match the `bound_headers()` getter; name the new key rather than leave
+            // `deny_unknown_fields`' bare "unknown field".
+            return Err(parse(
+                "the `bind_headers` key was renamed to `bound_headers`; write \
+                 `bound_headers = [...]` with the same list"
+                    .to_owned(),
+            ));
+        }
         if let Some(value) = file.uuid {
             self.uuid = UuidMapping::from_on(value);
         }
@@ -658,8 +672,8 @@ impl Spec {
                     .push(KeepRule::operation(method, entry.path.clone()));
             }
         }
-        for name in file.bind_headers {
-            self = self.bind_header(name);
+        for name in file.bound_headers {
+            self = self.add_bound_header(name);
         }
         Ok(self)
     }
@@ -873,7 +887,10 @@ struct FileConfig {
     #[serde(default)]
     keep: Vec<KeepToml>,
     #[serde(default)]
-    bind_headers: Vec<String>,
+    bound_headers: Vec<String>,
+    /// Retained solely to give the removed `bind_headers` key a targeted error naming
+    /// `bound_headers`.
+    bind_headers: Option<toml::Value>,
 }
 
 /// A `[[keep]]` entry: one operation, by `method` and `path`, both required.
@@ -1049,7 +1066,7 @@ mod tests {
         assert_eq!(spec.open_unions, UnionTags::Closed);
         assert_eq!(spec.verbatim_docs, CarriedDocs::Rewritten);
         assert_eq!(spec.testing, TestingModule::Omitted);
-        assert!(spec.bind_headers.is_empty());
+        assert!(spec.bound_headers.is_empty());
         assert!(spec.omit.is_empty());
         assert_eq!(Build::new(spec, "out.rs").cargo, CargoIntegration::Auto);
     }
@@ -1081,23 +1098,23 @@ mod tests {
         assert_eq!(spec.config_files(), [file]);
     }
 
-    /// `bind_headers` in the file is appended to what the spec already binds, in order, and a
+    /// `bound_headers` in the file is appended to what the spec already binds, in order, and a
     /// name already bound in another letter case is not bound twice, from the file or a setter.
     #[test]
     fn config_file_bound_headers_are_appended_and_deduplicated_in_any_case() {
         let spec = Spec::new("openapi.yaml")
-            .bind_header("X-Api-Version")
+            .add_bound_header("X-Api-Version")
             .apply_config(
-                "bind_headers = [\"X-Tenant\", \"x-api-version\"]\n",
+                "bound_headers = [\"X-Tenant\", \"x-api-version\"]\n",
                 Utf8Path::new("spargen.toml"),
                 true,
             )
             .unwrap()
-            .bind_header("X-TENANT");
+            .add_bound_header("X-TENANT");
         assert_eq!(spec.bound_headers(), ["X-Api-Version", "X-Tenant"]);
 
-        let error = apply("bind_headers = \"X-Tenant\"\n").unwrap_err();
-        assert!(error.to_string().contains("bind_headers"), "{error}");
+        let error = apply("bound_headers = \"X-Tenant\"\n").unwrap_err();
+        assert!(error.to_string().contains("bound_headers"), "{error}");
     }
 
     #[test]
@@ -1125,6 +1142,24 @@ mod tests {
         assert_eq!(spec.open_unions, UnionTags::Open);
         assert_eq!(spec.verbatim_docs, CarriedDocs::Verbatim);
         assert_eq!(spec.testing, TestingModule::Emitted);
+    }
+
+    /// The removed `bind_headers` key is refused, whatever its value, with an error naming its
+    /// `bound_headers` replacement.
+    #[test]
+    fn the_removed_bind_headers_key_names_its_bound_headers_replacement() {
+        for text in [
+            "bind_headers = [\"X-Tenant\"]\n",
+            "bind_headers = \"X-Tenant\"\n",
+        ] {
+            let error = apply(text).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("the `bind_headers` key was renamed to `bound_headers`"),
+                "{error}"
+            );
+        }
     }
 
     /// The removed `time` switch is refused, whatever its value, with an error naming the
@@ -1198,7 +1233,7 @@ mod tests {
     #[test]
     fn config_file_omits_are_appended_not_replaced() {
         let spec = Spec::new("openapi.yaml")
-            .omit_rule(OmitRule::path("/first"))
+            .add_omit_rule(OmitRule::path("/first"))
             .apply_config(
                 "[[omit]]\npath = \"/second\"\n",
                 Utf8Path::new("c.toml"),
@@ -1216,7 +1251,7 @@ mod tests {
     #[test]
     fn toml_keep_entries_append_kept_operations() {
         let spec = Spec::new("openapi.yaml")
-            .keep_operation(OmitMethod::Get, "/first")
+            .add_keep_operation(OmitMethod::Get, "/first")
             .apply_config(
                 "[[keep]]\nmethod = \"POST\"\npath = \"/second\"\n\n[[keep]]\nmethod = \"get\"\npath = \"/v1/*\"\n",
                 Utf8Path::new("c.toml"),

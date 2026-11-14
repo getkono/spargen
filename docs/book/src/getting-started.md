@@ -23,8 +23,10 @@ only `generate` takes a `Build`; `check`, `diff`, `requirements`, and `vendor` t
 never ask for an output path they would not use. Both types have private fields and chained
 setters, so a new knob is additive rather than breaking.
 
-`Spec`'s knobs are `uuid`, `datetime`, `omit`/`omit_rule`, `error_body_cap`, `batch_cap`, `carve`,
-`open_narrowing`, `open_unions`, `verbatim_docs`, `testing`, and `bind_header`. They can equally be read from a
+`Spec`'s knobs are `uuid`, `datetime`, `error_body_cap`, `batch_cap`, `carve`, `open_narrowing`,
+`open_unions`, `verbatim_docs` and `testing`, each set by its `with_` setter, and the lists
+`add_omit`/`add_omit_rule`/`add_keep_operation` and `add_bound_header` append to, read back by
+`omissions` and `bound_headers`. They can equally be read from a
 [`spargen.toml`](./cli.md#spargentoml-reference) (`Spec::config_file`,
 `Spec::discover_config_file`) — the same file the CLI and the macro read, parsed by the library
 so the three cannot drift. Setters called afterwards still win, so build code stays
@@ -147,7 +149,7 @@ The `spargen.toml` beside the spec is always discovered and applied first; the m
 override it in either direction (`carve` or `carve = true` turns one on, `no_carve` or
 `carve = false` turns it off), its caps replace the file's values, and its `omit { ... }` adds
 rules to the file's `[[omit]]` rules. A switch, `datetime` or cap given twice, in either spelling,
-is a compile error; `omit`, `keep` and `bind_header` may repeat and accumulate. The spec path is
+is a compile error; `omit`, `keep` and `bound_header` may repeat and accumulate. The spec path is
 relative to the crate's `Cargo.toml`, while an `omit { file("…") { … } }` path is relative to the
 spec's directory, as a `$ref` is. Cargo and rustc track the root schema, every transitive
 source file, `spargen.lock`, and the `spargen.toml` it applied through the expansion. The
@@ -209,7 +211,7 @@ Key points of the surface:
   [generated surface](./generated-api.md#generated-surface) states how an
   alternative is selected and how each credential failure is typed.
 - `Client::with_bound_header(name, value)?` sets a header every operation declares once on the
-  client, where the build bound it with `Spec::bind_header("X-Api-Version")`: no operation takes
+  client, where the build bound it with `Spec::add_bound_header("X-Api-Version")`: no operation takes
   an argument for it, and one that requires it fails before anything is sent, as
   `RequestError::MissingBoundParameter`, while no value is bound. A value that is not a valid
   header value is refused when it is bound, as `Error::RequestConstruction`.

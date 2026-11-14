@@ -1095,9 +1095,9 @@ fn the_getters_read_back_what_the_setters_wrote() {
         .with_uuid(spargen::UuidMapping::String)
         .with_datetime(spargen::DateTimeBackend::String)
         // `omit` and `omit_rule` each append to the rules set before them.
-        .omit_rule(appended.clone())
-        .omit(omit)
-        .omit_rule(appended.clone())
+        .add_omit_rule(appended.clone())
+        .add_omit(omit)
+        .add_omit_rule(appended.clone())
         .with_error_body_cap(11)
         .with_batch_cap(7)
         .with_carve(spargen::Carve::Auto)
@@ -1105,8 +1105,8 @@ fn the_getters_read_back_what_the_setters_wrote() {
         .with_open_unions(spargen::UnionTags::Open)
         .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
         .with_testing(spargen::TestingModule::Emitted)
-        .bind_header("X-Api-Version")
-        .bind_header("X-Tenant");
+        .add_bound_header("X-Api-Version")
+        .add_bound_header("X-Tenant");
     assert_eq!(spec.uuid(), spargen::UuidMapping::String);
     assert_eq!(spec.datetime(), spargen::DateTimeBackend::String);
     assert_eq!(spec.omissions().rules, [appended.clone(), rule, appended]);
@@ -1206,14 +1206,14 @@ fn keep_operation_reads_back_and_clear_omissions_removes_it() {
     let mut profile = spargen::Omit::default();
     profile.keep.push(put.clone());
     let spec = spargen::Spec::new("openapi.yaml")
-        .keep_operation(spargen::OmitMethod::Post, "/kept")
-        .omit(profile);
+        .add_keep_operation(spargen::OmitMethod::Post, "/kept")
+        .add_omit(profile);
     assert_eq!(spec.omissions().keep, [post, put]);
 
     let spec = spec
-        .omit_rule(spargen::OmitRule::path("/dropped"))
+        .add_omit_rule(spargen::OmitRule::path("/dropped"))
         .clear_omissions()
-        .keep_operation(spargen::OmitMethod::Get, "/pets");
+        .add_keep_operation(spargen::OmitMethod::Get, "/pets");
     assert_eq!(spec.omissions().keep, [get]);
     assert!(spec.omissions().rules.is_empty());
     assert!(!spec.omissions().is_empty());
@@ -1241,7 +1241,7 @@ fn omit_after_a_config_file_keeps_the_file_rules_and_a_reapplied_file_adds_none(
     let spec = spargen::Spec::new(dir.join("openapi.yaml"))
         .config_file(&file)
         .unwrap()
-        .omit(omit);
+        .add_omit(omit);
     assert_eq!(
         spec.omissions().rules,
         [from_file.clone(), from_setter.clone()]
