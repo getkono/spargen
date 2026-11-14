@@ -182,9 +182,8 @@ pub(super) fn credential_setter_tokens(
             "Unregister the credential for the security scheme `{key}`; one never registered is \
              left as it is. Operations pick the first `security` alternative whose schemes are \
              all registered and never fall through past it when attaching fails, so this is how \
-             a caller reaches a later alternative: `client.clone().{}()` derives a client that \
-             no longer selects one listing `{key}`.",
-            without.as_str()
+             a caller reaches a later alternative: the client this returns no longer selects \
+             one listing `{key}`."
         );
         let without_body = match &forward {
             None => quote! { self.core.remove_credential(#key); },

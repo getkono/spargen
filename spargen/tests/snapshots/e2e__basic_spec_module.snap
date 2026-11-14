@@ -290,7 +290,7 @@ mod support {
         /// different intent for; an error they can see is the better failure.
         ///
         /// A caller who wants the *other* alternative unregisters a scheme of the earlier one with
-        /// [`ClientCore::remove_credential`] (the generated client's `without_credential`); selection then
+        /// [`ClientCore::remove_credential`] (the generated client's `without_<scheme>` setters); selection then
         /// passes over the earlier alternative and reaches the later one on the next call. Registering the
         /// fallback as well is not enough on its own, because selection stops at the first satisfiable
         /// alternative and the earlier one stays satisfied until one of its schemes is removed.
@@ -14737,7 +14737,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `bearer`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_bearer()` derives a client that no longer selects one listing `bearer`.
+    ///Unregister the credential for the security scheme `bearer`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `bearer`.
     #[must_use]
     pub fn without_bearer(mut self) -> Self {
         self.core.remove_credential("bearer");
@@ -14785,7 +14785,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `apiKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_api_key()` derives a client that no longer selects one listing `apiKey`.
+    ///Unregister the credential for the security scheme `apiKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `apiKey`.
     #[must_use]
     pub fn without_api_key(mut self) -> Self {
         self.core.remove_credential("apiKey");
@@ -14833,7 +14833,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `tenant`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_tenant()` derives a client that no longer selects one listing `tenant`.
+    ///Unregister the credential for the security scheme `tenant`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `tenant`.
     #[must_use]
     pub fn without_tenant(mut self) -> Self {
         self.core.remove_credential("tenant");
@@ -14862,7 +14862,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `basic`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_basic()` derives a client that no longer selects one listing `basic`.
+    ///Unregister the credential for the security scheme `basic`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `basic`.
     #[must_use]
     pub fn without_basic(mut self) -> Self {
         self.core.remove_credential("basic");
@@ -14910,7 +14910,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `queryKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_query_key()` derives a client that no longer selects one listing `queryKey`.
+    ///Unregister the credential for the security scheme `queryKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `queryKey`.
     #[must_use]
     pub fn without_query_key(mut self) -> Self {
         self.core.remove_credential("queryKey");
@@ -14958,7 +14958,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `cookieKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_cookie_key()` derives a client that no longer selects one listing `cookieKey`.
+    ///Unregister the credential for the security scheme `cookieKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `cookieKey`.
     #[must_use]
     pub fn without_cookie_key(mut self) -> Self {
         self.core.remove_credential("cookieKey");
@@ -21432,7 +21432,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
                 .with_bearer_refreshable(token, is_rejection, on_rejected);
             self
         }
-        ///Unregister the credential for the security scheme `bearer`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_bearer()` derives a client that no longer selects one listing `bearer`.
+        ///Unregister the credential for the security scheme `bearer`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `bearer`.
         #[must_use]
         pub fn without_bearer(mut self) -> Self {
             self.inner = self.inner.without_bearer();
@@ -21481,7 +21481,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
                 .with_api_key_refreshable(token, is_rejection, on_rejected);
             self
         }
-        ///Unregister the credential for the security scheme `apiKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_api_key()` derives a client that no longer selects one listing `apiKey`.
+        ///Unregister the credential for the security scheme `apiKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `apiKey`.
         #[must_use]
         pub fn without_api_key(mut self) -> Self {
             self.inner = self.inner.without_api_key();
@@ -21527,7 +21527,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
                 .with_tenant_refreshable(token, is_rejection, on_rejected);
             self
         }
-        ///Unregister the credential for the security scheme `tenant`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_tenant()` derives a client that no longer selects one listing `tenant`.
+        ///Unregister the credential for the security scheme `tenant`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `tenant`.
         #[must_use]
         pub fn without_tenant(mut self) -> Self {
             self.inner = self.inner.without_tenant();
@@ -21549,7 +21549,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
             self.inner = self.inner.with_basic(username, password);
             self
         }
-        ///Unregister the credential for the security scheme `basic`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_basic()` derives a client that no longer selects one listing `basic`.
+        ///Unregister the credential for the security scheme `basic`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `basic`.
         #[must_use]
         pub fn without_basic(mut self) -> Self {
             self.inner = self.inner.without_basic();
@@ -21598,7 +21598,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
                 .with_query_key_refreshable(token, is_rejection, on_rejected);
             self
         }
-        ///Unregister the credential for the security scheme `queryKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_query_key()` derives a client that no longer selects one listing `queryKey`.
+        ///Unregister the credential for the security scheme `queryKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `queryKey`.
         #[must_use]
         pub fn without_query_key(mut self) -> Self {
             self.inner = self.inner.without_query_key();
@@ -21647,7 +21647,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
                 .with_cookie_key_refreshable(token, is_rejection, on_rejected);
             self
         }
-        ///Unregister the credential for the security scheme `cookieKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: `client.clone().without_cookie_key()` derives a client that no longer selects one listing `cookieKey`.
+        ///Unregister the credential for the security scheme `cookieKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `cookieKey`.
         #[must_use]
         pub fn without_cookie_key(mut self) -> Self {
             self.inner = self.inner.without_cookie_key();
