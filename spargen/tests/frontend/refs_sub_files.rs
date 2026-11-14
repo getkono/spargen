@@ -1207,3 +1207,47 @@ components:
         declared_types(&code, "Inner", |_| true)
     );
 }
+
+/// A `$ref` target saved with a leading byte-order mark is read like the root (#1425): YAML and
+/// JSON sub-files alike resolve, and their schemas lower to typed structs.
+#[test]
+fn a_ref_target_with_a_byte_order_mark_resolves() {
+    use super::source_parse::BOM;
+    let root = "openapi: 3.1.0\n\
+                info: { title: T, version: 1.0.0 }\n\
+                servers: [{ url: 'https://e.com' }]\n\
+                paths:\n  \
+                /y:\n    \
+                get:\n      \
+                operationId: getY\n      \
+                responses:\n        \
+                '200':\n          \
+                description: ok\n          \
+                content:\n            \
+                application/json:\n              \
+                schema: { $ref: './lib.yaml#/Yaml' }\n  \
+                /j:\n    \
+                get:\n      \
+                operationId: getJ\n      \
+                responses:\n        \
+                '200':\n          \
+                description: ok\n          \
+                content:\n            \
+                application/json:\n              \
+                schema: { $ref: './lib.json#/Json' }\n";
+    let yaml = format!(
+        "{BOM}Yaml:\n  type: object\n  required: [id]\n  properties: {{ id: {{ type: string }} }}\n"
+    );
+    let json = format!(
+        r#"{BOM}{{"Json": {{"type": "object", "required": ["id"], "properties": {{"id": {{"type": "string"}}}}}}}}"#
+    );
+    let (generated, checked, code) = generate_and_check_files(&[
+        ("openapi.yaml", root),
+        ("lib.yaml", &yaml),
+        ("lib.json", &json),
+    ]);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
+    assert!(code.contains("pub struct Yaml "), "{code}");
+    assert!(code.contains("pub struct Json "), "{code}");
+}

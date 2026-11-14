@@ -313,6 +313,83 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
+    /// Whether every payload of `ty` holds `tag_field`: a struct requiring the field (after every
+    /// merge and sibling meet lowering applied to it), or a union every tag-carrying variant of
+    /// which does. An untyped member, a map, or any other object type requires no property, so a
+    /// payload of it may arrive with no tag. `visiting` guards a union cycle, which finds nothing
+    /// against it.
+    fn requires_tag(&self, ty: Ty, tag_field: &str, visiting: &mut HashSet<TypeId>) -> bool {
+        if !visiting.insert(ty.id) {
+            return true;
+        }
+        match self.kind_of(ty.id) {
+            // Filled before any dispatch is decided ([`Self::decide_deferred_discriminators`]).
+            Some(TypeKind::Reserved) | None => false,
+            Some(TypeKind::Struct(object)) => object
+                .fields
+                .iter()
+                .any(|field| field.name.wire == tag_field && field.required),
+            Some(TypeKind::Union(union)) => union.variants.iter().all(|variant| {
+                !self.carries_tag(variant.ty, &mut HashSet::new())
+                    || self.requires_tag(variant.ty, tag_field, visiting)
+            }),
+            _ => false,
+        }
+    }
+
+    /// Refuse a discriminated union one of whose tag-selected variants leaves the tag property
+    /// optional while the Discriminator Object has no `defaultMapping` (#1421): a payload of that
+    /// variant with no tag satisfies the schema, and the tag dispatch has nowhere to send it.
+    /// OpenAPI 3.2 requires a `defaultMapping` for an optional discriminating property. Reported
+    /// as `E007` at the Discriminator Object, naming each such member; `true` where it was.
+    ///
+    /// A 3.1 document is not held to it: 3.1 has no `defaultMapping`, says only that the property
+    /// SHOULD be required, and leaves the behaviour for an absent one undefined, so the generated
+    /// decoder's error naming the missing tag is a disposition the specification allows.
+    pub(super) fn reject_optional_tag_property(
+        &mut self,
+        discriminator: &crate::oas31::Discriminator,
+        lowered: &[LoweredVariant],
+        dispatches: &[VariantDispatch],
+    ) -> bool {
+        if !self.document.is_oas32 {
+            return false;
+        }
+        let property = &discriminator.property_name;
+        let optional: Vec<String> = lowered
+            .iter()
+            .zip(dispatches)
+            .filter(|(variant, dispatch)| {
+                matches!(
+                    dispatch,
+                    VariantDispatch::Discriminated { tags, .. } if !tags.is_empty()
+                ) && !self.requires_tag(variant.ty, property, &mut HashSet::new())
+            })
+            .map(|(variant, _)| match variant.ref_name.as_deref() {
+                Some(name) => format!("union member {} (`{name}`)", variant.member()),
+                None => format!("union member {}", variant.member()),
+            })
+            .collect();
+        if optional.is_empty() {
+            return false;
+        }
+        let remedy = format!(
+            "require `{property}` in every member (or in a `required` beside the union), or add a \
+             `discriminator.defaultMapping` naming the member a payload with no tag decodes as"
+        );
+        // E007 case: optional-discriminator-property
+        Diagnostic::error(Code::NonDisjointUnion, discriminator.provenance.clone())
+            .message(format!(
+                "the discriminator property `{property}` is optional in {}, and the Discriminator \
+                 Object has no `defaultMapping`, so a payload of such a member with no `{property}` \
+                 satisfies the schema but has no variant to decode into",
+                optional.join(", ")
+            ))
+            .remedy(remedy)
+            .emit(self.diags);
+        true
+    }
+
     /// Whether `ty` is, or is a union reaching through its variants, a reservation still being
     /// lowered: nothing is known yet of what its payloads are, so neither whether it can carry a
     /// tag nor its JSON category can be decided until lowering has filled it.

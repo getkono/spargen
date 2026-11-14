@@ -34,18 +34,12 @@ hooks {
     }
   }
   ["pre-push"] {
-    // Deliberately unglobbed: this is the last gate before code leaves the machine, and
-    // the suite pins docs/errors.md and the corpus fixtures, so a change touching no Rust at all
-    // can still break it. A rust-toolchain.toml bump likewise changes what clippy reports.
+    // Only the fast checks run here. Clippy (`mise run lint`) and the test suite (`mise run test`)
+    // take minutes and CI runs both on every pull request and every push to `master`, so CI is
+    // their gate; pre-commit's `clippy` step still fixes what it can in the working tree.
     steps {
       ["fmt"] {
         check = "mise run fmt-check"
-      }
-      ["clippy"] {
-        check = "mise run lint"
-      }
-      ["test"] {
-        check = "mise run test"
       }
       ["convco"] {
         check = "mise run commit-range"

@@ -480,14 +480,12 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
             },
             Case {
                 tag: "untyped-one-of-variant",
-                stated_as: "a `oneOf` decoded by trial matching that keeps a variant \
-                                lowering to `serde_json::Value`",
+                stated_as: "a `oneOf` decoded by trial matching that keeps a variant",
                 reserved_wording: Some("`serde_json::Value`"),
             },
             Case {
                 tag: "indistinguishable-branches",
-                stated_as: "union branches lower to the same generated type, or to \
-                                identically structured ones",
+                stated_as: "union branches lower to the same generated type",
                 reserved_wording: None,
             },
         ],
@@ -523,10 +521,7 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
             },
             Case {
                 tag: "discriminator-target",
-                stated_as: "a `discriminator.mapping` or `defaultMapping` value, a schema \
-                                name or URI reference, names a schema the loaded description \
-                                does not hold, whether the discriminator sits beside a union or \
-                                on a schema with none",
+                stated_as: "a `discriminator.mapping` or `defaultMapping` value, a schema",
                 reserved_wording: None,
             },
             Case {
@@ -733,6 +728,11 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                 tag: "no-branch-left",
                 stated_as: "sibling keywords that leave the union with no branch at all",
                 reserved_wording: None,
+            },
+            Case {
+                tag: "optional-discriminator-property",
+                stated_as: "a member the tag selects leaves optional",
+                reserved_wording: Some("is optional in"),
             },
         ],
     ),
