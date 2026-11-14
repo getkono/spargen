@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/getkono/spargen/compare/spargen-v0.7.0...spargen-v0.8.0) - 2026-11-14
+
+### Added
+
+- *(runtime)* [**breaking**] drop From<Option<T>> for Nullable<T> ([#1456](https://github.com/getkono/spargen/pull/1456))
+- *(codegen)* [**breaking**] let a caller set the filename a binary multipart part sends ([#1394](https://github.com/getkono/spargen/pull/1394))
+- *(codegen)* [**breaking**] move required query, header and cookie parameters into `…Params::new` ([#1392](https://github.com/getkono/spargen/pull/1392))
+- *(codegen)* [**breaking**] typed per-scheme credential setters replace with_credential ([#1390](https://github.com/getkono/spargen/pull/1390))
+- *(runtime)* [**breaking**] name ParameterError, add ResponseValue::into_parts and full_jitter, drop BlockingRuntime safely, refuse non-canonical base64 ([#1369](https://github.com/getkono/spargen/pull/1369))
+- [**breaking**] a Nullable<T> tri-state for optional + nullable fields and content parameters ([#1355](https://github.com/getkono/spargen/pull/1355))
+- [**breaking**] tighten the Spec/Build facade: appending omit, enum switches, #[must_use], typed ConfigError ([#1356](https://github.com/getkono/spargen/pull/1356))
+- *(codegen)* [**breaking**] stream the raw binary arms of a success enum through a _stream twin ([#1317](https://github.com/getkono/spargen/pull/1317))
+- *(codegen)* a request builder and decoder for each binary _stream twin ([#1297](https://github.com/getkono/spargen/pull/1297))
+- *(codegen)* a typed testing::MockBackend behind Spec::testing ([#1293](https://github.com/getkono/spargen/pull/1293))
+- *(runtime)* [**breaking**] build requests as http::Request in the runtime ([#1292](https://github.com/getkono/spargen/pull/1292))
+- *(codegen)* split each operation into a request builder and a decoder, with ops constants ([#1283](https://github.com/getkono/spargen/pull/1283))
+- [**breaking**] choose the date-time crate, time, jiff, chrono or string (Spec::datetime) ([#1286](https://github.com/getkono/spargen/pull/1286))
+- [**breaking**] stream binary request and response bodies, bounding the buffered read ([#1285](https://github.com/getkono/spargen/pull/1285))
+- *(codegen)* [**breaking**] give closed string enums as_str, ALL, FromStr, Copy and Hash ([#1284](https://github.com/getkono/spargen/pull/1284))
+- [**breaking**] bind a header parameter once on the client (Spec::bind_header) ([#1282](https://github.com/getkono/spargen/pull/1282))
+- *(runtime)* [**breaking**] per-call RequestOptions with a body limit, extensions and headers ([#1281](https://github.com/getkono/spargen/pull/1281))
+- *(codegen)* sanitize carried docs and allow unsatisfiable lints per item ([#1280](https://github.com/getkono/spargen/pull/1280))
+- *(runtime)* [**breaking**] replay a call once after a refreshable credential is rejected ([#1272](https://github.com/getkono/spargen/pull/1272))
+- *(codegen)* [**breaking**] give object structs new, with_* setters and PartialEq ([#1275](https://github.com/getkono/spargen/pull/1275))
+- *(compat)* keep (allow-list) operation rules ([#1274](https://github.com/getkono/spargen/pull/1274))
+- *(name)* [**breaking**] name an inline request body after its operation ([#1277](https://github.com/getkono/spargen/pull/1277))
+- *(codegen)* [**breaking**] status() and owning body accessors on status enums ([#1276](https://github.com/getkono/spargen/pull/1276))
+- *(codegen)* [**breaking**] emit Client::with_client_and_backend and with_base_url ([#1278](https://github.com/getkono/spargen/pull/1278))
+
+### Fixed
+
+- *(name)* [**breaking**] rank response-header fields, and report their rebinding in diff as major ([#1470](https://github.com/getkono/spargen/pull/1470))
+- *(runtime)* keep LinkPaginator armed when a next_page future is dropped ([#1463](https://github.com/getkono/spargen/pull/1463))
+- *(cli)* exit cleanly on a closed stdout instead of panicking ([#1476](https://github.com/getkono/spargen/pull/1476))
+- *(frontend)* [**breaking**] reject an optional discriminator property without defaultMapping ([#1466](https://github.com/getkono/spargen/pull/1466))
+- *(ir)* check the defaultMapping index, enum value kinds, querystring count and status selectors ([#1473](https://github.com/getkono/spargen/pull/1473))
+- *(frontend)* skip x- keys as Path Item $ref siblings ([#1472](https://github.com/getkono/spargen/pull/1472))
+- *(output)* write through a symlinked output path instead of replacing the link ([#1469](https://github.com/getkono/spargen/pull/1469))
+- *(source)* accept a leading UTF-8 byte-order mark in a spec, $ref target or vendored copy ([#1467](https://github.com/getkono/spargen/pull/1467))
+- *(runtime)* MultipartPart::headers refuses Content-Type ([#1461](https://github.com/getkono/spargen/pull/1461))
+- *(compat)* apply a repeated omit rule once, satisfy a covered rule, and compare config paths by identity ([#1457](https://github.com/getkono/spargen/pull/1457))
+- *(cli)* add --testing/--no-testing and hold every switch to all four surfaces ([#1458](https://github.com/getkono/spargen/pull/1458))
+- *(runtime)* [**breaking**] stop at a cross-origin redirect instead of forwarding apiKey and bound headers ([#1460](https://github.com/getkono/spargen/pull/1460))
+- *(frontend)* [**breaking**] reject enum/const members the type excludes, and intersect enum with const ([#1462](https://github.com/getkono/spargen/pull/1462))
+- *(frontend)* [**breaking**] keep discriminator tag dispatch for recursive and union members ([#1455](https://github.com/getkono/spargen/pull/1455))
+- *(name)* [**breaking**] rank field and variant identifiers, and report a rebinding in diff as major ([#1454](https://github.com/getkono/spargen/pull/1454))
+- *(codegen)* [**breaking**] read HEAD and 204/205/304 responses as bodyless whatever content they declare ([#1393](https://github.com/getkono/spargen/pull/1393))
+- *(frontend)* warn and drop an Encoding Object header pinning Content-Disposition ([#1391](https://github.com/getkono/spargen/pull/1391))
+- *(pipeline)* keep build-environment warnings on write failures, warn on a failed cache write, and cap the carve rejection ([#1388](https://github.com/getkono/spargen/pull/1388))
+- *(runtime)* [**breaking**] refuse invalid base URLs and bound header values, and make transport timeouts construction-only ([#1389](https://github.com/getkono/spargen/pull/1389))
+- *(codegen)* [**breaking**] emit integer and boolean enum/const sets as checked newtypes ([#1387](https://github.com/getkono/spargen/pull/1387))
+- *(codegen)* [**breaking**] relax `required` on readOnly/writeOnly properties to their own direction ([#1383](https://github.com/getkono/spargen/pull/1383))
+- *(runtime)* [**breaking**] give a binary multipart part a filename, and refuse a part header setting Content-Disposition ([#1386](https://github.com/getkono/spargen/pull/1386))
+- *(codegen)* refuse a defaultMapping payload an untagged variant would claim ([#1382](https://github.com/getkono/spargen/pull/1382))
+- *(runtime)* keep PaginationCycle's URL without userinfo and query ([#1381](https://github.com/getkono/spargen/pull/1381))
+- *(compat)* match a file-scoped omit rule's file by whole path components ([#1380](https://github.com/getkono/spargen/pull/1380))
+- *(pipeline)* name every input to Cargo from check and from a failed load ([#1379](https://github.com/getkono/spargen/pull/1379))
+- *(codegen)* [**breaking**] send a request body declared with no schema as any value of its media ([#1377](https://github.com/getkono/spargen/pull/1377))
+- *(codegen)* refuse to serialize a discriminator tag that does not select the variant ([#1375](https://github.com/getkono/spargen/pull/1375))
+- *(runtime)* redact secret response headers in error Debug, and print each cause once ([#1374](https://github.com/getkono/spargen/pull/1374))
+- *(frontend)* warn on OpenAPI 3.0 nullable in a 3.1/3.2 document ([#1373](https://github.com/getkono/spargen/pull/1373))
+- *(emit)* make the output header and input digest independent of the checkout path and OS ([#1368](https://github.com/getkono/spargen/pull/1368))
+- *(surface)* classify differing uuid, datetime and testing settings in `spargen diff` ([#1371](https://github.com/getkono/spargen/pull/1371))
+- *(runtime)* carry scalar text/* bodies as bare text in both directions ([#1360](https://github.com/getkono/spargen/pull/1360))
+- *(name)* reserve the std and builder methods generated clients, params and servers answer to ([#1370](https://github.com/getkono/spargen/pull/1370))
+- *(codegen)* try each trial union variant only on a payload of its JSON category ([#1363](https://github.com/getkono/spargen/pull/1363))
+- *(runtime)* [**breaking**] refuse a LinkPaginator next link that leaves the first page's origin ([#1357](https://github.com/getkono/spargen/pull/1357))
+- *(source)* refuse https downgrades, bound bodies and write atomically in spargen lock ([#1365](https://github.com/getkono/spargen/pull/1365))
+- *(runtime)* stream failure handling — read errors by class, SSE EOF discard, terminal reconnect responses ([#1354](https://github.com/getkono/spargen/pull/1354))
+- *(diag)* keep the rejecting error when warnings fill batch_cap ([#1367](https://github.com/getkono/spargen/pull/1367))
+- *(runtime)* refuse a colon in a Basic username, zeroize credential intermediates, and send one Authorization ([#1358](https://github.com/getkono/spargen/pull/1358))
+- *(name)* disambiguate colliding synthesized operationIds instead of rejecting them ([#1364](https://github.com/getkono/spargen/pull/1364))
+- *(runtime)* read non-ASCII UTF-8 response headers and split header lists by RFC 9110's list rule ([#1359](https://github.com/getkono/spargen/pull/1359))
+- *(runtime)* stop refusing a bodiless response's Content-Length and bound the refresh read by max_body ([#1321](https://github.com/getkono/spargen/pull/1321))
+- *(codegen)* read an over-indented list continuation as paragraph text, not a fence ([#1318](https://github.com/getkono/spargen/pull/1318))
+- *(runtime)* [**breaking**] read and write one RFC 3339 date-time grammar under every backend ([#1319](https://github.com/getkono/spargen/pull/1319))
+- *(runtime)* link no private runtime item from a public item's docs ([#1320](https://github.com/getkono/spargen/pull/1320))
+- *(codegen)* keep a lone CR, bidi controls, non-void self-closing tags and over-indented list items out of carried docs ([#1315](https://github.com/getkono/spargen/pull/1315))
+- *(runtime)* [**breaking**] read a binary _stream twin's body chunk by chunk on wasm32 ([#1313](https://github.com/getkono/spargen/pull/1313))
+- *(codegen)* keep carried code blocks out of the consumer's doctests ([#1312](https://github.com/getkono/spargen/pull/1312))
+- *(runtime)* keep a query apiKey and bound header values out of logged text ([#1310](https://github.com/getkono/spargen/pull/1310))
+- *(codegen)* testing module reply defects: testing::testing, XML sequences, claimed statuses ([#1311](https://github.com/getkono/spargen/pull/1311))
+- *(codegen)* spell UnknownVariant in a string enum's from_str signature ([#1309](https://github.com/getkono/spargen/pull/1309))
+- *(surface)* report a renamed _stream twin or its companions in spargen diff ([#1298](https://github.com/getkono/spargen/pull/1298))
+
+### Other
+
+- *(hooks)* drop clippy and the test suite from pre-push ([#1471](https://github.com/getkono/spargen/pull/1471))
+- *(api)* [**breaking**] give DateTimeBackend::from_str a typed UnknownDateTimeBackend error ([#1465](https://github.com/getkono/spargen/pull/1465))
+- cut AGENTS.md to cross-cutting rules and scope the rest in .claude/rules ([#1396](https://github.com/getkono/spargen/pull/1396))
+- cover the audit's remaining untested branches across support-runtime, spargen and spargen-macro ([#1378](https://github.com/getkono/spargen/pull/1378))
+- rewrite the README for clarity and public sharing
+- *(book)* move the generated-surface reference and guarantees out of the README
+- *(runtime)* pin multipart calls retried and replayed after a refresh ([#1295](https://github.com/getkono/spargen/pull/1295))
+- *(runtime)* make enforcing TotalTimeout part of the HttpBackend contract ([#1294](https://github.com/getkono/spargen/pull/1294))
+
 ## [0.7.0](https://github.com/getkono/spargen/compare/spargen-v0.6.0...spargen-v0.7.0) - 2026-11-07
 
 ### Added

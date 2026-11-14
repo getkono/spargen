@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/getkono/spargen/compare/spargen-macro-v0.7.0...spargen-macro-v0.8.0) - 2026-11-14
+
+### Added
+
+- *(macro)* accept no_<switch> for every generate_api! switch and document argument rules ([#1372](https://github.com/getkono/spargen/pull/1372))
+- [**breaking**] tighten the Spec/Build facade: appending omit, enum switches, #[must_use], typed ConfigError ([#1356](https://github.com/getkono/spargen/pull/1356))
+- *(codegen)* a typed testing::MockBackend behind Spec::testing ([#1293](https://github.com/getkono/spargen/pull/1293))
+- [**breaking**] choose the date-time crate, time, jiff, chrono or string (Spec::datetime) ([#1286](https://github.com/getkono/spargen/pull/1286))
+- [**breaking**] bind a header parameter once on the client (Spec::bind_header) ([#1282](https://github.com/getkono/spargen/pull/1282))
+- *(codegen)* sanitize carried docs and allow unsatisfiable lints per item ([#1280](https://github.com/getkono/spargen/pull/1280))
+- *(compat)* keep (allow-list) operation rules ([#1274](https://github.com/getkono/spargen/pull/1274))
+
+### Fixed
+
+- *(diag)* keep the rejecting error when warnings fill batch_cap ([#1367](https://github.com/getkono/spargen/pull/1367))
+
+### Other
+
+- *(api)* [**breaking**] give DateTimeBackend::from_str a typed UnknownDateTimeBackend error ([#1465](https://github.com/getkono/spargen/pull/1465))
+- cut AGENTS.md to cross-cutting rules and scope the rest in .claude/rules ([#1396](https://github.com/getkono/spargen/pull/1396))
+- cover the audit's remaining untested branches across support-runtime, spargen and spargen-macro ([#1378](https://github.com/getkono/spargen/pull/1378))
+
 ## [0.7.0](https://github.com/getkono/spargen/compare/spargen-macro-v0.6.0...spargen-macro-v0.7.0) - 2026-11-07
 
 ### Added
