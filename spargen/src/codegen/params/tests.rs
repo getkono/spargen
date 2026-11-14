@@ -144,17 +144,19 @@ fn headers_and_cookies_render_verbatim_under_their_cookie_rules() {
 }
 
 /// Where every parameter of an operation is optional, its method takes the bundle as an `Option`,
-/// so each parameter is read through it.
+/// so each parameter is read through it. With no cookie parameter, it keeps no cookie jar.
 #[test]
 fn an_optional_bundle_is_read_through_its_option() {
     let generated = generated(PARAMS);
+    let list_things = preparer(&generated, "list_things");
     assert_contains_all(
-        preparer(&generated, "list_things"),
+        list_things,
         &[
             r#"ifletSome(value)=params.as_ref().and_then(|params|params.page.as_ref()){query.extend(support::serialize_form("page",value,true,support::PercentEncoding::Form,)"#,
             r#"ifletSome(value)=params.as_ref().filter(|params|!params.cn.is_absent()).map(|params|&params.cn){query.push(format!("#,
         ],
     );
+    assert!(!list_things.contains("cookies"), "{list_things}");
 }
 
 /// A whole-query value: a required JSON one is the raw query's initializer, an optional JSON one
