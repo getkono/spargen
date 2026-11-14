@@ -534,22 +534,35 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Lower an array schema with `prefixItems` to a tuple of its entries' types, rejected
-    /// (`E015`) unless `items: false` closes the array at the prefix: any other `items`, or
-    /// none, allows a remainder beside them.
+    /// (`E015`) unless the array is closed at the prefix — by `items: false`, by a `maxItems` at
+    /// or below the prefix length, or, with no `items`, by `unevaluatedItems: false`: any other
+    /// `items`, or none, allows a remainder beside them.
     fn lower_tuple(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         // `items` beside `prefixItems` is the 2020-12 rest-element schema, and an absent
         // `items` admits any remainder, as `items: true` does (#1413). A Rust tuple is
-        // fixed-length, so a remainder is not representable — except under `items: false`,
-        // which closes the array at the prefix and *is* a tuple.
+        // fixed-length, so a remainder is not representable — except where the array is closed
+        // at the prefix, which *is* a tuple. `maxItems` no greater than the prefix length is the
+        // spelling schemars 1.x (and so aide) emits for one; `unevaluatedItems: false` closes
+        // what no `items` evaluated, so it closes the remainder only where `items` is absent.
+        let bounded = schema.validation.max_items.is_some_and(|max| {
+            usize::try_from(max).is_ok_and(|max| max <= schema.prefix_items.len())
+        });
+        let unevaluated_closed = schema.validation_children.iter().any(|(keyword, child)| {
+            keyword == "unevaluatedItems" && matches!(child, SchemaOr::Bool(false))
+        });
         let message = match schema.items.as_deref() {
+            _ if bounded => None,
             Some(SchemaOr::Bool(false)) => None,
+            None if unevaluated_closed => None,
             Some(_) => Some(
                 "`items` beside `prefixItems` allows a typed variable-length remainder, which \
-                 no single Rust type expresses; only `items: false` closes the tuple",
+                 no single Rust type expresses; `items: false`, or a `maxItems` no greater than \
+                 the prefix length, closes the tuple",
             ),
             None => Some(
                 "`prefixItems` with no `items` allows any remainder after the prefix, as \
-                 `items: true` does, which no single Rust type expresses; only `items: false` \
+                 `items: true` does, which no single Rust type expresses; `items: false`, \
+                 `unevaluatedItems: false`, or a `maxItems` no greater than the prefix length \
                  closes the tuple",
             ),
         };
@@ -557,7 +570,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Diagnostic::error(Code::TupleRestNotRepresentable, schema.provenance.clone())
                 .message(message)
                 .remedy(
-                    "add `items: false` to close the tuple, describe the whole array with \
+                    "add `items: false` (or `maxItems` equal to the prefix length) to close the \
+                     tuple, describe the whole array with \
                      `items`, or omit this API segment with spargen::omit!",
                 )
                 .emit(self.diags);
