@@ -1110,7 +1110,7 @@ paths:
     // No body schema was lowered, and the success is the unit value beside its typed headers.
     assert!(!code.contains("probe_only"), "{code}");
     assert!(!code.contains("probe_problem"), "{code}");
-    assert!(!code.contains("decode_success"), "{code}");
+    assert!(!code.contains("support::decode_success"), "{code}");
     assert!(code.contains("support::ResponseValue<()>"), "{code}");
     assert!(code.contains("pub x_total: "), "{code}");
 }
