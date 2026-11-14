@@ -81,9 +81,11 @@ pub use config::{
     Build, CargoIntegration, CarriedDocs, Carve, ConfigError, Narrowing, Spec, TestingModule,
     UnionTags, UuidMapping,
 };
-pub use diag::{
-    Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, OutcomeClaim, Severity, Span, UnknownCode,
-};
+pub use diag::{Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, Severity, Span, UnknownCode};
+// The internal claim oracle `spargen/tests/frontend/` holds every run to, hidden and outside
+// semver like `Outcome::admits` and `Diagnostic::claim`.
+#[doc(hidden)]
+pub use diag::OutcomeClaim;
 pub use diff_api::{DiffRejection, DiffSides, Side};
 pub use ir::{DateTimeBackend, UnknownDateTimeBackend};
 pub use report::{Outcome, Report};
