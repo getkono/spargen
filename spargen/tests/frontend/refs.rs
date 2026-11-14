@@ -633,6 +633,42 @@ components:
     }
 }
 
+/// A mapping value and a member `$ref` that spell one node two ways — one percent-encoding a token
+/// the other writes plainly — name one member (#1451). Matching compares target identities, and
+/// an identity is the decoded pointer whatever the fragment's spelling, so the mapped tag
+/// dispatches rather than `E007` reporting the mapping's target as no member of the union.
+#[test]
+fn a_mapping_and_a_member_spelling_one_node_differently_are_one_member() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    Defs:\n      type: object\n      properties:\n        \
+         \"big cat\": { type: object, required: [kind], properties: { kind: { type: string } } }\n        \
+         dog: { type: object, required: [kind], properties: { kind: { type: string } } }\n    \
+         Pet:\n      oneOf:\n        \
+         - $ref: '#/components/schemas/Defs/properties/big%20cat'\n        \
+         - $ref: '#/components/schemas/Defs/properties/dog'\n      \
+         discriminator:\n        propertyName: kind\n        mapping:\n          \
+         cat: '#/components/schemas/Defs/properties/big cat'\n          \
+         dog: '#/components/schemas/Defs/properties/dog'\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let arms = super::discriminator::discriminated_arms(&code, "Pet");
+    let tags: Vec<Vec<String>> = arms.decode.into_iter().map(|(_, tags)| tags).collect();
+    assert_eq!(
+        tags,
+        [vec!["cat".to_owned()], vec!["dog".to_owned()]],
+        "{code}"
+    );
+    let written: Vec<Option<String>> = arms.encode.into_iter().map(|(_, tag)| tag).collect();
+    assert_eq!(
+        written,
+        [Some("cat".to_owned()), Some("dog".to_owned())],
+        "{code}"
+    );
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
