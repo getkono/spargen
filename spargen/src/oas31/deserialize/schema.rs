@@ -348,6 +348,9 @@ fn parse_xml(
             .get("nodeType")
             .and_then(SpannedValue::as_str)
             .map(str::to_owned),
+        node_type_provenance: value
+            .get("nodeType")
+            .map(|node_type| provenance(&pointer.push("nodeType"), node_type)),
         namespace: value
             .get("namespace")
             .and_then(SpannedValue::as_str)

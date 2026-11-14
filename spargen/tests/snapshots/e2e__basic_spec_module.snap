@@ -1190,16 +1190,28 @@ mod support {
             /// sends it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts
             /// it too.
             ///
-            /// Returns a request-construction error, leaving any value already bound to `name` in place,
-            /// if `value` is not a valid header value: it holds a control character other than a tab,
-            /// such as CR, LF, NUL or DEL. The error does not quote the value.
+            /// Returns a request-construction error, binding nothing and leaving any value already bound
+            /// in place, if `name` is not a valid header name (an empty name, or one holding a space, a
+            /// colon, a control character or a byte past ASCII), or if `value` is not a valid header
+            /// value: it holds a control character other than a tab, such as CR, LF, NUL or DEL. The
+            /// error names the header and does not quote the value.
             pub fn bind_header(
                 &mut self,
                 name: &str,
                 value: impl Into<String>,
             ) -> Result<(), Error<Infallible>> {
-                let value = value.into();
-                if http::HeaderValue::from_str(&value).is_err() {
+                let Ok(header) = http::HeaderName::from_bytes(name.as_bytes()) else {
+                    return Err(
+                        Error::request_message(
+                            format!(
+                                "`{}` is not a valid header name to bind a value to", name
+                                .escape_debug()
+                            ),
+                        ),
+                    );
+                };
+                let value = SecretString::from(value.into());
+                if http::HeaderValue::from_str(value.expose_secret()).is_err() {
                     return Err(
                         Error::request_message(
                             format!(
@@ -1209,17 +1221,15 @@ mod support {
                         ),
                     );
                 }
-                self.bound_headers
-                    .insert(name.to_ascii_lowercase(), SecretString::from(value));
+                self.bound_headers.insert(header.as_str().to_owned(), value);
                 Ok(())
             }
             /// Unbind the header `name`, matched in any letter case, returning the value bound to it if
-            /// there was one. An operation that requires the header then fails with
-            /// [`super::RequestError::MissingBoundParameter`] before anything is sent.
-            pub fn unbind_header(&mut self, name: &str) -> Option<String> {
-                self.bound_headers
-                    .remove(&name.to_ascii_lowercase())
-                    .map(|value| value.expose_secret().to_owned())
+            /// there was one, as the secret the core held it as, so its `Debug` redacts it. An operation
+            /// that requires the header then fails with [`super::RequestError::MissingBoundParameter`]
+            /// before anything is sent.
+            pub fn unbind_header(&mut self, name: &str) -> Option<SecretString> {
+                self.bound_headers.remove(&name.to_ascii_lowercase())
             }
             /// The value bound to the header `name`, matched in any letter case.
             pub fn bound_header(&self, name: &str) -> Option<&str> {
