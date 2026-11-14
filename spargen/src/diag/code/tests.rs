@@ -106,13 +106,12 @@ fn cited_codes(markdown: &str) -> Vec<(String, usize)> {
 /// declared code must be placed somewhere in the matrix, and a code must not be filed under a
 /// column that disagrees with its own severity.
 ///
-/// That is all it holds. The prose of a cell is constrained by nothing here: a row rewritten
-/// to say the opposite of what the generator does keeps every assertion green, so the prose is
-/// reviewed by hand. A matrix cell names its
-/// constructs and defers the cases reaching a code to `spargen explain`, the one copy of that
-/// list, rather than restating an `explain()` body in words no test compares with it; the
-/// clauses `E023`'s row does quote are held
-/// verbatim by `the_e023_matrix_row_quotes_its_pinned_explain_text_verbatim`.
+/// That is all it holds. The prose of a cell is constrained by nothing here: a row rewritten to say
+/// the opposite of what the generator does keeps every assertion green, so the prose is reviewed by
+/// hand. A matrix cell names its constructs and defers the cases reaching a code to `spargen
+/// explain`, the one copy of that list, rather than restating an `explain()` body in words no test
+/// compares with it; the clauses `E023`'s row does quote are held verbatim by
+/// `the_e023_matrix_row_quotes_its_pinned_explain_text_verbatim`.
 #[test]
 fn the_support_documents_cite_the_codes_that_exist_where_they_belong() {
     // Skipped only from a packaged `.crate`, which carries no docs directory. In the
@@ -788,10 +787,9 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                 reserved_wording: None,
             },
             Case {
-                tag: "null-only-left",
-                stated_as: "a schema with neither an `allOf` nor a `$ref` whose own `enum`, \
-                                `const` or `anyOf` members leave only the `null` its `type` \
-                                refuses",
+                tag: "own-keywords-empty",
+                stated_as: "a schema with neither an `allOf` nor a `$ref` whose own keywords \
+                                leave no value",
                 reserved_wording: None,
             },
         ],
@@ -1430,14 +1428,14 @@ fn a_case_marker_counts_only_on_a_test_that_asserts_its_code_in_its_owning_suite
     );
 }
 
-/// .claude/rules/diagnostics.md: every code gets "a fixture in `spargen/tests/frontend/`", enforced by tests
-/// rather than convention. Frontend codes are asserted there; the eight the frontend cannot
-/// produce — the `compat` omit rules, the facade's own Cargo-integration and runtime-audit
+/// .claude/rules/diagnostics.md: every code gets "a fixture in `spargen/tests/frontend/`", enforced
+/// by tests rather than convention. Frontend codes are asserted there; the eight the frontend
+/// cannot produce — the `compat` omit rules, the facade's own Cargo-integration and runtime-audit
 /// diagnostics, and `spargen lock`'s fetch failure — are asserted in the suite that *can* produce
 /// them, and each must say so in [`OWNED_ELSEWHERE`]. A new code that lands in neither place fails,
-/// which is the point. The
-/// owning suite must assert the code in a positive form ([`asserts_variant`]); the frontend
-/// suite must not name an elsewhere-owned code at all, not even negatively.
+/// which is the point. The owning suite must assert the code in a positive form
+/// ([`asserts_variant`]); the frontend suite must not name an elsewhere-owned code at all, not even
+/// negatively.
 #[test]
 fn every_code_is_asserted_by_the_suite_that_owns_it() {
     let Some(root) = repo_root() else {

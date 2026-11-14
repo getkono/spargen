@@ -242,7 +242,7 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
 
 /// Whether two URLs share a scheme, host and port, as the URL parser normalises them: a host's
 /// case and a spelled-out default port make no difference.
-fn same_origin(a: &Url, b: &Url) -> bool {
+pub(crate) fn same_origin(a: &Url, b: &Url) -> bool {
     a.scheme() == b.scheme()
         && a.host() == b.host()
         && a.port_or_known_default() == b.port_or_known_default()
@@ -250,8 +250,8 @@ fn same_origin(a: &Url, b: &Url) -> bool {
 
 /// `url` without its userinfo and query, the two places a URL carries a credential (an `apiKey`
 /// query parameter, a `user:password@` prefix), so an error holding it prints neither through
-/// `Display` or `Debug`.
-fn without_credentials(mut url: Url) -> Url {
+/// `Display` or `Debug`. The default backend's redirect policy stores a refused target this way.
+pub(crate) fn without_credentials(mut url: Url) -> Url {
     url.set_query(None);
     // Both fail only for a URL with no host, which an `http(s)` page URL always has.
     let _ = url.set_username("");

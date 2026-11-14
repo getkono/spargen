@@ -49,7 +49,8 @@ Options:
 
 `check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, the switch pairs
 `--carve`/`--no-carve`, `--uuid`/`--no-uuid`, `--open-narrowing`/`--no-open-narrowing`,
-`--open-unions`/`--no-open-unions` and `--verbatim-docs`/`--no-verbatim-docs`, `--datetime`,
+`--open-unions`/`--no-open-unions`, `--verbatim-docs`/`--no-verbatim-docs` and
+`--testing`/`--no-testing`, `--datetime`,
 `--error-body-cap`, `--batch-cap`, and the repeatable
 `--omit-path`, `--omit-operation`, `--omit-component`, `--omit-pointer`, `--keep-operation` and
 `--bind-header`. The
