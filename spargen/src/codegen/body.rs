@@ -163,6 +163,61 @@ pub(super) fn body_send_tokens(
     }
 }
 
+/// The typed `filename` setters of each multipart body type an operation takes as a
+/// `MultipartBody` ([`Api::multipart_file_parts`](crate::ir::Api::multipart_file_parts)): one
+/// inherent `impl` per body type, however many operations send it, in the order its first
+/// operation appears, with a `{field}_file_name` setter per binary property and an
+/// `{overflow}_file_name` setter, taking the key, for binary `additionalProperties` members.
+pub(super) fn file_name_setter_impls(api: &Api, names: &Names) -> TokenStream {
+    let mut seen = std::collections::BTreeSet::new();
+    let impls = api.operations.iter().filter_map(|operation| {
+        let parts = api.multipart_file_parts(operation)?;
+        if !seen.insert(parts.body.id) {
+            return None;
+        }
+        let ty = super::ty::ty_tokens(parts.body, names, true);
+        let setters = names
+            .file_name_setters(&parts)
+            .into_iter()
+            .map(|(setter, wire)| {
+                let setter = quote::format_ident!("{setter}");
+                match wire {
+                    Some(wire) => {
+                        let doc = format!(
+                            "Send `file_name` as the `filename` of the `{wire}` part, in place of \
+                             its part name."
+                        );
+                        quote! {
+                            #[doc = #doc]
+                            #[must_use]
+                            pub fn #setter(self, file_name: impl Into<String>) -> Self {
+                                self.file_name_for(#wire, file_name)
+                            }
+                        }
+                    }
+                    None => quote! {
+                        /// Send `file_name` as the `filename` of the `additionalProperties` part
+                        /// keyed `key`, in place of its key.
+                        #[must_use]
+                        pub fn #setter(
+                            self,
+                            key: impl Into<String>,
+                            file_name: impl Into<String>,
+                        ) -> Self {
+                            self.file_name_for(key, file_name)
+                        }
+                    },
+                }
+            });
+        Some(quote! {
+            impl support::MultipartBody<'_, #ty> {
+                #(#setters)*
+            }
+        })
+    });
+    quote! { #(#impls)* }
+}
+
 /// The statement that sets the request's `Accept` header to the media the success responses
 /// announce ([`Responses::accept`](crate::ir::Responses::accept)); empty when they announce none.
 pub(super) fn accept_tokens(operation: &Operation, bindings: &OperationBindings) -> TokenStream {
@@ -236,7 +291,9 @@ fn form_style_tokens(style: &crate::ir::ParamStyle) -> TokenStream {
 /// pins to a literal value. Otherwise the property's own lowered type
 /// decides how its value becomes bytes — the only thing the generator can know for a media type it
 /// has no codec for: a binary field (`bytes::Bytes`) becomes a file part whose `filename` is the
-/// property's name, a scalar a text part via
+/// one the caller set on the `MultipartBody` the method takes it as
+/// ([`Api::multipart_file_parts`](crate::ir::Api::multipart_file_parts)), else the property's
+/// name, a scalar a text part via
 /// `Display`, and anything composite a JSON-encoded text part; and that part carries the
 /// Content-Type its Encoding Object resolves to — explicit, or defaulted from the property's type
 /// by the specification's table — and any header the Encoding Object pins to a literal value. An
@@ -327,7 +384,12 @@ fn emit_multipart_body(
                         }
                     };
                 }
-                _ => media_part_tokens(kind, receiver, reference, &quote! { #wire }),
+                _ => media_part_tokens(
+                    kind,
+                    receiver,
+                    reference,
+                    &quote! { #body_binding.file_name_of(#wire).unwrap_or(#wire) },
+                ),
             };
             let set_type = set_part_type_tokens(property.map(|property| &property.mode));
             quote! {
@@ -415,7 +477,7 @@ fn additional_parts_tokens(
         kind,
         &quote! { value },
         &quote! { value },
-        &quote! { name.as_str() },
+        &quote! { #body_binding.file_name_of(name).unwrap_or(name.as_str()) },
     );
     let set_type = set_part_type_tokens(Some(mode));
     quote! {
@@ -431,7 +493,7 @@ fn additional_parts_tokens(
 
 /// The statement binding `part` to a media-mode multipart part built from one value, by the
 /// value's lowered type: a binary value becomes a file part, whose `filename` is `file_name` (the
-/// part's name), a scalar a text part via `Display`, and anything composite a JSON-encoded text
+/// one the caller set on the `MultipartBody`, else the part's name), a scalar a text part via `Display`, and anything composite a JSON-encoded text
 /// part. `receiver` is the value for method calls; `reference` is a `&value` for
 /// `serde_json::to_string`.
 fn media_part_tokens(

@@ -116,7 +116,7 @@ pub use parameter::{
     serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter,
     FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding,
 };
-pub use request::{MultipartForm, MultipartPart, RequestBuilder};
+pub use request::{AsMultipartBody, MultipartBody, MultipartForm, MultipartPart, RequestBuilder};
 pub use response::{stream_success_bytes, ByteStream, ResponseValue};
 pub use retry::{
     exponential_backoff, full_jitter, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,

@@ -113,6 +113,7 @@ pub(crate) fn generate(
     let signatures = operation::signatures(api, names, options);
     let client = client::emit_client(api, &signatures, names, options);
     let ops = operation::emit_ops(api, names);
+    let file_name_setters = body::file_name_setter_impls(api, names);
     // The synchronous facade is always emitted; `blocking::blocking_cfg` compiles its items out.
     let blocking = blocking::emit_blocking_client(api, &signatures, names, options);
     let testing = options.testing.then(|| testing::emit_testing(api, names));
@@ -144,6 +145,7 @@ pub(crate) fn generate(
         #models
         #ops
         #client
+        #file_name_setters
         #blocking
         #testing
     };

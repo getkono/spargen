@@ -16,7 +16,8 @@ mod synth;
 use std::collections::HashMap;
 
 use crate::ir::{
-    AdditionalProps, Api, CredentialShape, OperationId, ScalarRepr, SchemeId, TypeId, TypeKind,
+    AdditionalProps, Api, CredentialShape, MultipartFileParts, OperationId, ScalarRepr, SchemeId,
+    TypeId, TypeKind,
 };
 
 pub(crate) use casing::hint_segment;
@@ -93,6 +94,35 @@ impl Names {
         self.operations
             .get(id)
             .expect("every operation of the allocated API has its names")
+    }
+
+    /// The `MultipartBody` setters naming the `filename` of each file part in `parts`:
+    /// `{field}_file_name` per declared property, in field order, with its part name, then
+    /// `{overflow}_file_name` for the `additionalProperties` members, with no part name, since a
+    /// member's key is its part name. The field and overflow identifiers are distinct in their
+    /// struct's scope, so these spellings are distinct too.
+    pub(crate) fn file_name_setters<'a>(
+        &self,
+        parts: &MultipartFileParts<'a>,
+    ) -> Vec<(String, Option<&'a str>)> {
+        let declared = parts.fields.iter().map(|field| {
+            let ident = self
+                .fields
+                .get(&(parts.body.id, field.name.wire.clone()))
+                .expect("multipart body field name allocated");
+            (
+                format!("{}_file_name", ident.unraw()),
+                Some(field.name.wire.as_str()),
+            )
+        });
+        let overflow = parts.overflow.then(|| {
+            let ident = self
+                .struct_overflow
+                .get(&parts.body.id)
+                .expect("overflow field name allocated");
+            (format!("{}_file_name", ident.unraw()), None)
+        });
+        declared.chain(overflow).collect()
     }
 }
 
@@ -327,6 +357,7 @@ pub(crate) const SERVERS_MODULE_NAMES: &[&str] = &["Default", "Into", "String"];
 pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "ApiErrorBody",
     "ApiErrorProblem",
+    "AsMultipartBody",
     "AuthError",
     "ByteStream",
     "ClientConfig",
@@ -343,6 +374,7 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "MaybeSync",
     "Middleware",
     "MiddlewareBackend",
+    "MultipartBody",
     "Next",
     "Nullable",
     "ParameterError",

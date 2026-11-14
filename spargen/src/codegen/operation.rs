@@ -813,11 +813,28 @@ impl OperationSig {
                 ));
                 quote! { #[doc = #note] }
             });
+        // A multipart body with file parts names, in the rustdoc, the setters that override the
+        // `filename` each sends.
+        let file_parts_doc = api.multipart_file_parts(operation).map(|parts| {
+            let setters = names
+                .file_name_setters(&parts)
+                .into_iter()
+                .map(|(setter, _)| format!("`{setter}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let note = normalize_rustdoc(&format!(
+                "Each binary part of the request body is sent as a file part whose `filename` is \
+                 its part name; to send another, pass a `MultipartBody` built from the body and \
+                 set it with {setters}."
+            ));
+            quote! { #[doc = #note] }
+        });
         let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
         let attrs = quote! {
             #docs
             #(#param_docs)*
             #binary_body_doc
+            #file_parts_doc
             #deprecated
         };
 
@@ -887,16 +904,32 @@ impl OperationSig {
             // body is taken by value as anything that converts into the transport's body, so owned
             // bytes move in without a copy and a stream is sent as it is read; an optional one is
             // the concrete `HttpBody`, where `impl Into` would leave a bare `None` uninferable.
-            let decl = match (api.sends_binary_body(operation), body.required) {
-                (true, true) => quote! { #body_binding: impl Into<support::HttpBody> },
-                (true, false) => quote! { #body_binding: Option<support::HttpBody> },
-                (false, true) => quote! { #body_binding: &#ty },
-                (false, false) => quote! { #body_binding: Option<&#ty> },
+            // A multipart body with file parts is read as a `MultipartBody`, which carries the
+            // `filename` a caller sets for each: a required one is `&T` or a `MultipartBody`, so a
+            // call passing the body alone sends every file part under its part name; an optional
+            // one is the concrete `Option<MultipartBody>`, where `impl AsMultipartBody` would
+            // leave a bare `None` uninferable.
+            let files = api.multipart_file_parts(operation).is_some();
+            let (decl, normalize) = match (api.sends_binary_body(operation), files, body.required) {
+                (true, _, true) => (quote! { #body_binding: impl Into<support::HttpBody> }, None),
+                (true, _, false) => (quote! { #body_binding: Option<support::HttpBody> }, None),
+                (false, true, true) => (
+                    quote! { #body_binding: impl support::AsMultipartBody<#ty> },
+                    Some(quote! {
+                        let #body_binding = support::AsMultipartBody::as_multipart_body(&#body_binding);
+                    }),
+                ),
+                (false, true, false) => (
+                    quote! { #body_binding: Option<support::MultipartBody<'_, #ty>> },
+                    None,
+                ),
+                (false, false, true) => (quote! { #body_binding: &#ty }, None),
+                (false, false, false) => (quote! { #body_binding: Option<&#ty> }, None),
             };
             args.push(Arg {
                 decl,
                 forward: quote! { #body_binding },
-                normalize: None,
+                normalize,
                 shapes_url: false,
             });
         }
