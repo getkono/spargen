@@ -294,7 +294,7 @@ pub(super) fn querystring_param_tokens(
 }
 
 /// The statement extending `binding` with the `name=value` fragments `support::serialize_form`
-/// renders for `value`: a `form`-style query or cookie parameter, or a form-encoded whole-query
+/// renders for `value`: a `form`-style query parameter, or a form-encoded whole-query
 /// value (whose empty `name` makes each member its own pair).
 fn form_fragments_tokens(
     binding: &crate::name::Ident,
