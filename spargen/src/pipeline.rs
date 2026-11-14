@@ -89,10 +89,16 @@ fn generate_rereading(
             return with_leading(preview.report, cargo_diagnostics);
         }
         let Some(plan) = preview.plan.as_ref() else {
-            return pipeline_error_report("generation produced no module".to_owned());
+            return with_leading(
+                pipeline_error_report("generation produced no module".to_owned()),
+                cargo_diagnostics,
+            );
         };
         let Some(requirements) = preview.requirements.as_ref() else {
-            return pipeline_error_report("generation produced no runtime requirements".to_owned());
+            return with_leading(
+                pipeline_error_report("generation produced no runtime requirements".to_owned()),
+                cargo_diagnostics,
+            );
         };
         // A fresh run rejects on any audit finding, before anything is written. The inner run's
         // truncation carries: merging its diagnostics into a wider list does not make the dropped
@@ -120,8 +126,10 @@ fn generate_rereading(
 
         let (contents, content_digest) = cache::finalized(&plan.contents, &snapshot.digest);
         if let Err(message) = output::write_output(&build.output, &contents) {
-            return pipeline_error_report(message);
+            return with_leading(pipeline_error_report(message), cargo_diagnostics);
         }
+        // The module is written, so a record that cannot be written costs only the next build's
+        // replay: a warning on a generating run, never a rejection of the module it wrote.
         if let Some(path) = &cache_path {
             if let Err(message) = cache::write_cache(
                 path,
@@ -130,15 +138,26 @@ fn generate_rereading(
                 &preview.report,
                 requirements,
             ) {
-                return pipeline_error_report(message);
+                preview.report.diagnostics.push(
+                    Diagnostic::at_root(
+                        Code::CacheWriteFailed,
+                        format!(
+                            "{message}; the module was written, and the next build regenerates it"
+                        ),
+                    )
+                    .build(),
+                );
             }
         }
         return with_leading(preview.report, cargo_diagnostics);
     }
 
-    pipeline_error_report(
-        "generation inputs changed repeatedly while they were being read; retry the build"
-            .to_owned(),
+    with_leading(
+        pipeline_error_report(
+            "generation inputs changed repeatedly while they were being read; retry the build"
+                .to_owned(),
+        ),
+        cargo_diagnostics,
     )
 }
 
@@ -427,7 +446,8 @@ pub(crate) fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
         // diagnostic's pointer addresses the file its span lies in, and only the bundle can name
         // that file in a rule or find the `$ref`s that reach it. The mapper must also see *every*
         // error diagnostic to carve correctly, so the probe's batch is unbounded (a spec has
-        // finitely many constructs); the user's `batch_cap` still governs the final report below.
+        // finitely many constructs); the user's `batch_cap` still governs the final report: a
+        // converged carve reruns under it, and a rejection is replayed into it by `capped`.
         let mut diags = diag::Diagnostics::new(usize::MAX);
         let bundle = load_bundle(&probe, &mut diags).ok();
         let lowered = bundle
@@ -453,7 +473,7 @@ pub(crate) fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
             .collect();
         if new_rules.is_empty() {
             // No progress possible — report the residual rejections (and any carved W009s) honestly.
-            return Err(report);
+            return Err(capped(report, spec.batch_cap));
         }
         omit.rules.extend(new_rules);
         last_rejection = Some(report);
@@ -462,12 +482,23 @@ pub(crate) fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
     // Exhausted the round cap while still rejecting: return the last honest rejection report.
     // With no round run at all, nothing was carved.
     match last_rejection {
-        Some(report) => Err(report),
+        Some(report) => Err(capped(report, spec.batch_cap)),
         None => Ok(Spec {
             carve: crate::Carve::Off,
             ..spec.clone()
         }),
     }
+}
+
+/// `report`, a rejection collected without a cap, as a batch capped at `cap` would have collected
+/// it: its diagnostics replayed in emission order, so past the cap a warning is dropped and an
+/// error evicts the most recent retained warning, and the report says it was truncated.
+fn capped(report: Report, cap: usize) -> Report {
+    let mut diags = diag::Diagnostics::new(cap);
+    for diagnostic in report.diagnostics {
+        diags.emit(diagnostic);
+    }
+    Report::new(diags, report.outcome)
 }
 
 fn emit_pipeline_error(diags: &mut diag::Diagnostics, message: String) {
@@ -613,6 +644,83 @@ components:
         assert!(!build.output.exists());
     }
 
+    /// A spec in a fresh directory whose one schema is named `Pet`, built to `output` relative to
+    /// that directory under the default `CargoIntegration::Auto`, which outside a build script (as
+    /// a test process is) puts `W013` ahead of the run's own diagnostics.
+    fn auto_integration_fixture(output: &str) -> (tempfile::TempDir, Build) {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), spec_naming("Pet")).unwrap();
+        let build = Spec::new(dir.join("openapi.yaml")).build(dir.join(output));
+        (temp, build)
+    }
+
+    /// The codes of `report`'s diagnostics, in order.
+    fn codes(report: &Report) -> Vec<&'static str> {
+        report
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect()
+    }
+
+    /// An output that cannot be written rejects the run with the write's `E011`, and keeps the
+    /// build-environment warning the run opened with ahead of it.
+    #[test]
+    fn an_output_write_failure_keeps_the_build_environment_warnings() {
+        let (temp, build) = auto_integration_fixture("occupied/api.rs");
+        // A regular file where the output's directory should be, so the write cannot land.
+        std::fs::write(temp.path().join("occupied"), "").unwrap();
+
+        let report = generate_with_cache_dir(&build, None);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(codes(&report), ["W013", "E011"], "{report:#?}");
+        assert_eq!(
+            report.diagnostics()[0].code,
+            Code::CargoIntegrationDegraded,
+            "{report:#?}"
+        );
+    }
+
+    /// A cache record that cannot be written once the module is leaves the run generating: the
+    /// module stands, and the report carries a `W016` after the build-environment warning, and no
+    /// error.
+    #[test]
+    fn a_cache_write_failure_after_the_output_is_written_is_a_warning() {
+        let (temp, build) = auto_integration_fixture("api.rs");
+        // A regular file where the cache directory should be, so the record cannot land.
+        let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
+        std::fs::write(&cache_dir, "").unwrap();
+
+        let report = generate_with_cache_dir(&build, Some(&cache_dir));
+        assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+        assert_eq!(codes(&report), ["W013", "W016"], "{report:#?}");
+        let warning = &report.diagnostics()[1];
+        assert_eq!(warning.code, Code::CacheWriteFailed, "{report:#?}");
+        assert!(
+            warning.message.contains("failed to write cache")
+                && warning.message.ends_with("the next build regenerates it"),
+            "{report:#?}"
+        );
+        let module = std::fs::read_to_string(&build.output).unwrap();
+        assert!(module.contains("pub struct Pet"), "{module}");
+    }
+
+    /// Inputs that keep changing reject the run with the build-environment warning it opened with
+    /// still ahead of the rejection.
+    #[test]
+    fn inputs_that_keep_changing_keep_the_build_environment_warnings() {
+        let (_temp, build) = auto_integration_fixture("api.rs");
+        let mut rereads = 0;
+        let report = generate_rereading(&build, None, |spec| {
+            rereads += 1;
+            std::fs::write(&spec.path, spec_naming(&format!("Schema{rereads}"))).unwrap();
+            cache::InputSnapshot::load(spec)
+        });
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(codes(&report), ["W013", "E011"], "{report:#?}");
+    }
+
     /// A round that finds no new rule ends the carve with that round's report: the residual
     /// rejection carve cannot map to a construct, beside the `W009` for what it did carve.
     #[test]
@@ -684,5 +792,49 @@ paths:
             "{beyond:#?}"
         );
         assert_eq!(carved(&beyond), cap - 1, "{beyond:#?}");
+    }
+
+    /// Both rejections the carve driver returns are bounded by the spec's `batch_cap`, though its
+    /// probe collects without one: the residual error evicts the `W009`s past the cap, and the
+    /// report says it was truncated.
+    #[test]
+    fn a_carve_rejection_is_bounded_by_the_batch_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+        let carve_capped = |contents: &str| {
+            std::fs::write(&path, contents).unwrap();
+            check(
+                &Spec::new(path.clone())
+                    .with_carve(crate::Carve::Auto)
+                    .with_batch_cap(1),
+            )
+        };
+
+        // A round that finds no new rule: the `$dynamicRef` operation carved, the dialect left.
+        let stalled = carve_capped(
+            "openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+jsonSchemaDialect: https://example.com/custom-dialect
+paths:
+  /dynamic:
+    get:
+      operationId: getDynamic
+      responses:
+        \"200\":
+          description: OK
+          content:
+            application/json:
+              schema: { $dynamicRef: \"#meta\" }
+",
+        );
+        assert_eq!(stalled.outcome(), Outcome::Rejected, "{stalled:#?}");
+        assert!(stalled.truncated(), "{stalled:#?}");
+        assert_eq!(codes(&stalled), ["E002"], "{stalled:#?}");
+
+        // The round cap: `cap - 1` links carved, the next one's `E004` left.
+        let exhausted = carve_capped(&dangling_chain(compat::MAX_CARVE_ROUNDS));
+        assert_eq!(exhausted.outcome(), Outcome::Rejected, "{exhausted:#?}");
+        assert!(exhausted.truncated(), "{exhausted:#?}");
+        assert_eq!(codes(&exhausted), ["E004"], "{exhausted:#?}");
     }
 }

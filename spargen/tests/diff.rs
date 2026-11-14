@@ -406,22 +406,21 @@ paths:
 
 /// With `carve` set, a side the carve driver cannot make lower is rejected with the carve driver's
 /// own report, the one `check` returns under carve: it carries a `W009` for each construct carved
-/// before the driver gave up, and `batch_cap` does not bound it.
+/// before the driver gave up, and `batch_cap` bounds it as it bounds every other report, an error
+/// evicting a warning past the cap.
 #[test]
 fn carve_reports_an_uncarvable_side_with_the_carve_drivers_report() {
     let temp = tempfile::tempdir().unwrap();
     let old =
         Spec::new(write_spec(temp.path(), "old.yaml", &base())).with_carve(spargen::Carve::Auto);
-    let new = Spec::new(write_spec(temp.path(), "new.yaml", UNCARVABLE))
-        .with_carve(spargen::Carve::Auto)
-        .with_batch_cap(1);
+    let new =
+        Spec::new(write_spec(temp.path(), "new.yaml", UNCARVABLE)).with_carve(spargen::Carve::Auto);
 
     let rejection = spargen::diff(&old, &new).expect_err("the new side cannot be carved to lower");
     assert!(rejection.old_report().is_none(), "{rejection}");
     let report = rejection.new_report().expect("the new side is rejected");
     assert_eq!(report.outcome(), spargen::Outcome::Rejected, "{report:#?}");
     assert!(!report.truncated(), "{report:#?}");
-    assert!(report.diagnostics().len() > 1, "{report:#?}");
     let carved = report
         .diagnostics()
         .iter()
@@ -439,6 +438,27 @@ fn carve_reports_an_uncarvable_side_with_the_carve_drivers_report() {
     assert_eq!(
         format!("{:?}", checked.diagnostics()),
         format!("{:?}", report.diagnostics())
+    );
+
+    // Capped at one, the report keeps the residual error alone and says it was truncated, as
+    // `check` under carve does for the same spec.
+    let capped_new = new.with_batch_cap(1);
+    let rejection =
+        spargen::diff(&old, &capped_new).expect_err("the new side cannot be carved to lower");
+    let capped = rejection.new_report().expect("the new side is rejected");
+    assert_eq!(capped.outcome(), spargen::Outcome::Rejected, "{capped:#?}");
+    assert!(capped.truncated(), "{capped:#?}");
+    let codes: Vec<_> = capped
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect();
+    assert_eq!(codes, ["E002"], "{capped:#?}");
+    let checked = spargen::check(&capped_new);
+    assert!(checked.truncated(), "{checked:#?}");
+    assert_eq!(
+        format!("{:?}", checked.diagnostics()),
+        format!("{:?}", capped.diagnostics())
     );
 }
 
