@@ -597,12 +597,16 @@ fn basic_spec_module_is_pinned() {
 }
 
 /// Every by-value constructor the generated API emits outside the embedded runtime (each model's
-/// `new`, each server-variables builder's `new` and `url`, and `servers::default_url`) carries
-/// `#[must_use]`, so a consumer that discards the value it built is warned. The runtime's own
-/// builders carry it in source, which the golden file above pins.
+/// `new`, each server-variables builder's `new` and `url`, `servers::default_url`, and in the
+/// `testing` module every `pub fn` returning `Self`: `Reply::new`, `MockBackend::new`, and each
+/// typed reply constructor and builder) carries `#[must_use]`, so a consumer that discards the
+/// value it built is warned. The runtime's own builders carry it in source, which the golden file
+/// above pins.
 #[test]
 fn generated_constructors_and_server_urls_are_must_use() {
-    let written = generate_text(BASIC_SPEC, |spec| spec);
+    let written = generate_text(BASIC_SPEC, |spec| {
+        spec.with_testing(spargen::TestingModule::Emitted)
+    });
     let lines: Vec<&str> = written.lines().collect();
     // The embedded runtime is the `mod support { … }` block, closed at column 0.
     let support = lines
@@ -614,17 +618,39 @@ fn generated_constructors_and_server_urls_are_must_use() {
             .iter()
             .position(|line| *line == "}")
             .expect("the support module closes");
-    let mut seen = [0usize; 3];
+    // The `testing` module is the `pub mod testing { … }` block, closed at its own indentation.
+    let testing = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("pub mod testing {"))
+        .expect("BASIC_SPEC generated with the testing module emits it");
+    let close = format!(
+        "{}}}",
+        &lines[testing][..lines[testing].len() - lines[testing].trim_start().len()]
+    );
+    let testing_end = testing
+        + lines[testing..]
+            .iter()
+            .position(|line| *line == close)
+            .expect("the testing module closes");
+    let mut seen = [0usize; 4];
     for (index, line) in lines.iter().enumerate().skip(support_end) {
         let line = line.trim_start();
-        let kind = if line.starts_with("pub fn new(") {
-            // `Client::new` returns a `Result`, which is already `#[must_use]`.
+        let returns_self = || {
             let end = index
                 + lines[index..]
                     .iter()
                     .position(|line| line.trim_end().ends_with('{'))
                     .expect("a signature opens its body");
-            if !lines[end].trim().ends_with("-> Self {") {
+            lines[end].trim().ends_with("-> Self {")
+        };
+        let kind = if (testing..testing_end).contains(&index) && line.starts_with("pub fn ") {
+            if !returns_self() {
+                continue;
+            }
+            3
+        } else if line.starts_with("pub fn new(") {
+            // `Client::new` returns a `Result`, which is already `#[must_use]`.
+            if !returns_self() {
                 continue;
             }
             0
@@ -646,7 +672,8 @@ fn generated_constructors_and_server_urls_are_must_use() {
     }
     assert!(
         seen.iter().all(|count| *count > 0),
-        "BASIC_SPEC emits a model `new`, a server `url` and `default_url`: {seen:?}"
+        "BASIC_SPEC emits a model `new`, a server `url`, `default_url` and a testing \
+         constructor: {seen:?}"
     );
 }
 
