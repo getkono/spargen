@@ -796,32 +796,16 @@ pub enum ConfigError {
         /// What is wrong with the entry.
         message: String,
     },
-    /// A front end's own flag-syntax error, made with [`flag`](Self::flag).
-    #[non_exhaustive]
-    Flag {
-        /// The message `Display` writes.
-        message: String,
-    },
 }
 
 impl ConfigError {
-    /// A [`Flag`](Self::Flag) error with a caller-supplied message. Public so a front end (the
-    /// CLI, a build script wrapper) can report *its* own flag-syntax errors through the same type
-    /// the library returns, rather than inventing a parallel one.
-    pub fn flag(message: impl Into<String>) -> Self {
-        Self::Flag {
-            message: message.into(),
-        }
-    }
-
-    /// The config file the error is about, or `None` for a [`Flag`](Self::Flag) error.
-    pub fn path(&self) -> Option<&Utf8Path> {
+    /// The config file the error is about, as given.
+    pub fn path(&self) -> &Utf8Path {
         match self {
             Self::Read { path, .. }
             | Self::Parse { path, .. }
             | Self::InvalidOmitRule { path, .. }
-            | Self::InvalidKeepRule { path, .. } => Some(path),
-            Self::Flag { .. } => None,
+            | Self::InvalidKeepRule { path, .. } => path,
         }
     }
 }
@@ -851,7 +835,6 @@ impl std::fmt::Display for ConfigError {
                 "invalid config file `{path}`: keep rule #{}: {message}",
                 index + 1
             ),
-            Self::Flag { message } => formatter.write_str(message),
         }
     }
 }
@@ -1009,12 +992,6 @@ mod tests {
         use std::error::Error as _;
 
         let file = Utf8Path::new("spargen.toml");
-        let flag = ConfigError::flag("bad flag");
-        assert!(matches!(&flag, ConfigError::Flag { message } if message == "bad flag"));
-        assert_eq!(flag.to_string(), "bad flag");
-        assert_eq!(flag.path(), None);
-        assert!(flag.source().is_none());
-
         let missing = Spec::new("openapi.yaml")
             .config_file("/nonexistent/spargen-1328/spargen.toml")
             .unwrap_err();
@@ -1022,6 +999,7 @@ mod tests {
             panic!("a missing file is a read error: {missing:?}");
         };
         assert_eq!(path, "/nonexistent/spargen-1328/spargen.toml");
+        assert_eq!(missing.path(), "/nonexistent/spargen-1328/spargen.toml");
         assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
         assert_eq!(
             missing.to_string(),
@@ -1048,7 +1026,7 @@ mod tests {
             "{keep:?}"
         );
         for error in [&parse, &omit, &keep] {
-            assert_eq!(error.path(), Some(file));
+            assert_eq!(error.path(), file);
             assert!(error.source().is_none(), "{error:?}");
         }
         assert!(keep.to_string().contains("keep rule #2: "), "{keep}");
