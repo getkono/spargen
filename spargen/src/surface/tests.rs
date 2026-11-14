@@ -56,6 +56,9 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::AdditionalPropertiesTypeChanged,
         ChangeKind::StreamTwinAdded,
         ChangeKind::StreamTwinRemoved,
+        ChangeKind::CredentialSchemeAdded,
+        ChangeKind::CredentialSchemeRemoved,
+        ChangeKind::CredentialSettersChanged,
         ChangeKind::TestingModuleAdded,
         ChangeKind::TestingModuleRemoved,
     ];
@@ -109,6 +112,9 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::AdditionalPropertiesTypeChanged
             | ChangeKind::StreamTwinAdded
             | ChangeKind::StreamTwinRemoved
+            | ChangeKind::CredentialSchemeAdded
+            | ChangeKind::CredentialSchemeRemoved
+            | ChangeKind::CredentialSettersChanged
             | ChangeKind::TestingModuleAdded
             | ChangeKind::TestingModuleRemoved => {}
         }
@@ -165,6 +171,9 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::AdditionalPropertiesTypeChanged => "AdditionalPropertiesTypeChanged",
         ChangeKind::StreamTwinAdded => "StreamTwinAdded",
         ChangeKind::StreamTwinRemoved => "StreamTwinRemoved",
+        ChangeKind::CredentialSchemeAdded => "CredentialSchemeAdded",
+        ChangeKind::CredentialSchemeRemoved => "CredentialSchemeRemoved",
+        ChangeKind::CredentialSettersChanged => "CredentialSettersChanged",
         ChangeKind::TestingModuleAdded => "TestingModuleAdded",
         ChangeKind::TestingModuleRemoved => "TestingModuleRemoved",
     }
@@ -174,7 +183,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
 fn the_kind_list_covers_the_whole_enum() {
     assert_eq!(
         all_kinds().len(),
-        48,
+        51,
         "a `ChangeKind` variant reached the exhaustive match without joining the list"
     );
 }
@@ -248,6 +257,7 @@ fn only_the_additive_kinds_are_minor() {
         ChangeKind::ServerVariableAdded,
         ChangeKind::AdditionalPropertiesAdded,
         ChangeKind::StreamTwinAdded,
+        ChangeKind::CredentialSchemeAdded,
         ChangeKind::TestingModuleAdded,
     ];
     for kind in all_kinds() {

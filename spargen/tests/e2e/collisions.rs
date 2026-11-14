@@ -91,10 +91,6 @@ paths:
     get: { operationId: withClientAndBackend, responses: { "204": { description: ok } } }
   /core:
     get: { operationId: core, responses: { "204": { description: ok } } }
-  /with-credential:
-    get: { operationId: withCredential, responses: { "204": { description: ok } } }
-  /without-credential:
-    get: { operationId: withoutCredential, responses: { "204": { description: ok } } }
   /with-timeout:
     get: { operationId: withTimeout, responses: { "204": { description: ok } } }
   /with-options:
@@ -104,6 +100,10 @@ paths:
   /inner:
     get: { operationId: inner, responses: { "204": { description: ok } } }
 components:
+  securitySchemes:
+    timeout: { type: http, scheme: bearer }
+    options: { type: http, scheme: basic }
+    inner: { type: openIdConnect, openIdConnectUrl: 'https://id.example.com/.well-known/openid-configuration' }
   schemas:
     DateTime: { type: string }
     Serialize: { type: object, properties: { name: { type: string } } }
@@ -126,8 +126,10 @@ components:
 ///   import or prelude item of that name (issue #356);
 /// - an `operationId` spelling one of the client's own inherent methods: operation methods share
 ///   `impl Client` (and `impl BlockingClient`) with the constructors and accessors, so
-///   `operationId: withCredential` otherwise emits a second `pub fn with_credential`, which is
-///   `E0592`.
+///   `operationId: withTimeout` otherwise emits a second `pub fn with_timeout`, which is `E0592`;
+/// - a security scheme whose typed setter spells one of those methods: the scheme `timeout`'s
+///   `with_timeout`, `options`' `with_options`, and `inner`'s `with_inner` beside the operation
+///   `inner`'s `inner` (issue #1337).
 #[test]
 fn reserved_spellings_compile_together() {
     let temp = tempfile::tempdir().unwrap();
@@ -172,8 +174,6 @@ fn reserved_spellings_compile_together() {
         "with_client",
         "with_backend",
         "core",
-        "with_credential",
-        "without_credential",
         "with_timeout",
         "with_options",
         "with_base_url",
@@ -182,6 +182,23 @@ fn reserved_spellings_compile_together() {
         assert!(
             generated.contains(&format!("pub async fn {method}_")),
             "operation `{method}` must yield to the client method of that name:\n{generated}"
+        );
+    }
+    for setter in ["with_timeout", "with_options"] {
+        assert!(
+            generated.contains(&format!("pub fn {setter}_")),
+            "a scheme's setter must yield to the client method `{setter}`:\n{generated}"
+        );
+    }
+    for setter in [
+        "with_inner(",
+        "with_inner_provider(",
+        "without_timeout(",
+        "without_options(",
+    ] {
+        assert!(
+            generated.contains(&format!("pub fn {setter}")),
+            "a scheme's setter that collides with nothing keeps its spelling `{setter}`:\n{generated}"
         );
     }
 

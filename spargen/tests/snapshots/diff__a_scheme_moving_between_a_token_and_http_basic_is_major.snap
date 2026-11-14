@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|credential-setters-changed|securitySchemes.bearer|credential setters with_bearer(token: SecretString), with_bearer_provider(provider: TokenProvider), with_bearer_refreshable(token: TokenProvider, is_rejection, on_rejected), without_bearer() -> with_bearer(username: impl Into<String>, password: SecretString), without_bearer()
+bump=major

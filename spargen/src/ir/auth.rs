@@ -5,9 +5,9 @@ pub(crate) struct SchemeId(pub(crate) String);
 /// A declared security scheme: how a credential attaches, plus the documentation the specification
 /// lets the scheme carry.
 ///
-/// The documentation is rendered onto `Client::with_credential`, where a caller decides what to
-/// register and needs to know the token format, the flows that mint one, the OpenID Connect
-/// discovery URL, and whether the scheme is deprecated.
+/// The documentation is rendered onto the scheme's credential setter on `Client` (`with_<scheme>`),
+/// where a caller decides what to register and needs to know the token format, the flows that mint
+/// one, the OpenID Connect discovery URL, and whether the scheme is deprecated.
 #[derive(Debug, Clone)]
 pub(crate) struct SecuritySchemeDef {
     /// How a credential for this scheme attaches to a request.
@@ -38,6 +38,32 @@ pub(crate) enum SecurityScheme {
     /// `mutualTLS` — satisfied by the client certificate on the injected `reqwest::Client`. The
     /// requirement is always satisfiable and the request carries nothing extra.
     MutualTls,
+}
+
+/// What a caller registers for a security scheme, which fixes the arguments of the scheme's typed
+/// setters on the generated client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialShape {
+    /// One secret token: `http bearer`, `apiKey`, `oauth2` and `openIdConnect`. Registered as a
+    /// static token, a token provider, or a refreshable token.
+    Token,
+    /// A username and password: `http basic`.
+    Basic,
+}
+
+impl SecurityScheme {
+    /// The credential a caller registers for this scheme, or `None` for `mutualTLS`, which the
+    /// transport's client certificate satisfies without reading a registered credential.
+    pub(crate) fn credential_shape(&self) -> Option<CredentialShape> {
+        match self {
+            SecurityScheme::Http(HttpScheme::Bearer)
+            | SecurityScheme::ApiKey { .. }
+            | SecurityScheme::OAuth2
+            | SecurityScheme::OpenIdConnect => Some(CredentialShape::Token),
+            SecurityScheme::Http(HttpScheme::Basic) => Some(CredentialShape::Basic),
+            SecurityScheme::MutualTls => None,
+        }
+    }
 }
 
 /// The `http` scheme kind.

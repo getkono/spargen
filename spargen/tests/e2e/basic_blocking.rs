@@ -30,23 +30,22 @@ fn blocking_method_round_trips_against_a_mock() {
 }
 
 // Selection never falls through past a chosen alternative whose credential fails, so the remedy
-// is to unregister it: `without_credential` on the same client reaches the later, fully registered
+// is to unregister it: `without_bearer` on the same client reaches the later, fully registered
 // alternative over real HTTP, and the request carries that alternative's credential alone.
 #[test]
-fn without_credential_falls_through_to_a_later_alternative() {
+fn without_a_scheme_falls_through_to_a_later_alternative() {
     let (base, server) = serve_no_content();
-    let failing_bearer = basic_client::Credential::Provider(std::sync::Arc::new(|| {
-        Box::pin(async { Err(basic_client::AuthError::new("idp down")) })
-            as basic_client::TokenFuture
-    }));
+    let failing_bearer = basic_client::token_provider(|| async {
+        Err(basic_client::AuthError::new("idp down"))
+    });
     // `getConjunction` is `tenant + bearer`, or `apiKey`, or `mtls + tenant`: all three registered
     // selects the first, whose bearer provider fails before anything is sent — so the mock sees
     // no connection from this call.
     let client = basic_client::BlockingClient::new(&base)
         .unwrap()
-        .with_credential("tenant", basic_client::Credential::ApiKey(basic_client::SecretString::from("acme")))
-        .with_credential("bearer", failing_bearer)
-        .with_credential("apiKey", basic_client::Credential::ApiKey(basic_client::SecretString::from("k3y")));
+        .with_tenant(basic_client::SecretString::from("acme"))
+        .with_bearer_provider(failing_bearer)
+        .with_api_key(basic_client::SecretString::from("k3y"));
     match client.get_conjunction() {
         Err(basic_client::Error::RequestConstruction(
             basic_client::RequestError::CredentialProvider { scheme, .. },
@@ -54,7 +53,7 @@ fn without_credential_falls_through_to_a_later_alternative() {
         other => panic!("expected the selected alternative's provider failure, got {other:?}"),
     }
 
-    let client = client.without_credential("bearer");
+    let client = client.without_bearer();
     let response = client.get_conjunction().expect("the apiKey alternative is selected and sent");
     assert_eq!(response.status(), 204);
     let request = server.join().unwrap().text().to_ascii_lowercase();

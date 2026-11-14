@@ -64,6 +64,10 @@ pub(crate) struct Surface {
     aliases: BTreeSet<String>,
     /// The server builders of the generated `servers` module, keyed by generated builder name.
     servers: BTreeMap<String, ServerSurface>,
+    /// The typed credential setters `Client` and `BlockingClient` carry per security scheme taking
+    /// a credential, keyed by the scheme's `securitySchemes` key: each setter's generated name and
+    /// the arguments it takes.
+    credentials: BTreeMap<String, BTreeMap<String, &'static str>>,
     /// Whether the generated module carries the `testing` module (`Spec::testing`). Its items
     /// follow the operations (an `on_{method}` and a `{method}::Reply` per operation), whose
     /// changes the operations already report, so its presence is what is compared.
@@ -412,6 +416,16 @@ pub enum ChangeKind {
     /// An operation lost its `{method}_stream` twin and its companions. **Major** — the methods a
     /// consumer calls disappear.
     StreamTwinRemoved,
+    /// A security scheme taking a credential was declared, and the clients gained its typed
+    /// setters (`with_<scheme>`, `without_<scheme>`, and the token schemes' `_provider` and
+    /// `_refreshable`). **Minor** — additive.
+    CredentialSchemeAdded,
+    /// A security scheme's typed setters were removed, by removing or renaming the scheme.
+    /// **Major** — the setters a consumer registers its credential through disappear.
+    CredentialSchemeRemoved,
+    /// A security scheme's typed setters were renamed or take other arguments: its kind moved
+    /// between `http basic` and a scheme taking a token. **Major**.
+    CredentialSettersChanged,
     /// The generated module gained its `testing` module (`Spec::testing`). **Minor** — additive.
     TestingModuleAdded,
     /// The generated module lost its `testing` module. **Major** — code naming
@@ -435,6 +449,7 @@ impl ChangeKind {
             | ChangeKind::ServerVariableAdded
             | ChangeKind::AdditionalPropertiesAdded
             | ChangeKind::StreamTwinAdded
+            | ChangeKind::CredentialSchemeAdded
             | ChangeKind::TestingModuleAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
@@ -470,6 +485,8 @@ impl ChangeKind {
             | ChangeKind::AdditionalPropertiesRemoved
             | ChangeKind::AdditionalPropertiesTypeChanged
             | ChangeKind::StreamTwinRemoved
+            | ChangeKind::CredentialSchemeRemoved
+            | ChangeKind::CredentialSettersChanged
             | ChangeKind::TestingModuleRemoved => Impact::Major,
         }
     }
@@ -523,6 +540,9 @@ impl ChangeKind {
             ChangeKind::AdditionalPropertiesTypeChanged => "additional-properties-type-changed",
             ChangeKind::StreamTwinAdded => "stream-twin-added",
             ChangeKind::StreamTwinRemoved => "stream-twin-removed",
+            ChangeKind::CredentialSchemeAdded => "credential-scheme-added",
+            ChangeKind::CredentialSchemeRemoved => "credential-scheme-removed",
+            ChangeKind::CredentialSettersChanged => "credential-setters-changed",
             ChangeKind::TestingModuleAdded => "testing-module-added",
             ChangeKind::TestingModuleRemoved => "testing-module-removed",
         }

@@ -15,7 +15,9 @@ mod synth;
 
 use std::collections::HashMap;
 
-use crate::ir::{AdditionalProps, Api, OperationId, ScalarRepr, TypeId, TypeKind};
+use crate::ir::{
+    AdditionalProps, Api, CredentialShape, OperationId, ScalarRepr, SchemeId, TypeId, TypeKind,
+};
 
 pub(crate) use casing::hint_segment;
 use casing::{to_pascal_case, to_snake_case};
@@ -57,6 +59,26 @@ pub(crate) struct Names {
     pub(crate) server_variable_variants: HashMap<(usize, String, String), Ident>,
     /// Setter/field name per `(server index, variable name)`.
     pub(crate) server_variable_fields: HashMap<(usize, String), Ident>,
+    /// The typed credential setters on `Client` and `BlockingClient`, per declared security
+    /// scheme that takes a credential ([`crate::ir::SecurityScheme::credential_shape`]), keyed by its
+    /// `securitySchemes` key.
+    pub(crate) credential_setters: HashMap<SchemeId, CredentialSetterNames>,
+}
+
+/// The typed setters `Client` and `BlockingClient` register one security scheme's credential
+/// through. Allocated in the client method scope after every operation-level method, each family
+/// as one batch ranked by the scheme's key, so adding a scheme renames no operation method and the
+/// names do not depend on the order the spec declares its schemes in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CredentialSetterNames {
+    /// `with_{scheme}`: registers a static token, or a username and password for `http basic`.
+    pub(crate) with: Ident,
+    /// `with_{scheme}_provider`: registers a token provider, for a scheme taking a token.
+    pub(crate) provider: Option<Ident>,
+    /// `with_{scheme}_refreshable`: registers a refreshable token, for a scheme taking a token.
+    pub(crate) refreshable: Option<Ident>,
+    /// `without_{scheme}`: unregisters the scheme's credential.
+    pub(crate) without: Ident,
 }
 
 /// The inherent associated `const` listing a closed string enum's variants. It shares the
@@ -194,8 +216,9 @@ impl ResponseHeaderNames {
 }
 
 /// The fixed inherent methods codegen emits on `Client` and `BlockingClient`, beside one method
-/// per operation. Operation method names are allocated after these are reserved, so an
-/// `operationId` that spells one of them (`withCredential`, `new`, …) is disambiguated instead of
+/// per operation and the credential setters of each security scheme. Operation methods and
+/// credential setters are allocated after these are reserved, so an `operationId` or a scheme that
+/// spells one of them (`withTimeout`, a scheme `timeout`, `new`, …) is disambiguated instead of
 /// emitting a duplicate definition. `with_default_server` is emitted only when the specification
 /// declares a server, `with_bound_header` only when the build binds a header, and `inner` only on
 /// `BlockingClient`; all three are reserved unconditionally, so an operation's method name does
@@ -208,8 +231,6 @@ pub(crate) const CLIENT_METHODS: &[&str] = &[
     "with_client",
     "with_backend",
     "core",
-    "with_credential",
-    "without_credential",
     "with_bound_header",
     "with_timeout",
     "with_options",
@@ -609,6 +630,8 @@ pub(crate) fn allocate(api: &Api) -> Names {
         allocate_twin_family(api, &method_spellings, &mut operation_scope, |method| {
             format!("decode_{method}_stream")
         });
+    // The credential setters after every operation-level method, so they yield to all of them.
+    names.credential_setters = allocate_credential_setters(api, &mut operation_scope);
     let companions = request_builders
         .into_iter()
         .zip(decoders)
@@ -774,6 +797,70 @@ fn allocate_twin_family(
         .map(|operation| {
             api.streams_binary_success(operation)
                 .then(|| allocated.next().expect("one name per binary success"))
+        })
+        .collect()
+}
+
+/// Allocate the [`CredentialSetterNames`] of every security scheme of `api` that takes a
+/// credential, in the client method `scope`. Each family (`with_`, `_provider`, `_refreshable`,
+/// `without_`) is one batch ranked by the scheme's key, which `securitySchemes` keeps unique, and
+/// a loser's suffix is seeded from the scheme's `/components/securitySchemes/{key}` pointer.
+fn allocate_credential_setters(
+    api: &Api,
+    scope: &mut Scope,
+) -> HashMap<SchemeId, CredentialSetterNames> {
+    let schemes: Vec<(&SchemeId, CredentialShape, crate::diag::JsonPointer)> = api
+        .security_schemes
+        .iter()
+        .filter_map(|(id, def)| {
+            def.kind.credential_shape().map(|shape| {
+                let pointer = crate::diag::JsonPointer::root()
+                    .push("components")
+                    .push("securitySchemes")
+                    .push(&id.0);
+                (id, shape, pointer)
+            })
+        })
+        .collect();
+    let mut family = |spell: fn(&str) -> String, token_only: bool| {
+        let hints: Vec<(usize, String)> = schemes
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, shape, _))| !token_only || *shape == CredentialShape::Token)
+            .map(|(index, (id, ..))| (index, spell(&id.0)))
+            .collect();
+        let requests: Vec<_> = hints
+            .iter()
+            .map(|(index, hint)| RankedRequest {
+                hint,
+                provenance: &schemes[*index].2,
+                rank: schemes[*index].0 .0.as_str(),
+            })
+            .collect();
+        let mut allocated = scope.alloc_ranked(&requests, IdentRole::Method).into_iter();
+        let mut by_scheme: Vec<Option<Ident>> = vec![None; schemes.len()];
+        for (index, _) in &hints {
+            by_scheme[*index] = allocated.next();
+        }
+        by_scheme
+    };
+    let with = family(|key| format!("with {key}"), false);
+    let provider = family(|key| format!("with {key} provider"), true);
+    let refreshable = family(|key| format!("with {key} refreshable"), true);
+    let without = family(|key| format!("without {key}"), false);
+    schemes
+        .iter()
+        .zip(with.into_iter().zip(provider).zip(refreshable).zip(without))
+        .map(|((id, ..), (((with, provider), refreshable), without))| {
+            (
+                (*id).clone(),
+                CredentialSetterNames {
+                    with: with.expect("a `with_` setter per scheme taking a credential"),
+                    provider,
+                    refreshable,
+                    without: without.expect("a `without_` setter per scheme taking a credential"),
+                },
+            )
         })
         .collect()
 }

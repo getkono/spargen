@@ -199,7 +199,7 @@ fn lower_security_scheme(
 
 /// Render the documentation a Security Scheme Object carries into rustdoc lines.
 ///
-/// A caller of `Client::with_credential` needs exactly this to know what to register: the token
+/// A caller of a scheme's `Client::with_<scheme>` setter needs exactly this to know what to register: the token
 /// format, where a token is obtained, and whether the scheme is on its way out. None of it changes
 /// a byte on the wire, which is why it is documentation rather than lowered structure.
 fn security_scheme_docs(name: &str, scheme: &SecuritySchemeObject) -> Vec<String> {

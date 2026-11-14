@@ -650,6 +650,8 @@ fn a_mixed_report_summarizes_and_displays_every_change() {
 // nothing proving the classifier ever produces them; the modules below drive each one out of a
 // real pair of specs. `spargen/src/surface/tests.rs` holds the guard that keeps this list complete.
 
+#[path = "diff/credentials.rs"]
+mod credentials;
 #[path = "diff/headers.rs"]
 mod headers;
 #[path = "diff/json.rs"]

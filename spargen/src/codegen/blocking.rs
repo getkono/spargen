@@ -6,7 +6,7 @@ use quote::quote;
 use crate::ir::{Api, Operation};
 use crate::name::Names;
 
-use super::client::{default_server_docs, with_bound_header_tokens, with_credential_docs};
+use super::client::{credential_setter_tokens, default_server_docs, with_bound_header_tokens};
 use super::docs::normalize_rustdoc;
 use super::operation::{url_accessor_tokens, Arg, OperationSig};
 
@@ -24,9 +24,9 @@ pub(super) fn blocking_cfg() -> TokenStream {
 /// compiled under [`blocking_cfg`]. Each method is a shim over the async client's method, so the
 /// request building and dispatch are the async client's. Its constructors are the async client's
 /// `new`, `with_config`, `with_default_server` (when a server is declared), `with_client` and
-/// `with_backend`, and its `with_credential` carries the async
-/// client's documentation, declared schemes included, as its `with_bound_header` does where the
-/// build bound a header.
+/// `with_backend`, and its typed credential setters forward to the async client's and carry their
+/// documentation, each scheme's included, as its `with_bound_header` does where the build bound a
+/// header.
 ///
 /// A `BlockingClient` must not be called from inside another async runtime (tokio's `block_on`
 /// panics when nested); building or dropping one there is fine, since `BlockingRuntime`'s drop
@@ -51,7 +51,7 @@ pub(super) fn emit_blocking_client(
         `tokio::task::spawn_blocking`). Building or dropping one inside an async runtime is fine: \
         the drop shuts its runtime down in the background without waiting.";
     let cfg = blocking_cfg();
-    let credential_docs = with_credential_docs(api, options);
+    let credential_setters = credential_setter_tokens(api, names, options, Some(quote! { inner }));
     let with_bound_header = with_bound_header_tokens(
         api,
         quote! { self.inner = self.inner.with_bound_header(name, value)?; },
@@ -150,23 +150,7 @@ pub(super) fn emit_blocking_client(
                 self.inner.core()
             }
 
-            #credential_docs
-            #[must_use]
-            pub fn with_credential(
-                mut self,
-                scheme: &str,
-                credential: support::Credential,
-            ) -> Self {
-                self.inner = self.inner.with_credential(scheme, credential);
-                self
-            }
-
-            /// Unregister the credential for a named security scheme (mirrors the async client).
-            #[must_use]
-            pub fn without_credential(mut self, scheme: &str) -> Self {
-                self.inner = self.inner.without_credential(scheme);
-                self
-            }
+            #credential_setters
 
             #with_bound_header
 

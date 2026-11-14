@@ -159,7 +159,7 @@ every argument the macro accepts.
 Every spec lowers to the same surface, so the shape below is stable across clients:
 
 ```rust
-use api::{types, Client, Credential};
+use api::{types, Client};
 use secrecy::SecretString;
 
 # async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -167,7 +167,7 @@ use secrecy::SecretString;
 // (TLS choice, proxies, timeouts); `with_backend` installs a retry or middleware adapter, or a
 // transport of your own. `with_base_url` repoints a clone without rebuilding it.
 let client = Client::new("https://api.example.com")?
-    .with_credential("bearerAuth", Credential::Bearer(SecretString::from("token")));
+    .with_bearer_auth(SecretString::from("token"));
 
 // One async method per operation. Required parameters are positional; optional parameters
 // live in a per-operation `…Params` struct that derives `Default`.
@@ -200,8 +200,10 @@ Key points of the surface:
   `with_<member>(value)` per optional member, and compares with `==`; the
   [generated surface](./generated-api.md#generated-surface) states what `new`
   sets and when a struct implements `Default`.
-- `Client::with_credential(scheme, credential)` registers static secrets (via `secrecy`) or async
-  token providers, which operation `security` requirements attach; the
+- `Client::with_bearer_auth(token)`, one typed setter per declared security scheme (here
+  `bearerAuth`), registers a static secret (via `secrecy`), and its `_provider` and
+  `_refreshable` siblings an async token provider; operation `security` requirements attach
+  them, and `without_bearer_auth()` unregisters it. The
   [generated surface](./generated-api.md#generated-surface) states how an
   alternative is selected and how each credential failure is typed.
 - `Client::with_bound_header(name, value)?` sets a header every operation declares once on the

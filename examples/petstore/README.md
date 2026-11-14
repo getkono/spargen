@@ -29,8 +29,9 @@ What it exercises:
   builder whose variables default to a resolvable URL.
 - **Typed response headers** — the documented `X-Total-Count` is read through a generated
   accessor, as an explicit second step that cannot turn a successful call into a failure.
-- **Auth** — a bearer credential registered with `with_credential`; a missing credential fails
-  before the request is sent. A `Credential::Provider` is awaited on tokio's executor once per
+- **Auth** — a bearer credential registered with the typed `with_bearer_auth` setter; a missing
+  credential fails before the request is sent. A token provider registered with
+  `with_bearer_auth_provider` is awaited on tokio's executor once per
   request and its token is what the mock authenticates; a provider that fails surfaces as
   `RequestError::CredentialProvider`, naming the scheme with the provider's `AuthError` as its
   `source()`, and nothing reaches the mock.

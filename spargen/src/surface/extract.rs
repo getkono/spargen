@@ -8,8 +8,8 @@ use super::{
     ServerVariableSurface, Settings, Surface, TypeSurface, UrlArgSurface,
 };
 use crate::ir::{
-    AdditionalProps, Api, ApiErrorBodyImpl, Emission, ErrorShape, Prim, ScalarValue, StatusSpec,
-    SuccessShape, Ty, TypeKind,
+    AdditionalProps, Api, ApiErrorBodyImpl, CredentialShape, Emission, ErrorShape, Prim,
+    ScalarValue, StatusSpec, SuccessShape, Ty, TypeKind,
 };
 use crate::name::Names;
 
@@ -213,8 +213,42 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
         types,
         aliases,
         servers: servers(api, names),
+        credentials: credentials(api, names),
         testing: settings.testing,
     }
+}
+
+/// The typed credential setters codegen's `credential_setter_tokens` emits per security scheme
+/// taking a credential, named as it names them, each with the arguments it takes.
+fn credentials(api: &Api, names: &Names) -> BTreeMap<String, BTreeMap<String, &'static str>> {
+    api.security_schemes
+        .iter()
+        .filter_map(|(id, def)| {
+            let shape = def.kind.credential_shape()?;
+            let setter = names
+                .credential_setters
+                .get(id)
+                .expect("credential setters allocated");
+            let with = match shape {
+                CredentialShape::Token => "token: SecretString",
+                CredentialShape::Basic => "username: impl Into<String>, password: SecretString",
+            };
+            let mut setters = BTreeMap::from([
+                (setter.with.as_str().to_owned(), with),
+                (setter.without.as_str().to_owned(), ""),
+            ]);
+            if let Some(provider) = &setter.provider {
+                setters.insert(provider.as_str().to_owned(), "provider: TokenProvider");
+            }
+            if let Some(refreshable) = &setter.refreshable {
+                setters.insert(
+                    refreshable.as_str().to_owned(),
+                    "token: TokenProvider, is_rejection, on_rejected",
+                );
+            }
+            Some((id.0.clone(), setters))
+        })
+        .collect()
 }
 
 /// The server builders codegen's `emit_servers` declares, named as it names them.

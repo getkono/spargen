@@ -87,8 +87,6 @@ const FIXED_CLIENT_METHODS: &[&str] = &[
     "with_client",
     "with_backend",
     "core",
-    "with_credential",
-    "without_credential",
     "with_timeout",
     "with_options",
     "with_base_url",

@@ -15,6 +15,7 @@ pub(crate) fn diff(old: &Surface, new: &Surface) -> DiffReport {
     diff_operations(old, new, &mut changes);
     diff_types(old, new, &mut changes);
     diff_servers(old, new, &mut changes);
+    diff_credentials(old, new, &mut changes);
     diff_testing(old, new, &mut changes);
 
     // Deterministic order: most-severe first, then by location, then by machine code, then detail.
@@ -33,6 +34,47 @@ pub(crate) fn diff(old: &Surface, new: &Surface) -> DiffReport {
         .max()
         .unwrap_or(Impact::Patch);
     DiffReport { changes, bump }
+}
+
+/// The changes between the typed credential setters on both sides, by security scheme: a scheme's
+/// setters appearing, disappearing, or renamed or retyped as a set. A scheme renamed in the spec
+/// is one removed and one added.
+fn diff_credentials(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
+    let render = |setters: &BTreeMap<String, &'static str>| {
+        setters
+            .iter()
+            .map(|(name, arguments)| format!("{name}({arguments})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for scheme in keys(&old.credentials, &new.credentials) {
+        let location = format!("securitySchemes.{scheme}");
+        match (old.credentials.get(scheme), new.credentials.get(scheme)) {
+            (None, Some(setters)) => changes.push(Change::new(
+                ChangeKind::CredentialSchemeAdded,
+                location,
+                format!("credential setters added: {}", render(setters)),
+            )),
+            (Some(setters), None) => changes.push(Change::new(
+                ChangeKind::CredentialSchemeRemoved,
+                location,
+                format!("credential setters removed (were {})", render(setters)),
+            )),
+            (Some(old_setters), Some(new_setters)) if old_setters != new_setters => {
+                changes.push(Change::new(
+                    ChangeKind::CredentialSettersChanged,
+                    location,
+                    format!(
+                        "credential setters {} -> {}",
+                        render(old_setters),
+                        render(new_setters)
+                    ),
+                ));
+            }
+            (Some(_), Some(_)) => {}
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
 }
 
 /// The `testing` module appearing or disappearing.

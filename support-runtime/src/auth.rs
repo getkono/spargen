@@ -243,7 +243,7 @@ impl std::fmt::Debug for Credential {
 /// different intent for; an error they can see is the better failure.
 ///
 /// A caller who wants the *other* alternative unregisters a scheme of the earlier one with
-/// [`ClientCore::remove_credential`] (the generated client's `without_credential`); selection then
+/// [`ClientCore::remove_credential`] (the generated client's `without_<scheme>` setters); selection then
 /// passes over the earlier alternative and reaches the later one on the next call. Registering the
 /// fallback as well is not enough on its own, because selection stops at the first satisfiable
 /// alternative and the earlier one stays satisfied until one of its schemes is removed.
