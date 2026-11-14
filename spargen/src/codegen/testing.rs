@@ -4,7 +4,9 @@
 //! operation method attaches, never by path, to the handler registered with that operation's
 //! `on_{method}`. The handler reads the recorded `testing::Call` and answers with the operation's
 //! own `testing::{method}::Reply`, whose constructors, one per documented response, encode a typed
-//! body with the codec the client's decoder reads that status with. A request no handler is
+//! body with the codec the client's decoder reads that status with, in the response direction:
+//! every `readOnly` member written and every `writeOnly` one left out, which the model fields ask
+//! the module's `skip_*` predicates about (`models::emit_field`). A request no handler is
 //! registered for fails with a `testing::Unrouted` error naming its operation, method and path.
 
 use proc_macro2::TokenStream;
@@ -99,6 +101,41 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 }
             }
 
+            ::std::thread_local! {
+                /// Whether this thread is encoding a typed reply's body, during which every model
+                /// serializes in the response direction (`Reply::in_response_direction`).
+                static RESPONSE_DIRECTION: ::std::cell::Cell<bool> = const { ::std::cell::Cell::new(false) };
+            }
+
+            /// Whether this thread is encoding a typed reply's body.
+            fn response_direction() -> bool {
+                RESPONSE_DIRECTION.with(::std::cell::Cell::get)
+            }
+
+            /// The `skip_serializing_if` of an optional `readOnly` member: left out of a request,
+            /// written in a reply wherever it is present.
+            pub(super) fn skip_read_only<T>(value: &Option<T>) -> bool {
+                !response_direction() || value.is_none()
+            }
+
+            /// The `skip_serializing_if` of an optional nullable `readOnly` member: left out of a
+            /// request, written in a reply wherever it is not absent.
+            pub(super) fn skip_read_only_nullable<T>(value: &super::support::Nullable<T>) -> bool {
+                !response_direction() || value.is_absent()
+            }
+
+            /// The `skip_serializing_if` of an optional `writeOnly` member: written in a request
+            /// wherever it is present, left out of a reply.
+            pub(super) fn skip_write_only<T>(value: &Option<T>) -> bool {
+                response_direction() || value.is_none()
+            }
+
+            /// The `skip_serializing_if` of an optional nullable `writeOnly` member: written in a
+            /// request wherever it is not absent, left out of a reply.
+            pub(super) fn skip_write_only_nullable<T>(value: &super::support::Nullable<T>) -> bool {
+                response_direction() || value.is_absent()
+            }
+
             /// A response the `MockBackend` answers with: a status, headers, and a body held in
             /// memory. Each operation's typed `Reply` builds one for each response the operation
             /// documents; this is the untyped form those wrap, for a response the description
@@ -165,9 +202,26 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                         .body(body)
                 }
 
+                /// Run `encode` with every model serializing in the response direction, as a server
+                /// writes it: each `readOnly` member written, each `writeOnly` one left out. The
+                /// request direction is restored on return, a panic's unwind included.
+                fn in_response_direction<R>(encode: impl FnOnce() -> R) -> R {
+                    /// Restores the direction `encode` started in when dropped.
+                    struct Restore(bool);
+
+                    impl Drop for Restore {
+                        fn drop(&mut self) {
+                            RESPONSE_DIRECTION.with(|direction| direction.set(self.0));
+                        }
+                    }
+
+                    let _restore = Restore(RESPONSE_DIRECTION.with(|direction| direction.replace(true)));
+                    encode()
+                }
+
                 /// `body` as JSON.
                 fn json<T: ::serde::Serialize + ?Sized>(status: u16, body: &T) -> Self {
-                    match ::serde_json::to_vec(body) {
+                    match Self::in_response_direction(|| ::serde_json::to_vec(body)) {
                         Ok(bytes) => Self::encoded(status, "application/json", bytes.into()),
                         Err(error) => panic!("testing::Reply: the body has no JSON form: {error}"),
                     }
@@ -176,7 +230,7 @@ pub(super) fn emit_testing(api: &Api, names: &Names) -> TokenStream {
                 /// `body` as `text/plain`: a string as itself, a number or boolean as its JSON
                 /// spelling, each read back by the client's text codec.
                 fn text<T: ::serde::Serialize + ?Sized>(status: u16, body: &T) -> Self {
-                    match ::serde_json::to_value(body) {
+                    match Self::in_response_direction(|| ::serde_json::to_value(body)) {
                         Ok(::serde_json::Value::String(text)) => {
                             Self::encoded(status, "text/plain; charset=utf-8", text.into())
                         }
@@ -634,7 +688,7 @@ fn constructor(
                         #[serde(rename = "item")]
                         struct Element<'a, T>(&'a T);
 
-                        match support::to_xml(&Element(body)) {
+                        match super::Reply::in_response_direction(|| support::to_xml(&Element(body))) {
                             Ok(xml) => super::Reply::encoded(#status, "application/xml", xml.into()),
                             Err(error) => {
                                 panic!("testing::Reply: the body has no XML form: {error}")
@@ -650,7 +704,7 @@ fn constructor(
             (
                 quote! { body: &#ty },
                 quote! {
-                    match support::to_xml(body) {
+                    match super::Reply::in_response_direction(|| support::to_xml(body)) {
                         Ok(xml) => super::Reply::encoded(#status, "application/xml", xml.into()),
                         Err(error) => panic!("testing::Reply: the body has no XML form: {error}"),
                     }
@@ -691,12 +745,20 @@ mod tests {
     /// One operation per reply shape: an exact JSON body beside a `4XX` text range and a bodyless
     /// `default` (`getItem`), an XML body (`getXml`), a top-level XML sequence beside a bodyless
     /// `204`, both claimed from the `2XX` range beside them, and a `5XX` nothing claims from (`getList`), raw octets
-    /// (`getRaw`), and a streamed body (`watch`).
+    /// (`getRaw`), and a streamed body (`watch`). `Item` holds a `readOnly` and a `writeOnly`
+    /// member, nullable and not.
     const REPLIES: &str = r##"openapi: 3.1.0
 info: {title: T, version: '1'}
 components:
   schemas:
-    Item: {type: object, properties: {name: {type: string}}}
+    Item:
+      type: object
+      properties:
+        name: {type: string}
+        id: {type: integer, readOnly: true}
+        secret: {type: string, writeOnly: true}
+        stamp: {type: [string, 'null'], readOnly: true}
+        hint: {type: [string, 'null'], writeOnly: true}
 paths:
   /items:
     get:
@@ -756,8 +818,10 @@ paths:
             "pubfnstatus_200(body:&types::Item)->Self{Self(super::Reply::json(200u16,body))}",
             "pubfnstatus_4xx(status:u16,body:&types::ResponseBody)->Self{Self(super::Reply::text(super::Reply::in_range(status,4u16),body))}",
             "pubfndefault(status:u16)->Self{Self(super::Reply::new(super::Reply::unclaimed(status,&[(200u16,\"status_200\")],&[(4u16,\"status_4xx\")],),),)}",
-            "matchsupport::to_xml(body){Ok(xml)=>{super::Reply::encoded(200u16,\"application/xml\",xml.into())}",
-            "#[serde(rename=\"item\")]structElement<'a,T>(&'aT);matchsupport::to_xml(&Element(body)){Ok(xml)=>{super::Reply::encoded(200u16,\"application/xml\",xml.into())}",
+            "matchsuper::Reply::in_response_direction(||support::to_xml(body)){Ok(xml)=>{super::Reply::encoded(200u16,\"application/xml\",xml.into())}",
+            "#[serde(rename=\"item\")]structElement<'a,T>(&'aT);matchsuper::Reply::in_response_direction(||support::to_xml(&Element(body),)){Ok(xml)=>{super::Reply::encoded(200u16,\"application/xml\",xml.into())}",
+            "matchSelf::in_response_direction(||::serde_json::to_vec(body)){",
+            "matchSelf::in_response_direction(||::serde_json::to_value(body)){",
             "pubfnstatus_2xx(status:u16)->Self{Self(super::Reply::new(super::Reply::unclaimed(super::Reply::in_range(status,2u16),&[(200u16,\"status_200\"),(204u16,\"status_204\")],&[],),),)}",
             "pubfnstatus_5xx(status:u16)->Self{Self(super::Reply::new(super::Reply::in_range(status,5u16)))}",
             "#[allow(clippy::module_inception)]pubmodget_item{",
@@ -776,6 +840,38 @@ paths:
         let xml = &generated[generated.find("pubmodget_xml{").expect("the XML replies")..];
         let xml = &xml[..xml.find("implFrom<Reply>").expect("its conversion")];
         assert!(!xml.contains("structElement"), "{xml}");
+    }
+
+    /// Under the switch, a `readOnly` or `writeOnly` member asks the `testing` module which
+    /// direction it is serializing in, so a typed reply writes the one and leaves the other out;
+    /// without it, a `readOnly` member is never serialized and a `writeOnly` one is a plain
+    /// optional member.
+    #[test]
+    fn read_and_write_only_members_serialize_by_direction_only_under_the_switch() {
+        let on = generated(true);
+        for (member, skip) in [
+            ("id", "super::testing::skip_read_only"),
+            ("secret", "super::testing::skip_write_only"),
+            ("stamp", "super::testing::skip_read_only_nullable"),
+            ("hint", "super::testing::skip_write_only_nullable"),
+        ] {
+            let expected = format!("rename=\"{member}\",default,skip_serializing_if=\"{skip}\"");
+            assert!(on.contains(&expected), "missing `{expected}`");
+        }
+        let off = generated(false);
+        assert!(!off.contains("super::testing::"), "{off}");
+        for (member, skip) in [
+            ("id", "skip_serializing,"),
+            ("secret", "skip_serializing_if=\"Option::is_none\""),
+            ("stamp", "skip_serializing)"),
+            (
+                "hint",
+                "skip_serializing_if=\"super::support::Nullable::is_absent\"",
+            ),
+        ] {
+            let expected = format!("rename=\"{member}\",default,{skip}");
+            assert!(off.contains(&expected), "missing `{expected}`");
+        }
     }
 
     /// Without the switch, nothing of the module is emitted.
