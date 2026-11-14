@@ -82,9 +82,10 @@ struct Audit<'a, 'doc> {
 /// The per-keyword audit: walks every schema under the root document's components and paths, and
 /// every schema a reference met there reaches — through the Path Items, inline or referenced, and
 /// the Parameter, Request Body, Response, Header, Media Type and Encoding Objects that hold them —
-/// and emits the once-per-site warnings (validation-only keywords), and resolves the references
-/// in every subschema lowering never reads ([`Audit::resolve_unlowered`]). Other rejections fire
-/// during parsing and lowering.
+/// and emits the once-per-site warnings (validation-only keywords), rejects the Schema Object
+/// fields only OpenAPI 3.2 defines in a 3.1 document ([`reject_oas32_schema_fields`]), and resolves
+/// the references in every subschema lowering never reads ([`Audit::resolve_unlowered`]). Other
+/// rejections fire during parsing and lowering.
 pub(crate) fn audit(document: &Document, resolver: &Resolver<'_>, diags: &mut Diagnostics) {
     let consumed_content = consumed_sse_content(document, resolver, diags);
     let mut audit = Audit {
