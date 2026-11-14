@@ -3785,6 +3785,12 @@ mod support {
             /// A style defined only for arrays and objects (`spaceDelimited`, `pipeDelimited`) received a
             /// scalar or undefined value.
             ExpectedComposite,
+            /// A cookie parameter's serialized pair holds a byte its [`CookieValue`] rule refuses
+            /// (`cookie_pair`). It names the parameter and never the value, which may be a secret.
+            InvalidCookie {
+                /// The parameter's declared name.
+                parameter: String,
+            },
         }
         impl fmt::Display for ParameterError {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -3823,6 +3829,12 @@ mod support {
                  parameter value",
                             )
                     }
+                    Self::InvalidCookie { parameter } => {
+                        write!(
+                            formatter,
+                            "cookie parameter `{parameter}` holds a byte RFC 6265 does not admit in a cookie"
+                        )
+                    }
                 }
             }
         }
@@ -3834,7 +3846,8 @@ mod support {
                     | Self::ExpectedObject
                     | Self::FormBodyNotObject
                     | Self::DeepObjectInMultipart
-                    | Self::ExpectedComposite => None,
+                    | Self::ExpectedComposite
+                    | Self::InvalidCookie { .. } => None,
                 }
             }
         }
@@ -4044,6 +4057,73 @@ mod support {
                 }
                 value => Ok(vec![format!("{name}={}", scalar(& value, encoding) ?)]),
             }
+        }
+        /// Which bytes a cookie pair may carry, by how its parameter was serialized; [`cookie_pair`]
+        /// holds a pair to it.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum CookieValue {
+            /// A `style: form` pair, already percent-encoded: only a `;` or a CTL that `allowReserved`
+            /// left literal can break it, so those are refused anywhere in the pair.
+            Encoded,
+            /// A `content` or `explode: true` `style: cookie` pair, sent verbatim: an RFC 6265
+            /// `cookie-name` (a `token`), `=`, and a `cookie-value`, which is `*cookie-octet`, bare or
+            /// between two `"`.
+            Octets,
+            /// An `explode: false` `style: cookie` pair: as [`Octets`](Self::Octets), but the value may
+            /// also carry the `,` that style joins array items and object members with.
+            OctetList,
+        }
+        /// Check one `name=value` cookie pair of the parameter declared as `parameter` against `rule`,
+        /// and return it unchanged where it holds, so it can be joined into the `Cookie` header.
+        ///
+        /// A pair it refuses fails as `ParameterError::InvalidCookie`, which names `parameter` and not
+        /// the value: a `;` would otherwise split one value into a second cookie the caller never
+        /// declared, and a cookie may be a secret.
+        pub fn cookie_pair(
+            parameter: &str,
+            pair: String,
+            rule: CookieValue,
+        ) -> Result<String, ParameterError> {
+            let admitted = match pair.split_once('=') {
+                None => false,
+                Some(_) if rule == CookieValue::Encoded => {
+                    pair.bytes().all(|byte| byte != b';' && !byte.is_ascii_control())
+                }
+                Some((name, value)) => {
+                    let value = value
+                        .strip_prefix('"')
+                        .and_then(|quoted| quoted.strip_suffix('"'))
+                        .unwrap_or(value);
+                    !name.is_empty() && name.bytes().all(is_token_byte)
+                        && value
+                            .bytes()
+                            .all(|byte| {
+                                is_cookie_octet(byte)
+                                    || (byte == b',' && rule == CookieValue::OctetList)
+                            })
+                }
+            };
+            if admitted {
+                Ok(pair)
+            } else {
+                Err(ParameterError::InvalidCookie {
+                    parameter: parameter.to_owned(),
+                })
+            }
+        }
+        /// RFC 6265 §4.1.1 `cookie-octet`: visible US-ASCII but `"`, `,`, `;` and `\`.
+        fn is_cookie_octet(byte: u8) -> bool {
+            matches!(
+                byte, 0x21 | 0x23..= 0x2B | 0x2D..= 0x3A | 0x3C..= 0x5B | 0x5D..= 0x7E
+            )
+        }
+        /// RFC 9110 §5.6.2 `tchar`, the bytes of the `token` a cookie name is.
+        fn is_token_byte(byte: u8) -> bool {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte, b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' |
+                    b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+                )
         }
         /// Serialize one `style: spaceDelimited` or `style: pipeDelimited` query parameter.
         ///
@@ -7761,10 +7841,10 @@ mod support {
     pub use nullable::Nullable;
     pub use header::{parse_header, require_header, HeaderError, HeaderShape};
     pub use parameter::{
-        encode, serialize_deep_object, serialize_delimited, serialize_form,
+        cookie_pair, encode, serialize_deep_object, serialize_delimited, serialize_form,
         serialize_form_body, serialize_label, serialize_matrix,
-        serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty,
-        FormStyle, ParameterError, PercentEncoding,
+        serialize_multipart_values, serialize_simple, CookieValue, Delimiter, FormMode,
+        FormProperty, FormStyle, ParameterError, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
     pub use request::{
@@ -15273,16 +15353,20 @@ impl Client {
                     .map_err(support::Error::request_construction)?,
             );
         let mut cookies: Vec<String> = Vec::new();
-        cookies
-            .extend(
-                support::serialize_form(
-                        "cookies",
-                        &params.cookies,
-                        true,
-                        support::PercentEncoding::Form,
-                    )
-                    .map_err(support::Error::request_construction)?,
-            );
+        for pair in support::serialize_form(
+                "cookies",
+                &params.cookies,
+                true,
+                support::PercentEncoding::Form,
+            )
+            .map_err(support::Error::request_construction)?
+        {
+            cookies
+                .push(
+                    support::cookie_pair("cookies", pair, support::CookieValue::Encoded)
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
         if !cookies.is_empty() {
             request = request.header(reqwest::header::COOKIE, cookies.join("; "));
         }
@@ -15611,16 +15695,24 @@ impl Client {
             );
         let mut cookies: Vec<String> = Vec::new();
         if let Some(value) = params.session.as_ref() {
-            cookies
-                .extend(
-                    support::serialize_form(
-                            "session",
-                            value,
-                            true,
-                            support::PercentEncoding::Form,
-                        )
-                        .map_err(support::Error::request_construction)?,
-                );
+            for pair in support::serialize_form(
+                    "session",
+                    value,
+                    true,
+                    support::PercentEncoding::Form,
+                )
+                .map_err(support::Error::request_construction)?
+            {
+                cookies
+                    .push(
+                        support::cookie_pair(
+                                "session",
+                                pair,
+                                support::CookieValue::Encoded,
+                            )
+                            .map_err(support::Error::request_construction)?,
+                    );
+            }
         }
         if !cookies.is_empty() {
             request = request.header(reqwest::header::COOKIE, cookies.join("; "));
@@ -21262,16 +21354,24 @@ Response `5XX`: Any server error*/
         }
         let mut cookies: Vec<String> = Vec::new();
         if let Some(value) = params.as_ref().and_then(|params| params.session.as_ref()) {
-            cookies
-                .extend(
-                    support::serialize_form(
-                            "session",
-                            value,
-                            true,
-                            support::PercentEncoding::Form,
-                        )
-                        .map_err(support::Error::request_construction)?,
-                );
+            for pair in support::serialize_form(
+                    "session",
+                    value,
+                    true,
+                    support::PercentEncoding::Form,
+                )
+                .map_err(support::Error::request_construction)?
+            {
+                cookies
+                    .push(
+                        support::cookie_pair(
+                                "session",
+                                pair,
+                                support::CookieValue::Encoded,
+                            )
+                            .map_err(support::Error::request_construction)?,
+                    );
+            }
         }
         if !cookies.is_empty() {
             request = request.header(reqwest::header::COOKIE, cookies.join("; "));
