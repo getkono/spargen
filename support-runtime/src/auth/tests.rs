@@ -876,6 +876,54 @@ fn an_api_key_that_is_not_a_header_value_fails_as_request_construction() {
     }
 }
 
+/// Issue #1409: a header apiKey replaces any value the request already carries under its name,
+/// as `http bearer` and `http basic` replace `Authorization`. An apiKey named `Authorization` on a
+/// request built from a userinfo URL sends one `Authorization`, the apiKey's, rather than the
+/// URL's `Basic` beside it; one named `X-Api-Key` on a request already carrying that header sends
+/// one value. Either way the value is marked sensitive.
+#[test]
+fn a_header_api_key_replaces_a_value_the_request_already_carries() {
+    let mut core = core();
+    core.set_credential("key", Credential::ApiKey(SecretString::from("t0k3n")));
+    let cases = [
+        (
+            "Authorization",
+            request_to(&core, reqwest::Method::GET, "https://u:p@example.com/op"),
+        ),
+        ("X-Api-Key", get(&core).header("X-Api-Key", "stale")),
+    ];
+    for (name, request) in cases {
+        let request = poll_ready(attach_auth(
+            &core,
+            request,
+            &[&[AuthScheme {
+                name: "key",
+                kind: AuthKind::ApiKeyHeader(name),
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        let sent: Vec<_> = request.headers().get_all(name).iter().collect();
+        assert_eq!(sent, ["t0k3n"], "{name}");
+        assert!(sent[0].is_sensitive(), "{name}");
+    }
+    // A name no header can carry fails the call before anything is sent.
+    let error = poll_ready(attach_auth(
+        &core,
+        get(&core),
+        &[&[AuthScheme {
+            name: "key",
+            kind: AuthKind::ApiKeyHeader("X Api Key"),
+        }]],
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+        "{error:?}"
+    );
+}
+
 /// A bearer token a header value refuses fails the call as a request-construction error while the
 /// credential is attached, so the request is never sent; an `http basic` password likewise.
 #[test]
