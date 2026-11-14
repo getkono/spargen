@@ -1115,3 +1115,76 @@ fn the_recursive_ref_guard_does_not_key_on_component_declaration_order() {
         "an acyclic `$ref` with shape-bearing siblings must still intersect: {report:#?}"
     );
 }
+
+/// A discriminated union one of whose members reaches back to it (#1400): `A` holds a `U`, so
+/// whichever of the two is declared first, one of them is still an open reservation while the
+/// other is lowered. With `A` first, `U` was lowered while `A` was a reservation, which has no
+/// JSON category, so the discriminator was dropped in silence and `U` was trial-matched: `{"kind":
+/// "B"}` matched both `A` and `B` and failed to decode, though its tag names `B`. Tag dispatch is
+/// decided once every reservation is filled, so the declaration order decides nothing: both
+/// orders dispatch by tag and generate the same `U`.
+#[test]
+fn a_recursive_discriminated_member_keeps_tag_dispatch_in_either_declaration_order() {
+    let a = "    A: { type: object, required: [kind], properties: { kind: { type: string }, \
+             next: { $ref: '#/components/schemas/U' } } }\n";
+    let b = "    B: { type: object, required: [kind], properties: { kind: { type: string } } }\n";
+    let u = "    U: { oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: \
+             '#/components/schemas/B' }], discriminator: { propertyName: kind } }\n";
+    let spec = |schemas: [&str; 3]| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /u:\n    \
+             get:\n      \
+             operationId: getU\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json: {{ schema: {{ $ref: '#/components/schemas/U' }} }}\n\
+             components:\n  \
+             schemas:\n{}",
+            schemas.concat()
+        )
+    };
+    let mut bodies = Vec::new();
+    for (order, schemas) in [("U first", [u, a, b]), ("A first", [a, b, u])] {
+        let (report, code) = generate_with_code(&spec(schemas));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{order}: {report:#?}");
+        assert_eq!(codes(&report), Vec::<&str>::new(), "{order}: {report:#?}");
+        let arms = super::discriminator::discriminated_arms(&code, "U");
+        assert_eq!(
+            arms.decode,
+            vec![
+                ("A".to_owned(), vec!["A".to_owned()]),
+                ("B".to_owned(), vec!["B".to_owned()]),
+            ],
+            "{order}: {code}"
+        );
+        assert_eq!(
+            arms.encode,
+            vec![
+                ("A".to_owned(), Some("A".to_owned())),
+                ("B".to_owned(), Some("B".to_owned())),
+            ],
+            "{order}: {code}"
+        );
+        // `U`'s own items, its enum and both impls; where the cycle is boxed, and the order the
+        // items are emitted in, follow the declaration order whatever the dispatch.
+        let start = code
+            .find("pub enum U {")
+            .unwrap_or_else(|| panic!("{order}: no `U`: {code}"));
+        let end = code[start..]
+            .find("impl serde::Serialize for U {")
+            .and_then(|at| {
+                code[start + at..]
+                    .find("\n    }\n")
+                    .map(|end| start + at + end)
+            })
+            .unwrap_or_else(|| panic!("{order}: no `Serialize` for `U`: {code}"));
+        bodies.push(code[start..end].to_owned());
+    }
+    assert_eq!(bodies[0], bodies[1], "the declaration order changed `U`");
+}
