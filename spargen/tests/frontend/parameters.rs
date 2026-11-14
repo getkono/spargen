@@ -1469,12 +1469,12 @@ paths:
     }
 }
 
-/// Issue #1121: a required parameter is a positional argument with no attribute slot, so its
-/// `deprecated: true` is noted in its method's rustdoc, before its `default` note, as an optional
-/// parameter's `…Params` field carries both. A required parameter that is not deprecated gets no
-/// such note.
+/// Issue #1121: a path parameter is a positional argument with no attribute slot, so its
+/// `deprecated: true` is noted in its method's rustdoc. A required query parameter is a `…Params`
+/// field (issue #1338), so it carries both notes on its field, `deprecated` before `default`, as
+/// an optional parameter's field does. A parameter that is not deprecated gets no such note.
 #[test]
-fn a_deprecated_required_parameter_is_noted_in_its_method_docs() {
+fn a_deprecated_required_parameter_is_noted_in_its_method_docs_or_field_docs() {
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -1498,10 +1498,15 @@ paths:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
     let notes = "///Parameter `id` is deprecated per the spec. \
-                 ///Parameter `sort` is deprecated per the spec. \
-                 ///Parameter `sort` default: `name`. \
                  #[inline] pub async fn list_items(";
     assert!(flat.contains(notes), "{code}");
+    assert!(
+        flat.contains(
+            "///Deprecated per the spec. ///Default: `name`. #[serde(rename = \"sort\")] pub sort:"
+        ),
+        "{code}"
+    );
+    assert!(!flat.contains("Parameter `sort`"), "{code}");
     assert!(!flat.contains("Parameter `kept`"), "{code}");
     assert!(!flat.contains("Parameter `page`"), "{code}");
     assert!(
