@@ -70,8 +70,9 @@ fn a_params_field_rebound_to_another_wire_name_is_major() {
         &with_query(&["pageSize"]),
         &with_query(&["pageSize", "page-size"]),
     );
-    assert!(
-        codes(&report).contains(&"identifier-rebound"),
+    assert_eq!(
+        kinds(&report)[0],
+        ChangeKind::IdentifierRebound,
         "{:?}",
         report.changes
     );
@@ -82,8 +83,9 @@ fn a_params_field_rebound_to_another_wire_name_is_major() {
 fn a_struct_field_rebound_to_another_wire_name_is_major() {
     // `foo_bar` is spelled as its identifier, so it takes `foo_bar` from `fooBar`.
     let report = diff(&pet_with(&["fooBar"]), &pet_with(&["fooBar", "foo_bar"]));
-    assert!(
-        codes(&report).contains(&"identifier-rebound"),
+    assert_eq!(
+        kinds(&report)[0],
+        ChangeKind::IdentifierRebound,
         "{:?}",
         report.changes
     );
@@ -112,8 +114,9 @@ fn reordering_colliding_properties_renames_nothing() {
 fn an_enum_variant_rebound_to_another_wire_value_is_major() {
     // `A_B` sorts before `a-b`, so it takes `AB`, and `Kind::AB` would now send `A_B`.
     let report = diff(&kind_with("a-b"), &kind_with("A_B, a-b"));
-    assert!(
-        codes(&report).contains(&"identifier-rebound"),
+    assert_eq!(
+        kinds(&report)[0],
+        ChangeKind::IdentifierRebound,
         "{:?}",
         report.changes
     );

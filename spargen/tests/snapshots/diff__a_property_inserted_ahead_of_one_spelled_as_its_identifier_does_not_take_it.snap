@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+minor|field-added|Pet.foo_bar_0bcf79bf|optional field added: `String`
+bump=minor
