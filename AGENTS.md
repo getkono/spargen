@@ -26,7 +26,8 @@ for the area you change: `support-runtime.md`, `diagnostics.md` (codes, `oas31`,
 ## Validate
 
 `mise run check`, `fmt`, `lint` and `test` cover most changes; `mise tasks` lists the rest. Run
-`mise run hooks` once. A green pre-push is not a green CI, and a green pull request is not a green
+`mise run hooks` once. Pre-push runs only `fmt-check`, `commit-range` and `deny`; CI gates clippy
+and the tests. A green pre-push is not a green CI, and a green pull request is not a green
 `master`: the slow gates (`msrv`, `powerset`, `corpus-smoke`, `github-api`, `example`,
 `bench-build`) skip ordinary pull requests, so a change that risks one (a toolchain or dependency
 bump, a codegen change) first runs `gh workflow run ci.yml --ref <branch>`, which tests the branch
