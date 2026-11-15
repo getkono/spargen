@@ -4,11 +4,13 @@
 //! numeric bounds, `multipleOf`, `uniqueItems`). One of the wrong shape is `E011` at the keyword
 //! (or the array element) that holds it; dropping it would silently widen the schema. The one
 //! exception is OpenAPI 3.0's boolean `exclusiveMinimum`/`exclusiveMaximum`, which is `W001`.
-//! OpenAPI 3.0's `nullable: true` is read here too ([`oas30_nullable`]), only to be reported.
+//! OpenAPI 3.0's `nullable: true` is read here too ([`oas30_nullable`]), only to be reported, and
+//! so are the pre-2020-12 keywords ([`Pre2020Keyword`]).
 
 use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer};
 use crate::source::{Node, Number, SpannedMap, SpannedValue};
 
+use super::super::schema::Pre2020Keyword;
 use super::super::{JsonType, TypeSet, ValidationKeywords};
 use super::{expect_array, expect_bool, expect_string, provenance};
 
@@ -104,7 +106,8 @@ pub(super) const SUBSCHEMA_KEYWORDS: [&str; 8] = [
 
 /// A Schema Object's [`ValidationKeywords`]. `other` is set by any of [`SUBSCHEMA_KEYWORDS`],
 /// `dependentSchemas`, `dependentRequired`, `minContains`, `maxContains`, or an OpenAPI 3.0
-/// boolean `exclusiveMinimum`/`exclusiveMaximum` (see [`exclusive_bound`]).
+/// boolean `exclusiveMinimum`/`exclusiveMaximum` (see [`exclusive_bound`]); `pre_2020_12` lists
+/// the [`Pre2020Keyword`]s present.
 pub(super) fn parse_validation(
     map: &SpannedMap,
     pointer: &JsonPointer,
@@ -151,7 +154,19 @@ pub(super) fn parse_validation(
                     "dependentRequired",
                 ])
                 .any(|keyword| map.get(keyword).is_some()),
+        pre_2020_12: pre_2020_12_keywords(map),
     }
+}
+
+/// The [`Pre2020Keyword`]s the schema writes. In a 3.1 or 3.2 document each is an unknown
+/// keyword, which the generated code cannot enforce whatever it was meant to state: it is
+/// recorded so the audit reports it as `W001`, and the subschemas it holds are parsed into
+/// `Schema::validation_children`, so nothing under it disappears silently.
+fn pre_2020_12_keywords(map: &SpannedMap) -> Vec<Pre2020Keyword> {
+    Pre2020Keyword::ALL
+        .into_iter()
+        .filter(|keyword| map.get(keyword.as_str()).is_some())
+        .collect()
 }
 
 /// A numeric keyword (`minimum`, `multipleOf`, ...) of the schema at `pointer`: absent, or a

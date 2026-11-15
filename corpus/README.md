@@ -10,7 +10,7 @@ Included public APIs:
 | --- | --- | --- | --- | --- | --- |
 | `github-api-3-1` | `github/rest-api-description` | `03ca9c1cac754ec9b8369dc75de8a8c753c6e087` | `descriptions-next/api.github.com/api.github.com.json` | `d88008d8198becda210d59fbe64a6554bcc4c979be2348e2e356638b369eee47` | Generate |
 | `github-api-3-0` | `github/rest-api-description` | `v2.1.0` | `descriptions/api.github.com/api.github.com.json` | `b138e9cdcf4ac29a23fea1f6579d2840668a5f3d41fe7f160b263bec590d2e3f` | Reject `E001` |
-| `openai-openapi` | `openai/openai-openapi` | `5162af98d3147432c14680df789e8e12d4891e6b` | `openapi.yaml` | `74cbcf73838f4cd7e209b2d3f2e9ddc9fa155f21a44360b6fac7646a6d4f5f8b` | Reject `E009` (an `application/sdp`-only response body) |
+| `openai-openapi` | `openai/openai-openapi` | `5162af98d3147432c14680df789e8e12d4891e6b` | `openapi.yaml` | `74cbcf73838f4cd7e209b2d3f2e9ddc9fa155f21a44360b6fac7646a6d4f5f8b` | Reject `E006` (a 2019-09 `$recursiveRef`/`$recursiveAnchor`) |
 | `ollama` | `ollama/ollama` | `d47859ce495496196df211e939702364492a2b7f` | `docs/openapi.yaml` | `d54e2ef5c24a396662ca7222af31ab3e26a642efbd2bb060d921b9393e9fef87` | Generate |
 | `openapi-boilerplate` | `dgarcia360/openapi-boilerplate` | `41630ba37b628c7bd871230f480f62f694607d3f` | `src/**` | tree `6a1a45fb44e25fb931c3c2b7c85d2b10b70cd82bae78b189b30035cca973c3e8`; root `580f8d9b131756c29dd82535a74f6948dc77e53377e2b3292b49d2778029d209` | Generate |
 | `stripe` | `stripe/openapi` | `d5d11f661d1180a847d6e26774517756e6a493a1` | `openapi/spec3.json` | `e24a26de4188fd64dec4c043d5d3726277fdcb07556a493ea481c305b0a223d8` | Reject `E001` (OpenAPI 3.0.0) |
@@ -25,9 +25,12 @@ job of that name, checks each expectation; this is the one place the reasons are
 - `github-api-3-1` must clear the strict frontend with no carve and no omits. Its `spargen.toml`
   raises the batch cap so that a new terminal diagnostic cannot hide behind the warning volume.
 - `github-api-3-0` is OpenAPI 3.0, rejected at the version gate (`E001`).
-- `openai-openapi` is 3.1 and past the version gate, but `POST /realtime/calls` documents
-  `application/sdp` as its only `201` content entry, and spargen has no codec for an unregistered
-  media type (`E009`).
+- `openai-openapi` is 3.1 and past the version gate, but `/components/schemas/CompoundFilter`
+  writes JSON Schema 2019-09's `$recursiveAnchor: true`, and its `filters` items a
+  `$recursiveRef: '#'` member, which need dynamic schema-scope evaluation (`E006`). Behind that,
+  `POST /realtime/calls` documents `application/sdp` as its only `201` content entry, which
+  spargen has no codec for (`E009`), but a Schema Object rejection stops the run before lowering
+  reaches it.
 - `ollama` and `openapi-boilerplate` generate: `check` succeeds with no rejection.
 - Stripe (3.0.0), Twilio (3.0.1) and a representative Kubernetes API-group document (3.0.0) pin
   the version gate (`E001`) on major APIs.
@@ -51,22 +54,21 @@ Deliberately not included: HoneyHive, IOTA gas-station, and Redocly.
 
 A passing `corpus-smoke`, `corpus_manifest`, `snapshot`, or `recipes` run is evidence only for the
 constructs these descriptions contain and that reach the code being changed. It is silent about
-the rest. Five of the ten cases (and the `poem-openapi` recipe) are rejected before any schema is
-lowered: `E001` for the four OpenAPI 3.0.x documents and the recipe, and `E011` document validation
-for `meilisearch`. Schema lowering is reached only by `github-api-3-1`, `openai-openapi`, `ollama`,
-`openapi-boilerplate`, `mastodon-openapi`, and the `utoipa`, `utoipa-untagged-overlap`, and `aide`
-recipes.
+the rest. Six of the ten cases (and the `poem-openapi` recipe) are rejected before any schema is
+lowered: `E001` for the four OpenAPI 3.0.x documents and the recipe, `E011` document validation
+for `meilisearch`, and the Schema Object rejection `E006` for `openai-openapi`. Schema lowering is
+reached only by `github-api-3-1`, `ollama`, `openapi-boilerplate`, `mastodon-openapi`, and the
+`utoipa`, `utoipa-untagged-overlap`, and `aide` recipes.
 
 **Schema Object `$ref` beside shape-bearing sibling keywords** (the intersection the support matrix
-describes, and its `E013` rejections) is reached by `mastodon-openapi` and by one `oneOf` member of
-`openai-openapi`. Mastodon carries 35 `$ref`s with a `type` sibling, each a string enum component
-referenced beside `type: string` (33) or `type: [string, 'null']` (2);
-`/components/schemas/Status/properties/visibility` is one. In the other pinned documents and
-recipes, the only `$ref` with a sibling other than an annotation (`description`, `title`,
-`deprecated`, `default`, 3.0's `nullable`) is `openai-openapi`'s
+describes, and its `E013` rejections) is reached by `mastodon-openapi` alone. Mastodon carries 35
+`$ref`s with a `type` sibling, each a string enum component referenced beside `type: string` (33)
+or `type: [string, 'null']` (2); `/components/schemas/Status/properties/visibility` is one. In the
+other pinned documents and recipes, the only `$ref` with a sibling other than an annotation
+(`description`, `title`, `deprecated`, `default`, 3.0's `nullable`) is `openai-openapi`'s
 `/components/schemas/InputItem/oneOf/1`, which sets `type: object` beside
-`$ref: '#/components/schemas/Item'`; a union member's `$ref` siblings reach the intersection like
-any other's ([#279](https://github.com/getkono/spargen/issues/279)). Every other intersection
+`$ref: '#/components/schemas/Item'`, and that document's `E006` stops the run before lowering
+reaches it. Every other intersection
 behaviour — an empty intersection, a recursive target, and a non-empty one of any other shape — is
 pinned only by inline fixtures: those in `spargen/tests/frontend/`, and the two carve fixtures in
 `spargen/tests/carve.rs` (`carve_removes_a_ref_whose_siblings_cannot_be_intersected` and
@@ -75,8 +77,7 @@ pinned only by inline fixtures: those in `spargen/tests/frontend/`, and the two 
 
 So the corpus is thin evidence for these constructs. Mutating the lowering pass
 (`spargen/src/oas31/lower/`) so that every shape-bearing `$ref` sibling reaching the intersection
-rejects with `E013` changes only `mastodon-openapi`, which rejects, and `openai-openapi`, which
-gains an `E013` at `/components/schemas/InputItem/oneOf/1`. Mutating it so that the
+rejects with `E013` changes only `mastodon-openapi`, which rejects. Mutating it so that the
 recursive-nullable collapse (a single real union member that closes a reference cycle, without
 sibling keywords) rejects with `E013` changes only `mastodon-openapi`. Every other case and recipe
 keeps its outcome under either mutation.
