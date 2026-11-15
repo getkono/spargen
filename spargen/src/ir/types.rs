@@ -176,7 +176,8 @@ pub(crate) enum UnionStrategy {
     Disjoint,
     /// Variants overlap structurally, so generated serde implementations try each typed payload
     /// against one buffered JSON value. `oneOf` requires exactly one match; `anyOf` selects the
-    /// highest-specificity match ([`VariantDispatch::Trial`]), with source order breaking ties.
+    /// highest-specificity match ([`VariantDispatch::Trial`]) among those that keep every member
+    /// of the payload ([`UnionMode::AnyOf`]), with source order breaking ties.
     Trial {
         /// Whether the source applicator was `oneOf` or `anyOf`.
         mode: UnionMode,
@@ -252,7 +253,9 @@ pub(crate) enum VariantDispatch {
 pub(crate) enum UnionMode {
     /// Exactly one variant must deserialize successfully.
     OneOf,
-    /// One or more variants may match; the most specific typed match is selected.
+    /// One or more variants may match; the most specific typed match is selected. A variant
+    /// matches only where it writes back every member of the payload it decoded, so one that
+    /// decodes by dropping undeclared members is never selected.
     AnyOf,
 }
 

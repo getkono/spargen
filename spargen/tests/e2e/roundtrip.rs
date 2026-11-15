@@ -360,6 +360,22 @@ fn an_any_of_trial_selects_the_more_specific_of_two_lossless_variants() {
     assert!(matches!(brief, types::Briefing::Brief(_)), "{brief:?}");
     assert_eq!(serde_json::to_value(&brief).unwrap(), payload);
 }
+
+// The untagged members of a discriminated `anyOf` are selected by the same rule: a payload no tag
+// selects decodes as the member that keeps it, and one no member keeps does not decode.
+#[test]
+fn an_untagged_discriminated_any_of_member_is_selected_only_where_it_keeps_the_payload() {
+    let payload = serde_json::json!({ "kind": "bike", "a": 1 });
+    let gadget: types::Gadget = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(gadget, types::Gadget::GadgetVariant1(_)), "{gadget:?}");
+    assert_eq!(serde_json::to_value(&gadget).unwrap(), payload);
+    let payload = serde_json::json!({ "kind": "bike", "b": "x" });
+    let gadget: types::Gadget = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(gadget, types::Gadget::GadgetVariant2(_)), "{gadget:?}");
+    assert_eq!(serde_json::to_value(&gadget).unwrap(), payload);
+    let decoded = serde_json::from_value::<types::Gadget>(serde_json::json!({ "kind": "bike", "z": 1 }));
+    assert!(decoded.is_err(), "no member keeps `z`: {decoded:?}");
+}
 "####;
 
 /// The spec generated for [`union_and_allof_roundtrip_under_proptest`]: a `User` object pulling in a
@@ -371,7 +387,8 @@ fn an_any_of_trial_selects_the_more_specific_of_two_lossless_variants() {
 /// untagged object member (`Vehicle`); a discriminated union lowered while its member `Node` is
 /// still being lowered (`Chain`), and one with a union member and two string members (`Creature`);
 /// two `anyOf` unions of open objects whose selection keeps every member of the payload, one of
-/// inline members no specificity favours correctly (`Thing`) and one ranked by it (`Briefing`).
+/// inline members no specificity favours correctly (`Thing`) and one ranked by it (`Briefing`), and
+/// a discriminated `anyOf` whose untagged members are held to the same rule (`Gadget`).
 /// One operation references `User` so every type is emitted. The document is 3.1, so the
 /// `defaultMapping` union (`Ride`) is in `OAS32_SPEC`, whose fixture's `wire` test drives it.
 const ROUNDTRIP_SPEC: &str = r##"
@@ -410,6 +427,7 @@ components:
         creature: { $ref: "#/components/schemas/Creature" }
         thing: { $ref: "#/components/schemas/Thing" }
         briefing: { $ref: "#/components/schemas/Briefing" }
+        gadget: { $ref: "#/components/schemas/Gadget" }
     Thing:
       anyOf:
         - type: object
@@ -434,6 +452,22 @@ components:
       anyOf:
         - $ref: "#/components/schemas/Brief"
         - $ref: "#/components/schemas/Fuller"
+    Gadget:
+      anyOf:
+        - $ref: "#/components/schemas/Car"
+        - type: object
+          properties:
+            kind: { type: string }
+            a: { type: integer }
+        - type: object
+          properties:
+            kind: { type: string }
+            b: { type: string }
+            c: { type: string }
+      discriminator:
+        propertyName: kind
+        mapping:
+          car: "#/components/schemas/Car"
     Bird:
       type: object
       required: [kind]

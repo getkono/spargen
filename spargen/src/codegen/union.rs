@@ -257,6 +257,7 @@ pub(super) fn emit_union(
                         priority,
                         guard.as_ref(),
                         unknown.as_ref(),
+                        *mode,
                     ))
                 })
                 .collect();
@@ -513,6 +514,7 @@ pub(super) fn emit_union(
                     priority,
                     guard.as_ref(),
                     unknown.as_ref(),
+                    *mode,
                 )
             });
             let ser_arms = union.variants.iter().map(|variant| {
@@ -529,10 +531,20 @@ pub(super) fn emit_union(
                 .any(|variant| open_member_unknown_test(types, names, variant.ty).is_some());
             // A value an open member decodes only as its `Unknown` is held to the same rule on
             // serialize as on decode: it counts only when no variant matches outright. A variant
-            // is tried on the written value under the same category guard as on decode.
+            // is tried on the written value under the same category guard as on decode, and under
+            // `anyOf` counts only where it keeps the written value, as on decode.
+            let keeps = keeps_payload_tokens(*mode);
             let validations = union.variants.iter().map(|variant| {
                 let ty = boxed_ty_tokens(variant.ty, names, false);
                 let guard = trial_guard_tokens(trial_dispatch(variant).1, variant.ty);
+                let count = match &keeps {
+                    Some(keeps) => quote! {
+                        if #keeps {
+                            match_count += 1;
+                        }
+                    },
+                    None => quote! { match_count += 1; },
+                };
                 match open_member_unknown_test(types, names, variant.ty) {
                     Some(unknown) => {
                         let (pattern, attempt) = guarded_decode_tokens(&ty, guard.as_ref());
@@ -541,8 +553,16 @@ pub(super) fn emit_union(
                                 if #unknown {
                                     unknown_match = true;
                                 } else {
-                                    match_count += 1;
+                                    #count
                                 }
+                            }
+                        }
+                    }
+                    None if keeps.is_some() => {
+                        let (pattern, attempt) = guarded_decode_tokens(&ty, guard.as_ref());
+                        quote! {
+                            if let #pattern = #attempt {
+                                #count
                             }
                         }
                     }
@@ -556,18 +576,18 @@ pub(super) fn emit_union(
                     }
                 }
             });
-            let expected = match mode {
-                UnionMode::OneOf => "exactly one",
-                UnionMode::AnyOf => "at least one",
+            let (expected, keeping) = match mode {
+                UnionMode::OneOf => ("exactly one", ""),
+                UnionMode::AnyOf => ("at least one", ", keeping every member of it"),
             };
             let de_valid = trial_match_rule_tokens(*mode);
             let ser_valid = de_valid.clone();
             let de_error = format!(
-                "data must match {expected} typed variant of union {}",
+                "data must match {expected} typed variant of union {}{keeping}",
                 ident.as_str()
             );
             let ser_error = format!(
-                "serialized value must match {expected} typed variant of union {}",
+                "serialized value must match {expected} typed variant of union {}{keeping}",
                 ident.as_str()
             );
             let fallback_decl = fallback_member.then(unknown_fallback_decl_tokens);
@@ -835,6 +855,12 @@ fn guarded_decode_tokens(
 /// `unknown_fallback` ([`unknown_fallback_decl_tokens`]), which the trial takes only when no
 /// variant matched. Counting it would let an open member's catch-all overlap every other object
 /// variant, and fail a `oneOf` that decodes with the member closed.
+///
+/// Under `anyOf`, a decode counts only where the variant keeps the payload
+/// ([`keeps_payload_tokens`]): one that decodes by dropping members it does not declare is no
+/// match, so a less specific variant that keeps them is selected over it, and a payload no
+/// variant keeps fails the trial (#1404). `oneOf` counts every decode, as its exactly-one rule
+/// already refuses a payload two variants take.
 fn trial_attempt_tokens(
     ident: &crate::name::Ident,
     variant_ident: &crate::name::Ident,
@@ -842,6 +868,7 @@ fn trial_attempt_tokens(
     priority: u32,
     guard: Option<&TokenStream>,
     unknown: Option<&TokenStream>,
+    mode: UnionMode,
 ) -> TokenStream {
     let (pattern, attempt) = guarded_decode_tokens(ty, guard);
     let count = quote! {
@@ -853,6 +880,14 @@ fn trial_attempt_tokens(
         if replace {
             selected = Some((#priority, #ident::#variant_ident(inner)));
         }
+    };
+    let count = match keeps_payload_tokens(mode) {
+        Some(keeps) => quote! {
+            if #keeps {
+                #count
+            }
+        },
+        None => count,
     };
     match unknown {
         Some(unknown) => quote! {
@@ -896,6 +931,70 @@ fn open_member_unknown_test(types: &TypeGraph, names: &Names, ty: Ty) -> Option<
         quote! { matches!(inner.as_deref(), Some(#member::#unknown { .. })) }
     } else {
         quote! { matches!(*inner, #member::#unknown { .. }) }
+    })
+}
+
+/// The name of the private function `types` carries wherever an `anyOf` union is trial-matched
+/// ([`keeps_payload_decl`]). Snake case, so it cannot collide with a `PascalCase` type.
+const KEEPS_PAYLOAD: &str = "keeps_payload";
+
+/// Under `anyOf`, the test that the variant decoded into `inner` from `value` keeps the payload
+/// ([`keeps_payload_decl`]); `None` under `oneOf`, which counts every decode.
+fn keeps_payload_tokens(mode: UnionMode) -> Option<TokenStream> {
+    let keeps = quote::format_ident!("{KEEPS_PAYLOAD}");
+    matches!(mode, UnionMode::AnyOf).then(|| quote! { #keeps(&value, &inner) })
+}
+
+/// The private `keeps_payload` function of the `types` module, when `types` holds a union an
+/// `anyOf` trial matches, whether every variant or a discriminated union's untagged ones:
+/// whether `decoded`, written back, keeps every member of `read`, the payload it was decoded
+/// from. An object keeps it where every key of `read` is written with a value that keeps that
+/// key's, an array where it has as many items and each keeps its counterpart, and a scalar where
+/// it is a scalar of the same JSON type: its value was already checked by decoding it, and a
+/// spelling decoding normalises (`1` read as `1.0`, an RFC 3339 offset) is the same value.
+pub(super) fn keeps_payload_decl(types: &TypeGraph) -> Option<TokenStream> {
+    let any_of_trial = types.emitted().any(|(_, definition)| {
+        matches!(
+            &definition.kind,
+            TypeKind::Union(Union {
+                strategy: UnionStrategy::Trial {
+                    mode: UnionMode::AnyOf
+                } | UnionStrategy::Discriminated {
+                    mode: UnionMode::AnyOf,
+                    ..
+                },
+                ..
+            })
+        )
+    });
+    let keeps = quote::format_ident!("{KEEPS_PAYLOAD}");
+    any_of_trial.then(|| {
+        quote! {
+            /// Whether `decoded`, a variant an `anyOf` trial decoded from `read`, writes back
+            /// every member of `read`: a variant that decodes a payload by dropping members it
+            /// does not declare is not selected.
+            fn #keeps<T: Serialize>(read: &serde_json::Value, decoded: &T) -> bool {
+                fn kept(read: &serde_json::Value, written: &serde_json::Value) -> bool {
+                    match (read, written) {
+                        (serde_json::Value::Object(read), serde_json::Value::Object(written)) => {
+                            read.iter().all(|(key, member)| {
+                                written.get(key).is_some_and(|written| kept(member, written))
+                            })
+                        }
+                        (serde_json::Value::Array(read), serde_json::Value::Array(written)) => {
+                            read.len() == written.len()
+                                && read.iter().zip(written).all(|(item, written)| kept(item, written))
+                        }
+                        (serde_json::Value::Object(_) | serde_json::Value::Array(_), _)
+                        | (_, serde_json::Value::Object(_) | serde_json::Value::Array(_)) => false,
+                        (read, written) => {
+                            std::mem::discriminant(read) == std::mem::discriminant(written)
+                        }
+                    }
+                }
+                serde_json::to_value(decoded).is_ok_and(|written| kept(read, &written))
+            }
+        }
     })
 }
 
