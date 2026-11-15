@@ -63,6 +63,7 @@ mod encoding_headers;
 mod encoding_style;
 mod open_narrowing;
 mod parameters;
+mod parameters_querystring;
 mod pattern_properties;
 mod placement;
 mod read_write_only;

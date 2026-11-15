@@ -1500,6 +1500,7 @@ mod tests {
             explode: false,
             deprecated: false,
             default_display: None,
+            form_encoding: None,
         }
     }
 

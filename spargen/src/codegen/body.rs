@@ -86,36 +86,15 @@ pub(super) fn body_send_tokens(
                     // Rendered property by property through the resolved Encoding Object rather
                     // than `RequestBuilder::form`, whose encoder rejects arrays and objects at
                     // runtime and cannot express a per-property content type.
-                    let properties = form_properties_tokens(encoding);
-                    // The typed `additionalProperties` members, rendered in their type's default
-                    // mode, with the overflow map's length, which tells the runtime how many of
-                    // the serialized members are overflow; `None` when the body has no typed
-                    // overflow to send.
-                    let additional = match (&encoding.additional, names.struct_overflow.get(&ty.id))
-                    {
-                        (Some(mode), Some(overflow)) => {
-                            let mode = form_mode_tokens(mode);
-                            let len = if ty.nullable {
-                                quote! {
-                                    #body_binding
-                                        .as_ref()
-                                        .map_or(0, |body| body.#overflow.len())
-                                }
-                            } else {
-                                quote! { #body_binding.#overflow.len() }
-                            };
-                            quote! { Some((#mode, #len)) }
-                        }
-                        _ => quote! { None },
-                    };
+                    let serialize = form_serialization_tokens(
+                        &quote! { #body_binding },
+                        ty,
+                        encoding,
+                        names,
+                        &quote! { FORM_PROPERTIES },
+                    );
                     quote! {
-                        const FORM_PROPERTIES: &[support::FormProperty] = &[#(#properties),*];
-                        let #body_binding = support::serialize_form_body(
-                            #body_binding,
-                            FORM_PROPERTIES,
-                            #additional,
-                        )
-                        .map_err(support::Error::request_construction)?;
+                        let #body_binding = #serialize;
                         #request_binding = #request_binding
                             .header(
                                 reqwest::header::CONTENT_TYPE,
@@ -269,6 +248,44 @@ pub(super) fn accept_tokens(operation: &Operation, bindings: &OperationBindings)
             #request_binding = #request_binding.header(reqwest::header::ACCEPT, #accept);
         },
         None => quote! {},
+    }
+}
+
+/// The block expression rendering `value`, a binding to `&T` (or, for a nullable `ty`, to
+/// `&Option<T>`) of the form struct `ty`, into its `application/x-www-form-urlencoded` text
+/// through its resolved [`BodyEncoding`](crate::ir::BodyEncoding), `?`-propagating a refusal as a
+/// request-construction error. A form request body and a form-urlencoded `in: querystring`
+/// parameter share it, as the specification has them share Encoding Objects. `properties` names
+/// the block's `const` table of `support::FormProperty` entries.
+pub(super) fn form_serialization_tokens(
+    value: &TokenStream,
+    ty: Ty,
+    encoding: &crate::ir::BodyEncoding,
+    names: &Names,
+    properties: &TokenStream,
+) -> TokenStream {
+    let entries = form_properties_tokens(encoding);
+    // The typed `additionalProperties` members, rendered in their type's default mode, with the
+    // overflow map's length, which tells the runtime how many of the serialized members are
+    // overflow; `None` when the struct has no typed overflow to send.
+    let additional = match (&encoding.additional, names.struct_overflow.get(&ty.id)) {
+        (Some(mode), Some(overflow)) => {
+            let mode = form_mode_tokens(mode);
+            let len = if ty.nullable {
+                quote! { #value.as_ref().map_or(0, |value| value.#overflow.len()) }
+            } else {
+                quote! { #value.#overflow.len() }
+            };
+            quote! { Some((#mode, #len)) }
+        }
+        _ => quote! { None },
+    };
+    quote! {
+        {
+            const #properties: &[support::FormProperty] = &[#(#entries),*];
+            support::serialize_form_body(#value, #properties, #additional)
+                .map_err(support::Error::request_construction)?
+        }
     }
 }
 

@@ -217,7 +217,8 @@ pub(super) const ENUMERATED_CASES: &[(Code, &[Case])] = &[
             },
             Case {
                 tag: "form-binary",
-                stated_as: "a binary property in a form-urlencoded body",
+                stated_as: "a binary property in a form-urlencoded body or `in: querystring` \
+                                parameter",
                 reserved_wording: None,
             },
             Case {

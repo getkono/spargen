@@ -1,5 +1,5 @@
-//! Encoding Objects of `multipart` and form bodies: each property's mode, content type and
-//! headers.
+//! Encoding Objects of `multipart` and form bodies, and of a form-urlencoded `in: querystring`
+//! parameter: each property's mode, content type and headers.
 
 use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{
@@ -16,9 +16,9 @@ use super::parameter::StyleDomain;
 use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
-    /// Resolve the Encoding Objects of a form or multipart request body into a fully-populated
-    /// [`BodyEncoding`] — one entry per body property, so the emitted code never has to infer a
-    /// default at runtime.
+    /// Resolve the Encoding Objects of a form or multipart request body, or of a form-urlencoded
+    /// `in: querystring` parameter, into a fully-populated [`BodyEncoding`] — one entry per
+    /// property, so the emitted code never has to infer a default at runtime.
     ///
     /// Returns `None` only when the body is unrepresentable; an encoding that simply has no effect
     /// here is reported as `W011` and dropped.

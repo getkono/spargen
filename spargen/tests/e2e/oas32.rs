@@ -173,6 +173,40 @@ fn a_json_querystring_parameter_is_one_encoded_query() {
     }
 }
 
+/// A form-urlencoded `in: querystring` parameter is rendered through its Encoding Objects, as a
+/// form body is: `style: form, explode: false` joins `tags` into one `,`-separated field, a JSON
+/// `contentType` sends `at` as its percent-encoded JSON, and an absent optional member adds
+/// nothing. With every member absent the request carries no query at all.
+#[test]
+fn a_form_querystring_parameter_follows_its_encoding_objects() {
+    let (base, server) = common::serve(vec![common::no_content(); 2]);
+
+    let client = oas32_client::BlockingClient::new(&base).unwrap();
+    client
+        .filter_records(oas32_client::FilterRecordsParams::new(
+            oas32_client::types::RecordFilter {
+                tags: Some(vec!["a".to_owned(), "b c".to_owned()]),
+                at: Some(oas32_client::types::RecordFilterAt { x: Some("y".to_owned()) }),
+                term: Some("t".to_owned()),
+            },
+        ))
+        .unwrap();
+    client
+        .filter_records(oas32_client::FilterRecordsParams::new(
+            oas32_client::types::RecordFilter::default(),
+        ))
+        .unwrap();
+
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    for (request, expected) in requests.iter().zip([
+        "GET /records/filtered?tags=a,b%20c&at=%7B%22x%22%3A%22y%22%7D&term=t HTTP/1.1",
+        "GET /records/filtered HTTP/1.1",
+    ]) {
+        assert_eq!(request.line(), expected, "{}", request.text());
+    }
+}
+
 /// The fixed 3.2 `QUERY` method on the wire: the method token travels as `QUERY`, the request
 /// carries its serialized JSON body, and the `200` array decodes into the typed records.
 #[test]

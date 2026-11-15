@@ -62,7 +62,7 @@ pub(super) fn emit_operation(
     } = sig;
     let decls: Vec<&TokenStream> = args.iter().map(|arg| &arg.decl).collect();
     let normalizations = args.iter().filter_map(|arg| arg.normalize.as_ref());
-    let url_building = url_building(operation, operation_names);
+    let url_building = url_building(operation, names, operation_names);
     let UrlBuilding {
         statements: url_statements,
         build_url,
@@ -613,8 +613,13 @@ struct UrlBuilding {
     build_url: TokenStream,
 }
 
-/// Build an operation's [`UrlBuilding`] over the bindings `name` allocated for it.
-fn url_building(operation: &Operation, operation_names: &OperationNames) -> UrlBuilding {
+/// Build an operation's [`UrlBuilding`] over the bindings `name` allocated for it, and the
+/// `names` of the types a form-urlencoded querystring value is rendered from.
+fn url_building(
+    operation: &Operation,
+    names: &Names,
+    operation_names: &OperationNames,
+) -> UrlBuilding {
     let bindings = &operation_names.bindings;
     let path_binding = &bindings.path;
     let query_binding = &bindings.query;
@@ -673,7 +678,7 @@ fn url_building(operation: &Operation, operation_names: &OperationNames) -> UrlB
             if initializes_raw_query {
                 return quote! {};
             }
-            querystring_param_tokens(parameter, value, query_binding, raw_query_binding)
+            querystring_param_tokens(parameter, value, names, query_binding, raw_query_binding)
         },
     );
 
