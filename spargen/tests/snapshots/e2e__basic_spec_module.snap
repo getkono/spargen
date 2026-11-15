@@ -8840,10 +8840,11 @@ pub mod types {
     {
         T::deserialize(deserializer).map(Some)
     }
-    /// The `deserialize_with` of every required, nullable field. It decodes a present value
-    /// as `Option<T>` does, `null` as `None`. A field with a `deserialize_with` and no
-    /// `default` is one serde refuses as `missing field` when it is absent, where a bare
-    /// `Option<T>` field would read the absent member as `None`.
+    /// The `deserialize_with` of every required, nullable field but an XML attribute, which
+    /// writes `null` by omission. It decodes a present value as `Option<T>` does, `null` as
+    /// `None`. A field with a `deserialize_with` and no `default` is one serde refuses as
+    /// `missing field` when it is absent, where a bare `Option<T>` field would read the
+    /// absent member as `None`.
     fn decode_required<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -12457,6 +12458,8 @@ pub mod types {
     pub struct XmlReceipt {
         #[serde(rename = "ReceiptCode")]
         pub code: XmlReceiptCode,
+        #[serde(rename = "@count")]
+        pub count: Option<XmlReceiptCount>,
         #[serde(
             rename = "note",
             default,
@@ -12469,8 +12472,8 @@ pub mod types {
         ///A `XmlReceipt` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
-        pub fn new(code: XmlReceiptCode) -> Self {
-            Self { code, note: None }
+        pub fn new(code: XmlReceiptCode, count: Option<XmlReceiptCount>) -> Self {
+            Self { code, count, note: None }
         }
         ///Set the `note` member.
         #[must_use]
@@ -12480,6 +12483,7 @@ pub mod types {
         }
     }
     pub type XmlReceiptCode = String;
+    pub type XmlReceiptCount = f64;
     pub type XmlReceiptNote = String;
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(rename = "meta")]

@@ -679,14 +679,16 @@ fn xml_body_types_carry_attribute_and_rename() {
     assert!(xml.starts_with("<order "), "{xml}");
     assert!(xml.ends_with("</order>"), "{xml}");
 
-    let receipt: basic_client::types::XmlReceipt =
-        quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
+    let receipt: basic_client::types::XmlReceipt = quick_xml::de::from_str(
+        r#"<XmlReceipt count="7"><ReceiptCode>OK</ReceiptCode></XmlReceipt>"#,
+    )
+    .unwrap();
     assert_eq!(receipt.code, "OK");
     assert_eq!(receipt.note, None);
     // Without a root `xml.name`, the component name `xml-receipt` names the root element, as
     // OpenAPI infers it, in place of the Rust type's name.
     let xml = quick_xml::se::to_string(&receipt).unwrap();
-    assert_eq!(xml, "<xml-receipt><ReceiptCode>OK</ReceiptCode></xml-receipt>");
+    assert_eq!(xml, r#"<xml-receipt count="7"><ReceiptCode>OK</ReceiptCode></xml-receipt>"#);
     // A present optional element is decoded as the field's own type through its present-value
     // deserializer, not through quick-xml's `Option` handling.
     let noted: basic_client::types::XmlReceipt = quick_xml::de::from_str(

@@ -54,10 +54,11 @@ pub(super) fn emit_models(
                 T::deserialize(deserializer).map(Some)
             }
 
-            /// The `deserialize_with` of every required, nullable field. It decodes a present value
-            /// as `Option<T>` does, `null` as `None`. A field with a `deserialize_with` and no
-            /// `default` is one serde refuses as `missing field` when it is absent, where a bare
-            /// `Option<T>` field would read the absent member as `None`.
+            /// The `deserialize_with` of every required, nullable field but an XML attribute, which
+            /// writes `null` by omission. It decodes a present value as `Option<T>` does, `null` as
+            /// `None`. A field with a `deserialize_with` and no `default` is one serde refuses as
+            /// `missing field` when it is absent, where a bare `Option<T>` field would read the
+            /// absent member as `None`.
             fn #decode_required<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
             where
                 D: serde::Deserializer<'de>,
@@ -651,9 +652,12 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
     // reads a missing `Option` field as `None` unless the field has a `deserialize_with`, so an
     // absent member would decode as an explicit `null`. `decode_required` decodes exactly as
     // `Option<T>` does and, with no `default` beside it, makes the absent member `missing field`.
+    // An XML attribute is the exception: OpenAPI writes a `null` attribute by omitting it
+    // (§Handling `null` Values), so an absent required nullable attribute is that `null`, and
+    // keeps serde's absent-`Option`-is-`None` reading.
     let decode_with = match (field.decodes_optional(), field.ty.nullable) {
         (true, false) => Some(DECODE_PRESENT),
-        (false, true) => Some(DECODE_REQUIRED),
+        (false, true) if !field.xml.attribute => Some(DECODE_REQUIRED),
         _ => None,
     }
     .map(|path| quote! { deserialize_with = #path, });
@@ -922,9 +926,10 @@ fn emit_struct_constructors(
 /// type. Snake case, so it cannot collide with a `PascalCase` type.
 const DECODE_PRESENT: &str = "decode_present";
 
-/// The name of the private function `types` carries for every required, nullable field: a
-/// `deserialize_with` target that decodes as `Option<T>` does, so an absent member is serde's
-/// `missing field` rather than `None`. Snake case, so it cannot collide with a `PascalCase` type.
+/// The name of the private function `types` carries for every required, nullable field that is
+/// not an XML attribute: a `deserialize_with` target that decodes as `Option<T>` does, so an absent
+/// member is serde's `missing field` rather than `None`. Snake case, so it cannot collide with a
+/// `PascalCase` type.
 const DECODE_REQUIRED: &str = "decode_required";
 
 /// The `{field}_or_default` accessor of struct `id`'s `field`, when it has an
