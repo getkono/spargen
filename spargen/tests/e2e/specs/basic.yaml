@@ -1729,14 +1729,19 @@ components:
           type: string
     # XML response body: `code` renamed via `xml.name`; `note` carries an unsupported
     # `xml.namespace` hint (→ W006, still generates). With no root `xml.name`, the component name,
-    # which is no Rust identifier, names the root element of the `XmlReceipt` struct.
+    # which is no Rust identifier, names the root element of the `XmlReceipt` struct. `count` is
+    # the required nullable attribute of OAS 3.2's `productWithNulls` example: `null` is written by
+    # omitting the attribute, so an omitted attribute decodes as `None`.
     xml-receipt:
       type: object
-      required: [code]
+      required: [code, count]
       properties:
         code:
           type: string
           xml: { name: "ReceiptCode" }
+        count:
+          type: [number, "null"]
+          xml: { attribute: true }
         note:
           type: string
     # JSON-only schema carrying `xml` metadata (regression guard): the same hint shapes as

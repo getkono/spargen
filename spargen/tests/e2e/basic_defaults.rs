@@ -697,6 +697,21 @@ fn xml_body_types_carry_attribute_and_rename() {
 }
 
 #[test]
+fn an_omitted_required_nullable_xml_attribute_decodes_as_none() {
+    // OAS 3.2 writes a `null` attribute by omitting it (§Handling `null` Values,
+    // `productWithNulls.xml`), so a required nullable attribute that is absent is `null`, not a
+    // missing member.
+    let receipt: basic_client::types::XmlReceipt =
+        quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
+    assert_eq!(receipt.count, None);
+    let counted: basic_client::types::XmlReceipt = quick_xml::de::from_str(
+        r#"<XmlReceipt count="42"><ReceiptCode>OK</ReceiptCode></XmlReceipt>"#,
+    )
+    .unwrap();
+    assert_eq!(counted.count, Some(42.0));
+}
+
+#[test]
 fn json_only_schema_with_xml_metadata_keeps_original_json_names() {
     // regression guard: `JsonMeta` carries `xml.attribute`/`xml.name` hints but is used
     // only by a JSON operation, so the format-agnostic serde rename is SUPPRESSED. JSON must use the
