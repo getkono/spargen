@@ -91,6 +91,21 @@ fn a_listed_value_is_its_own_variant_and_an_unlisted_one_is_kept() {
 }
 
 #[test]
+fn an_open_defaulted_member_reads_through_its_accessor() {
+    // `430`'s optional `detail` narrows to an open set with a default: absent, the accessor gives
+    // the default; set, even to an unlisted value, it gives the value.
+    let absent = decode(PostProblemsError::Status430, r#"{"type":"t","title":"t"}"#).unwrap();
+    assert!(absent.detail.is_none());
+    assert_eq!(absent.detail_or_default().as_str(), "a");
+    let unlisted = decode(
+        PostProblemsError::Status430,
+        r#"{"type":"t","title":"t","detail":"elsewhere"}"#,
+    )
+    .unwrap();
+    assert_eq!(unlisted.detail_or_default().as_str(), "elsewhere");
+}
+
+#[test]
 fn the_ref_sibling_spelling_opens_and_a_value_spelled_other_keeps_its_name() {
     let other = decode(PostProblemsError::Status409, r#"{"type":"other","title":"t"}"#).unwrap();
     // The listed `other` keeps `Other`; the catch-all takes the next name.

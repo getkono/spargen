@@ -568,9 +568,9 @@ pub fn unexplained_variants(report: &Report, code: &str) -> Vec<String> {
 /// enum its variants in, so [`relocation_differences`] sees a relocation that reorders them; and
 /// it reads line by line and never fails, so [`run_violations`] can run it over every module the
 /// fuzz harnesses produce, one that does not parse included. The `syn` reader sorts fields by wire
-/// name and variants by shape, expands a `serde(default = ...)` to its function's body, and panics
-/// on a module that does not parse: the intersection laws it serves hold up to member order, and
-/// only ever read a module that parsed.
+/// name and variants by shape, reads a field's `{field}_or_default` accessor beside its `serde`
+/// attributes, and panics on a module that does not parse: the intersection laws it serves hold up
+/// to member order, and only ever read a module that parsed.
 #[allow(dead_code)]
 pub fn shape(code: &str, name: &str) -> String {
     Declarations::read(&types_module(code)).shape_of(name, 8)

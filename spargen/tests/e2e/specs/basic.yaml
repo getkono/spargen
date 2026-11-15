@@ -1605,6 +1605,17 @@ components:
         mode:
           $ref: "#/components/schemas/Mode"
           default: auto
+    # `with_b`'s `{field}_or_default` accessor would spell `with_b_or_default`, which is the
+    # `with_{field}` setter of `b_or_default`: the accessor must take another name, or the two
+    # methods collide and the generated crate fails to compile.
+    DefaultAccessorClash:
+      type: object
+      properties:
+        with_b:
+          type: string
+          default: x
+        b_or_default:
+          type: string
     # `patternProperties` composed with an explicit property: the declared `host` field plus a typed
     # overflow map (`#[serde(flatten)] BTreeMap<String, String>`) for the pattern-matched keys. The
     # key regex is validation-only (W001) and not enforced by the map.

@@ -416,7 +416,7 @@ fn strings_and_nulls_decode_beside_the_refined_object_branch() {
 /// (one nullable), optional members (one nullable, one keyword-named, one with a schema `default`,
 /// one a recursive reference, one a union), a typed overflow map, a struct with no required member,
 /// one with more required members than clippy's argument threshold (issue #1267), and one whose
-/// required member is named like the provider of its defaulted one.
+/// required member is named like the `{field}_or_default` accessor of its defaulted one.
 const CONSTRUCTORS_SPEC: &str = r#"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -480,15 +480,11 @@ components:
         h: { type: string }
     Shadowed:
       type: object
-      required: [default_29_speed]
+      required: [speed_or_default]
       properties:
-        default_29_speed: { type: string }
+        speed_or_default: { type: string }
         speed: { type: string, default: fast }
 "#;
-
-/// The provider `new` calls to apply `Shadowed.speed`'s default. `Shadowed`'s required member has
-/// the same name, so it becomes a `new` parameter that shadows a bare call to the provider.
-const SHADOWED_PROVIDER: &str = "fn default_29_speed(";
 
 /// Issue #1267: an object struct derives `PartialEq` (and `Default` when no member is required),
 /// and `new` plus one `with_*` setter per optional member build the value a struct literal does, so
@@ -501,15 +497,6 @@ fn object_structs_build_through_new_and_setters_and_compare_equal() {
 
     let report = generate_fixture_crate(&spec, &out, "constructors_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    let module = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
-    assert!(
-        module.contains(SHADOWED_PROVIDER),
-        "`Shadowed`'s required member must share its default provider's name; providers: {:?}",
-        module
-            .lines()
-            .filter(|line| line.contains("fn default_"))
-            .collect::<Vec<_>>()
-    );
 
     std::fs::create_dir_all(out.join("tests")).unwrap();
     std::fs::write(
@@ -535,7 +522,7 @@ fn new_and_setters_build_the_decoded_value() {
     let wire = serde_json::json!({
         "id": "e1", "count": 3, "parent": null, "note": "hi", "label": "l", "type": "kind",
         "mode": "slow", "ratio": 0.5,
-        "child": { "id": "e2", "count": 0, "parent": "e1", "mode": "fast" },
+        "child": { "id": "e2", "count": 0, "parent": "e1" },
         "pet": "cat", "extra": 7
     });
     let decoded: Envelope = serde_json::from_value(wire.clone()).unwrap();
@@ -549,7 +536,8 @@ fn new_sets_each_optional_member_as_decoding_an_absent_one_does() {
     let envelope = Envelope::new("e".to_owned(), 1, Some("p".to_owned()));
     assert_eq!(envelope.note, None);
     assert_eq!(envelope.label, constructors_client::Nullable::Absent);
-    assert_eq!(envelope.mode, Some(EnvelopeMode::Fast));
+    assert_eq!(envelope.mode, None);
+    assert_eq!(envelope.mode_or_default(), EnvelopeMode::Fast);
     assert!(envelope.additional.is_empty());
     let decoded: Envelope =
         serde_json::from_value(serde_json::json!({ "id": "e", "count": 1, "parent": "p" }))
@@ -565,9 +553,10 @@ fn a_struct_with_no_required_member_defaults_to_new() {
         serde_json::from_value(serde_json::json!({ "verbose": true, "level": 2 })).unwrap();
     assert_eq!(settings, decoded);
 
-    // A schema `default` makes `Default` an `impl` calling `new`, which applies it.
+    // A schema `default` leaves the member unset in `Default` too; its accessor reads it.
     assert_eq!(Tuned::default(), Tuned::new());
-    assert_eq!(Tuned::default().retries, Some(3));
+    assert_eq!(Tuned::default().retries, None);
+    assert_eq!(Tuned::default().retries_or_default(), 3);
     let decoded: Tuned = serde_json::from_value(serde_json::json!({})).unwrap();
     assert_eq!(Tuned::default(), decoded);
 }
@@ -580,11 +569,13 @@ fn every_required_member_is_a_new_argument() {
 }
 
 #[test]
-fn new_applies_a_default_whose_provider_a_required_member_is_named_after() {
+fn a_default_accessor_and_a_member_of_its_name_coexist() {
     let shadowed = Shadowed::new("x".to_owned());
-    assert!(shadowed.speed.is_some());
+    assert_eq!(shadowed.speed, None);
+    assert_eq!(shadowed.speed_or_default, "x");
+    assert_eq!(shadowed.speed_or_default(), "fast");
     let decoded: Shadowed =
-        serde_json::from_value(serde_json::json!({ "default_29_speed": "x" })).unwrap();
+        serde_json::from_value(serde_json::json!({ "speed_or_default": "x" })).unwrap();
     assert_eq!(shadowed, decoded);
 }
 "##,

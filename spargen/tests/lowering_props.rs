@@ -957,10 +957,13 @@ mod shape {
     /// The item declarations of a generated `types` module, keyed by name.
     pub struct Types {
         items: BTreeMap<String, syn::Item>,
+        /// The body of each inherent method, as tokens, keyed by its type's name and its own.
+        methods: BTreeMap<(String, String), String>,
     }
 
     /// What a struct field is: its wire name and type, its `serde` attributes other than its rename
-    /// (a `default` function by its body, not its name), and its rustdoc lines.
+    /// (with an `or_default = …` entry holding the body of its `{field}_or_default` accessor, where
+    /// it has one), and its rustdoc lines.
     pub struct Field {
         pub wire: String,
         pub ty: syn::Type,
@@ -972,6 +975,7 @@ mod shape {
         /// The `types` module of the generated module `code`; empty when there is none.
         pub fn read(code: &str) -> Self {
             let mut items = BTreeMap::new();
+            let mut methods = BTreeMap::new();
             let file = syn::parse_file(code).unwrap_or_else(|error| {
                 panic!("the generated module does not parse: {error}\n{code}")
             });
@@ -984,12 +988,23 @@ mod shape {
                     syn::Item::Type(alias) => alias.ident.to_string(),
                     syn::Item::Struct(item) => item.ident.to_string(),
                     syn::Item::Enum(item) => item.ident.to_string(),
-                    syn::Item::Fn(function) => function.sig.ident.to_string(),
+                    syn::Item::Impl(block) if block.trait_.is_none() => {
+                        let owner = block.self_ty.to_token_stream().to_string();
+                        for member in &block.items {
+                            if let syn::ImplItem::Fn(method) = member {
+                                methods.insert(
+                                    (owner.clone(), method.sig.ident.to_string()),
+                                    method.block.to_token_stream().to_string(),
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     _ => continue,
                 };
                 items.insert(name, item);
             }
-            Self { items }
+            Self { items, methods }
         }
 
         /// The fields of `pub struct name`, or `None` when the module declares no such struct.
@@ -997,7 +1012,12 @@ mod shape {
             let Some(syn::Item::Struct(item)) = self.items.get(name) else {
                 return None;
             };
-            Some(item.fields.iter().map(|field| self.field(field)).collect())
+            Some(
+                item.fields
+                    .iter()
+                    .map(|field| self.field(name, field))
+                    .collect(),
+            )
         }
 
         /// The type of the field `wire` of `pub struct name`.
@@ -1034,21 +1054,19 @@ mod shape {
             }
         }
 
-        /// The body of the function `name`, as tokens.
-        pub fn function_body(&self, name: &str) -> Option<String> {
-            match self.items.get(name)? {
-                syn::Item::Fn(function) => Some(function.block.to_token_stream().to_string()),
-                _ => None,
-            }
-        }
-
-        fn field(&self, field: &syn::Field) -> Field {
+        fn field(&self, owner: &str, field: &syn::Field) -> Field {
             let mut wire = field
                 .ident
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_default();
             let mut serde = Vec::new();
+            if let Some(ident) = &field.ident {
+                let accessor = format!("{}_or_default", syn::ext::IdentExt::unraw(ident));
+                if let Some(body) = self.methods.get(&(owner.to_owned(), accessor)) {
+                    serde.push(format!("or_default = {body}"));
+                }
+            }
             let mut docs = Vec::new();
             for attribute in &field.attrs {
                 if attribute.path().is_ident("doc") {
@@ -1079,11 +1097,6 @@ mod shape {
                         let value: syn::LitStr = meta.value()?.parse()?;
                         match key.as_str() {
                             "rename" => wire = value.value(),
-                            "default" => serde.push(format!(
-                                "default = {}",
-                                self.function_body(&value.value())
-                                    .unwrap_or_else(|| value.value())
-                            )),
                             _ => serde.push(format!("{key} = {}", value.value())),
                         }
                         Ok(())
@@ -1201,7 +1214,7 @@ mod shape {
                     variants.sort();
                     format!("enum {{ {} }}", variants.join(", "))
                 }
-                // A `default` function is read through the field naming it, never as a type.
+                // Only an alias, a struct or an enum declares a type here.
                 _ => return None,
             })
         }
@@ -1444,9 +1457,9 @@ proptest! {
     }
 
     /// Every `default` a member writes on a property is accounted for by the meet, exactly as
-    /// [`default_oracle`] says: kept (the merged field's rustdoc reads ``Default: `v`.``, wired as a
-    /// serde default exactly when the field is optional), or reported (`W005`) at exactly the
-    /// pointer that wrote it, and then documented as not applied when the field is uninhabited and
+    /// [`default_oracle`] says: kept (the merged field's rustdoc reads ``Default: `v`.``, returned
+    /// by its `{field}_or_default` accessor exactly when the field is optional), or reported
+    /// (`W005`) at exactly the pointer that wrote it, and then documented as not applied when the field is uninhabited and
     /// not at all when another member's `default` was kept. No other `default` pointer is reported.
     #[test]
     fn every_written_default_is_kept_or_reported(
@@ -1498,7 +1511,7 @@ proptest! {
                     .find(|field| field.wire == KEYS[key])
                     .ok_or_else(|| TestCaseError::fail(format!("{spelling:?}: no `{}` field in `{meet}`:\n{source}", KEYS[key])))?;
                 let notes: Vec<&String> = field.docs.iter().filter(|line| line.starts_with("Default")).collect();
-                let wired = field.serde.iter().find(|attr| attr.starts_with("default = "));
+                let wired = field.serde.iter().find(|attr| attr.starts_with("or_default = "));
                 let optional = !members.iter().any(|m| m.props.get(&key).is_some_and(|p| p.required));
                 let expected_note = kept.map(|value| {
                     if uninhabited {
@@ -1523,7 +1536,8 @@ proptest! {
                 if let (Some(wired), Some(value)) = (wired, expected_wired) {
                     let literal = value.raw();
                     prop_assert!(
-                        wired.contains(&format!("Some ({literal}")),
+                        wired.contains(&format!("unwrap_or ({literal})"))
+                            || wired.contains(&format!("{literal} . to_owned ()")),
                         "{:?}: `{}.{}` wires `{}`, not {}:\n{}",
                         spelling, meet, KEYS[key], wired, literal, spec
                     );

@@ -3,9 +3,9 @@ use crate::codegen::test_harness::{assert_contains_all, between, generated_with}
 /// One definition per model shape the `types` module emits: string enums (`Color`), checked
 /// integer and boolean sets, one documented (`Level`, `Flag`), a base64 newtype (`Blob`), structs
 /// renamed for XML or not (`Root`, `Plain`), a struct with every kind of member (`Thing`), structs
-/// whose `Default` is derived (`Loose`), implemented (`Defaulted`) or absent (`Only`), aliases
-/// (`Pair`, `Anything`, `Nil`), an uninhabited definition (`Nothing`) and a newtype closing an
-/// alias cycle (`Cycle`).
+/// whose `Default` is derived, with defaulted members (`Defaulted`) or without (`Loose`), or
+/// absent (`Only`), aliases (`Pair`, `Anything`, `Nil`), an uninhabited definition (`Nothing`) and
+/// a newtype closing an alias cycle (`Cycle`).
 const MODELS: &str = r##"openapi: 3.1.0
 info: {title: T, version: '1'}
 components:
@@ -224,7 +224,8 @@ fn a_struct_is_renamed_for_xml_only_where_its_element_name_differs() {
 /// one as an `Option`, an optional one as an `Option` decoded only when present, an optional
 /// nullable one as a `Nullable`; `readOnly` never serialized (nor a member both `readOnly` and
 /// `writeOnly`, whatever direction the `testing` module asks), `writeOnly` decoded as absent; a
-/// representable `default` applied through a provider; and the typed overflow flattened.
+/// member with a representable `default` decoded as absent like any other, its rustdoc naming the
+/// default; and the typed overflow flattened.
 #[test]
 fn each_member_takes_its_serde_attribute_and_type() {
     let member = |name: &str, attribute: &str, ty: &str| {
@@ -271,31 +272,27 @@ fn each_member_takes_its_serde_attribute_and_type() {
                 ),
                 member(
                     "count",
-                    ",default=\"default_8_count\",skip_serializing_if=\"Option::is_none\",deserialize_with=\"decode_present\",",
+                    optional,
                     "Option<ThingCount>"
                 ),
                 member(
                     "color",
-                    ",default=\"default_8_color\",skip_serializing_if=\"Option::is_none\",deserialize_with=\"decode_present\",",
+                    optional,
                     "Option<Color>"
                 ),
                 member(
                     "level",
-                    ",default=\"default_8_level\",skip_serializing_if=\"Option::is_none\",deserialize_with=\"decode_present\",",
+                    optional,
                     "Option<Level>"
                 ),
                 member("old", optional, "Option<ThingOld>"),
             ),
-            concat!(
-                r#"fndefault_8_count()->Option<ThingCount>{Some(5)}fndefault_8_color()->Option<Color>{Some(Color::Green)}"#,
-                r#"fndefault_8_level()->Option<Level>{Some(Level(3))}"#,
-            ),
-            concat!(
-                r#"fndefault_21_n()->Option<DefaultedN>{Some(1.5)}fndefault_21_s()->Option<DefaultedS>{Some("hi".to_owned())}"#,
-                r#"fndefault_21_b()->Option<DefaultedB>{Some(true)}"#,
-            ),
         ],
     );
+    // A defaulted member decodes as absent, as every other optional member does: no default
+    // provider is emitted for serde to call.
+    let models = types(false, false);
+    assert!(!models.contains("fndefault_"), "{models}");
     // Under `testing`, a member both `readOnly` and `writeOnly` is still never written.
     assert_contains_all(
         &types(false, true),
@@ -310,8 +307,9 @@ fn each_member_takes_its_serde_attribute_and_type() {
 /// `new` takes every constructed member in declaration order (a required `writeOnly` one stored as
 /// present, `null` included) and sets every other member as decoding an absent one does; a
 /// setter follows for each member `new` does not take, a nullable one's beside its `_null`
-/// setter, and for the overflow map. `Default` is derived where `new` takes nothing, implemented
-/// through `new` where a default applies, and absent otherwise.
+/// setter, and for the overflow map, then a `{field}_or_default` accessor per member with an
+/// applied default, returning a `Copy` value as it is and cloning any other. `Default` is derived
+/// where `new` takes nothing, and absent otherwise.
 #[test]
 fn constructors_take_the_constructed_members_and_set_the_rest() {
     let types = types(false, false);
@@ -319,13 +317,13 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
         &types,
         &[
             concat!(
-                r#"implThing{///A`Thing`holdingtherequiredmembersgiven,indeclarationorder,andeveryoptionalmemberas"#,
-                r#"decodinganabsentonesetsit:itsschema`default`whereithasone,elseunset."#,
+                r#"implThing{///A`Thing`holdingtherequiredmembersgiven,indeclarationorder,andeveryoptionalmember"#,
+                r#"unset,amemberwithaschema`default`included."#,
                 r#"#[allow(clippy::too_many_arguments)]#[must_use]pubfnnew(label:ThingLabel,maybe:Option<ThingMaybe>,"#,
                 r#"secret:ThingSecret,hint:Option<ThingHint>,)->Self{Self{id:None,label,maybe,secret:Some(secret),"#,
                 r#"hint:matchhint{Some(value)=>super::support::Nullable::Value(value),None=>super::support::Nullable::Null,},"#,
-                r#"both:None,note:super::support::Nullable::Absent,count:self::default_8_count(),"#,
-                r#"color:self::default_8_color(),level:self::default_8_level(),old:None,additional:BTreeMap::new(),}}"#,
+                r#"both:None,note:super::support::Nullable::Absent,count:None,"#,
+                r#"color:None,level:None,old:None,additional:BTreeMap::new(),}}"#,
                 r#"///Setthe`id`member.#[must_use]pubfnwith_id(mutself,value:ThingId)->Self{self.id=Some(value);self}"#,
                 r#"///Setthe`both`member.#[must_use]pubfnwith_both(mutself,value:ThingBoth)->Self{self.both=Some(value);self}"#,
                 r#"///Setthe`note`member:avalue,or`Nullable::Null`foranexplicit`null`.#[must_use]pubfnwith_note(mutself,"#,
@@ -335,17 +333,28 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
             ),
             concat!(
                 r#"///Setthemembersnopropertydeclares,replacinganysetbefore.#[must_use]pubfnwith_additional(mutself,"#,
-                r#"value:BTreeMap<String,ThingAdditional>,)->Self{self.additional=value;self}}"#,
+                r#"value:BTreeMap<String,ThingAdditional>,)->Self{self.additional=value;self}"#,
+                r#"///The`count`memberwhereitisset,elseitsschemadefault.//////Default:`5`.#[must_use]"#,
+                r#"pubfncount_or_default(&self)->ThingCount{self.count.unwrap_or(5)}"#,
+                r#"///The`color`memberwhereitisset,elseitsschemadefault.//////Default:`green`.#[must_use]"#,
+                r#"pubfncolor_or_default(&self)->Color{self.color.unwrap_or(Color::Green)}"#,
+                r#"///The`level`memberwhereitisset,elseitsschemadefault.//////Default:`3`.#[must_use]"#,
+                r#"pubfnlevel_or_default(&self)->Level{self.level.unwrap_or(Level(3))}}"#,
             ),
             "#[derive(Debug,Clone,PartialEq,Default,Serialize,Deserialize)]pubstructLoose{",
             concat!(
-                r#"implLoose{///A`Loose`witheveryoptionalmemberasdecodinganabsentonesetsit:itsschema`default`"#,
-                r#"whereithasone,elseunset.`Default`buildsthesamevalue.#[allow(clippy::too_many_arguments)]"#,
+                r#"implLoose{///A`Loose`witheveryoptionalmemberunset,amemberwithaschema`default`included."#,
+                r#"`Default`buildsthesamevalue.#[allow(clippy::too_many_arguments)]"#,
                 r#"#[must_use]pubfnnew()->Self{Self{x:None}}"#,
             ),
-            "#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]pubstructDefaulted{",
-            "pubfnnew()->Self{Self{n:self::default_21_n(),s:self::default_21_s(),b:self::default_21_b(),}}",
-            r#"implstd::default::DefaultforDefaulted{fndefault()->Self{Self::new()}}"#,
+            "#[derive(Debug,Clone,PartialEq,Default,Serialize,Deserialize)]pubstructDefaulted{",
+            "pubfnnew()->Self{Self{n:None,s:None,b:None}}",
+            concat!(
+                r#"pubfnn_or_default(&self)->DefaultedN{self.n.unwrap_or(1.5)}"#,
+                r#"///The`s`memberwhereitisset,elseitsschemadefault.//////Default:`hi`.#[must_use]"#,
+                r#"pubfns_or_default(&self)->DefaultedS{self.s.clone().unwrap_or_else(||"hi".to_owned())}"#,
+            ),
+            r#"pubfnb_or_default(&self)->DefaultedB{self.b.unwrap_or(true)}"#,
             concat!(
                 r#"#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]pubstructOnly{#[serde(rename="a")]puba:OnlyA,}"#,
                 r#"implOnly{///A`Only`holdingeverymembergiven,indeclarationorder.#[allow(clippy::too_many_arguments)]"#,

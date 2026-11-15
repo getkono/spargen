@@ -94,13 +94,14 @@ fn a_listed_value_converts_and_an_unlisted_one_does_not() {
 }
 
 #[test]
-fn decoding_refuses_an_unlisted_value_and_applies_a_listed_default() {
+fn decoding_refuses_an_unlisted_value_and_reads_a_listed_default() {
     let setting: Setting = serde_json::from_str(r#"{"level":-1,"on":true}"#).unwrap();
     assert_eq!(setting.level, Level::V_MINUS_1);
-    assert_eq!(setting.tier, Some(SettingTier::V2));
+    assert_eq!(setting.tier, None);
+    assert_eq!(setting.tier_or_default(), SettingTier::V2);
     assert_eq!(
         serde_json::to_string(&setting).unwrap(),
-        r#"{"level":-1,"on":true,"tier":2}"#
+        r#"{"level":-1,"on":true}"#
     );
     for unlisted in [
         r#"{"level":2,"on":true}"#,
@@ -143,7 +144,7 @@ fn an_open_response_set_decodes_an_unlisted_value_and_a_closed_one_refuses_it() 
     assert!(requests[0].line().contains("?min=-1 "), "{}", requests[0].line());
     assert_eq!(
         String::from_utf8_lossy(&requests[0].body),
-        r#"{"level":1,"on":true,"tier":2}"#
+        r#"{"level":1,"on":true}"#
     );
 }
 "##,

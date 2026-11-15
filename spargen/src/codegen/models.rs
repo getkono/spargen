@@ -255,10 +255,6 @@ fn emit_type_def(
                 .fields
                 .iter()
                 .map(|field| emit_field(id, field, names, options.testing));
-            let providers = object
-                .fields
-                .iter()
-                .filter_map(|field| emit_default_provider(id, field, types, names));
             let additional = match &object.additional {
                 AdditionalProps::Typed(ty) => {
                     let ty = ty_tokens(**ty, names, false);
@@ -273,7 +269,7 @@ fn emit_type_def(
             let StructConstructors {
                 derive_default,
                 constructors,
-            } = emit_struct_constructors(id, object, names);
+            } = emit_struct_constructors(id, object, types, names);
             quote! {
                 #docs
                 #deprecated
@@ -285,7 +281,6 @@ fn emit_type_def(
                     #additional
                 }
                 #constructors
-                #(#providers)*
             }
         }
         Emission::StringEnum(enumeration) => {
@@ -569,10 +564,10 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
         .wire_override(&field.name.wire)
         .unwrap_or_else(|| field.name.wire.clone());
     let ty = field_ty_tokens(field, names);
-    // An optional field always deserializes an absent value; when the spec gives a representable
-    // scalar default, point serde at a generated provider so the default fills in rather than the
-    // absent state. Otherwise fall back to the type's `Default`: `None` for an `Option`, and
-    // `Nullable::Absent` for a nullable member. Either way the absent state is skipped on the wire.
+    // An optional field always deserializes an absent value as the type's `Default`: `None` for an
+    // `Option`, and `Nullable::Absent` for a nullable member, a schema `default` included, which
+    // only its `{field}_or_default` accessor reads. The absent state is skipped on the wire, so a
+    // decoded value re-sends no member the payload left out.
     let skip = if field.ty.nullable {
         NULLABLE_IS_ABSENT
     } else {
@@ -604,13 +599,10 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
         }
         _ => quote! { skip_serializing_if = #skip, },
     };
-    let serde_default = if !field.decodes_optional() {
-        quote! {}
-    } else if applies_default(field) {
-        let provider = default_provider_ident(id, ident).to_string();
-        quote! { default = #provider, #skip }
-    } else {
+    let serde_default = if field.decodes_optional() {
         quote! { default, #skip }
+    } else {
+        quote! {}
     };
     // The `Option` wrapping an optional non-nullable field stands for absence only, yet serde's
     // `Option<T>` maps a JSON `null` to `None` without ever calling `T::deserialize`, so
@@ -697,38 +689,32 @@ struct StructConstructors {
     constructors: TokenStream,
 }
 
-/// Whether optional `field` takes its schema `default` when absent: decoding fills it through a
-/// generated provider, and `new` does the same.
-fn applies_default(field: &Field) -> bool {
-    field.decodes_optional()
-        && field
-            .default
-            .as_ref()
-            .is_some_and(|default| default.applied.is_some())
-}
-
 /// The inherent `impl` of object struct `id`: `new`, taking every [constructed] member by value in
 /// declaration order (every required member but a `readOnly` one; a `writeOnly` one is stored as
-/// `Some` of it) and setting every other member as decoding an absent one does (its schema
-/// `default` where decoding applies one, else `None` or `Nullable::Absent`, and the overflow map
-/// empty), then one consuming `with_<field>` setter per member `new` does not take and for the
-/// overflow map, in field order. A non-nullable member's setter takes the bare `T` by value, as
-/// the `…Params` setters take theirs, and stores `Some` of it. A nullable member's takes
+/// `Some` of it) and setting every other member as decoding an absent one does (`None` or
+/// `Nullable::Absent`, a schema `default` included, and the overflow map empty), then one
+/// consuming `with_<field>` setter per member `new` does not take and for the overflow map, in
+/// field order, then one `{field}_or_default` accessor per member with an
+/// [applied default](Field::applied_default) ([`default_accessor`]). A non-nullable member's
+/// setter takes the bare `T` by value, as the `…Params` setters take theirs, and stores `Some` of
+/// it. A nullable member's takes
 /// `impl Into<Nullable<T>>`, so a value or `Nullable::Null` fits, and stores what it converts to;
 /// `Nullable` has no `From<Option<T>>`, so a `None` meaning "unset" never becomes a `null` that
 /// clears the member. Its `with_<field>_null()` setter stores that explicit `null`. The overflow
 /// map's takes the whole map.
 ///
 /// So `new` with the constructed members equals what decoding an object of just those members
-/// yields. With no constructed member, `Default` is `new()`: derived when every other member is
-/// absent there, and otherwise an `impl` calling `new`. Setter names are `with_` before the field
-/// identifier, or the null setter's stem ([`Names::null_setters`]), unraw, so they are distinct
-/// exactly when those identifiers are, which allocation makes them within one struct.
+/// yields, and so does serializing it: a member left unset is left off the wire. With no
+/// constructed member, `Default` is derived, and builds what `new()` does. Setter names are
+/// `with_` before the field identifier, or the null setter's stem ([`Names::null_setters`]),
+/// unraw, so they are distinct exactly when those identifiers are, which allocation makes them
+/// within one struct; the accessors are allocated after them ([`Names::default_accessors`]).
 ///
 /// [constructed]: Field::constructed
 fn emit_struct_constructors(
     id: crate::ir::TypeId,
     object: &crate::ir::Struct,
+    types: &TypeGraph,
     names: &Names,
 ) -> StructConstructors {
     let ident = names.types.get(&id).expect("type name allocated");
@@ -763,11 +749,6 @@ fn emit_struct_constructors(
             }
         } else if field.constructed() {
             quote! { #field_ident: Some(#field_ident), }
-        } else if applies_default(field) {
-            // By path: a required member named like the provider is a `new` parameter, which
-            // would shadow the bare name.
-            let provider = default_provider_ident(id, field_ident);
-            quote! { #field_ident: self::#provider(), }
         } else if field.ty.nullable {
             quote! { #field_ident: super::support::Nullable::Absent, }
         } else {
@@ -852,8 +833,7 @@ fn emit_struct_constructors(
         .iter()
         .filter(|field| field.constructed())
         .count();
-    let optional_doc = "every optional member as decoding an absent one sets it: its schema \
-                        `default` where it has one, else unset.";
+    let optional_doc = "every optional member unset, a member with a schema `default` included.";
     let new_doc = if required == 0 {
         format!("A `{ident}` with {optional_doc} `Default` builds the same value.")
     } else if setters.is_empty() {
@@ -864,22 +844,12 @@ fn emit_struct_constructors(
              {optional_doc}"
         )
     };
-    let (derive_default, default_impl) = if required > 0 {
-        (None, None)
-    } else if object.fields.iter().any(applies_default) {
-        // Spelled by path: `name::TYPES_MODULE_NAMES` does not reserve `Default`, so a schema may
-        // take that name in this module.
-        let default_impl = quote! {
-            impl std::default::Default for #ident {
-                fn default() -> Self {
-                    Self::new()
-                }
-            }
-        };
-        (None, Some(default_impl))
-    } else {
-        (Some(quote! { Default, }), None)
-    };
+    // With no constructed member, `new` sets every member to its type's `Default`.
+    let derive_default = (required == 0).then(|| quote! { Default, });
+    let accessors = object
+        .fields
+        .iter()
+        .filter_map(|field| default_accessor(id, field, types, names));
     // A description decides how many members are required, and a consumer's `clippy.toml` where
     // `too_many_arguments` fires, so `new` allows it whatever its arity.
     let constructors = quote! {
@@ -895,8 +865,9 @@ fn emit_struct_constructors(
             }
 
             #(#setters)*
+
+            #(#accessors)*
         }
-        #default_impl
     };
     StructConstructors {
         derive_default,
@@ -906,40 +877,70 @@ fn emit_struct_constructors(
 
 /// The name of the private function `types` carries for every optional, non-nullable field: a
 /// `deserialize_with` target that decodes a present value, `null` included, as the field's own
-/// type. Snake case, so it cannot collide with a `PascalCase` type, and not of the
-/// `default_<id>_<field>` shape a default provider takes.
+/// type. Snake case, so it cannot collide with a `PascalCase` type.
 const DECODE_PRESENT: &str = "decode_present";
 
-/// The deterministic identifier of a field's generated serde default-provider function. Derived
-/// from the owning type's dense id plus the field's Rust identifier, so it is stable across runs
-/// and cannot collide with a `PascalCase` type ident or another field's provider.
-fn default_provider_ident(
-    id: crate::ir::TypeId,
-    field_ident: &crate::name::Ident,
-) -> proc_macro2::Ident {
-    format_ident!("default_{}_{}", id.0, field_ident.unraw())
-}
-
-/// Emit a field's serde default-provider function, when its `default` is a representable scalar
-/// wired through serde. The function returns `Option<T>` matching the (optional) field's Rust type:
-/// lowering applies a default only to a non-nullable member.
-fn emit_default_provider(
+/// The `{field}_or_default` accessor of struct `id`'s `field`, when it has an
+/// [applied default](Field::applied_default): `pub fn …(&self) -> T`, the member's value where it
+/// is set, else the schema default. Lowering applies a default only to a non-nullable member, so
+/// the member is an `Option<T>`. A `Copy` value is returned as it is, and any other is cloned: a
+/// boolean, a number, a checked newtype and a closed string enum are `Copy`; a string and an open
+/// string enum are not. Only a string's default is built lazily, through `unwrap_or_else`; an
+/// enum's is a unit variant, passed to `unwrap_or`.
+fn default_accessor(
     id: crate::ir::TypeId,
     field: &Field,
     types: &TypeGraph,
     names: &Names,
 ) -> Option<TokenStream> {
-    let applied = field.default.as_ref()?.applied.as_ref()?;
-    let field_ident = names
-        .fields
-        .get(&(id, field.name.wire.clone()))
-        .expect("field name allocated");
-    let fn_ident = default_provider_ident(id, field_ident);
-    let inner_ty = ty_tokens(field.ty, names, false);
+    use crate::ir::DefaultValue;
+    let applied = field.applied_default()?;
+    let key = (id, field.name.wire.clone());
+    let field_ident = names.fields.get(&key).expect("field name allocated");
+    let accessor = names
+        .default_accessors
+        .get(&key)
+        .expect("default accessor allocated");
+    let ty = ty_tokens(field.ty, names, false);
     let value = default_value_tokens(applied, field.ty, types, names);
+    let copy = match applied {
+        DefaultValue::Bool(_) | DefaultValue::Int(_) | DefaultValue::Float(_) => true,
+        DefaultValue::Str(_) => false,
+        DefaultValue::EnumVariant(_) => types.get(field.ty.id).is_some_and(|def| {
+            matches!(
+                types.emission(field.ty.id, def),
+                Emission::StringEnum(enumeration) if !enumeration.is_open()
+            )
+        }),
+    };
+    // A unit variant is as cheap to build as the closure that would defer it, so only a string's
+    // `.to_owned()` is deferred: `unwrap_or_else` over a variant sets off clippy's
+    // `unnecessary_lazy_evaluations` in the consumer's crate.
+    let body = match (copy, applied) {
+        (true, _) => quote! { self.#field_ident.unwrap_or(#value) },
+        (false, DefaultValue::Str(_)) => {
+            quote! { self.#field_ident.clone().unwrap_or_else(|| #value) }
+        }
+        (false, _) => quote! { self.#field_ident.clone().unwrap_or(#value) },
+    };
+    let doc = format!(
+        "The `{}` member where it is set, else its schema default.",
+        field.name.wire
+    );
+    let note = normalize_rustdoc(
+        &field
+            .default
+            .as_ref()
+            .expect("an applied default is a declared one")
+            .doc_note,
+    );
     Some(quote! {
-        fn #fn_ident() -> Option<#inner_ty> {
-            Some(#value)
+        #[doc = #doc]
+        #[doc = ""]
+        #[doc = #note]
+        #[must_use]
+        pub fn #accessor(&self) -> #ty {
+            #body
         }
     })
 }

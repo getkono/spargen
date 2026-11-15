@@ -707,9 +707,9 @@ fn take_declaration(existing: &mut Field, other: &Field) -> bool {
     true
 }
 
-/// Keep a required field consistent with its default: a serde default fires only for an absent
-/// member, so a field that decodes as required drops its applied `default`, which stays documented
-/// in rustdoc. A `required` `readOnly` or `writeOnly` one decodes as optional
+/// Keep a required field consistent with its default: only a member that may be absent gets a
+/// `{field}_or_default` accessor, so a field that decodes as required drops its applied `default`,
+/// which stays documented in rustdoc. A `required` `readOnly` or `writeOnly` one decodes as optional
 /// ([`Field::decodes_optional`]), so it keeps its default as every other optional member does.
 pub(super) fn drop_applied_default_if_required(field: &mut Field) {
     if !field.decodes_optional() {
