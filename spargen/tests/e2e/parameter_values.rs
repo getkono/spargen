@@ -1,5 +1,6 @@
 //! Parameter values that would silently change the request, refused before anything is sent:
-//! an empty path value and a non-finite number.
+//! an empty path value and a non-finite number, in a styled parameter, a JSON `content`
+//! parameter, or a JSON request body or multipart part.
 
 use super::*;
 
@@ -9,6 +10,10 @@ use super::*;
 /// as an undefined value (`ratio=`, or an empty segment again). Each call fails as
 /// `RequestConstruction` whose source downcasts to the `ParameterError` naming the cause, while a
 /// path value of `0` and a finite number still reach the wire.
+///
+/// The JSON paths refuse a non-finite number the same way (#1507): `serde_json` writes one as
+/// `null`, so a JSON `content` parameter, a JSON `in: querystring` value, a JSON body, and a
+/// JSON-encoded multipart part would each send `null` where the caller passed a number.
 #[test]
 fn an_empty_path_value_or_a_non_finite_number_is_refused_before_sending() {
     let temp = tempfile::tempdir().unwrap();
@@ -16,7 +21,7 @@ fn an_empty_path_value_or_a_non_finite_number_is_refused_before_sending() {
         temp.path(),
         "openapi.yaml",
         r##"
-openapi: 3.1.0
+openapi: 3.2.0
 info: { title: Parameter values, version: 1.0.0 }
 paths:
   /users/{id}:
@@ -41,6 +46,58 @@ paths:
         - { name: ratio, in: query, schema: { type: number } }
       responses:
         "204": { description: No Content }
+  /filters:
+    get:
+      operationId: getFiltered
+      parameters:
+        - name: filter
+          in: query
+          content: { application/json: { schema: { type: number } } }
+        - name: X-Ratio
+          in: header
+          content: { application/json: { schema: { type: number } } }
+      responses:
+        "204": { description: No Content }
+  /search:
+    get:
+      operationId: search
+      parameters:
+        - name: q
+          in: querystring
+          content: { application/json: { schema: { $ref: "#/components/schemas/Ratio" } } }
+      responses:
+        "204": { description: No Content }
+  /ratios:
+    post:
+      operationId: postRatios
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: array, items: { $ref: "#/components/schemas/Ratio" } }
+      responses:
+        "204": { description: No Content }
+  /uploads:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [meta]
+              properties:
+                meta: { $ref: "#/components/schemas/Ratio" }
+      responses:
+        "204": { description: No Content }
+components:
+  schemas:
+    Ratio:
+      type: object
+      required: [ratio]
+      properties:
+        ratio: { type: number }
 "##,
     );
     let out = temp.path().join("client");
@@ -54,7 +111,10 @@ paths:
 
 mod common;
 
-use param_values_client::{BlockingClient, Error, GetScoreParams, ParameterError};
+use param_values_client::types::{Ratio, UploadBody};
+use param_values_client::{
+    BlockingClient, Error, GetFilteredParams, GetScoreParams, ParameterError, SearchParams,
+};
 
 /// A client against a base no server listens on: a request that reached the transport would
 /// fail there instead, so `RequestConstruction` proves nothing was sent.
@@ -105,6 +165,60 @@ fn a_non_finite_number_is_refused() {
             ParameterError::NonFiniteNumber
         ));
     }
+}
+
+#[test]
+fn a_non_finite_number_in_a_json_parameter_or_body_is_refused() {
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let ratio = Ratio { ratio: number };
+        assert!(matches!(
+            parameter_error(unreachable().get_filtered(GetFilteredParams::default().filter(number))),
+            ParameterError::NonFiniteNumber
+        ));
+        assert!(matches!(
+            parameter_error(unreachable().get_filtered(GetFilteredParams::default().x_ratio(number))),
+            ParameterError::NonFiniteNumber
+        ));
+        assert!(matches!(
+            parameter_error(unreachable().search(Some(SearchParams::default().q(ratio.clone())))),
+            ParameterError::NonFiniteNumber
+        ));
+        // Nested: the second element of the array body.
+        assert!(matches!(
+            parameter_error(unreachable().post_ratios(&vec![Ratio { ratio: 1.0 }, ratio.clone()])),
+            ParameterError::NonFiniteNumber
+        ));
+        assert!(matches!(
+            parameter_error(unreachable().upload(&UploadBody { meta: ratio })),
+            ParameterError::NonFiniteNumber
+        ));
+    }
+}
+
+#[test]
+fn a_finite_number_in_a_json_parameter_or_body_reaches_the_wire() {
+    let (base, server) = common::serve(vec![common::no_content(); 3]);
+    let client = BlockingClient::new(&base).unwrap();
+    client
+        .get_filtered(GetFilteredParams::default().filter(0.5))
+        .expect("the call round-trips");
+    client
+        .search(Some(SearchParams::default().q(Ratio { ratio: 0.25 })))
+        .expect("the call round-trips");
+    client
+        .post_ratios(&vec![Ratio { ratio: 2.0 }])
+        .expect("the call round-trips");
+    let requests = server.join().unwrap();
+    assert_eq!(requests[0].line(), "GET /filters?filter=0.5 HTTP/1.1");
+    assert_eq!(
+        requests[1].line(),
+        "GET /search?%7B%22ratio%22%3A0.25%7D HTTP/1.1"
+    );
+    assert!(
+        requests[2].text().ends_with(r#"[{"ratio":2.0}]"#),
+        "{}",
+        requests[2].text()
+    );
 }
 
 #[test]
