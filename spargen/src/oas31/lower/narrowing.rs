@@ -21,18 +21,13 @@ pub(super) fn held_values(variants: &[ScalarValue], width: Prim) -> Vec<ScalarVa
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The meet of the scalar set `set` (whose type is `enum_ty`) with the primitive `primitive` of
-    /// its JSON category: the set itself, or — for a closed set narrowing a plain `string`,
-    /// `integer` or `boolean` where [`Self::narrowing_opens`] holds — an open set listing the same
-    /// values, whose domain is the primitive it narrowed. That is the set itself, opened, when it
-    /// is one of [`Self::open_candidates`], and a new open copy otherwise (a set that came from a
-    /// `$ref` target, or from another intersection, may be reached from where it must stay
-    /// closed).
-    ///
-    /// Of the strings, only a plain `string` widens it: `uuid` and the date formats have a decoded
-    /// representation of their own that an arbitrary string is not. Under `open_narrowing` (in a
-    /// response body's own schema or not), a string set meeting one of them is
-    /// [`Openness::Locked`] instead, so no plain `string` met before or after opens it: the set an
-    /// `allOf` lowers to does not depend on where its formatted member sits.
+    /// its JSON category: the set itself, or — for a closed integer or boolean set where
+    /// [`Self::narrowing_opens`] holds — an open set listing the same values, whose domain is the
+    /// primitive it narrowed. That is the set itself, opened, when it is one of
+    /// [`Self::open_candidates`], and a new open copy otherwise (a set that came from a `$ref`
+    /// target, or from another intersection, may be reached from where it must stay closed). A
+    /// string set stays closed here: whether every string set is open is settled once lowering is
+    /// done (`Spec::closed_enums`), not by where it sits.
     ///
     /// An integer set meets an integer primitive at the narrower of the two widths
     /// ([`intersect_primitives`]), keeping the members that width holds: none left is
@@ -51,20 +46,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         primitive: Prim,
         hint: &str,
     ) -> Result<Ty, NoMeet> {
-        let openness = match (set.repr, set.openness, primitive) {
-            (ScalarRepr::String, _, Prim::Uuid | Prim::Date | Prim::DateTime)
-                if self.open_narrowing =>
-            {
-                Openness::Locked
-            }
-            (ScalarRepr::String, Openness::Closed, Prim::String)
-            | (ScalarRepr::Int | ScalarRepr::Bool, Openness::Closed, _)
-                if self.narrowing_opens =>
-            {
+        let openness = match (set.repr, set.openness) {
+            (ScalarRepr::Int | ScalarRepr::Bool, Openness::Closed) if self.narrowing_opens => {
                 Openness::Open
             }
-            (_, Openness::Open, _) if !self.narrowing_opens => Openness::Closed,
-            (_, openness, _) => openness,
+            (_, Openness::Open) if !self.narrowing_opens => Openness::Closed,
+            (_, openness) => openness,
         };
         let width = match set.repr {
             ScalarRepr::Int => intersect_primitives(set.width, primitive).unwrap_or(set.width),

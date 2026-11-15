@@ -682,9 +682,9 @@ pub(crate) struct ScalarEnum {
     /// [`Prim::Bool`] for a boolean one and [`Prim::String`] for a string one. Every listed value
     /// fits it.
     pub(crate) width: Prim,
-    /// Whether the set is open, closed, or closed for good. Only an [`Openness::Open`] set admits
-    /// a value beyond the listed ones: a string enum's catch-all variant, or a checked newtype
-    /// whose decode accepts any value of its width.
+    /// Whether the set is open or closed. Only an [`Openness::Open`] set admits a value beyond the
+    /// listed ones: a string enum's catch-all variant, or a checked newtype whose decode accepts
+    /// any value of its width.
     pub(crate) openness: Openness,
 }
 
@@ -704,26 +704,25 @@ impl ScalarEnum {
     }
 }
 
-/// How a [`ScalarEnum`]'s value set relates to the strings beyond it. Only `open_narrowing`
-/// produces anything but [`Openness::Closed`].
+/// How a [`ScalarEnum`]'s value set relates to the values beyond it.
+///
+/// An integer or boolean set is opened only by `open_narrowing`. A string set is closed throughout
+/// lowering, and once lowering is done every string set is opened together unless
+/// `Spec::closed_enums` is set: whether a string enum takes an unlisted value does not depend on
+/// where it sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Openness {
-    /// The listed values and nothing else. A plain `string`, `integer` or `boolean` it narrows
-    /// inside a response body's own schema opens it under `open_narrowing`.
+    /// The listed values and nothing else. A plain `integer` or `boolean` it narrows inside a
+    /// response body's own schema opens it under `open_narrowing`.
     Closed,
     /// A set whose values name the members the description lists, beside any other value of its
-    /// kind: an `enum`/`const` that narrows a property another `allOf` member (or the `$ref` it
-    /// sits beside) declares as a plain `string`, `integer` or `boolean`, inside a response body's
-    /// own schema. A string set holds the other string in one more variant; an integer or boolean
-    /// set's checked newtype decodes any value of its width. The open set's domain is that wider
-    /// declaration's, so it is still exactly what the description admits there, minus the
-    /// narrowing.
+    /// kind. A string set holds the other string in one more variant. An integer or boolean set is
+    /// open where an `enum`/`const` narrows a property another `allOf` member (or the `$ref` it
+    /// sits beside) declares as a plain `integer` or `boolean`, inside a response body's own
+    /// schema, and its checked newtype decodes any value of its width: the open set's domain is
+    /// that wider declaration's, so it is still exactly what the description admits there, minus
+    /// the narrowing.
     Open,
-    /// The listed values and nothing else, narrowed against a `uuid`, `date`, or `date-time`
-    /// string (in its own schema, or in a schema it met). That format admits no arbitrary string,
-    /// so no plain `string` it later meets opens it, and an open set meeting it closes: the set
-    /// stays closed whichever order an `allOf` lists its members in.
-    Locked,
 }
 
 /// The scalar kind backing a [`ScalarEnum`].

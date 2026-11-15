@@ -4,8 +4,8 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::ir::{
-    AdditionalProps, DisjointFeature, JsonCategory, Ty, TypeGraph, TypeKind, Union, UnionMode,
-    UnionStrategy, UnionVariant, VariantDispatch,
+    AdditionalProps, DisjointFeature, JsonCategory, ScalarRepr, Ty, TypeGraph, TypeKind, Union,
+    UnionMode, UnionStrategy, UnionVariant, VariantDispatch,
 };
 use crate::name::Names;
 
@@ -44,6 +44,35 @@ pub(super) fn emit_union(
         } => {
             let decl = union_enum_decl(id, ident, union, names, &docs, &deprecated);
             let unknown = open.then(|| open_variant_ident(names, id));
+            // The payload `Unknown` holds is built by the runtime, which reads its tag and
+            // refuses one the union lists (`OpenUnion::lists_tag`).
+            let open_union_impl = unknown.map(|_| {
+                let claimed = union
+                    .variants
+                    .iter()
+                    .flat_map(|variant| discriminated_dispatch(variant).tags);
+                let lists = quote! { [#(#claimed),*].contains(&tag) };
+                quote! {
+                    impl super::support::OpenUnion for #ident {
+                        const TAG_FIELD: &'static str = #tag_field;
+
+                        fn lists_tag(tag: &str) -> bool {
+                            #lists
+                        }
+                    }
+                }
+            });
+            let unknown_unlisted = format!(
+                "discriminator value of union {} is one it lists",
+                ident.as_str()
+            );
+            let build_unknown = unknown.map(|unknown| {
+                quote! {
+                    super::support::UnknownPayload::from_payload(value)
+                        .map(#ident::#unknown)
+                        .ok_or_else(|| serde::de::Error::custom(#unknown_unlisted))
+                }
+            });
             let category_arms = union.variants.iter().filter_map(|variant| {
                 let category = discriminated_dispatch(variant).category?;
                 let variant_ident = union_variant_ident(names, id, variant);
@@ -94,7 +123,7 @@ pub(super) fn emit_union(
             // tag is inserted only into a value constructed without it.
             let unknown_ser_arm = unknown.map(|unknown| {
                 quote! {
-                    #ident::#unknown { tag, value } => (value.clone(), Some(tag.as_str())),
+                    #ident::#unknown(payload) => (payload.value().clone(), Some(payload.tag())),
                 }
             });
             // A tag the variant already wrote is kept only if decoding it selects that variant
@@ -141,7 +170,7 @@ pub(super) fn emit_union(
                 }
             });
             let unknown_refusal_arm = unknown.map(|unknown| {
-                quote! { #ident::#unknown { .. } => None, }
+                quote! { #ident::#unknown(_) => None, }
             });
             let held_tag = format!("discriminator `{tag_field}` value ");
             // Where no variant has a tag to hold, only `Unknown` reaches the check, and it keeps
@@ -277,17 +306,15 @@ pub(super) fn emit_union(
             // fallback.
             let unknown_tag_arm = match (&fallback, unknown) {
                 (Some(fallback), _) => fallback.clone(),
-                (None, Some(unknown)) if attempts.is_empty() => {
-                    quote! { Ok(#ident::#unknown { tag, value }) }
-                }
-                (None, Some(unknown)) => {
+                (None, Some(_)) if attempts.is_empty() => quote! { #build_unknown },
+                (None, Some(_)) => {
                     let ambiguous = format!(
                         "data matched more than one untagged variant of union {}",
                         ident.as_str()
                     );
                     quote! {
                         if match_count == 0 {
-                            Ok(#ident::#unknown { tag, value })
+                            #build_unknown
                         } else {
                             Err(serde::de::Error::custom(#ambiguous))
                         }
@@ -371,7 +398,7 @@ pub(super) fn emit_union(
                         // exhaustive regardless.
                         let unknown_name = unknown.map(|unknown| {
                             let name = format!("{}::{}", ident.as_str(), unknown.as_str());
-                            quote! { #ident::#unknown { .. } => #name, }
+                            quote! { #ident::#unknown(_) => #name, }
                         });
                         let refusal = format!(
                             "payload of variant {}::{} decodes as variant ",
@@ -406,6 +433,7 @@ pub(super) fn emit_union(
             let unknown_tag_arm = untagged_trial(unknown_tag_arm);
             quote! {
                 #decl
+                #open_union_impl
 
                 impl<'de> serde::Deserialize<'de> for #ident {
                     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -684,7 +712,8 @@ fn discriminated_dispatch(variant: &UnionVariant) -> Discriminated<'_> {
 }
 
 /// The union enum's declaration, `docs` and `deprecated` first, one variant per
-/// [`union_variant_defs`] entry, then, for an open union, the `Unknown { tag, value }` variant.
+/// [`union_variant_defs`] entry, then, for an open union, the `Unknown(UnknownPayload<Self>)`
+/// variant.
 /// Every strategy declares the same enum and differs only in the serde impls beside it.
 fn union_enum_decl(
     id: crate::ir::TypeId,
@@ -704,17 +733,12 @@ fn union_enum_decl(
             let unknown = open_variant_ident(names, id);
             let doc = format!(
                 "A payload whose `{tag_field}` names a kind this description does not list. \
-                 Decoding produces it only for a value no other variant takes."
+                 Decoding produces it only for a value no other variant takes; its `tag()` is \
+                 that `{tag_field}` value and its `value()` the whole payload, as it arrived."
             );
-            let tag_doc = format!("The `{tag_field}` value the payload carries.");
             Some(quote! {
                 #[doc = #doc]
-                #unknown {
-                    #[doc = #tag_doc]
-                    tag: String,
-                    /// The whole payload, as it arrived.
-                    value: serde_json::Value,
-                },
+                #unknown(super::support::UnknownPayload<#ident>),
             })
         }
         _ => None,
@@ -730,12 +754,12 @@ fn union_enum_decl(
     }
 }
 
-/// The identifier `name` allocated for open union `id`'s `Unknown` variant.
+/// The identifier `name` allocated for open union or open string enum `id`'s `Unknown` variant.
 fn open_variant_ident(names: &Names, id: crate::ir::TypeId) -> &crate::name::Ident {
     names
         .open_variants
         .get(&id)
-        .expect("open union variant name allocated")
+        .expect("open variant name allocated")
 }
 
 /// The expression decoding the buffered `value` into `variant_ident`'s payload, as the
@@ -900,7 +924,8 @@ fn guarded_decode_tokens(
 /// holds no member the variant would drop, so a more specific variant that would drop one is never
 /// selected over one that keeps it, and a payload every variant would drop part of fails.
 ///
-/// `unknown` is [`open_member_unknown_test`] for a variant that is itself an open union: a value
+/// `unknown` is [`open_member_unknown_test`] for a variant that is itself an open union or an open
+/// string enum: a value
 /// it decodes only as its `Unknown` is not counted as a match but kept, the first such one, in
 /// `unknown_fallback` ([`unknown_fallback_decl_tokens`]), which the trial takes only when no
 /// variant matched. Counting it would let an open member's catch-all overlap every other object
@@ -950,22 +975,27 @@ fn unknown_fallback_decl_tokens() -> TokenStream {
     quote! { let mut unknown_fallback: Option<Self> = None; }
 }
 
-/// For a union variant of type `ty` that is itself an open union, the test that its decoded
-/// payload `inner` (`Box<T>`, or `Option<Box<T>>` when nullable) is that union's `Unknown`;
-/// `None` for any other variant type.
+/// For a union variant of type `ty` that is itself an open union or an open string enum, the test
+/// that its decoded payload `inner` (`Box<T>`, or `Option<Box<T>>` when nullable) is that type's
+/// `Unknown`; `None` for any other variant type.
 fn open_member_unknown_test(types: &TypeGraph, names: &Names, ty: Ty) -> Option<TokenStream> {
-    let TypeKind::Union(union) = &types.get(ty.id)?.kind else {
-        return None;
+    let kind = &types.get(ty.id)?.kind;
+    let open = if let TypeKind::Union(union) = kind {
+        union.is_open()
+    } else if let TypeKind::Enum(set) = kind {
+        set.repr == ScalarRepr::String && set.is_open()
+    } else {
+        false
     };
-    if !union.is_open() {
+    if !open {
         return None;
     }
     let member = names.types.get(&ty.id).expect("type name allocated");
     let unknown = open_variant_ident(names, ty.id);
     Some(if ty.nullable {
-        quote! { matches!(inner.as_deref(), Some(#member::#unknown { .. })) }
+        quote! { matches!(inner.as_deref(), Some(#member::#unknown(_))) }
     } else {
-        quote! { matches!(*inner, #member::#unknown { .. }) }
+        quote! { matches!(*inner, #member::#unknown(_)) }
     })
 }
 

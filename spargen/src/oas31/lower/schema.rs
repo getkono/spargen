@@ -792,18 +792,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate
         // (last-insert invariant: `lower_into_reservation`).
-        //
-        // A string set whose own schema names a `uuid` or date format is narrowed against that
-        // format exactly as an `allOf` member declaring it would narrow it (`narrowed_set`).
-        let formatted = matches!(
-            schema.format.as_deref(),
-            Some("uuid" | "date" | "date-time")
-        );
-        let openness = if self.open_narrowing && repr == ScalarRepr::String && formatted {
-            Openness::Locked
-        } else {
-            Openness::Closed
-        };
         let mut ty = self.insert_schema_type(
             schema,
             hint,
@@ -811,7 +799,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 repr,
                 variants,
                 width,
-                openness,
+                openness: Openness::Closed,
             }),
         );
         if self.narrowing_opens {

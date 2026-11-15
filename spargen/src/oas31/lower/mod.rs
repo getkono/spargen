@@ -38,7 +38,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
-use crate::ir::{Api, Info, PathTemplate, Ty, TypeGraph, TypeId, TypeKind};
+use crate::ir::{Api, Info, Openness, PathTemplate, ScalarRepr, Ty, TypeGraph, TypeId, TypeKind};
 use crate::name::{assign_operation_ids, OperationIdRequest};
 
 use super::{Document, PathItem, Resolver, Schema};
@@ -374,6 +374,12 @@ fn lower_pass(
         ctx.diags,
     );
 
+    // Every set is lowered and met, each string set closed throughout, so opening them now opens
+    // every one alike, wherever it sits; `closed_enums` leaves them closed.
+    if !options.closed_enums {
+        open_string_sets(&mut ctx.graph);
+    }
+
     let servers = document
         .servers
         .iter()
@@ -395,6 +401,18 @@ fn lower_pass(
         security_schemes,
     };
     (ctx.diags.result(api), stale)
+}
+
+/// Open every string set in `graph`: give each string enum its `Unknown` variant.
+fn open_string_sets(graph: &mut TypeGraph) {
+    let ids: Vec<TypeId> = graph.iter().map(|(id, _)| id).collect();
+    for id in ids {
+        if let Some(TypeKind::Enum(set)) = graph.get_mut(id).map(|def| &mut def.kind) {
+            if set.repr == ScalarRepr::String {
+                set.openness = Openness::Open;
+            }
+        }
+    }
 }
 
 /// The API's own documentation: `info`'s summary and description, its contact, license and
@@ -675,8 +693,8 @@ struct LowerCtx<'a, 'doc> {
     /// decremented on exit. A `$ref`/allOf/array/object chain that pushes this past
     /// [`MAX_SCHEMA_DEPTH`] is rejected (`E014`) rather than allowed to overflow the stack.
     depth: u32,
-    /// The `open_narrowing` option: whether an `enum`/`const` narrowing a plain `string`,
-    /// `integer` or `boolean` is lowered as an open set where [`Self::narrowing_opens`] allows it.
+    /// The `open_narrowing` option: whether an `enum`/`const` narrowing a plain `integer` or
+    /// `boolean` is lowered as an open set where [`Self::narrowing_opens`] allows it.
     open_narrowing: bool,
     /// The `open_unions` option: whether a discriminated union with no `defaultMapping` is
     /// lowered open ([`UnionStrategy::Discriminated::open`](crate::ir::UnionStrategy)).
@@ -786,8 +804,12 @@ impl LowerCtx<'_, '_> {
 /// The options that change what lowering produces.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct LowerOptions<'a> {
-    /// `Spec::open_narrowing`: lower a response body's own scalar narrowings as open sets.
+    /// `Spec::open_narrowing`: lower a response body's own integer and boolean narrowings as open
+    /// sets.
     pub(crate) open_narrowing: bool,
+    /// `Spec::closed_enums`: leave every string set closed, rather than opening each one once
+    /// lowering is done.
+    pub(crate) closed_enums: bool,
     /// `Spec::open_unions`: give a discriminated union a variant for a tag value it does not list.
     pub(crate) open_unions: bool,
     /// `Spec::add_bound_header`: the header names whose parameters become an operation's

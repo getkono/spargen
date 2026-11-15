@@ -496,9 +496,9 @@ mod tests {
 
     /// Two string enums listing one value set decode the same values only when they agree on
     /// openness (#492): an open set also decodes every unlisted string, so it never merges with a
-    /// closed one, while `Locked` is closed and merges with `Closed`. Pinned here rather than in
-    /// `frontend/` because every `oneOf` branch is lowered closed, so no document reaches a
-    /// union with an open and a closed branch.
+    /// closed one. Pinned here rather than in `frontend/` because lowering leaves every string set
+    /// closed until it settles them all at once, so no document reaches a union with an open and a
+    /// closed branch.
     #[test]
     fn string_enums_of_one_value_set_decode_the_same_values_only_at_one_openness() {
         use crate::ir::{Openness, ScalarEnum, ScalarRepr, ScalarValue, Ty, TypeKind};
@@ -522,15 +522,12 @@ mod tests {
         };
         let closed = set(Openness::Closed, ["x", "y"]);
         let reordered = set(Openness::Closed, ["y", "x"]);
-        let locked = set(Openness::Locked, ["x", "y"]);
         let open = set(Openness::Open, ["x", "y"]);
         let open_reordered = set(Openness::Open, ["y", "x"]);
         assert!(graph.same_decoded_values(closed, reordered));
-        assert!(graph.same_decoded_values(closed, locked));
         assert!(graph.same_decoded_values(open, open_reordered));
         assert!(!graph.same_decoded_values(closed, open));
         assert!(!graph.same_decoded_values(open, closed));
-        assert!(!graph.same_decoded_values(locked, open));
         // Two distinct string enums are never one generated type, whatever their values.
         assert!(!graph.same_generated_type(closed, reordered));
     }

@@ -67,21 +67,28 @@ pub(crate) struct SpecArgs {
     /// Max diagnostics collected before batching stops (default 100).
     #[arg(long, value_name = "COUNT")]
     pub(crate) batch_cap: Option<usize>,
-    /// Lower a response body's own `enum`/`const` narrowings of a plain `string`, `integer` or
-    /// `boolean` as open sets, so a value the description does not list still decodes.
+    /// Lower a response body's own `enum`/`const` narrowings of a plain `integer` or `boolean` as
+    /// open sets, so a value the description does not list still decodes.
     #[arg(long, conflicts_with = "no_open_narrowing")]
     pub(crate) open_narrowing: bool,
     /// Keep response-body narrowings closed, overriding `open_narrowing = true` in
     /// `spargen.toml`.
     #[arg(long)]
     pub(crate) no_open_narrowing: bool,
-    /// Give every discriminated union without a `defaultMapping` an `Unknown { tag, value }`
+    /// Give every discriminated union without a `defaultMapping` an `Unknown(UnknownPayload<Self>)`
     /// variant, so a discriminator value the description does not list still decodes.
     #[arg(long, conflicts_with = "no_open_unions")]
     pub(crate) open_unions: bool,
     /// Keep discriminated unions closed, overriding `open_unions = true` in `spargen.toml`.
     #[arg(long)]
     pub(crate) no_open_unions: bool,
+    /// Generate every string `enum` closed, with no `Unknown` variant, so a value the description
+    /// does not list fails to decode.
+    #[arg(long, conflicts_with = "no_closed_enums")]
+    pub(crate) closed_enums: bool,
+    /// Generate every string `enum` open, overriding `closed_enums = true` in `spargen.toml`.
+    #[arg(long)]
+    pub(crate) no_closed_enums: bool,
     /// Carry the spec's prose into rustdoc as written, overriding `verbatim_docs = false` in
     /// `spargen.toml`.
     #[arg(long, conflicts_with = "no_verbatim_docs")]
@@ -141,6 +148,8 @@ impl SpecArgs {
             no_open_narrowing,
             open_unions,
             no_open_unions,
+            closed_enums,
+            no_closed_enums,
             verbatim_docs,
             no_verbatim_docs,
             testing,
@@ -163,6 +172,8 @@ impl SpecArgs {
             (*no_open_narrowing, "--no-open-narrowing"),
             (*open_unions, "--open-unions"),
             (*no_open_unions, "--no-open-unions"),
+            (*closed_enums, "--closed-enums"),
+            (*no_closed_enums, "--no-closed-enums"),
             (*verbatim_docs, "--verbatim-docs"),
             (*no_verbatim_docs, "--no-verbatim-docs"),
             (*testing, "--testing"),

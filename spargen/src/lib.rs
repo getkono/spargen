@@ -78,8 +78,8 @@ mod test_support;
 
 pub use compat::{ComponentKind, KeepRule, Omit, OmitMethod, OmitRule, UnknownOmitToken};
 pub use config::{
-    Build, CargoIntegration, CarriedDocs, Carve, ConfigError, Narrowing, Spec, TestingModule,
-    UnionTags, UuidMapping,
+    Build, CargoIntegration, CarriedDocs, Carve, ConfigError, Narrowing, Spec, StringEnums,
+    TestingModule, UnionTags, UuidMapping,
 };
 pub use diag::{Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, Severity, Span, UnknownCode};
 // The internal claim oracle `spargen/tests/frontend/` and `spargen/tests/corpus_manifest.rs`

@@ -80,6 +80,7 @@ fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[
     append(&mut hasher, &[u8::from(spec.carve.is_on())]);
     append(&mut hasher, &[u8::from(spec.open_narrowing.is_on())]);
     append(&mut hasher, &[u8::from(spec.open_unions.is_on())]);
+    append(&mut hasher, &[u8::from(spec.closed_enums.is_on())]);
     append(&mut hasher, &[u8::from(spec.verbatim_docs.is_on())]);
     append(&mut hasher, &[u8::from(spec.testing.is_on())]);
     // The omit profile's one canonical encoding, the same bytes its provenance-header
@@ -940,6 +941,7 @@ components:
             carve: crate::Carve::Auto,
             open_narrowing: crate::Narrowing::Exact,
             open_unions: crate::UnionTags::Open,
+            closed_enums: crate::StringEnums::Closed,
             verbatim_docs: crate::CarriedDocs::Rewritten,
             testing: crate::TestingModule::Emitted,
             bound_headers: vec!["X-Api-Version".to_owned()],
@@ -971,6 +973,7 @@ components:
         frame(&[1]);
         frame(&[0]);
         frame(&[1]);
+        frame(&[1]);
         frame(&[0]);
         frame(&[1]);
         frame(&spec.omit.canonical_encoding());
@@ -988,7 +991,7 @@ components:
         assert_eq!(digest, sha256_hex(&buffer));
         assert_eq!(
             digest,
-            "8ecd1dfb1755bb401d0b0e9105151ba9330a9ddce7cc948776f8e22afe56be23"
+            "bc5983707d88eba593dc5c6b74bf5d77c10dfbb2f0608b8df52e94608506a6ba"
         );
     }
 
@@ -1211,6 +1214,7 @@ components:
             carve,
             open_narrowing,
             open_unions,
+            closed_enums,
             verbatim_docs,
             testing,
             bound_headers,
@@ -1284,6 +1288,13 @@ components:
                 "open_unions",
                 Spec {
                     open_unions: crate::UnionTags::from_on(!open_unions.is_on()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "closed_enums",
+                Spec {
+                    closed_enums: crate::StringEnums::from_on(!closed_enums.is_on()),
                     ..base.clone()
                 },
             ),

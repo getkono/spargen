@@ -80,21 +80,36 @@ pub enum Carve {
 }
 switch!(Carve, off = Off, on = Auto);
 
-/// How an `enum`/`const` narrowing a plain `string`, `integer` or `boolean` in a response body's
-/// own schema lowers, set with [`Spec::with_open_narrowing`] and read with
-/// [`Spec::open_narrowing`]; the `open_narrowing` key of `spargen.toml`, where `true` is
-/// [`Open`](Self::Open).
+/// How an `enum`/`const` narrowing a plain `integer` or `boolean` in a response body's own schema
+/// lowers, set with [`Spec::with_open_narrowing`] and read with [`Spec::open_narrowing`]; the
+/// `open_narrowing` key of `spargen.toml`, where `true` is [`Open`](Self::Open). A string set is
+/// [`StringEnums`]' to decide.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Narrowing {
     /// A closed set: a value the description does not list is a decode failure.
     #[default]
     Exact,
-    /// An open set: a string enum's one more variant holds any other string, and an integer or
-    /// boolean set's checked newtype decodes any other value of its width.
+    /// An open set: the checked newtype decodes any other value of its width.
     Open,
 }
 switch!(Narrowing, off = Exact, on = Open);
+
+/// Whether a string `enum` takes a value it does not list, set with [`Spec::with_closed_enums`]
+/// and read with [`Spec::closed_enums`]; the `closed_enums` key of `spargen.toml`, where `true` is
+/// [`Closed`](Self::Closed).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StringEnums {
+    /// Every string enum has one more variant, `Unknown(UnknownValue<Self>)`, holding a value it
+    /// does not list.
+    #[default]
+    Open,
+    /// Every string enum lists its values and nothing else, and is `Copy`: a value it does not
+    /// list is a decode failure.
+    Closed,
+}
+switch!(StringEnums, off = Open, on = Closed);
 
 /// Whether a discriminated union takes a tag value it does not list, set with
 /// [`Spec::with_open_unions`] and read with [`Spec::open_unions`]; the `open_unions` key of
@@ -176,6 +191,7 @@ pub struct Spec {
     pub(crate) carve: Carve,
     pub(crate) open_narrowing: Narrowing,
     pub(crate) open_unions: UnionTags,
+    pub(crate) closed_enums: StringEnums,
     pub(crate) verbatim_docs: CarriedDocs,
     pub(crate) testing: TestingModule,
     /// The header names [`Spec::add_bound_header`] bound, in the order bound, no two equal in any
@@ -191,7 +207,8 @@ impl Spec {
     /// A spec with defaults: `format: uuid` mapped to `uuid::Uuid` ([`UuidMapping::Uuid`]), dates
     /// mapped through the `time` crate ([`DateTimeBackend::Time`]), a 64 KiB error-body cap, a
     /// 100-diagnostic batch, no omissions, no carving ([`Carve::Off`]), exact narrowing
-    /// ([`Narrowing::Exact`]), closed unions ([`UnionTags::Closed`]), carried docs rewritten for
+    /// ([`Narrowing::Exact`]), closed unions ([`UnionTags::Closed`]), open string enums
+    /// ([`StringEnums::Open`]), carried docs rewritten for
     /// rustdoc ([`CarriedDocs::Rewritten`]), no `testing` module ([`TestingModule::Omitted`]), and
     /// no bound headers.
     pub fn new(path: impl Into<Utf8PathBuf>) -> Self {
@@ -205,6 +222,7 @@ impl Spec {
             carve: Carve::Off,
             open_narrowing: Narrowing::Exact,
             open_unions: UnionTags::Closed,
+            closed_enums: StringEnums::Open,
             verbatim_docs: CarriedDocs::Rewritten,
             testing: TestingModule::Omitted,
             bound_headers: Vec::new(),
@@ -262,6 +280,12 @@ impl Spec {
     /// [`with_open_unions`](Self::with_open_unions) set it.
     pub fn open_unions(&self) -> UnionTags {
         self.open_unions
+    }
+
+    /// Whether a string enum takes a value it does not list, as
+    /// [`with_closed_enums`](Self::with_closed_enums) set it.
+    pub fn closed_enums(&self) -> StringEnums {
+        self.closed_enums
     }
 
     /// How the spec's prose reaches rustdoc, as [`with_verbatim_docs`](Self::with_verbatim_docs)
@@ -398,17 +422,16 @@ impl Spec {
         self
     }
 
-    /// With [`Narrowing::Open`], lower a string `enum`/`const` that narrows a plain `string` as an
-    /// **open** set (default [`Narrowing::Exact`]), inside a response body's own schema.
+    /// With [`Narrowing::Open`], lower an integer or boolean `enum`/`const` that narrows a plain
+    /// `integer` or `boolean` as an **open** set (default [`Narrowing::Exact`]), inside a response
+    /// body's own schema. A string set is open or closed by [`with_closed_enums`](Self::with_closed_enums)
+    /// alone, wherever it sits.
     ///
     /// The construct is a property that one `allOf` member (or the `$ref` it sits beside) declares
-    /// as a plain `string` and another narrows with `enum`/`const` — the RFC 9457 shape
-    /// `allOf: [$ref: Problem, {properties: {type: {const: …}}}]` that gives each documented error
-    /// status its own problem `type`. By default the narrowing is exact: the field is a closed
-    /// enum, and a value the description does not list is a decode failure (`Error::Decode`).
-    /// With this on, the field is an open enum instead: each listed value is still its own
-    /// variant, and one more variant holds any other string, which is the domain the wider
-    /// declaration admits. A server that adds a problem type then still decodes into `Error::Api`.
+    /// as a plain `integer` or `boolean` and another narrows with `enum`/`const`. By default the
+    /// narrowing is exact: the field's checked newtype refuses a value the description does not
+    /// list, as a decode failure (`Error::Decode`). With this on, the checked newtype decodes any
+    /// value of its width instead, which is the domain the wider declaration admits.
     ///
     /// It applies to the schema written in the response itself, and to what that schema contains
     /// other than a `oneOf`/`anyOf`; a narrowing written inside a `$ref` target stays closed. A
@@ -422,17 +445,18 @@ impl Spec {
     }
 
     /// With [`UnionTags::Open`], give every discriminated union one more variant,
-    /// `Unknown { tag, value }`, holding a payload whose discriminator value the union does not
-    /// list (default [`UnionTags::Closed`]).
+    /// `Unknown(UnknownPayload<Self>)`, holding a payload whose discriminator value the union does
+    /// not list (default [`UnionTags::Closed`]).
     ///
     /// By default a discriminated union is closed: a tag value that selects none of its variants
     /// is a decode failure (`Error::Decode`), the same as a malformed payload. An API that
     /// documents "new kinds may be added; a client ignores kinds it does not know" needs the two
     /// told apart. With this on, a payload whose tag is a string the union lists for no variant,
-    /// and that no untagged variant accepts, decodes as `Unknown`: `tag` is that string and
-    /// `value` the whole payload as it arrived. Serializing `Unknown` writes `value` back, with
-    /// `tag` inserted under the tag property when `value` does not already carry it. A missing or
-    /// non-string tag is still a decode failure.
+    /// and that no untagged variant accepts, decodes as `Unknown`: its `tag()` is that string and
+    /// its `value()` the whole payload as it arrived. Its fields are private, and only decoding or
+    /// `UnknownPayload::from_payload` builds one, which refuses a payload whose tag the union
+    /// lists. Serializing `Unknown` writes `value()` back. A missing or non-string tag is still a
+    /// decode failure.
     ///
     /// It applies to every union with a `discriminator`, in requests and responses alike, except
     /// one with an OpenAPI 3.2 `defaultMapping`, whose fallback variant already takes every tag
@@ -446,6 +470,26 @@ impl Spec {
     /// can fail to decode where it decoded with this option off.
     pub fn with_open_unions(mut self, tags: UnionTags) -> Self {
         self.open_unions = tags;
+        self
+    }
+
+    /// With [`StringEnums::Closed`], generate every string `enum` closed: one unit variant per
+    /// listed value and nothing else (default [`StringEnums::Open`]).
+    ///
+    /// By default a string enum is open: beside one unit variant per listed value it has an
+    /// `Unknown(UnknownValue<Self>)` variant holding any other string, so a server that adds a
+    /// value still decodes. `FromStr` and decoding map a listed value to its own variant and only
+    /// another to `Unknown`, and nothing else builds an `UnknownValue`, so `Unknown` never holds a
+    /// listed value. The enum is `Clone`, `Eq` and `Hash`, has `ALL` (the listed variants),
+    /// `as_str(&self) -> &str`, `Display` and an infallible `FromStr`. An open enum that is a
+    /// variant of a union with no discriminator counts as a match there only for a value it
+    /// lists, as an open union does under [`with_open_unions`](Self::with_open_unions).
+    ///
+    /// With this on, a value the description does not list is a decode failure
+    /// (`Error::Decode`); the enum is `Copy`, `as_str` is a `const fn(self) -> &'static str`, and
+    /// `FromStr` fails with `UnknownVariant`.
+    pub fn with_closed_enums(mut self, enums: StringEnums) -> Self {
+        self.closed_enums = enums;
         self
     }
 
@@ -639,6 +683,9 @@ impl Spec {
         }
         if let Some(value) = file.open_unions {
             self.open_unions = UnionTags::from_on(value);
+        }
+        if let Some(value) = file.closed_enums {
+            self.closed_enums = StringEnums::from_on(value);
         }
         if let Some(value) = file.verbatim_docs {
             self.verbatim_docs = CarriedDocs::from_on(value);
@@ -862,6 +909,7 @@ struct FileConfig {
     error_body_cap: Option<usize>,
     open_narrowing: Option<bool>,
     open_unions: Option<bool>,
+    closed_enums: Option<bool>,
     verbatim_docs: Option<bool>,
     testing: Option<bool>,
     /// Retained solely to give the removed 0.2 `[features]` table a targeted error.
@@ -1043,6 +1091,7 @@ mod tests {
         assert_eq!(spec.error_body_cap, 64 * 1024);
         assert_eq!(spec.open_narrowing, Narrowing::Exact);
         assert_eq!(spec.open_unions, UnionTags::Closed);
+        assert_eq!(spec.closed_enums, StringEnums::Open);
         assert_eq!(spec.verbatim_docs, CarriedDocs::Rewritten);
         assert_eq!(spec.testing, TestingModule::Omitted);
         assert!(spec.bound_headers.is_empty());
@@ -1107,6 +1156,7 @@ mod tests {
             error_body_cap = 11
             open_narrowing = true
             open_unions = true
+            closed_enums = true
             verbatim_docs = true
             testing = true
             "#,
@@ -1119,6 +1169,7 @@ mod tests {
         assert_eq!(spec.error_body_cap, 11);
         assert_eq!(spec.open_narrowing, Narrowing::Open);
         assert_eq!(spec.open_unions, UnionTags::Open);
+        assert_eq!(spec.closed_enums, StringEnums::Closed);
         assert_eq!(spec.verbatim_docs, CarriedDocs::Verbatim);
         assert_eq!(spec.testing, TestingModule::Emitted);
     }

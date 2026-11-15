@@ -330,6 +330,7 @@ fn lower_bundle(
     let options = oas31::LowerOptions {
         open_narrowing: spec.open_narrowing.is_on(),
         open_unions: spec.open_unions.is_on(),
+        closed_enums: spec.closed_enums.is_on(),
         bind_headers: &spec.bound_headers,
     };
     let api = oas31::lower(&document, &resolver, diags, options).map_err(|_| ())?;

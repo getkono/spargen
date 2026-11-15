@@ -261,18 +261,25 @@ fn an_open_union_keeps_an_unlisted_tag_in_unknown() {
         &[
             concat!(
                 r#"Stop(Box<Stop>),///Apayloadwhose`kind`namesakindthisdescriptiondoesnotlist."#,
-                r#"Decodingproducesitonlyforavaluenoothervarianttakes.Unknown{///The`kind`valuethepayloadcarries."#,
-                r#"tag:String,///Thewholepayload,asitarrived.value:serde_json::Value,},}"#,
+                r#"Decodingproducesitonlyforavaluenoothervarianttakes;its`tag()`isthat`kind`value"#,
+                r#"andits`value()`thewholepayload,asitarrived.Unknown(super::support::UnknownPayload<Event>),}"#,
+                r#"implsuper::support::OpenUnionforEvent{constTAG_FIELD:&'staticstr="kind";"#,
+                r#"fnlists_tag(tag:&str)->bool{["tick","Tick","stop","halt","Stop"].contains(&tag)}}"#,
             ),
-            r#"_=>Ok(Event::Unknown{tag,value}),}"#,
-            r#"Event::Unknown{tag,value}=>(value.clone(),Some(tag.as_str())),};"#,
-            r#"Event::Unknown{..}=>None,};"#,
+            concat!(
+                r#"_=>{super::support::UnknownPayload::from_payload(value).map(Event::Unknown)"#,
+                r#".ok_or_else(||serde::de::Error::custom("discriminatorvalueofunionEventisoneitlists",))}"#,
+            ),
+            r#"Event::Unknown(payload)=>(payload.value().clone(),Some(payload.tag())),};"#,
+            r#"Event::Unknown(_)=>None,};"#,
         ],
     );
     assert_contains_all(
         union(&types, "Notice"),
         &[concat!(
-            r#"_=>{ifmatch_count==0{Ok(Notice::Unknown{tag,value})}else{Err(serde::de::Error::custom("#,
+            r#"_=>{ifmatch_count==0{super::support::UnknownPayload::from_payload(value).map(Notice::Unknown)"#,
+            r#".ok_or_else(||serde::de::Error::custom("discriminatorvalueofunionNoticeisoneitlists",))"#,
+            r#"}else{Err(serde::de::Error::custom("#,
             r#""datamatchedmorethanoneuntaggedvariantofunionNotice",),)}}"#,
         )],
     );
@@ -281,7 +288,7 @@ fn an_open_union_keeps_an_unlisted_tag_in_unknown() {
         &[
             r#"letmutselected:Option<(u32,Self)>=None;letmutunknown_fallback:Option<Self>=None;"#,
             concat!(
-                r#"ifletOk(inner)=serde_json::from_value::<Box<Event>>(value.clone()){ifmatches!(*inner,Event::Unknown{..})"#,
+                r#"ifletOk(inner)=serde_json::from_value::<Box<Event>>(value.clone()){ifmatches!(*inner,Event::Unknown(_))"#,
                 r#"{ifunknown_fallback.is_none(){unknown_fallback=Some(Choice::Event(inner));}}else{match_count+=1;"#,
             ),
             concat!(
@@ -292,7 +299,7 @@ fn an_open_union_keeps_an_unlisted_tag_in_unknown() {
                 r#"letmutmatch_count=0_usize;letmutunknown_match=false;"#,
                 r#"if(value.is_object()&&value.as_object().is_none_or(|members|{members.keys().all(|key|matches!(key.as_str(),"kind"|"n"))}))&&serde_json::from_value::<Box<Tick>>(value.clone()).is_ok(){match_count+=1;}"#,
                 r#"if(value.is_object()&&value.as_object().is_none_or(|members|{members.keys().all(|key|matches!(key.as_str(),"note"))}))&&serde_json::from_value::<Box<ChoiceVariant1>>(value.clone()).is_ok(){match_count+=1;}"#,
-                r#"ifletOk(inner)=serde_json::from_value::<Box<Event>>(value.clone()){ifmatches!(*inner,Event::Unknown{..})"#,
+                r#"ifletOk(inner)=serde_json::from_value::<Box<Event>>(value.clone()){ifmatches!(*inner,Event::Unknown(_))"#,
                 r#"{unknown_match=true;}else{match_count+=1;}}ifmatch_count>=1||(match_count==0&&unknown_match)"#,
             ),
         ],

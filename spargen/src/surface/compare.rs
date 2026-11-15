@@ -912,14 +912,16 @@ fn diff_open_variant(name: &str, old: Option<&str>, new: Option<&str>, changes: 
         changes.push(Change::new(
             ChangeKind::VariantAdded,
             name,
-            format!("variant added: `{variant}(String)`, holding any unlisted value"),
+            format!("variant added: `{variant}(UnknownValue<Self>)`, holding any unlisted value"),
         ));
     }
     if let Some(variant) = old {
         changes.push(Change::new(
             ChangeKind::VariantRemoved,
             name,
-            format!("variant removed: `{variant}(String)`, which held any unlisted value"),
+            format!(
+                "variant removed: `{variant}(UnknownValue<Self>)`, which held any unlisted value"
+            ),
         ));
     }
 }

@@ -93,13 +93,22 @@ fn types(open: bool, testing: bool) -> String {
     between(&generated, "pubmodtypes{", "pubstructClient{").to_owned()
 }
 
-/// A closed string enum derives serde under each value's rename and lists its values in `ALL`,
-/// `as_str` and `FromStr`; an open one, from a narrowing `open_narrowing` opens, holds any other
-/// string in one more variant, written and read by hand.
+/// The `types` module `MODELS` generates under `closed_enums`, every other switch at its default.
+fn closed_types() -> String {
+    let generated = generated_with(MODELS, |spec| {
+        spec.with_closed_enums(crate::StringEnums::Closed)
+    });
+    between(&generated, "pubmodtypes{", "pubstructClient{").to_owned()
+}
+
+/// A string enum is open by default: one unit variant per listed value and `Unknown` holding an
+/// `UnknownValue` of any other string, which only the runtime's `parse_open` builds, through the
+/// enum's `OpenEnum` impl. Under `closed_enums` it derives serde under each value's rename and is
+/// `Copy`. Either way it lists its values in `ALL`, `as_str` and `FromStr`.
 #[test]
 fn string_enums_list_their_values_closed_or_open() {
     assert_contains_all(
-        &types(false, false),
+        &closed_types(),
         &[concat!(
             r#"#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash,Serialize,Deserialize)]pubenumColor"#,
             r#"{#[serde(rename="red")]Red,#[serde(rename="green")]Green,}implColor{"#,
@@ -113,18 +122,24 @@ fn string_enums_list_their_values_closed_or_open() {
         )],
     );
     assert_contains_all(
-        &types(true, false),
+        &types(false, false),
         &[concat!(
-            r#"pubenumResponseBodyMember1Kind{Rare,"#,
-            r#"///Avaluethedescriptiondoesnotlisthere.Decodingproducesitonlyforastringnoothervariantnames."#,
-            r#"Other(String),}implResponseBodyMember1Kind{///Thewirevalue.pubfnas_str(&self)->&str{matchself{"#,
-            r#"ResponseBodyMember1Kind::Rare=>"rare",ResponseBodyMember1Kind::Other(value)=>value.as_str(),}}}"#,
-            r#"implstd::fmt::DisplayforResponseBodyMember1Kind{fnfmt(&self,f:&mutstd::fmt::Formatter<'_>)->std::fmt::Result{f.write_str(self.as_str())}}"#,
-            r#"implserde::SerializeforResponseBodyMember1Kind{fnserialize<S>(&self,serializer:S)->Result<S::Ok,S::Error>"#,
+            r#"#[derive(Debug,Clone,PartialEq,Eq,Hash)]pubenumColor{Red,Green,"#,
+            r#"///Avaluethedescriptiondoesnotlisthere.Onlydecodingand`FromStr`buildone,andonlyforastringnoothervariantnames."#,
+            r#"Unknown(super::support::UnknownValue<Color>),}implColor{"#,
+            r#"///Everylistedvariant,intheorderthedescriptionlistsitsvalues.pubconstALL:&'static[Self]=&[Color::Red,Color::Green];"#,
+            r#"///Thewirevalue.pubfnas_str(&self)->&str{matchself{Color::Red=>"red",Color::Green=>"green",Color::Unknown(value)=>value.as_str(),}}}"#,
+            r#"implsuper::support::OpenEnumforColor{fnlisted(value:&str)->Option<Self>{matchvalue{"#,
+            r#""red"=>Some(Color::Red),"green"=>Some(Color::Green),_=>None,}}"#,
+            r#"fnunknown(value:super::support::UnknownValue<Self>)->Self{Color::Unknown(value)}}"#,
+            r#"implstd::fmt::DisplayforColor{fnfmt(&self,f:&mutstd::fmt::Formatter<'_>)->std::fmt::Result{f.write_str(self.as_str())}}"#,
+            r#"implstd::str::FromStrforColor{typeErr=std::convert::Infallible;"#,
+            r#"///Parseawirevalue:alistedvalue,matchedbyteforbyte,isitsownvariant,and///anyotherstringis`Unknown`."#,
+            r#"fnfrom_str(value:&str)->Result<Self,std::convert::Infallible>{Ok(super::support::parse_open(value))}}"#,
+            r#"implserde::SerializeforColor{fnserialize<S>(&self,serializer:S)->Result<S::Ok,S::Error>"#,
             r#"whereS:serde::Serializer,{serializer.serialize_str(self.as_str())}}"#,
-            r#"impl<'de>serde::Deserialize<'de>forResponseBodyMember1Kind{fndeserialize<D>(deserializer:D)->Result<Self,D::Error>"#,
-            r#"whereD:serde::Deserializer<'de>,{letvalue=<Stringasserde::Deserialize>::deserialize(deserializer)?;"#,
-            r#"Ok(matchvalue.as_str(){"rare"=>ResponseBodyMember1Kind::Rare,_=>ResponseBodyMember1Kind::Other(value),},)}}"#,
+            r#"impl<'de>serde::Deserialize<'de>forColor{fndeserialize<D>(deserializer:D)->Result<Self,D::Error>"#,
+            r#"whereD:serde::Deserializer<'de>,{super::support::deserialize_open(deserializer)}}"#,
         )],
     );
 }
@@ -395,7 +410,7 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
                 r#"///The`count`memberwhereitisset,elseitsschemadefault.//////Default:`5`.#[must_use]"#,
                 r#"pubfncount_or_default(&self)->ThingCount{self.count.unwrap_or(5)}"#,
                 r#"///The`color`memberwhereitisset,elseitsschemadefault.//////Default:`green`.#[must_use]"#,
-                r#"pubfncolor_or_default(&self)->Color{self.color.unwrap_or(Color::Green)}"#,
+                r#"pubfncolor_or_default(&self)->Color{self.color.clone().unwrap_or(Color::Green)}"#,
                 r#"///The`level`memberwhereitisset,elseitsschemadefault.//////Default:`3`.#[must_use]"#,
                 r#"pubfnlevel_or_default(&self)->Level{self.level.unwrap_or(Level(3))}}"#,
             ),
