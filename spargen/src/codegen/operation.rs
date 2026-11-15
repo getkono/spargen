@@ -631,8 +631,12 @@ fn url_building(
         .map(|(param, ident)| {
             let placeholder = format!("{{{}}}", param.name);
             let value = param_value_tokens(param, quote! { &#ident });
+            // An empty rendering would leave an empty segment and re-target the request.
             quote! {
-                #path_binding = #path_binding.replace(#placeholder, &#value);
+                #path_binding = #path_binding.replace(
+                    #placeholder,
+                    &support::path_segment(#value).map_err(support::Error::request_construction)?,
+                );
             }
         });
     let query = location_statements(

@@ -769,6 +769,8 @@ mod oas32;
 mod open_narrowing;
 #[path = "e2e/open_unions.rs"]
 mod open_unions;
+#[path = "e2e/parameter_values.rs"]
+mod parameter_values;
 #[path = "e2e/read_write_only.rs"]
 mod read_write_only;
 #[path = "e2e/redirects.rs"]

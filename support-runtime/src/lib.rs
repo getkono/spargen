@@ -112,7 +112,7 @@ pub use middleware::{Middleware, MiddlewareBackend, Next};
 pub use nullable::Nullable;
 pub use paginate::{next_link, LinkPaginator};
 pub use parameter::{
-    cookie_pair, encode, serialize_deep_object, serialize_delimited, serialize_form,
+    cookie_pair, encode, path_segment, serialize_deep_object, serialize_delimited, serialize_form,
     serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values,
     serialize_simple, CookieValue, Delimiter, FormMode, FormProperty, FormStyle, ParameterError,
     PercentEncoding,
