@@ -406,7 +406,7 @@ fn single_bodied_success_with_bodyless_sibling_is_an_enum() {
             by_status,
             default: Some(resp(None)),
         };
-        assert!(matches!(responses.success(), SuccessShape::Plain(_)));
+        assert!(matches!(responses.success(), SuccessShape::Plain(..)));
     }
 }
 
@@ -466,7 +466,7 @@ fn a_streaming_body_beside_a_bodyless_sibling_stays_plain() {
         ],
         default: None,
     };
-    assert!(matches!(responses.success(), SuccessShape::Plain(body) if body.id == TypeId(1)));
+    assert!(matches!(responses.success(), SuccessShape::Plain(body, _) if body.id == TypeId(1)));
     assert!(responses.stream_success().is_some());
     assert!(!responses.stream_outside_single_success());
 }
@@ -595,7 +595,7 @@ fn a_documented_304_or_3xx_is_on_the_error_side_and_promotes_no_success_enum() {
         ],
         default: None,
     };
-    assert!(matches!(single.success(), SuccessShape::Plain(body) if body.id == TypeId(1)));
+    assert!(matches!(single.success(), SuccessShape::Plain(body, _) if body.id == TypeId(1)));
     assert_eq!(
         shape(single.error()),
         Shape::Enum(vec![
@@ -614,7 +614,7 @@ fn a_documented_304_or_3xx_is_on_the_error_side_and_promotes_no_success_enum() {
         ],
         default: None,
     };
-    assert!(matches!(multi.success(), SuccessShape::Plain(body) if body.id == TypeId(1)));
+    assert!(matches!(multi.success(), SuccessShape::Plain(body, _) if body.id == TypeId(1)));
     match multi.error() {
         ErrorShape::Enum(entries) => {
             assert_eq!(
@@ -639,7 +639,7 @@ fn a_documented_304_or_3xx_is_on_the_error_side_and_promotes_no_success_enum() {
         by_status: vec![(StatusSpec::Exact(304), resp(None))],
         default: Some(resp(Some(1))),
     };
-    assert!(matches!(conditional.success(), SuccessShape::Plain(body) if body.id == TypeId(1)));
+    assert!(matches!(conditional.success(), SuccessShape::Plain(body, _) if body.id == TypeId(1)));
     assert_eq!(
         shape(conditional.error()),
         Shape::Enum(vec![
@@ -890,7 +890,7 @@ fn a_default_with_no_explicit_status_is_both_the_success_and_the_error_body() {
         by_status: Vec::new(),
         default: Some(resp(Some(7))),
     };
-    assert!(matches!(bodied.success(), SuccessShape::Plain(body) if body.id == TypeId(7)));
+    assert!(matches!(bodied.success(), SuccessShape::Plain(body, _) if body.id == TypeId(7)));
     assert!(matches!(bodied.error(), ErrorShape::Single(body) if body.id == TypeId(7)));
     assert_eq!(bodied.single_success_media(), Some(super::MediaType::Json));
     assert_eq!(bodied.single_error_media(), Some(super::MediaType::Json));
@@ -900,7 +900,7 @@ fn a_default_with_no_explicit_status_is_both_the_success_and_the_error_body() {
         by_status: Vec::new(),
         default: Some(resp(None)),
     };
-    assert!(matches!(bodyless.success(), SuccessShape::Unit));
+    assert!(matches!(bodyless.success(), SuccessShape::Unit(_)));
     assert!(matches!(bodyless.error(), ErrorShape::None));
 
     // And no responses at all is `Unit` / `None`.
@@ -908,7 +908,7 @@ fn a_default_with_no_explicit_status_is_both_the_success_and_the_error_body() {
         by_status: Vec::new(),
         default: None,
     };
-    assert!(matches!(empty.success(), SuccessShape::Unit));
+    assert!(matches!(empty.success(), SuccessShape::Unit(_)));
     assert!(matches!(empty.error(), ErrorShape::None));
 }
 
@@ -921,7 +921,7 @@ fn default_documents_the_success_side_when_no_success_status_is_declared() {
         by_status: vec![(StatusSpec::Exact(404), resp(Some(1)))],
         default: Some(resp(Some(2))),
     };
-    assert!(matches!(responses.success(), SuccessShape::Plain(body) if body.id == TypeId(2)));
+    assert!(matches!(responses.success(), SuccessShape::Plain(body, _) if body.id == TypeId(2)));
     assert_eq!(
         responses.single_success_media(),
         Some(super::MediaType::Json)
@@ -945,7 +945,7 @@ fn default_documents_the_success_side_when_no_success_status_is_declared() {
             default: Some(resp(Some(2))),
         };
         assert!(
-            matches!(responses.success(), SuccessShape::Plain(body) if body.id == TypeId(2)),
+            matches!(responses.success(), SuccessShape::Plain(body, _) if body.id == TypeId(2)),
             "{status:?}"
         );
     }
@@ -955,7 +955,7 @@ fn default_documents_the_success_side_when_no_success_status_is_declared() {
         by_status: vec![(StatusSpec::Exact(404), resp(Some(1)))],
         default: Some(resp(None)),
     };
-    assert!(matches!(responses.success(), SuccessShape::Unit));
+    assert!(matches!(responses.success(), SuccessShape::Unit(_)));
     assert_eq!(responses.single_success_media(), None);
 }
 
@@ -976,13 +976,98 @@ fn a_declared_success_status_keeps_default_off_the_success_side() {
             default: Some(resp(Some(2))),
         };
         match (body, responses.success()) {
-            (None, SuccessShape::Unit) => {}
-            (Some(_), SuccessShape::Plain(ty)) => assert_eq!(ty.id, TypeId(1)),
+            (None, SuccessShape::Unit(_)) => {}
+            (Some(_), SuccessShape::Plain(ty, _)) => assert_eq!(ty.id, TypeId(1)),
             (_, other) => panic!("{status:?}: unexpected success shape {other:?}"),
         }
         assert_eq!(
             responses.single_success_media(),
             body.map(|_| super::MediaType::Json)
+        );
+    }
+}
+
+#[test]
+fn each_success_shape_carries_the_selectors_it_decodes() {
+    // Issue #1426: a unit or single-body success decodes only its documented 2xx selectors, in
+    // decode precedence, whatever the document order; the error statuses are not among them.
+    let statuses_of = |by_status: Vec<(StatusSpec, Response)>, default: Option<Response>| {
+        let responses = Responses { by_status, default };
+        let shape = responses.success();
+        let carried = match &shape {
+            SuccessShape::Unit(statuses) | SuccessShape::Plain(_, statuses) => {
+                statuses.selectors().to_vec()
+            }
+            SuccessShape::Enum(_) => panic!("expected a unit or single-body shape, got {shape:?}"),
+        };
+        (shape, carried)
+    };
+
+    let (shape, carried) = statuses_of(
+        vec![
+            (StatusSpec::Exact(404), resp(Some(3))),
+            (StatusSpec::Exact(201), resp(Some(1))),
+        ],
+        Some(resp(Some(2))),
+    );
+    assert!(matches!(shape, SuccessShape::Plain(body, _) if body.id == TypeId(1)));
+    assert_eq!(carried, [StatusSpec::Exact(201)]);
+
+    let (shape, carried) = statuses_of(
+        vec![
+            (StatusSpec::Range(2), resp(None)),
+            (StatusSpec::Exact(204), resp(None)),
+            (StatusSpec::Exact(202), resp(None)),
+        ],
+        None,
+    );
+    assert!(matches!(shape, SuccessShape::Unit(_)));
+    assert_eq!(
+        carried,
+        [
+            StatusSpec::Exact(202),
+            StatusSpec::Exact(204),
+            StatusSpec::Range(2)
+        ]
+    );
+
+    // A streaming body keeps its bodyless sibling among the statuses it decodes.
+    let (shape, carried) = statuses_of(
+        vec![
+            (StatusSpec::Exact(204), resp(None)),
+            (StatusSpec::Exact(200), stream_resp(Some(1))),
+        ],
+        None,
+    );
+    assert!(matches!(shape, SuccessShape::Plain(..)));
+    assert_eq!(carried, [StatusSpec::Exact(200), StatusSpec::Exact(204)]);
+
+    // `default` as the success source documents every 2xx, bodied or not.
+    for default in [resp(Some(2)), resp(None)] {
+        let (_, carried) =
+            statuses_of(vec![(StatusSpec::Exact(404), resp(Some(3)))], Some(default));
+        assert_eq!(carried, [StatusSpec::Default]);
+    }
+
+    // Neither a 2xx entry nor a `default`: no 2xx is documented.
+    let (shape, carried) = statuses_of(vec![(StatusSpec::Exact(410), resp(None))], None);
+    assert!(matches!(shape, SuccessShape::Unit(_)));
+    assert_eq!(carried, []);
+}
+
+#[test]
+fn only_a_2xx_range_or_the_success_source_default_covers_every_2xx() {
+    for (selectors, covers) in [
+        (vec![StatusSpec::Range(2)], true),
+        (vec![StatusSpec::Exact(200), StatusSpec::Range(2)], true),
+        (vec![StatusSpec::Default], true),
+        (vec![StatusSpec::Exact(200), StatusSpec::Exact(204)], false),
+        (Vec::new(), false),
+    ] {
+        assert_eq!(
+            super::SuccessStatuses(selectors.clone()).cover_every_2xx(),
+            covers,
+            "{selectors:?}"
         );
     }
 }
@@ -1264,8 +1349,8 @@ mod partition_props {
 
     fn success_shape(success: SuccessShape) -> Shape {
         match success {
-            SuccessShape::Unit => Shape::None,
-            SuccessShape::Plain(body) => Shape::Single(body.id.0),
+            SuccessShape::Unit(_) => Shape::None,
+            SuccessShape::Plain(body, _) => Shape::Single(body.id.0),
             SuccessShape::Enum(entries) => Shape::Enum(
                 entries
                     .into_iter()

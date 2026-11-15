@@ -136,6 +136,7 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                 request_body,
                 file_name_setters,
                 success: success_sig(&operation.responses.success(), api, names, settings),
+                success_statuses: success_statuses(&operation.responses.success()),
                 error: error_sig(&error, api, names, settings),
                 error_body: error_body_sig(&error, api, names, settings),
                 response_headers: response_headers(operation, api, names, settings),
@@ -518,9 +519,30 @@ fn nominal_name(ty: Ty, names: &Names) -> String {
 /// Render an operation's success shape to a stable string.
 fn success_sig(shape: &SuccessShape, api: &Api, names: &Names, settings: Settings) -> String {
     match shape {
-        SuccessShape::Unit => "()".to_owned(),
-        SuccessShape::Plain(ty) => canon_ty(*ty, api, names, settings),
+        SuccessShape::Unit(_) => "()".to_owned(),
+        SuccessShape::Plain(ty, _) => canon_ty(*ty, api, names, settings),
         SuccessShape::Enum(entries) => status_enum_sig("Success", entries, api, names, settings),
+    }
+}
+
+/// The 2xx statuses a unit or single-body success decodes, as labels: `2xx` alone where its
+/// selectors cover every 2xx (a `2XX` range, or the success-source `default`), since those decode
+/// alike; otherwise each selector's Responses Object key, in decode precedence; empty where none is
+/// documented. Empty for a success enum, whose statuses its [`success_sig`] already renders.
+fn success_statuses(shape: &SuccessShape) -> Vec<String> {
+    match shape {
+        SuccessShape::Unit(statuses) | SuccessShape::Plain(_, statuses) => {
+            if statuses.cover_every_2xx() {
+                vec!["2xx".to_owned()]
+            } else {
+                statuses
+                    .selectors()
+                    .iter()
+                    .map(|status| status.display_label())
+                    .collect()
+            }
+        }
+        SuccessShape::Enum(_) => Vec::new(),
     }
 }
 

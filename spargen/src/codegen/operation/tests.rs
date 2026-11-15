@@ -184,7 +184,9 @@ fn a_binary_success_has_a_stream_twin_and_a_stream_reads_without_body_limits() {
                 r#"operation'stypederror.#[inline]pubasyncfndecode_get_file_stream(&self,"#,
                 r#"response:http::Response<support::HttpBody>,)"#,
                 r#"->Result<support::ResponseValue<support::ByteStream>,support::Error<GetFileError>,>"#,
-                r#"{ifresponse.status().is_success(){Ok(support::stream_success_bytes(response.map(support::read_as_it_arrives)))}"#,
+                r#"{ifresponse.status().is_success(){if!support::StatusSpec::Exact(200u16).matches(response.status())"#,
+                r#"{returnErr(support::unexpected_status::<GetFileError>(&self.core,response).await,);}"#,
+                r#"Ok(support::stream_success_bytes(response.map(support::read_as_it_arrives)))}"#,
             ),
             concat!(
                 r#"///`get_parts`,witheachrawbinarysuccessbodyhandedoverunreadasa`ByteStream`initsstatus'svariant,"#,

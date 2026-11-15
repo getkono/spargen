@@ -16343,6 +16343,12 @@ impl Client {
     ) -> Result<support::ResponseValue<()>, support::Error<ReadFileError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<ReadFileError>(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -16486,6 +16492,14 @@ impl Client {
     ) -> Result<support::ResponseValue<()>, support::Error<BindingCollisionsError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        BindingCollisionsError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -16644,6 +16658,14 @@ impl Client {
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        SignatureBindingCollisionsError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -16838,6 +16860,14 @@ impl Client {
     ) -> Result<support::ResponseValue<()>, support::Error<SerializeParamsError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        SerializeParamsError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -16993,6 +17023,14 @@ impl Client {
     ) -> Result<support::ResponseValue<()>, support::Error<GetConjunctionError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        GetConjunctionError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -17143,6 +17181,12 @@ impl Client {
     ) -> Result<support::ResponseValue<types::User>, support::Error<GetUserError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<GetUserError>(&self.core, response)
+                        .await,
+                );
+            }
             support::decode_success::<types::User>(&self.core, response)
                 .await
                 .map_err(support::Error::widen)
@@ -17420,6 +17464,12 @@ Response `409`: Conflict*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetSharedError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<GetSharedError>(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -17537,6 +17587,12 @@ Response `default`: Anything else*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetMaybeError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<GetMaybeError>(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -17780,6 +17836,14 @@ Response `default`: Anything else*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        GetPlainDefaultError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             support::decode_success::<types::MultiOk>(&self.core, response)
                 .await
                 .map_err(support::Error::widen)
@@ -17856,6 +17920,14 @@ Response `default`: Anything else*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetUnitDefaultError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        GetUnitDefaultError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -17934,6 +18006,14 @@ Response `default`: Anything else*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetBodylessDefaultError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        GetBodylessDefaultError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -18047,6 +18127,14 @@ Response `default`: Anything else*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        GetBodylessDefaultMultiError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -18167,6 +18255,14 @@ Response `404`: Not Found*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetBodylessSiblingError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        GetBodylessSiblingError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -18272,6 +18368,14 @@ Response `404`: Not Found*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetXmlBodylessSiblingError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        GetXmlBodylessSiblingError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -18482,6 +18586,14 @@ Response `400`: Bad Request*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetMaybeSingleError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        GetMaybeSingleError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -18560,6 +18672,14 @@ Response `409`: Conflict*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetAliasSharedError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        GetAliasSharedError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -18699,6 +18819,12 @@ Response `409`: Conflict*/
     ) -> Result<support::ResponseValue<()>, support::Error<UploadFileError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<UploadFileError>(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -18803,6 +18929,12 @@ Response `409`: Conflict*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetBlobError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<GetBlobError>(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -18906,6 +19038,12 @@ Response `409`: Conflict*/
     ) -> Result<support::ResponseValue<()>, support::Error<PostRawError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<PostRawError>(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -19006,6 +19144,14 @@ Response `409`: Conflict*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        PostNullableBytesError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             support::decode_success::<types::ResponseBody8899a140>(&self.core, response)
                 .await
                 .map_err(support::Error::widen)
@@ -19117,6 +19263,14 @@ Response `409`: Conflict*/
     ) -> Result<support::ResponseValue<()>, support::Error<PostNullablePartsError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        PostNullablePartsError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -19198,6 +19352,12 @@ Response `409`: Conflict*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<RenderHtmlError>(&self.core, response)
+                        .await,
+                );
+            }
             support::decode_success_text::<
                 types::ResponseBody4555dd31,
             >(&self.core, response)
@@ -19278,6 +19438,12 @@ Response `409`: Conflict*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<GetOctocatError>(&self.core, response)
+                        .await,
+                );
+            }
             support::decode_success_text::<
                 types::ResponseBodyE2c17756,
             >(&self.core, response)
@@ -19359,6 +19525,12 @@ Response `409`: Conflict*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<DownloadRawError>(&self.core, response)
+                        .await,
+                );
+            }
             support::decode_success_bytes(&self.core, response)
                 .await
                 .map_err(support::Error::widen)
@@ -19415,6 +19587,12 @@ Response `409`: Conflict*/
         support::Error<DownloadRawError>,
     > {
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<DownloadRawError>(&self.core, response)
+                        .await,
+                );
+            }
             Ok(support::stream_success_bytes(response.map(support::read_as_it_arrives)))
         } else {
             Err(
@@ -19491,6 +19669,12 @@ Response `409`: Conflict*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(206u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<PutRangedError>(&self.core, response)
+                        .await,
+                );
+            }
             support::decode_success_bytes(&self.core, response)
                 .await
                 .map_err(support::Error::widen)
@@ -19546,6 +19730,12 @@ Response `409`: Conflict*/
         support::Error<PutRangedError>,
     > {
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(206u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<PutRangedError>(&self.core, response)
+                        .await,
+                );
+            }
             Ok(support::stream_success_bytes(response.map(support::read_as_it_arrives)))
         } else {
             Err(support::unexpected_status::<PutRangedError>(&self.core, response).await)
@@ -19629,6 +19819,12 @@ Response `409`: Conflict*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<GetArtworkError>(&self.core, response)
+                        .await,
+                );
+            }
             support::decode_success_bytes(&self.core, response)
                 .await
                 .map_err(support::Error::widen)
@@ -19701,6 +19897,12 @@ Response `409`: Conflict*/
         support::Error<GetArtworkError>,
     > {
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<GetArtworkError>(&self.core, response)
+                        .await,
+                );
+            }
             Ok(support::stream_success_bytes(response.map(support::read_as_it_arrives)))
         } else {
             Err(
@@ -19783,6 +19985,12 @@ Response `409`: Conflict*/
     ) -> Result<support::ResponseValue<()>, support::Error<PutArtworkError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<PutArtworkError>(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -19874,6 +20082,12 @@ Response `400`: textual failure*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetTextErrorError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<GetTextErrorError>(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -20208,6 +20422,12 @@ Response `409`: binary error*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<SubmitOrderError>(&self.core, response)
+                        .await,
+                );
+            }
             support::decode_success_xml::<types::XmlReceipt>(&self.core, response)
                 .await
                 .map_err(support::Error::widen)
@@ -20305,6 +20525,14 @@ Response `409`: binary error*/
     ) -> Result<support::ResponseValue<()>, support::Error<PatchMergeDocumentError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        PatchMergeDocumentError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -20399,6 +20627,14 @@ Response `409`: binary error*/
     ) -> Result<support::ResponseValue<()>, support::Error<SubmitLegacyOrderError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        SubmitLegacyOrderError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -20488,6 +20724,12 @@ Response `409`: binary error*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<PostJsonMetaError>(&self.core, response)
+                        .await,
+                );
+            }
             support::decode_success::<types::JsonMeta>(&self.core, response)
                 .await
                 .map_err(support::Error::widen)
@@ -20582,6 +20824,12 @@ Response `409`: binary error*/
         support::Error<StreamChatError>,
     > {
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<StreamChatError>(&self.core, response)
+                        .await,
+                );
+            }
             Ok(
                 support::EventStream::new_reconnectable(
                     response,
@@ -20680,6 +20928,14 @@ Response `409`: binary error*/
         support::Error<StreamChatLinesError>,
     > {
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        StreamChatLinesError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             Ok(
                 support::EventStream::new_reconnectable(
                     response,
@@ -20779,6 +21035,14 @@ Response `409`: binary error*/
         support::Error<StreamChatSequenceError>,
     > {
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        StreamChatSequenceError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             Ok(
                 support::EventStream::new_reconnectable(
                     response,
@@ -20884,6 +21148,14 @@ Response `409`: binary error*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetAlternateAuthError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        GetAlternateAuthError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -21060,6 +21332,14 @@ Response `409`: binary error*/
     ) -> Result<support::ResponseValue<()>, support::Error<SerializeStylesError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        SerializeStylesError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -21288,6 +21568,14 @@ Response `409`: binary error*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        SerializeContentParamsError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -21421,6 +21709,12 @@ Response `409`: binary error*/
     ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<SubmitFormError>(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -21519,6 +21813,14 @@ Response `409`: binary error*/
     ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormAdditionalError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        SubmitFormAdditionalError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -21635,6 +21937,14 @@ Response `409`: binary error*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        SubmitNullableFormAdditionalError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -21728,6 +22038,14 @@ Response `409`: binary error*/
     ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        UploadAdditionalError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -21800,6 +22118,14 @@ Response `409`: binary error*/
     ) -> Result<support::ResponseValue<()>, support::Error<DocumentedHeadersError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        DocumentedHeadersError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
@@ -22417,6 +22743,14 @@ Response `409`: Conflict*/
     > {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(200u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<
+                        GetErrorRangedError,
+                    >(&self.core, response)
+                        .await,
+                );
+            }
             support::decode_success::<types::MultiOk>(&self.core, response)
                 .await
                 .map_err(support::Error::widen)
@@ -22646,6 +22980,12 @@ Response `5XX`: Any server error*/
     ) -> Result<support::ResponseValue<()>, support::Error<GetTracedError>> {
         let response = support::with_body_limits(&self.core, response);
         if response.status().is_success() {
+            if !support::StatusSpec::Exact(204u16).matches(response.status()) {
+                return Err(
+                    support::unexpected_status::<GetTracedError>(&self.core, response)
+                        .await,
+                );
+            }
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
