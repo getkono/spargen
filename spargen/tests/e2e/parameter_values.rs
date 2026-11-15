@@ -117,6 +117,15 @@ components:
           square: "#/components/schemas/Square"
           triangle: "#/components/schemas/Triangle"
         defaultMapping: "#/components/schemas/Triangle"
+    Tagged:
+      oneOf:
+        - $ref: "#/components/schemas/Circle"
+        - $ref: "#/components/schemas/Square"
+      discriminator:
+        propertyName: kind
+        mapping:
+          circle: "#/components/schemas/Circle"
+          square: "#/components/schemas/Square"
     Circle:
       type: object
       required: [kind, radius]
@@ -162,7 +171,9 @@ components:
 
 mod common;
 
-use param_values_client::types::{Circle, Ratio, Shape, Size, Square, Triangle, UploadBody};
+use param_values_client::types::{
+    Circle, Ratio, Shape, Size, Square, Tagged, Triangle, UploadBody,
+};
 use param_values_client::{
     BlockingClient, Error, GetFilteredParams, GetScoreParams, ParameterError, PostShapeParams,
     SearchParams,
@@ -295,6 +306,17 @@ fn a_union_holding_a_non_finite_number_keeps_its_tag_rules() {
             ParameterError::NonFiniteNumber
         ));
     }
+}
+
+/// A discriminated union named `Tagged` compiles and writes its non-finite variant through the
+/// direct path: the serializer's own helper type does not shadow the union's name.
+#[test]
+fn a_union_named_tagged_writes_a_non_finite_variant() {
+    let square = Tagged::Square(Box::new(Square { kind: "square".to_owned(), side: f64::NAN }));
+    assert_eq!(
+        serde_json::to_value(&square).unwrap(),
+        serde_json::json!({ "kind": "square", "side": null })
+    );
 }
 
 #[test]
