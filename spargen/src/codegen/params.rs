@@ -172,7 +172,7 @@ pub(super) fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStrea
     if let crate::ir::ParamStyle::Content(media) = &param.style {
         let rendered = match media {
             MediaType::Json => quote! {
-                serde_json::to_string(#value).map_err(support::Error::request_construction)?
+                support::to_json_string(#value).map_err(support::Error::request_construction)?
             },
             // Text is the only other media a `content` parameter may carry; lowering rejects the
             // rest, so this arm never sees a codec it cannot render.
@@ -263,7 +263,7 @@ pub(super) fn json_querystring_tokens(value: TokenStream) -> TokenStream {
     let encoding = query_encoding_tokens(false);
     quote! {
         support::encode(
-            &serde_json::to_string(#value).map_err(support::Error::request_construction)?,
+            &support::to_json_string(#value).map_err(support::Error::request_construction)?,
             #encoding,
         )
     }

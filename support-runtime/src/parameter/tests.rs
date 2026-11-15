@@ -964,8 +964,8 @@ fn every_parameter_error_displays_its_rule_and_only_serialize_has_a_source() {
         ),
         (
             ParameterError::NonFiniteNumber,
-            "a parameter value holds a NaN or infinite number, which no parameter style can \
-             represent",
+            "a parameter or request body value holds a NaN or infinite number, which neither a \
+             parameter style nor JSON can represent",
         ),
     ] {
         assert_eq!(error.to_string(), expected);
@@ -1348,6 +1348,64 @@ fn a_non_finite_f32_or_nested_member_is_refused() {
     assert!(matches!(
         serialize_form_body(&holder, &[], None),
         Err(ParameterError::NonFiniteNumber)
+    ));
+}
+
+/// The JSON encoders refuse a NaN or an infinity, `f64` or `f32`, at the top level, inside an
+/// array, and as a nested struct member, where `serde_json` alone would write `null`; a finite
+/// value encodes to exactly the text `serde_json` writes.
+#[test]
+fn the_json_encoders_refuse_a_non_finite_number() {
+    #[derive(Serialize)]
+    struct Holder {
+        inner: Vec<std::collections::BTreeMap<&'static str, f32>>,
+    }
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let nested = Holder {
+            inner: vec![std::collections::BTreeMap::from([("ratio", number as f32)])],
+        };
+        for outcome in [
+            to_json_string(&number).map(drop),
+            to_json_vec(&number).map(drop),
+            to_json_string(&vec![1.0, number]).map(drop),
+            to_json_vec(&vec![1.0, number]).map(drop),
+            to_json_string(&nested).map(drop),
+            to_json_vec(&nested).map(drop),
+        ] {
+            assert!(
+                matches!(outcome, Err(ParameterError::NonFiniteNumber)),
+                "{number}: {outcome:?}"
+            );
+        }
+    }
+    let finite = vec![0.0, -1.5, f64::MAX];
+    assert_eq!(
+        to_json_string(&finite).unwrap(),
+        serde_json::to_string(&finite).unwrap()
+    );
+    assert_eq!(
+        to_json_vec(&finite).unwrap(),
+        serde_json::to_vec(&finite).unwrap()
+    );
+}
+
+/// A value whose own `Serialize` fails reaches the JSON encoders' real serialization, which
+/// reports it as `ParameterError::Serialize`.
+#[test]
+fn the_json_encoders_report_a_failing_serialize() {
+    struct Failing;
+    impl Serialize for Failing {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("refused"))
+        }
+    }
+    assert!(matches!(
+        to_json_string(&Failing),
+        Err(ParameterError::Serialize(_))
+    ));
+    assert!(matches!(
+        to_json_vec(&Failing),
+        Err(ParameterError::Serialize(_))
     ));
 }
 
