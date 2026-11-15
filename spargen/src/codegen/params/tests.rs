@@ -80,18 +80,19 @@ fn preparer<'g>(generated: &'g str, name: &str) -> &'g str {
 
 /// Each path parameter is rendered in its style and percent-encoded by its own set: `simple`
 /// unreserved or, under `allowReserved`, reserved; `matrix` and `label` with their explode; a
-/// JSON `content` value as one opaque segment.
+/// JSON `content` value as one opaque segment. Each rendering passes `support::path_segment`,
+/// which refuses an empty one, before it is substituted.
 #[test]
 fn each_path_parameter_renders_in_its_style_and_encoding() {
     let generated = generated(PARAMS);
     assert_contains_all(
         preparer(&generated, "get_thing"),
         &[
-            r#"path=path.replace("{id}",&support::serialize_simple(&id,false,support::PercentEncoding::Unreserved,).map_err(support::Error::request_construction)?,);"#,
-            r#"path=path.replace("{raw}",&support::serialize_simple(&raw,false,support::PercentEncoding::ReservedPath,).map_err(support::Error::request_construction)?,);"#,
-            r#"path=path.replace("{m}",&support::serialize_matrix("m",&m,true,support::PercentEncoding::Unreserved,).map_err(support::Error::request_construction)?,);"#,
-            r#"path=path.replace("{l}",&support::serialize_label(&l,false,support::PercentEncoding::Unreserved,).map_err(support::Error::request_construction)?,);"#,
-            r#"path=path.replace("{c}",&support::encode(&serde_json::to_string(&c).map_err(support::Error::request_construction)?,support::PercentEncoding::Unreserved,),);"#,
+            r#"path=path.replace("{id}",&support::path_segment(support::serialize_simple(&id,false,support::PercentEncoding::Unreserved,).map_err(support::Error::request_construction)?,).map_err(support::Error::request_construction)?,);"#,
+            r#"path=path.replace("{raw}",&support::path_segment(support::serialize_simple(&raw,false,support::PercentEncoding::ReservedPath,).map_err(support::Error::request_construction)?,).map_err(support::Error::request_construction)?,);"#,
+            r#"path=path.replace("{m}",&support::path_segment(support::serialize_matrix("m",&m,true,support::PercentEncoding::Unreserved,).map_err(support::Error::request_construction)?,).map_err(support::Error::request_construction)?,);"#,
+            r#"path=path.replace("{l}",&support::path_segment(support::serialize_label(&l,false,support::PercentEncoding::Unreserved,).map_err(support::Error::request_construction)?,).map_err(support::Error::request_construction)?,);"#,
+            r#"path=path.replace("{c}",&support::path_segment(support::encode(&serde_json::to_string(&c).map_err(support::Error::request_construction)?,support::PercentEncoding::Unreserved,),).map_err(support::Error::request_construction)?,);"#,
         ],
     );
 }

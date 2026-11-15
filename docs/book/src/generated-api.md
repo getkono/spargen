@@ -141,6 +141,12 @@ use.
   character `allowReserved` left literal is refused. A refused value fails the call before
   anything is sent, as `Error::RequestConstruction` whose `RequestError::Other` source downcasts
   to `ParameterError::InvalidCookie`, which names the parameter and never the value.
+- A parameter value that would send a different request fails the call before anything is sent,
+  as `Error::RequestConstruction` whose `RequestError::Other` source downcasts to a
+  `ParameterError`: a path value that renders to nothing (`""`, an empty array), which would
+  re-target `/users/{id}` at `/users/`, is `ParameterError::EmptyPathSegment`, and an `f64` or
+  `f32` NaN or infinity anywhere in a styled parameter or form-urlencoded value, which would
+  otherwise reach the wire as an undefined value (`ratio=`), is `ParameterError::NonFiniteNumber`.
 - A closed error taxonomy, identical across all spargen output: request-construction
   (`Error::RequestConstruction`, carrying a `RequestError` — one of the four credential causes
   above, the missing bound header above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout

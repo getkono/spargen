@@ -957,6 +957,16 @@ fn every_parameter_error_displays_its_rule_and_only_serialize_has_a_source() {
             "`style: spaceDelimited` and `style: pipeDelimited` require an array or object \
              parameter value",
         ),
+        (
+            ParameterError::EmptyPathSegment,
+            "a path parameter rendered to an empty segment, which would send the request to a \
+             different resource",
+        ),
+        (
+            ParameterError::NonFiniteNumber,
+            "a parameter value holds a NaN or infinite number, which no parameter style can \
+             represent",
+        ),
     ] {
         assert_eq!(error.to_string(), expected);
         assert!(std::error::Error::source(&error).is_none(), "{error}");
@@ -1260,4 +1270,112 @@ fn an_encoded_cookie_pair_refuses_only_what_breaks_the_header() {
         cookie_pair("color", "color=a,b:c".to_owned(), CookieValue::Encoded).unwrap(),
         "color=a,b:c"
     );
+}
+
+/// Every serializer's outcome for `value`, labelled with the style that produced it.
+fn every_style<T: Serialize>(value: &T) -> Vec<(&'static str, Result<(), ParameterError>)> {
+    let properties = [FormProperty {
+        name: "a",
+        mode: FormMode::Text,
+    }];
+    vec![
+        ("simple", serialize_simple(value, false, U).map(drop)),
+        ("simple explode", serialize_simple(value, true, U).map(drop)),
+        ("label", serialize_label(value, false, U).map(drop)),
+        ("matrix", serialize_matrix("x", value, false, U).map(drop)),
+        ("form", serialize_form("x", value, false, F).map(drop)),
+        (
+            "form explode",
+            serialize_form("x", value, true, F).map(drop),
+        ),
+        (
+            "querystring form",
+            serialize_form("", value, true, F).map(drop),
+        ),
+        (
+            "spaceDelimited",
+            serialize_delimited("x", value, Delimiter::Space, F).map(drop),
+        ),
+        ("deepObject", serialize_deep_object("x", value, F).map(drop)),
+        (
+            "form body",
+            serialize_form_body(value, &properties, None).map(drop),
+        ),
+        (
+            "multipart",
+            serialize_multipart_values(value, FormStyle::Form, false).map(drop),
+        ),
+    ]
+}
+
+/// `serde_json::to_value` turns a NaN or an infinity into `null`, which every style renders as
+/// undefined, so a non-finite `f64` is refused by each serializer before that happens: at the top
+/// level, inside an array, and as an object member, whichever shape the style otherwise takes.
+#[test]
+fn every_serializer_refuses_a_non_finite_f64() {
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let scalar = every_style(&number);
+        let array = every_style(&vec![1.0, number]);
+        let object = every_style(&std::collections::BTreeMap::from([
+            ("a", 1.0),
+            ("b", number),
+        ]));
+        for (shape, outcomes) in [("scalar", scalar), ("array", array), ("object", object)] {
+            for (style, outcome) in outcomes {
+                assert!(
+                    matches!(outcome, Err(ParameterError::NonFiniteNumber)),
+                    "{style} {shape} {number}: {outcome:?}"
+                );
+            }
+        }
+    }
+}
+
+/// An `f32` is checked as well, and so is a non-finite number nested in a struct member.
+#[test]
+fn a_non_finite_f32_or_nested_member_is_refused() {
+    #[derive(Serialize)]
+    struct Holder {
+        a: Option<Vec<f32>>,
+    }
+    let holder = Holder {
+        a: Some(vec![f32::NAN]),
+    };
+    assert!(matches!(
+        serialize_simple(&f32::INFINITY, false, U),
+        Err(ParameterError::NonFiniteNumber)
+    ));
+    assert!(matches!(
+        serialize_form_body(&holder, &[], None),
+        Err(ParameterError::NonFiniteNumber)
+    ));
+}
+
+proptest::proptest! {
+    /// Every finite `f64` still serializes, to the text `serde_json` writes for it.
+    #[test]
+    fn every_finite_f64_serializes(number in proptest::num::f64::NORMAL
+        | proptest::num::f64::SUBNORMAL
+        | proptest::num::f64::ZERO
+    ) {
+        let expected = serde_json::to_string(&number).unwrap();
+        proptest::prop_assert_eq!(serialize_simple(&number, false, P).unwrap(), expected.clone());
+        proptest::prop_assert_eq!(
+            serialize_form("x", &vec![number], true, P).unwrap(),
+            vec![format!("x={expected}")]
+        );
+    }
+}
+
+/// A path parameter that renders to nothing would leave an empty segment, re-targeting
+/// `/users/{id}` at `/users/`, so the rendered value is refused; any other text, `0` included,
+/// passes unchanged.
+#[test]
+fn a_path_segment_refuses_only_the_empty_rendering() {
+    assert!(matches!(
+        path_segment(String::new()),
+        Err(ParameterError::EmptyPathSegment)
+    ));
+    assert_eq!(path_segment("0".to_owned()).unwrap(), "0");
+    assert_eq!(path_segment("%20".to_owned()).unwrap(), "%20");
 }
