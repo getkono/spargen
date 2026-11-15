@@ -885,7 +885,8 @@ const DECODE_PRESENT: &str = "decode_present";
 /// is set, else the schema default. Lowering applies a default only to a non-nullable member, so
 /// the member is an `Option<T>`. A `Copy` value is returned as it is, and any other is cloned: a
 /// boolean, a number, a checked newtype and a closed string enum are `Copy`; a string and an open
-/// string enum are not.
+/// string enum are not. Only a string's default is built lazily, through `unwrap_or_else`; an
+/// enum's is a unit variant, passed to `unwrap_or`.
 fn default_accessor(
     id: crate::ir::TypeId,
     field: &Field,
@@ -912,10 +913,15 @@ fn default_accessor(
             )
         }),
     };
-    let body = if copy {
-        quote! { self.#field_ident.unwrap_or(#value) }
-    } else {
-        quote! { self.#field_ident.clone().unwrap_or_else(|| #value) }
+    // A unit variant is as cheap to build as the closure that would defer it, so only a string's
+    // `.to_owned()` is deferred: `unwrap_or_else` over a variant sets off clippy's
+    // `unnecessary_lazy_evaluations` in the consumer's crate.
+    let body = match (copy, applied) {
+        (true, _) => quote! { self.#field_ident.unwrap_or(#value) },
+        (false, DefaultValue::Str(_)) => {
+            quote! { self.#field_ident.clone().unwrap_or_else(|| #value) }
+        }
+        (false, _) => quote! { self.#field_ident.clone().unwrap_or(#value) },
     };
     let doc = format!(
         "The `{}` member where it is set, else its schema default.",
