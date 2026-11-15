@@ -30,8 +30,12 @@ fn media_object_is_opaque_follows_the_table() {
         let mut diags = Diagnostics::default();
         let value = crate::source::parse_yaml(FileId(0), yaml, &mut diags)
             .unwrap_or_else(|_| panic!("probe does not parse: {yaml}"));
-        let object =
-            crate::oas31::deserialize::parse_media_type(&value, &JsonPointer::root(), &mut diags);
+        let object = crate::oas31::deserialize::parse_media_type(
+            &value,
+            &JsonPointer::root(),
+            crate::oas31::SchemaDialect::Oas,
+            &mut diags,
+        );
         assert_eq!(media_object_is_opaque(&object), opaque, "{yaml}");
     }
 }

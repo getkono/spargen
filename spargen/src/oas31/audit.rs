@@ -2,17 +2,14 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance};
-use crate::source::{schema_component_name, SpannedValue};
+use crate::source::schema_component_name;
 
+use super::deserialize::ObjectParser;
 use super::schema::Pre2020Keyword;
 use super::{
     Document, EncodingObject, HeaderObject, MediaTypeObject, ParameterObject, PathItem, RefOr,
     Reference, RequestBodyObject, Resolver, ResponseObject, Schema, SchemaOr,
 };
-
-/// How a Parameter, Request Body, Response or Header Object target is parsed, as lowering parses
-/// it.
-type ObjectParser<T> = fn(&SpannedValue, &JsonPointer, &mut Diagnostics) -> Option<T>;
 
 /// A Parameter, Request Body, Response or Header Object: how [`Audit::audit_ref_or`] parses a
 /// referenced one and audits it.
@@ -760,8 +757,10 @@ fn follow_media<'a>(
             .resolve_component(
                 &reference.reference,
                 resolver.written_in(&reference.provenance),
-                |value, pointer, diags| {
-                    Some(super::deserialize::parse_media_type(value, pointer, diags))
+                |value, pointer, dialect, diags| {
+                    Some(super::deserialize::parse_media_type(
+                        value, pointer, dialect, diags,
+                    ))
                 },
                 discarded,
             )
