@@ -76,17 +76,58 @@ pub(super) fn emit_union(
                     Some(tag) => quote! { Some(#tag) },
                     None => quote! { None },
                 };
-                // `serde_json::Value` holds a NaN or infinity as `null`: a variant holding one is
-                // written straight into the outer serializer, so `to_json_*`'s check sees it.
                 quote! {
-                    #ident::#variant_ident(inner) => {
-                        if super::support::holds_non_finite(inner) {
-                            return serde::Serialize::serialize(inner, serializer);
-                        }
-                        (
-                            serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
-                            #tag,
-                        )
+                    #ident::#variant_ident(inner) => (
+                        serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
+                        #tag,
+                    ),
+                }
+            });
+            // `serde_json::Value` holds a NaN or infinity as `null`: a variant holding one is
+            // written straight into the outer serializer once the tag checks below have passed
+            // on its `Value` (whose tag is what the variant holds), so `to_json_*`'s check sees
+            // the number (#1516). A tag the variant does not hold is written beside it, as the
+            // `Value` path inserts it.
+            let tagged_variant = union
+                .variants
+                .iter()
+                .any(|variant| !discriminated_dispatch(variant).tags.is_empty());
+            let non_finite_arms = union.variants.iter().map(|variant| {
+                let variant_ident = union_variant_ident(names, id, variant);
+                quote! {
+                    #ident::#variant_ident(inner) => super::support::holds_non_finite(inner),
+                }
+            });
+            let unknown_non_finite_arm = unknown.map(|unknown| {
+                quote! { #ident::#unknown { .. } => false, }
+            });
+            let direct_arms = union.variants.iter().map(|variant| {
+                let variant_ident = union_variant_ident(names, id, variant);
+                if discriminated_dispatch(variant).tags.is_empty() {
+                    quote! { #ident::#variant_ident(inner) => inner.serialize(serializer), }
+                } else {
+                    quote! {
+                        #ident::#variant_ident(inner) => match tag.filter(|_| !wrote_tag) {
+                            Some(tag) => Tagged { tag, inner }.serialize(serializer),
+                            None => inner.serialize(serializer),
+                        },
+                    }
+                }
+            });
+            let unknown_direct_arm = unknown.map(|unknown| {
+                quote! { #ident::#unknown { value, .. } => value.serialize(serializer), }
+            });
+            let wrote_tag_decl = tagged_variant.then(|| {
+                quote! { let wrote_tag = value.get(#tag_field).is_some(); }
+            });
+            let tagged_decl = tagged_variant.then(|| {
+                quote! {
+                    #[derive(serde::Serialize)]
+                    struct Tagged<'a, T> {
+                        #[serde(rename = #tag_field)]
+                        tag: &'a str,
+                        #[serde(flatten)]
+                        inner: &'a T,
                     }
                 }
             });
@@ -433,10 +474,15 @@ pub(super) fn emit_union(
                     where
                         S: serde::Serializer,
                     {
+                        let non_finite = match self {
+                            #(#non_finite_arms)*
+                            #unknown_non_finite_arm
+                        };
                         let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                             #(#ser_arms)*
                             #unknown_ser_arm
                         };
+                        #wrote_tag_decl
                         if let Some(tag) = tag {
                             let serde_json::Value::Object(map) = &mut value else {
                                 return Err(serde::ser::Error::custom(#non_object));
@@ -445,6 +491,13 @@ pub(super) fn emit_union(
                         }
                         #tagless_check
                         #fallback_claim_check
+                        if non_finite {
+                            #tagged_decl
+                            return match self {
+                                #(#direct_arms)*
+                                #unknown_direct_arm
+                            };
+                        }
                         value.serialize(serializer)
                     }
                 }
