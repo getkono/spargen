@@ -269,16 +269,9 @@ fn emit_type_def(
                 .fields
                 .iter()
                 .map(|field| emit_field(id, field, names, options.testing));
-            let additional = match &object.additional {
-                AdditionalProps::Typed(ty) => {
-                    let ty = ty_tokens(**ty, names, false);
-                    let overflow = names
-                        .struct_overflow
-                        .get(&id)
-                        .expect("overflow field name allocated");
-                    quote! { #[serde(flatten)] pub #overflow: BTreeMap<String, #ty>, }
-                }
-                AdditionalProps::Allow | AdditionalProps::Deny => quote! {},
+            let (additional, serialize_overflow) = match &object.additional {
+                AdditionalProps::Typed(ty) => emit_overflow(id, ident, object, **ty, names),
+                AdditionalProps::Allow | AdditionalProps::Deny => (quote! {}, quote! {}),
             };
             let StructConstructors {
                 derive_default,
@@ -295,6 +288,7 @@ fn emit_type_def(
                     #additional
                 }
                 #constructors
+                #serialize_overflow
             }
         }
         Emission::StringEnum(enumeration) => {
@@ -582,6 +576,87 @@ fn emit_base64_newtype(
     }
 }
 
+/// The name of the private associated function a struct with declared members and a typed
+/// overflow map carries: the overflow's `serialize_with`. The struct's other methods are `new`,
+/// the `with_` setters and the `_or_default` accessors, and this name is none of them.
+const SERIALIZE_OVERFLOW: &str = "serialize_overflow";
+
+/// A struct's typed `additionalProperties` field, flattened into the struct's object, and the
+/// `impl` block that carries its `serialize_with`, if it has one. An overflow entry whose key is a
+/// declared member's name is not written, whether that member is set or not, so the object never
+/// carries a key twice and the overflow never stands in for a declared member, the rule the form
+/// and multipart encoders follow. A declared name is the one serde writes the member under: the
+/// property's name, or the name an XML hint gives it, as [`emit_field`] renames it. Decoding never
+/// puts a key serde reads as a declared member into the map, so a decoded value writes back what
+/// it read.
+fn emit_overflow(
+    id: crate::ir::TypeId,
+    ident: &crate::name::Ident,
+    object: &crate::ir::Struct,
+    value_ty: Ty,
+    names: &Names,
+) -> (TokenStream, TokenStream) {
+    let ty = ty_tokens(value_ty, names, false);
+    let overflow = names
+        .struct_overflow
+        .get(&id)
+        .expect("overflow field name allocated");
+    let declared = overflow_skipped_keys(object);
+    if declared.is_empty() {
+        return (
+            quote! { #[serde(flatten)] pub #overflow: BTreeMap<String, #ty>, },
+            quote! {},
+        );
+    }
+    let function = format_ident!("{SERIALIZE_OVERFLOW}");
+    let path = format!("{ident}::{SERIALIZE_OVERFLOW}");
+    let field = quote! {
+        #[serde(flatten, serialize_with = #path)]
+        pub #overflow: BTreeMap<String, #ty>,
+    };
+    let serialize = quote! {
+        impl #ident {
+            /// The overflow map's `serialize_with`: every entry but one whose key is a declared
+            /// member's name, which only the member itself is written under.
+            fn #function<S>(overflow: &BTreeMap<String, #ty>, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.collect_map(
+                    overflow
+                        .iter()
+                        .filter(|(key, _)| !matches!(key.as_str(), #(#declared)|*)),
+                )
+            }
+        }
+    };
+    (field, serialize)
+}
+
+/// The overflow keys struct `object`'s serde encoding leaves out: each declared member's serde
+/// name, once, in declaration order. Empty when the struct declares no member.
+fn overflow_skipped_keys(object: &crate::ir::Struct) -> Vec<String> {
+    let mut declared: Vec<String> = Vec::new();
+    for field in &object.fields {
+        let name = serde_wire(field);
+        if !declared.contains(&name) {
+            declared.push(name);
+        }
+    }
+    declared
+}
+
+/// The name serde writes and reads struct field `field` under. An `xml.name`/`xml.attribute` hint
+/// overrides it for XML bodies (an attribute uses quick-xml's `@name` convention); otherwise it is
+/// the plain property wire name. The Rust identifier and the names-table key stay keyed off the
+/// original property name, so only the wire string changes.
+fn serde_wire(field: &Field) -> String {
+    field
+        .xml
+        .wire_override(&field.name.wire)
+        .unwrap_or_else(|| field.name.wire.clone())
+}
+
 /// One struct field: its rustdoc notes, its serde attribute (wire name, default, and the
 /// present-value decode an optional non-nullable field takes), and its declaration. `testing` is
 /// whether the `testing` module is emitted, whose typed replies serialize a `readOnly` or
@@ -591,14 +666,7 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
         .fields
         .get(&(id, field.name.wire.clone()))
         .expect("field name allocated");
-    // An `xml.name`/`xml.attribute` hint overrides the serde wire name for XML bodies (an attribute
-    // uses quick-xml's `@name` convention); otherwise the plain property wire name is used. The Rust
-    // identifier and the names-table key stay keyed off the original property name, so only the wire
-    // string changes.
-    let wire = field
-        .xml
-        .wire_override(&field.name.wire)
-        .unwrap_or_else(|| field.name.wire.clone());
+    let wire = serde_wire(field);
     let ty = field_ty_tokens(field, names);
     // An optional field always deserializes an absent value as the type's `Default`: `None` for an
     // `Option`, and `Nullable::Absent` for a nullable member, a schema `default` included, which
@@ -862,8 +930,14 @@ fn emit_struct_constructors(
                 .get(&id)
                 .expect("overflow field name allocated");
             let setter = format_ident!("with_{}", overflow.unraw());
+            let doc = if object.fields.is_empty() {
+                "Set the members no property declares, replacing any set before."
+            } else {
+                "Set the members no property declares, replacing any set before. An entry whose \
+                 key is a declared member's name is not sent."
+            };
             setters.push(quote! {
-                /// Set the members no property declares, replacing any set before.
+                #[doc = #doc]
                 #[must_use]
                 pub fn #setter(mut self, value: BTreeMap<String, #ty>) -> Self {
                     self.#overflow = value;
