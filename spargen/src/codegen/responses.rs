@@ -993,7 +993,7 @@ paths:
         crate::codegen::test_harness::assert_contains_all(
             &nullable,
             &[
-                "pubstructGetMessageError(pubOption<types::Message>);",
+                "#[derive(serde::Deserialize)]#[serde(transparent)]pubstructGetMessageError(pubOption<types::Message>);",
                 concat!(
                     "typeBody=types::Message;fnbody(&self)->Option<&types::Message>{self.0.as_ref()}",
                     "fninto_body(self)->Option<types::Message>{self.0}",
