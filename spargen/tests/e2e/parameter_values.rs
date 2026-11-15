@@ -91,8 +91,47 @@ paths:
                 meta: { $ref: "#/components/schemas/Ratio" }
       responses:
         "204": { description: No Content }
+  /shapes:
+    post:
+      operationId: postShape
+      parameters:
+        - { name: size, in: query, schema: { $ref: "#/components/schemas/Size" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Shape" }
+      responses:
+        "204": { description: No Content }
 components:
   schemas:
+    Shape:
+      oneOf:
+        - $ref: "#/components/schemas/Circle"
+        - $ref: "#/components/schemas/Square"
+      discriminator:
+        propertyName: kind
+        mapping:
+          circle: "#/components/schemas/Circle"
+          square: "#/components/schemas/Square"
+    Circle:
+      type: object
+      required: [kind, radius]
+      properties:
+        kind: { type: string }
+        radius: { type: number }
+    Square:
+      type: object
+      required: [kind, side]
+      properties:
+        kind: { type: string }
+        side: { type: number }
+    Size:
+      oneOf:
+        - $ref: "#/components/schemas/Amount"
+        - $ref: "#/components/schemas/Label"
+    Amount: { type: number }
+    Label: { type: string }
     Ratio:
       type: object
       required: [ratio]
@@ -111,9 +150,10 @@ components:
 
 mod common;
 
-use param_values_client::types::{Ratio, UploadBody};
+use param_values_client::types::{Circle, Ratio, Shape, Size, Square, UploadBody};
 use param_values_client::{
-    BlockingClient, Error, GetFilteredParams, GetScoreParams, ParameterError, SearchParams,
+    BlockingClient, Error, GetFilteredParams, GetScoreParams, ParameterError, PostShapeParams,
+    SearchParams,
 };
 
 /// A client against a base no server listens on: a request that reached the transport would
@@ -193,6 +233,49 @@ fn a_non_finite_number_in_a_json_parameter_or_body_is_refused() {
             ParameterError::NonFiniteNumber
         ));
     }
+}
+
+/// A union serializes its variant through `serde_json::Value`, which would turn the number into
+/// `null` before the check saw it: the check reaches the variant itself, in a discriminated-union
+/// JSON body and in a trial-union styled parameter alike.
+#[test]
+fn a_non_finite_number_inside_a_union_is_refused() {
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let circle = Shape::Circle(Box::new(Circle { kind: "circle".to_owned(), radius: number }));
+        assert!(matches!(
+            parameter_error(unreachable().post_shape(PostShapeParams::default(), &circle)),
+            ParameterError::NonFiniteNumber
+        ));
+        let square = Shape::Square(Box::new(Square { kind: "square".to_owned(), side: 1.0 }));
+        assert!(matches!(
+            parameter_error(
+                unreachable().post_shape(
+                    PostShapeParams::default().size(Size::Amount(Box::new(number))),
+                    &square,
+                )
+            ),
+            ParameterError::NonFiniteNumber
+        ));
+    }
+}
+
+#[test]
+fn a_finite_number_inside_a_union_reaches_the_wire() {
+    let (base, server) = common::serve_no_content();
+    BlockingClient::new(&base)
+        .unwrap()
+        .post_shape(
+            PostShapeParams::default().size(Size::Amount(Box::new(2.5))),
+            &Shape::Circle(Box::new(Circle { kind: "circle".to_owned(), radius: 0.5 })),
+        )
+        .expect("the call round-trips");
+    let request = server.join().unwrap();
+    assert_eq!(request.line(), "POST /shapes?size=2.5 HTTP/1.1");
+    assert!(
+        request.text().ends_with(r#"{"kind":"circle","radius":0.5}"#),
+        "{}",
+        request.text()
+    );
 }
 
 #[test]
