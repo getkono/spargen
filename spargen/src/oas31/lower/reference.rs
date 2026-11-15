@@ -12,7 +12,7 @@ use crate::oas31::{
     ParameterObject, PathItem, RefOr, Reference, RequestBodyObject, Resolver, ResponseObject,
     Schema,
 };
-use crate::source::{is_remote_ref, schema_component_name, SpannedValue};
+use crate::source::{is_remote_ref, schema_component_name};
 
 use super::shape::ref_siblings_bear_shape;
 use super::{LowerCtx, MAX_SCHEMA_DEPTH};
@@ -158,7 +158,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         &mut self,
         reference: &crate::oas31::Reference,
         kind: &str,
-        parse: fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
+        parse: crate::oas31::deserialize::ObjectParser<T>,
     ) -> Option<RefOr<T>> {
         let from = self.resolver.written_in(&reference.provenance);
         match self
@@ -364,9 +364,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     let resolved = ctx.resolver.resolve_component(
                         &reference.reference,
                         from,
-                        |value, pointer, diags| {
+                        |value, pointer, dialect, diags| {
                             Some(crate::oas31::deserialize::parse_media_type(
-                                value, pointer, diags,
+                                value, pointer, dialect, diags,
                             ))
                         },
                         ctx.diags,

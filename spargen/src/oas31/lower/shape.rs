@@ -130,8 +130,13 @@ mod tests {
         let mut diags = Diagnostics::default();
         let value = crate::source::parse_yaml(FileId(0), yaml, &mut diags)
             .unwrap_or_else(|_| panic!("probe does not parse: {yaml}"));
-        crate::oas31::deserialize::parse_schema(&value, &JsonPointer::root(), &mut diags)
-            .unwrap_or_else(|| panic!("probe is not a schema: {yaml}"))
+        crate::oas31::deserialize::parse_schema(
+            &value,
+            &JsonPointer::root(),
+            crate::oas31::SchemaDialect::Oas,
+            &mut diags,
+        )
+        .unwrap_or_else(|| panic!("probe is not a schema: {yaml}"))
     }
 
     /// The backticked spans of the one sentence of `explain` that `lead` begins, `lead` included.

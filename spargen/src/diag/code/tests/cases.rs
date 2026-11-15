@@ -491,6 +491,12 @@ pub(super) const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                 reserved_wording: None,
             },
             Case {
+                tag: "foreign-dialect-keyword",
+                stated_as: "`discriminator` on a schema read under the plain JSON Schema 2020-12 \
+                                dialect",
+                reserved_wording: None,
+            },
+            Case {
                 tag: "shadowed-component",
                 stated_as: "a schema component declared inside a referenced sub-file whose \
                                 name the root document also declares",

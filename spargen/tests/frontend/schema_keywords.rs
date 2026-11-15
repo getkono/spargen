@@ -416,3 +416,293 @@ fn a_reference_under_a_pre_2020_12_keyword_is_resolved() {
         );
     }
 }
+
+/// The plain JSON Schema 2020-12 dialect URI.
+const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
+
+/// A `Pet` union with a `discriminator` mapping `kitty` to `Cat`, `pet_dialect` written on `Pet`
+/// and `document_dialect` at the document root. `Holder` holds a second such union at
+/// `properties/pet`, mapping `held` to `Cat`, under `holder_dialect`, which `/held` reaches by a
+/// JSON Pointer `$ref` into `Holder`.
+fn dialect_pets(document_dialect: &str, pet_dialect: &str, holder_dialect: &str) -> String {
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+{document_dialect}
+paths:
+  /pet:
+    get:
+      operationId: getPet
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Pet' }} }}
+  /held:
+    get:
+      operationId: getHeld
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder/properties/pet' }} }}
+components:
+  schemas:
+    Pet:
+      {pet_dialect}
+      oneOf:
+        - {{ $ref: '#/components/schemas/Cat' }}
+        - {{ $ref: '#/components/schemas/Dog' }}
+      discriminator:
+        propertyName: kind
+        mapping: {{ kitty: Cat }}
+    Holder:
+      {holder_dialect}
+      type: object
+      properties:
+        pet:
+          oneOf:
+            - {{ $ref: '#/components/schemas/Cat' }}
+            - {{ $ref: '#/components/schemas/Dog' }}
+          discriminator:
+            propertyName: kind
+            mapping: {{ held: Cat }}
+    Cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }} }} }}
+    Dog: {{ type: object, required: [kind, bark], properties: {{ kind: {{ type: string }}, bark: {{ type: boolean }} }} }}
+"##
+    )
+}
+
+/// #1452: `discriminator` is OAS vocabulary, which the plain JSON Schema 2020-12 dialect does not
+/// define, so under it the keyword is an annotation: it selects nothing, and the union is decoded
+/// by its members' schemas as one with no discriminator is. It is reported as `W011` at the
+/// keyword, whether the dialect is the document's `jsonSchemaDialect`, a `$schema` on the schema
+/// itself, or a `$schema` on a schema enclosing the one a `$ref` points into. A `$schema` naming
+/// the OAS dialect inside a plain-dialect document brings the keyword back.
+// W011 case: foreign-dialect-keyword
+#[test]
+fn a_discriminator_under_the_plain_json_schema_dialect_is_w011_and_dispatches_nothing() {
+    const PET: &str = "/components/schemas/Pet/discriminator";
+    const HELD: &str = "/components/schemas/Holder/properties/pet/discriminator";
+    let plain_root = format!("jsonSchemaDialect: {JSON_SCHEMA_2020_12}");
+    let plain_schema = format!("$schema: {JSON_SCHEMA_2020_12}");
+    let oas_schema = "$schema: https://spec.openapis.org/oas/3.1/dialect/base";
+    let cases: [(&str, String, &[&str]); 4] = [
+        (
+            "document dialect",
+            dialect_pets(&plain_root, "", ""),
+            &[HELD, PET],
+        ),
+        ("own $schema", dialect_pets("", &plain_schema, ""), &[PET]),
+        (
+            "enclosing $schema",
+            dialect_pets("", "", &plain_schema),
+            &[HELD],
+        ),
+        (
+            "OAS $schema in a plain document",
+            dialect_pets(&plain_root, oas_schema, oas_schema),
+            &[],
+        ),
+    ];
+    for (what, spec, inert) in cases {
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        let mut w011 = located_messages(&report, Code::DeclarationHasNoEffect);
+        w011.sort_unstable();
+        w011.dedup();
+        assert_eq!(
+            w011.iter().map(|(pointer, _)| *pointer).collect::<Vec<_>>(),
+            inert,
+            "{what}: {report:#?}"
+        );
+        for (_, message) in &w011 {
+            assert!(
+                message.contains("`discriminator`")
+                    && message.contains("JSON Schema 2020-12 dialect"),
+                "{what}: {message}"
+            );
+        }
+        for (pointer, tag) in [(PET, "\"kitty\""), (HELD, "\"held\"")] {
+            assert_eq!(
+                code.contains(tag),
+                !inert.contains(&pointer),
+                "{what}: {tag} dispatches exactly when its discriminator is read:\n{code}"
+            );
+        }
+    }
+}
+
+/// #1452: under the plain JSON Schema 2020-12 dialect a malformed `discriminator` is an unknown
+/// keyword's value, not a malformed Discriminator Object, so it is not `E011`; and `xml` is OAS
+/// vocabulary too, so a hint that would be `E009` on an XML body is `W006` instead, the body
+/// generating without it.
+#[test]
+fn oas_vocabulary_under_the_plain_json_schema_dialect_is_read_as_annotation() {
+    let spec = |dialect: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /item:
+    get:
+      operationId: getItem
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml: {{ schema: {{ $ref: '#/components/schemas/Item' }} }}
+components:
+  schemas:
+    Item:
+      {dialect}
+      type: object
+      required: [id]
+      xml: {{ namespace: 'urn:example' }}
+      discriminator: {{ mapping: 3 }}
+      properties:
+        id: {{ type: string }}
+"##
+        )
+    };
+    let report = generate(&spec(""));
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+
+    let report = generate(&spec(&format!("$schema: {JSON_SCHEMA_2020_12}")));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let pointers = |code| {
+        located_messages(&report, code)
+            .into_iter()
+            .map(|(pointer, _)| pointer)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        pointers(Code::XmlHintIgnored),
+        ["/components/schemas/Item/xml"],
+        "{report:#?}"
+    );
+    assert_eq!(
+        pointers(Code::DeclarationHasNoEffect),
+        ["/components/schemas/Item/discriminator"],
+        "{report:#?}"
+    );
+    assert!(!has_code(&report, Code::InvalidInput), "{report:#?}");
+}
+
+/// A referenced sub-file holding a `Pet` union whose `discriminator` maps `kitty` to `Cat`, with
+/// `header` written at the file's root.
+fn dialect_sub_file(header: &str) -> String {
+    format!(
+        r##"
+{header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - {{ $ref: '#/components/schemas/Cat' }}
+        - {{ $ref: '#/components/schemas/Dog' }}
+      discriminator:
+        propertyName: kind
+        mapping: {{ kitty: Cat }}
+    Cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }} }} }}
+    Dog: {{ type: object, required: [kind, bark], properties: {{ kind: {{ type: string }}, bark: {{ type: boolean }} }} }}
+"##
+    )
+}
+
+/// #1452: `jsonSchemaDialect` is the default "within this OAS document" (3.2.0.md, Specifying
+/// Schema Dialects), so it does not reach into a referenced file. A sub-file that is a complete
+/// OpenAPI document reads Schema Objects under its own `jsonSchemaDialect`, or the OAS dialect when
+/// it declares none; one that is not a complete document is read under the OAS dialect, as the
+/// specification says it SHOULD be. A sub-file `jsonSchemaDialect` spargen does not read is
+/// `E002` there, as at the root.
+#[test]
+fn a_referenced_file_reads_its_own_dialect_default_not_the_roots() {
+    const PET: &str = "/components/schemas/Pet/discriminator";
+    let root = |dialect: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+{dialect}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /pet:
+    get:
+      operationId: getPet
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: './lib.yaml#/components/schemas/Pet' }} }}
+"##
+        )
+    };
+    let plain = format!("jsonSchemaDialect: {JSON_SCHEMA_2020_12}");
+    let complete = "openapi: 3.1.0\ninfo: { title: L, version: 1.0.0 }";
+    let complete_plain = format!("{complete}\n{plain}");
+    let cases: [(&str, String, String, bool); 4] = [
+        (
+            "fragment file under a plain root",
+            root(&plain),
+            dialect_sub_file(""),
+            false,
+        ),
+        (
+            "complete file without a dialect under a plain root",
+            root(&plain),
+            dialect_sub_file(complete),
+            false,
+        ),
+        (
+            "complete plain file under an OAS root",
+            root(""),
+            dialect_sub_file(&complete_plain),
+            true,
+        ),
+        (
+            "fragment file declaring a dialect it is not a document to declare",
+            root(""),
+            dialect_sub_file(&plain),
+            false,
+        ),
+    ];
+    for (what, root, lib, inert) in cases {
+        let (report, _, code) =
+            generate_and_check_files(&[("openapi.yaml", &root), ("lib.yaml", &lib)]);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        let w011: Vec<_> = located_messages(&report, Code::DeclarationHasNoEffect)
+            .into_iter()
+            .map(|(pointer, _)| pointer)
+            .filter(|pointer| *pointer == PET)
+            .collect();
+        assert_eq!(!w011.is_empty(), inert, "{what}: {report:#?}");
+        assert_eq!(
+            code.contains("\"kitty\""),
+            !inert,
+            "{what}: the tag dispatches exactly when the discriminator is read:\n{code}"
+        );
+    }
+
+    let (report, _, _) = generate_and_check_files(&[
+        ("openapi.yaml", &root("")),
+        (
+            "lib.yaml",
+            &dialect_sub_file(&format!(
+                "{complete}\njsonSchemaDialect: https://json-schema.org/draft/2019-09/schema"
+            )),
+        ),
+    ]);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        located_messages(&report, Code::UnsupportedDialect)
+            .into_iter()
+            .map(|(pointer, _)| pointer)
+            .collect::<Vec<_>>(),
+        ["/jsonSchemaDialect"],
+        "{report:#?}"
+    );
+}
