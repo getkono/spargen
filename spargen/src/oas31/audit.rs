@@ -445,6 +445,26 @@ impl Audit<'_, '_> {
             .emit(diags);
         }
 
+        // `base64` and `base64url` are decoded into bytes; any other `contentEncoding` names text
+        // spargen has no codec for, so the value stays the string the wire carries (#1417).
+        if let Some(encoding) = schema
+            .content_encoding
+            .as_deref()
+            .filter(|encoding| !matches!(*encoding, "base64" | "base64url"))
+        {
+            // W001 case: content-encoding
+            Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+                .message(format!(
+                    "`contentEncoding: {encoding}` names no encoding spargen decodes, so the \
+                     value is the string the wire carries, still encoded"
+                ))
+                .remedy(
+                    "use `contentEncoding: base64` or `base64url` for typed bytes, or decode the \
+                     string in application code",
+                )
+                .emit(diags);
+        }
+
         // A `patternProperties` key regex is a validation-only constraint: the generated typed overflow
         // map captures every non-declared property regardless of the pattern, so the key regex is not
         // enforced. Acknowledge it as `W001` (never silent) — the value schemas still lower.

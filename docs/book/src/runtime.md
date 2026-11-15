@@ -11,7 +11,7 @@ itself, so it adds nothing:
 
 | Capability | Adds |
 | --- | --- |
-| A raw `bytes` value serde encodes (a `format: binary` value in a model, a JSON `content` parameter, or a serde-encoded body; a [`contentEncoding: base64`](#binary-content) one carries its own codec) | `bytes`' `serde` feature |
+| A model holding a raw `bytes` value (a `format: binary` multipart part; a [`contentEncoding: base64`](#binary-content) or `base64url` one carries its own codec) | `bytes`' `serde` feature |
 | A body read as it arrives: [streaming](#streaming) (sequential responses), or a [binary `_stream` twin](#binary-content) | `futures-core` and reqwest's `stream` feature |
 | [XML bodies](#xml-bodies) | `quick-xml` |
 | [`format: date-time` / `date`](#uuid-and-dates) | `time`, or the `jiff` or `chrono` crate the `datetime` backend selects |
@@ -478,12 +478,19 @@ sets out why `time`'s own representation is not RFC 3339.
 
 ### Binary content
 
-`format: binary` maps to `bytes::Bytes`. A `contentEncoding: base64` string is a generated newtype
-over `bytes::Bytes` (`pub struct Data(pub bytes::Bytes);`), which `Deref`s to the bytes and
-converts with `From` in both directions. Its serde form is RFC 4648 base64 text, standard alphabet
-and padded, wherever a JSON, XML or form body carries it: a field, an array item, a map value or a
-union variant. Decoding also accepts the text without its padding. `bytes::Bytes`' own serde form
-is a sequence of numbers, so the newtype carries the embedded
+`format: binary` maps to `bytes::Bytes` where the bytes are the wire itself: a whole request or
+response body, and a part of a `multipart/form-data` body. Where a JSON, XML or form body or a
+stream item carries the value, `format` is an annotation with no effect on its encoding (OpenAPI
+3.1 and 3.2), so the value is the JSON string the wire holds and is typed `String`, with a `W001`
+saying so; `bytes::Bytes` there would be written as an array of numbers.
+
+A `contentEncoding: base64` or `base64url` string is a generated newtype over `bytes::Bytes`
+(`pub struct Data(pub bytes::Bytes);`), which `Deref`s to the bytes and converts with `From` in
+both directions. Its serde form is RFC 4648 text, padded, in the standard alphabet for `base64`
+and the URL- and filename-safe one (`-` and `_`) for `base64url`, wherever a JSON, XML or form
+body carries it: a field, an array item, a map value or a union variant. Decoding also accepts the
+text without its padding, and refuses the other alphabet. `bytes::Bytes`' own serde form is a
+sequence of numbers, so the newtype carries the embedded
 [`base64` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/base64.rs)'s
 codec instead, which adds no dependency and is embedded only when such a schema is emitted. A
 whole request or response body and a multipart part carry the octets themselves under either

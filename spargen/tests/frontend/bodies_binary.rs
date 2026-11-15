@@ -1559,6 +1559,24 @@ components:
     );
 }
 
+/// The Rust type of the field `field` names, with every alias on the way expanded: `Vec<T>`'s item
+/// as well.
+fn resolved_field_type(code: &str, field: &str) -> Option<String> {
+    fn resolve(code: &str, ty: &str) -> String {
+        if let Some(item) = ty
+            .strip_prefix("Vec<")
+            .and_then(|rest| rest.strip_suffix('>'))
+        {
+            return format!("Vec<{}>", resolve(code, item));
+        }
+        match alias_target(code, ty) {
+            Some(target) => resolve(code, &target),
+            None => ty.to_owned(),
+        }
+    }
+    field_type(code, field).map(|ty| resolve(code, &ty))
+}
+
 /// The `W001`s a run reports for reading `format: binary` as text.
 fn binary_format_warnings(report: &Report) -> usize {
     messages_for(report, Code::ValidationKeywordIgnored)
@@ -1567,11 +1585,11 @@ fn binary_format_warnings(report: &Report) -> usize {
         .count()
 }
 
-// W001 case: binary-format
 /// `format: binary` is an annotation in OpenAPI 3.1 and 3.2 (it has no effect on how a value is
 /// encoded), so inside a serde-encoded body — a JSON member, an array item, a form field — the
 /// value is the JSON string the wire carries, a `String`, and the reading is reported as `W001`
 /// (#1417). `bytes::Bytes` there would be written as an array of numbers.
+// W001 case: binary-format
 #[test]
 fn w001_format_binary_inside_a_serde_body_is_a_string() {
     let (report, code) = generate_with_code(
@@ -1610,21 +1628,22 @@ paths:
     );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert_eq!(
-        field_type(&code, "pub data").as_deref(),
+        resolved_field_type(&code, "pub data:").as_deref(),
         Some("String"),
         "{code}"
     );
     assert_eq!(
-        field_type(&code, "pub chunks").as_deref(),
+        resolved_field_type(&code, "pub chunks:").as_deref(),
         Some("Vec<String>"),
         "{code}"
     );
     assert_eq!(
-        field_type(&code, "pub blob").as_deref(),
+        resolved_field_type(&code, "pub blob:").as_deref(),
         Some("String"),
         "{code}"
     );
-    assert!(!code.contains("bytes::Bytes"), "{code}");
+    let types = types_module(&code);
+    assert!(!types.contains("bytes::Bytes"), "{types}");
     assert_eq!(binary_format_warnings(&report), 3, "{report:#?}");
 }
 
@@ -1683,12 +1702,12 @@ components:
         "{code}"
     );
     assert_eq!(
-        field_type(&code, "pub file").as_deref(),
+        resolved_field_type(&code, "pub file:").as_deref(),
         Some("bytes::Bytes"),
         "{code}"
     );
     assert_eq!(
-        field_type(&code, "pub echo").as_deref(),
+        resolved_field_type(&code, "pub echo:").as_deref(),
         Some("String"),
         "{code}"
     );
@@ -1742,10 +1761,10 @@ paths:
     assert!(!flat.contains("support::serialize_base64("), "{code}");
 }
 
-// W001 case: content-encoding
 /// A `contentEncoding` other than `base64` or `base64url` (`base32`, `quoted-printable`, ...) has
 /// no codec here, so the value stays the `String` the wire carries and the keyword is reported
 /// rather than dropped in silence (#1417).
+// W001 case: content-encoding
 #[test]
 fn w001_an_unsupported_content_encoding_is_reported() {
     let (report, code) = generate_with_code(
@@ -1764,14 +1783,15 @@ components:
     );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert_eq!(
-        field_type(&code, "pub text").as_deref(),
+        resolved_field_type(&code, "pub text:").as_deref(),
         Some("String"),
         "{code}"
     );
     assert!(
         messages_for(&report, Code::ValidationKeywordIgnored)
             .iter()
-            .any(|message| message.contains("`contentEncoding: base32`")),
+            .any(|message| message
+                .contains("`contentEncoding: base32` names no encoding spargen decodes")),
         "{report:#?}"
     );
 }

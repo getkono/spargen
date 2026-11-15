@@ -101,6 +101,10 @@ pub(crate) enum BytesEncoding {
     /// `bytes::Bytes` that the embedded `base64` runtime module (de)serializes. A whole non-streaming
     /// body never carries it: lowering takes such a body raw, and `check_invariants` holds that.
     Base64,
+    /// `contentEncoding: base64url`: a string of RFC 4648 §5 base64url text (the URL- and
+    /// filename-safe alphabet), emitted and held to the same rules as [`Self::Base64`], through
+    /// the same runtime module's base64url codec.
+    Base64Url,
 }
 
 /// A `oneOf`/`anyOf` union lowered to a Rust enum. Never `serde(untagged)` and never degraded to

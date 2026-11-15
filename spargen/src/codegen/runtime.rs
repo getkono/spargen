@@ -94,11 +94,15 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
     let datetime_reexport = datetime.is_some().then(|| {
         quote! { pub use datetime::{Date, DateParseError, DateTime}; }
     });
-    // The base64 codec is embedded only when a `contentEncoding: base64` newtype survives lowering;
-    // the newtype's serde impls are its only callers. It adds no dependency.
+    // The base64 codecs are embedded only when a `contentEncoding: base64` or `base64url` newtype
+    // survives lowering; the newtypes' serde impls are their only callers. They add no dependency.
     let base64_module = uses_base64.then(|| embed(&crate::support::base64_runtime_file()));
     let base64_reexport = uses_base64.then(|| {
-        quote! { pub use base64::{deserialize_base64, serialize_base64}; }
+        quote! {
+            pub use base64::{
+                deserialize_base64, deserialize_base64url, serialize_base64, serialize_base64url,
+            };
+        }
     });
     // The blocking runtime (`BlockingRuntime`) is embedded unconditionally under `blocking_cfg`. A
     // consumer opts in by declaring its own `blocking` feature wired to an optional, non-wasm tokio

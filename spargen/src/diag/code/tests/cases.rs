@@ -48,6 +48,16 @@ pub(super) const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                 stated_as: "union branches lower to the same generated type",
                 reserved_wording: None,
             },
+            Case {
+                tag: "binary-format",
+                stated_as: "`format: binary` on a value a serde codec carries",
+                reserved_wording: Some("`format: binary` is an annotation"),
+            },
+            Case {
+                tag: "content-encoding",
+                stated_as: "a `contentEncoding` other than `base64` and `base64url`",
+                reserved_wording: Some("names no encoding spargen decodes"),
+            },
         ],
     ),
     (

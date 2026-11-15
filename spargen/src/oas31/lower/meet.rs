@@ -328,12 +328,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the enclosing position's answer holds.
             (TypeKind::Union(union), _) => self.intersect_with_union(a, union, b, hint),
             (_, TypeKind::Union(union)) => self.intersect_with_union(b, union, a, hint),
-            // `contentEncoding: base64` fixes the value's text form, which `format: binary` leaves
-            // open, so the base64 side is the meet, as it is when both sit on one schema.
-            (TypeKind::Bytes(_), TypeKind::Bytes(crate::ir::BytesEncoding::Base64)) => {
-                Ok(non_nullable(b))
-            }
-            (TypeKind::Bytes(_), TypeKind::Bytes(_)) => Ok(non_nullable(a)),
+            // `contentEncoding: base64`/`base64url` fixes the value's text form, which
+            // `format: binary` leaves open, so the encoded side is the meet, as it is when both sit
+            // on one schema. Two encodings of one value in different alphabets share no text but
+            // the empty string, which no single Rust type represents, so that pair has no meet.
+            (TypeKind::Bytes(left), TypeKind::Bytes(right)) => match (left, right) {
+                (left, right) if left == right => Ok(non_nullable(a)),
+                (crate::ir::BytesEncoding::Raw, _) => Ok(non_nullable(b)),
+                (_, crate::ir::BytesEncoding::Raw) => Ok(non_nullable(a)),
+                _ => Err(no_meet(a_kind, b_kind)),
+            },
             // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
             // string conjoined with it is the binary content: `{$ref: Data, format: binary}` over a
             // string `Data` lowers exactly as the inline `{type: string, format: binary}` does. Only

@@ -305,8 +305,10 @@ components:
 /// plain string `Data` is the same conjunction — a string that is binary — spelled with the
 /// constraint on the other side of the `$ref`, and it used to reject with `E013`, because
 /// `intersect_non_null` had no arm for `(Bytes, Primitive(String))` and its catch-all `None` reads
-/// as an irreconcilable composition. Every spelling must now reach the same type, in every
-/// position (a JSON property, a raw response body, a multipart part) and under both versions.
+/// as an irreconcilable composition. Every spelling must now reach the same type in each position
+/// (a JSON property, a raw response body, a multipart part) and under both versions: the bytes in
+/// a whole body, where they are the wire, and the `String` the wire holds in a JSON property, where
+/// `format: binary` is an annotation (#1417).
 #[test]
 fn a_binary_string_lowers_to_bytes_however_the_binary_constraint_is_spelled() {
     let components = "    Data: { type: string }\n    \
@@ -324,7 +326,7 @@ fn a_binary_string_lowers_to_bytes_however_the_binary_constraint_is_spelled() {
             "{ allOf: [{ $ref: '#/components/schemas/Data' }, { format: binary }] }",
         ),
     ];
-    let expected = Ok(("bytes::Bytes".to_owned(), "bytes::Bytes".to_owned()));
+    let expected = Ok(("String".to_owned(), "bytes::Bytes".to_owned()));
     let disagreeing: Vec<_> =
         lower_each_spelling(spellings, components, "application/octet-stream", true)
             .into_iter()
@@ -332,8 +334,8 @@ fn a_binary_string_lowers_to_bytes_however_the_binary_constraint_is_spelled() {
             .collect();
     assert!(
         disagreeing.is_empty(),
-        "every spelling of a binary string must lower to `bytes::Bytes` in every position, \
-         but these did not: {disagreeing:#?}"
+        "every spelling of a binary string must lower to `String` as a JSON property and to \
+         `bytes::Bytes` as a whole body, but these did not: {disagreeing:#?}"
     );
 }
 
