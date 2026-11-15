@@ -63,9 +63,10 @@ pub(super) fn body_send_tokens(
                 // JSON: serialized here rather than through `RequestBuilder::json`, which labels the
                 // body `application/json` whatever the media key says (on wasm it overwrites a
                 // header set before it), so an `application/*+json` body such as JSON Merge Patch
-                // goes out under its declared essence.
+                // goes out under its declared essence. The runtime's encoder refuses a NaN or an
+                // infinity, which `serde_json` alone would send as `null`.
                 MediaType::Json => quote! {
-                    let #body_binding = serde_json::to_vec(#body_binding)
+                    let #body_binding = support::to_json_vec(#body_binding)
                         .map_err(support::Error::request_construction)?;
                     #request_binding = #request_binding
                         .header(reqwest::header::CONTENT_TYPE, #content_type)
@@ -432,7 +433,7 @@ fn emit_multipart_body(
             }
         });
         // `receiver` is the value for method calls (`.to_vec()`/`.to_string()` auto-ref); `reference`
-        // is an explicit `&value` for `serde_json::to_string`, which takes `&T`. Splitting them keeps
+        // is an explicit `&value` for `support::to_json_string`, which takes `&T`. Splitting them keeps
         // the emitted code free of `clippy::needless_borrow` on the method-call receivers.
         let add_part = |receiver: &TokenStream, reference: &TokenStream| {
             let build = match &property.map(|property| &property.mode) {
@@ -574,7 +575,7 @@ fn additional_parts_tokens(
 /// value's lowered type: a binary value becomes a file part, whose `filename` is `file_name` (the
 /// one the caller set on the `MultipartBody`, else the part's name), a scalar a text part via `Display`, and anything composite a JSON-encoded text
 /// part. `receiver` is the value for method calls; `reference` is a `&value` for
-/// `serde_json::to_string`.
+/// `support::to_json_string`.
 fn media_part_tokens(
     kind: Option<&TypeKind>,
     receiver: &TokenStream,
@@ -599,10 +600,10 @@ fn media_part_tokens(
         Some(TypeKind::Reserved) => unreachable!(
             "a reservation reached codegen; `check_invariants` should have rejected it"
         ),
-        // Any composite property → a JSON-encoded text part.
+        // Any composite property → a JSON-encoded text part, a non-finite number in it refused.
         _ => quote! {
             let mut part = support::MultipartPart::text(
-                serde_json::to_string(#reference)
+                support::to_json_string(#reference)
                     .map_err(support::Error::request_construction)?,
             );
         },

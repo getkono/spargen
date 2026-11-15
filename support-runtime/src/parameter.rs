@@ -93,8 +93,10 @@ pub enum ParameterError {
     /// A path parameter rendered to the empty string (`path_segment`), which would leave an
     /// empty segment and send the request to a different resource (`/users/{id}` to `/users/`).
     EmptyPathSegment,
-    /// A value held an `f64` or `f32` NaN or infinity, which no parameter style can represent:
-    /// serialized, it would reach the wire as an undefined value instead.
+    /// A value held an `f64` or `f32` NaN or infinity, which neither a parameter style nor JSON
+    /// can represent: serialized, it would reach the wire as an undefined value or a JSON `null`
+    /// instead. A parameter, a JSON request body (`to_json_vec`) and a JSON-encoded part
+    /// (`to_json_string`) are each refused this way.
     NonFiniteNumber,
 }
 
@@ -127,8 +129,8 @@ impl fmt::Display for ParameterError {
                  a different resource",
             ),
             Self::NonFiniteNumber => formatter.write_str(
-                "a parameter value holds a NaN or infinite number, which no parameter style can \
-                 represent",
+                "a parameter or request body value holds a NaN or infinite number, which neither \
+                 a parameter style nor JSON can represent",
             ),
         }
     }
@@ -171,6 +173,22 @@ pub fn path_segment(rendered: String) -> Result<String, ParameterError> {
     }
 }
 
+/// `value` as JSON text, for a JSON `content` parameter or a JSON-encoded multipart part, refused
+/// as `ParameterError::NonFiniteNumber` where it holds an `f64` or `f32` NaN or infinity anywhere:
+/// `serde_json` writes such a number as `null`, so the request would carry `null` where the
+/// caller passed a number.
+pub fn to_json_string<T: Serialize>(value: &T) -> Result<String, ParameterError> {
+    check_finite(value)?;
+    Ok(serde_json::to_string(value)?)
+}
+
+/// `value` as JSON bytes, for a JSON request body, refused as `ParameterError::NonFiniteNumber`
+/// where it holds an `f64` or `f32` NaN or infinity anywhere, as [`to_json_string`] is.
+pub fn to_json_vec<T: Serialize>(value: &T) -> Result<Vec<u8>, ParameterError> {
+    check_finite(value)?;
+    Ok(serde_json::to_vec(value)?)
+}
+
 /// `value` as the JSON value every style renders from, refused as
 /// `ParameterError::NonFiniteNumber` where it holds an `f64` or `f32` NaN or infinity:
 /// `serde_json` would turn that number into `null`, which every style renders as undefined, so a
@@ -178,6 +196,14 @@ pub fn path_segment(rendered: String) -> Result<String, ParameterError> {
 fn to_json<T: Serialize>(value: &T) -> Result<Value, ParameterError> {
     check_finite(value)?;
     Ok(serde_json::to_value(value)?)
+}
+
+/// Whether `value` holds an `f64` or `f32` NaN or infinity anywhere. A generated union's
+/// `Serialize` asks before it goes through `serde_json::Value`, which would turn the number into
+/// `null`: where it is `true`, the union serializes its variant straight into the outer
+/// serializer, so the check [`to_json_string`] and [`to_json_vec`] make reaches the number.
+pub fn holds_non_finite<T: Serialize + ?Sized>(value: &T) -> bool {
+    matches!(value.serialize(FiniteCheck), Err(FiniteError::NonFinite))
 }
 
 /// Refuse `value` as `ParameterError::NonFiniteNumber` where it holds an `f64` or `f32` NaN or

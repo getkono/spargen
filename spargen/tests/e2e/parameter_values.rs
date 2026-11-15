@@ -1,5 +1,6 @@
 //! Parameter values that would silently change the request, refused before anything is sent:
-//! an empty path value and a non-finite number.
+//! an empty path value and a non-finite number, in a styled parameter, a JSON `content`
+//! parameter, or a JSON request body or multipart part.
 
 use super::*;
 
@@ -9,6 +10,10 @@ use super::*;
 /// as an undefined value (`ratio=`, or an empty segment again). Each call fails as
 /// `RequestConstruction` whose source downcasts to the `ParameterError` naming the cause, while a
 /// path value of `0` and a finite number still reach the wire.
+///
+/// The JSON paths refuse a non-finite number the same way (#1507): `serde_json` writes one as
+/// `null`, so a JSON `content` parameter, a JSON `in: querystring` value, a JSON body, and a
+/// JSON-encoded multipart part would each send `null` where the caller passed a number.
 #[test]
 fn an_empty_path_value_or_a_non_finite_number_is_refused_before_sending() {
     let temp = tempfile::tempdir().unwrap();
@@ -16,7 +21,7 @@ fn an_empty_path_value_or_a_non_finite_number_is_refused_before_sending() {
         temp.path(),
         "openapi.yaml",
         r##"
-openapi: 3.1.0
+openapi: 3.2.0
 info: { title: Parameter values, version: 1.0.0 }
 paths:
   /users/{id}:
@@ -41,6 +46,101 @@ paths:
         - { name: ratio, in: query, schema: { type: number } }
       responses:
         "204": { description: No Content }
+  /filters:
+    get:
+      operationId: getFiltered
+      parameters:
+        - name: filter
+          in: query
+          content: { application/json: { schema: { type: number } } }
+        - name: X-Ratio
+          in: header
+          content: { application/json: { schema: { type: number } } }
+      responses:
+        "204": { description: No Content }
+  /search:
+    get:
+      operationId: search
+      parameters:
+        - name: q
+          in: querystring
+          content: { application/json: { schema: { $ref: "#/components/schemas/Ratio" } } }
+      responses:
+        "204": { description: No Content }
+  /ratios:
+    post:
+      operationId: postRatios
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: array, items: { $ref: "#/components/schemas/Ratio" } }
+      responses:
+        "204": { description: No Content }
+  /uploads:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [meta]
+              properties:
+                meta: { $ref: "#/components/schemas/Ratio" }
+      responses:
+        "204": { description: No Content }
+  /shapes:
+    post:
+      operationId: postShape
+      parameters:
+        - { name: size, in: query, schema: { $ref: "#/components/schemas/Size" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Shape" }
+      responses:
+        "204": { description: No Content }
+components:
+  schemas:
+    Shape:
+      oneOf:
+        - $ref: "#/components/schemas/Circle"
+        - $ref: "#/components/schemas/Square"
+      discriminator:
+        propertyName: kind
+        mapping:
+          circle: "#/components/schemas/Circle"
+          square: "#/components/schemas/Square"
+    Circle:
+      type: object
+      required: [kind, radius]
+      properties:
+        kind: { type: string }
+        radius: { type: number }
+    Square:
+      type: object
+      required: [kind, side]
+      properties:
+        kind: { type: string }
+        side: { type: number }
+    Size:
+      oneOf:
+        - $ref: "#/components/schemas/Ratio"
+        - $ref: "#/components/schemas/Weighted"
+    Weighted:
+      type: object
+      required: [ratio, weight]
+      properties:
+        ratio: { type: number }
+        weight: { type: number }
+    Ratio:
+      type: object
+      required: [ratio]
+      properties:
+        ratio: { type: number }
 "##,
     );
     let out = temp.path().join("client");
@@ -54,7 +154,11 @@ paths:
 
 mod common;
 
-use param_values_client::{BlockingClient, Error, GetScoreParams, ParameterError};
+use param_values_client::types::{Circle, Ratio, Shape, Size, Square, UploadBody};
+use param_values_client::{
+    BlockingClient, Error, GetFilteredParams, GetScoreParams, ParameterError, PostShapeParams,
+    SearchParams,
+};
 
 /// A client against a base no server listens on: a request that reached the transport would
 /// fail there instead, so `RequestConstruction` proves nothing was sent.
@@ -105,6 +209,103 @@ fn a_non_finite_number_is_refused() {
             ParameterError::NonFiniteNumber
         ));
     }
+}
+
+#[test]
+fn a_non_finite_number_in_a_json_parameter_or_body_is_refused() {
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let ratio = Ratio { ratio: number };
+        assert!(matches!(
+            parameter_error(unreachable().get_filtered(GetFilteredParams::default().filter(number))),
+            ParameterError::NonFiniteNumber
+        ));
+        assert!(matches!(
+            parameter_error(unreachable().get_filtered(GetFilteredParams::default().x_ratio(number))),
+            ParameterError::NonFiniteNumber
+        ));
+        assert!(matches!(
+            parameter_error(unreachable().search(Some(SearchParams::default().q(ratio.clone())))),
+            ParameterError::NonFiniteNumber
+        ));
+        // Nested: the second element of the array body.
+        assert!(matches!(
+            parameter_error(unreachable().post_ratios(&vec![Ratio { ratio: 1.0 }, ratio.clone()])),
+            ParameterError::NonFiniteNumber
+        ));
+        assert!(matches!(
+            parameter_error(unreachable().upload(&UploadBody { meta: ratio })),
+            ParameterError::NonFiniteNumber
+        ));
+    }
+}
+
+/// A union serializes its variant through `serde_json::Value`, which would turn the number into
+/// `null` before the check saw it: the check reaches the variant itself, in a discriminated-union
+/// JSON body and in a trial-union styled parameter alike.
+#[test]
+fn a_non_finite_number_inside_a_union_is_refused() {
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let circle = Shape::Circle(Box::new(Circle { kind: "circle".to_owned(), radius: number }));
+        assert!(matches!(
+            parameter_error(unreachable().post_shape(PostShapeParams::default(), &circle)),
+            ParameterError::NonFiniteNumber
+        ));
+        let square = Shape::Square(Box::new(Square { kind: "square".to_owned(), side: 1.0 }));
+        assert!(matches!(
+            parameter_error(
+                unreachable().post_shape(
+                    PostShapeParams::default().size(Size::Ratio(Box::new(Ratio { ratio: number }))),
+                    &square,
+                )
+            ),
+            ParameterError::NonFiniteNumber
+        ));
+    }
+}
+
+#[test]
+fn a_finite_number_inside_a_union_reaches_the_wire() {
+    let (base, server) = common::serve_no_content();
+    BlockingClient::new(&base)
+        .unwrap()
+        .post_shape(
+            PostShapeParams::default().size(Size::Ratio(Box::new(Ratio { ratio: 2.5 }))),
+            &Shape::Circle(Box::new(Circle { kind: "circle".to_owned(), radius: 0.5 })),
+        )
+        .expect("the call round-trips");
+    let request = server.join().unwrap();
+    assert_eq!(request.line(), "POST /shapes?ratio=2.5 HTTP/1.1");
+    assert!(
+        request.text().ends_with(r#"{"kind":"circle","radius":0.5}"#),
+        "{}",
+        request.text()
+    );
+}
+
+#[test]
+fn a_finite_number_in_a_json_parameter_or_body_reaches_the_wire() {
+    let (base, server) = common::serve(vec![common::no_content(); 3]);
+    let client = BlockingClient::new(&base).unwrap();
+    client
+        .get_filtered(GetFilteredParams::default().filter(0.5))
+        .expect("the call round-trips");
+    client
+        .search(Some(SearchParams::default().q(Ratio { ratio: 0.25 })))
+        .expect("the call round-trips");
+    client
+        .post_ratios(&vec![Ratio { ratio: 2.0 }])
+        .expect("the call round-trips");
+    let requests = server.join().unwrap();
+    assert_eq!(requests[0].line(), "GET /filters?filter=0.5 HTTP/1.1");
+    assert_eq!(
+        requests[1].line(),
+        "GET /search?%7B%22ratio%22%3A0.25%7D HTTP/1.1"
+    );
+    assert!(
+        requests[2].text().ends_with(r#"[{"ratio":2.0}]"#),
+        "{}",
+        requests[2].text()
+    );
 }
 
 #[test]

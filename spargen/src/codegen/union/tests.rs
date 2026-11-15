@@ -102,8 +102,8 @@ fn a_discriminated_union_dispatches_by_tag_and_refuses_a_foreign_one() {
                 r#"_=>{Err(serde::de::Error::custom("unknowndiscriminatorvalueforunionEvent",),)}}"#,
             ),
             concat!(
-                r#"Event::Tick(inner)=>{(serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,Some("tick"),)}"#,
-                r#"Event::Stop(inner)=>{(serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,Some("stop"),)}};"#,
+                r#"Event::Tick(inner)=>{ifsuper::support::holds_non_finite(inner){returnserde::Serialize::serialize(inner,serializer);}(serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,Some("tick"),)}"#,
+                r#"Event::Stop(inner)=>{ifsuper::support::holds_non_finite(inner){returnserde::Serialize::serialize(inner,serializer);}(serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,Some("stop"),)}};"#,
             ),
             concat!(
                 r#"ifletSome(held)=map.get("kind"){letrefusal:Option<&str>=matchself{"#,

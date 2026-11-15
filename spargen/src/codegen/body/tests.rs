@@ -150,7 +150,7 @@ fn each_codec_sends_its_body_under_its_declared_content_type() {
         &[&format!(
             "letmutrequest=support::RequestBuilder::new(reqwest::Method::PUT,url);\
              request=request.header(reqwest::header::ACCEPT,\"application/json\");\
-             letbody=serde_json::to_vec(body).map_err(support::Error::request_construction)?;\
+             letbody=support::to_json_vec(body).map_err(support::Error::request_construction)?;\
              {content_type}\"application/merge-patch+json\").body(body);letreplay"
         )],
     );
@@ -248,7 +248,7 @@ fn a_multipart_body_adds_one_part_per_sent_property() {
                  ifletSome(value)=&body.kind{{letmutpart=support::MultipartPart::text(\
                  value.to_string());{}form=form.part(\"kind\",part);}}\
                  ifletSome(value)=&body.meta{{letmutpart=support::MultipartPart::text(\
-                 serde_json::to_string(value).map_err(support::Error::request_construction)?,);\
+                 support::to_json_string(value).map_err(support::Error::request_construction)?,);\
                  {}form=form.part(\"meta\",part);}}\
                  ifletsupport::Nullable::Value(value)=&body.note{{",
                 mime("application/octet-stream"),

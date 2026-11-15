@@ -92,7 +92,7 @@ fn each_path_parameter_renders_in_its_style_and_encoding() {
             r#"path=path.replace("{raw}",&support::path_segment(support::serialize_simple(&raw,false,support::PercentEncoding::ReservedPath,).map_err(support::Error::request_construction)?,).map_err(support::Error::request_construction)?,);"#,
             r#"path=path.replace("{m}",&support::path_segment(support::serialize_matrix("m",&m,true,support::PercentEncoding::Unreserved,).map_err(support::Error::request_construction)?,).map_err(support::Error::request_construction)?,);"#,
             r#"path=path.replace("{l}",&support::path_segment(support::serialize_label(&l,false,support::PercentEncoding::Unreserved,).map_err(support::Error::request_construction)?,).map_err(support::Error::request_construction)?,);"#,
-            r#"path=path.replace("{c}",&support::path_segment(support::encode(&serde_json::to_string(&c).map_err(support::Error::request_construction)?,support::PercentEncoding::Unreserved,),).map_err(support::Error::request_construction)?,);"#,
+            r#"path=path.replace("{c}",&support::path_segment(support::encode(&support::to_json_string(&c).map_err(support::Error::request_construction)?,support::PercentEncoding::Unreserved,),).map_err(support::Error::request_construction)?,);"#,
         ],
     );
 }
@@ -113,7 +113,7 @@ fn each_query_parameter_renders_in_its_style_required_ones_first() {
             r#"ifletSome(value)=params.sp.as_ref(){query.extend(support::serialize_delimited("sp",value,support::Delimiter::Space,support::PercentEncoding::Form,).map_err(support::Error::request_construction)?,);}"#,
             r#"ifletSome(value)=params.pp.as_ref(){query.extend(support::serialize_delimited("pp",value,support::Delimiter::Pipe,support::PercentEncoding::Form,).map_err(support::Error::request_construction)?,);}"#,
             r#"ifletSome(value)=params.deep.as_ref(){query.extend(support::serialize_deep_object("deep",value,support::PercentEncoding::Form,).map_err(support::Error::request_construction)?,);}"#,
-            r#"if!params.cq.is_absent(){letvalue=&params.cq;query.push(format!("{}={}",support::encode("cq",support::PercentEncoding::Form),support::encode(&serde_json::to_string(value).map_err(support::Error::request_construction)?,support::PercentEncoding::Form),),);}"#,
+            r#"if!params.cq.is_absent(){letvalue=&params.cq;query.push(format!("{}={}",support::encode("cq",support::PercentEncoding::Form),support::encode(&support::to_json_string(value).map_err(support::Error::request_construction)?,support::PercentEncoding::Form),),);}"#,
             r#"ifletSome(value)=params.tq.as_ref(){query.push(format!("{}={}",support::encode("tq",support::PercentEncoding::Form),support::encode(&support::serialize_simple(value,false,support::PercentEncoding::Passthrough).map_err(support::Error::request_construction)?,support::PercentEncoding::Form),),);}"#,
             r#"ifletSome(value)=params.old.as_ref(){query.extend(support::serialize_form("old",value,true,support::PercentEncoding::Form,).map_err(support::Error::request_construction)?,);}"#,
             r#"ifletSome(value)=params.nq.as_ref(){query.extend(support::serialize_form("nq",value,true,support::PercentEncoding::Form,).map_err(support::Error::request_construction)?,);}"#,
@@ -133,12 +133,12 @@ fn headers_and_cookies_render_verbatim_under_their_cookie_rules() {
         preparer(&generated, "get_thing"),
         &[concat!(
             r#"request=request.header("X-Req",support::serialize_simple(&params.x_req,false,support::PercentEncoding::Passthrough,).map_err(support::Error::request_construction)?,);"#,
-            r#"ifletSome(value)=params.x_json.as_ref(){request=request.header("X-Json",serde_json::to_string(value).map_err(support::Error::request_construction)?,);}"#,
+            r#"ifletSome(value)=params.x_json.as_ref(){request=request.header("X-Json",support::to_json_string(value).map_err(support::Error::request_construction)?,);}"#,
             r#"letmutcookies:Vec<String>=Vec::new();"#,
             r#"ifletSome(value)=params.ck.as_ref(){forpairinsupport::serialize_form("ck",value,true,support::PercentEncoding::Form,).map_err(support::Error::request_construction)?{cookies.push(support::cookie_pair("ck",pair,support::CookieValue::Encoded).map_err(support::Error::request_construction)?,);}}"#,
             r#"ifletSome(value)=params.ce.as_ref(){forpairinsupport::serialize_form("ce",value,true,support::PercentEncoding::Passthrough,).map_err(support::Error::request_construction)?{cookies.push(support::cookie_pair("ce",pair,support::CookieValue::Octets).map_err(support::Error::request_construction)?,);}}"#,
             r#"ifletSome(value)=params.cl.as_ref(){forpairinsupport::serialize_form("cl",value,false,support::PercentEncoding::Passthrough,).map_err(support::Error::request_construction)?{cookies.push(support::cookie_pair("cl",pair,support::CookieValue::OctetList).map_err(support::Error::request_construction)?,);}}"#,
-            r#"ifletSome(value)=params.cj.as_ref(){cookies.push(support::cookie_pair("cj",format!("{}={}","cj",serde_json::to_string(value).map_err(support::Error::request_construction)?),support::CookieValue::Octets,).map_err(support::Error::request_construction)?,);}"#,
+            r#"ifletSome(value)=params.cj.as_ref(){cookies.push(support::cookie_pair("cj",format!("{}={}","cj",support::to_json_string(value).map_err(support::Error::request_construction)?),support::CookieValue::Octets,).map_err(support::Error::request_construction)?,);}"#,
             r#"if!cookies.is_empty(){request=request.header(reqwest::header::COOKIE,cookies.join(";"));}"#,
         )],
     );
@@ -173,14 +173,14 @@ fn a_whole_query_value_renders_by_its_codec() {
         preparer(&generated, "lookup"),
         &[&format!(
             "{}{build_url}",
-            r#"letmutquery:Vec<String>=Vec::new();letraw_query:Option<String>=Some(support::encode(&serde_json::to_string(&params.filter).map_err(support::Error::request_construction)?,support::PercentEncoding::Form,),);"#,
+            r#"letmutquery:Vec<String>=Vec::new();letraw_query:Option<String>=Some(support::encode(&support::to_json_string(&params.filter).map_err(support::Error::request_construction)?,support::PercentEncoding::Form,),);"#,
         )],
     );
     assert_contains_all(
         preparer(&generated, "lookup_maybe"),
         &[&format!(
             "{}{build_url}",
-            r#"letmutraw_query:Option<String>=None;ifletSome(value)=params.as_ref().and_then(|params|params.filter.as_ref()){raw_query=Some(support::encode(&serde_json::to_string(value).map_err(support::Error::request_construction)?,support::PercentEncoding::Form,),);}"#,
+            r#"letmutraw_query:Option<String>=None;ifletSome(value)=params.as_ref().and_then(|params|params.filter.as_ref()){raw_query=Some(support::encode(&support::to_json_string(value).map_err(support::Error::request_construction)?,support::PercentEncoding::Form,),);}"#,
         )],
     );
     assert_contains_all(
