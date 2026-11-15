@@ -1142,6 +1142,67 @@ fn an_sse_retry_counts_only_as_ascii_digits() {
     assert!(buf.is_empty());
 }
 
+/// Issue #1423: WHATWG sets the reconnection time as soon as a valid `retry` line is read, not
+/// when its event dispatches, so a `retry:` in an event the body ends before dispatching still
+/// applies, and is what the reconnect policy is offered as `server_delay`. A final line ended by
+/// a CR at EOF is a complete line and counts too.
+#[test]
+fn an_sse_retry_applies_when_read_even_if_its_event_never_dispatches() {
+    for framing in [Framing::Sse, Framing::SseEvent, Framing::SseJsonData] {
+        for body in [
+            "retry: 30000\n",
+            "retry: 30000\r",
+            "retry: 30000\r\n",
+            "retry: 30000\ndata: {\"a\":1}\n",
+            "data: {\"a\":1}\nretry: 30000\ndata: {\"a\":",
+        ] {
+            let policy = Arc::new(ImmediateReconnect::default());
+            let core =
+                ClientCore::with_backend(SequenceBackend::new([]), "https://example.com").unwrap();
+            let request = crate::tests::builder(Method::GET, "https://example.com/events");
+            let stream = EventStream::<serde_json::Value>::new_reconnectable(
+                response(body),
+                framing,
+                &core,
+                prepared(&core, request),
+            );
+            let Ok(mut stream) = stream.with_reconnect(policy.clone()) else {
+                panic!("reconnect should be available");
+            };
+            assert!(poll_ready(stream.next()).is_none(), "{framing:?} {body:?}");
+            assert_eq!(
+                stream.reconnect_delay(),
+                Some(std::time::Duration::from_secs(30)),
+                "{framing:?} {body:?}"
+            );
+            assert_eq!(
+                *policy.seen.lock().unwrap(),
+                [(0, "eof", Some(std::time::Duration::from_secs(30)))],
+                "{framing:?} {body:?}"
+            );
+        }
+    }
+}
+
+/// Issue #1423: an all-digit `retry` too large for a `u64` is ignored like any other invalid
+/// value, so an earlier valid one, in the same event or an earlier one, stays in force.
+#[test]
+fn an_overflowing_sse_retry_leaves_the_earlier_one_in_force() {
+    for body in [
+        "retry: 5000\nretry: 99999999999999999999999\ndata: {}\n\n",
+        "retry: 5000\ndata: {}\n\nretry: 99999999999999999999999\ndata: {}\n\n",
+    ] {
+        let mut stream: EventStream<serde_json::Value> =
+            EventStream::new(response(body), Framing::SseJsonData);
+        while poll_ready(stream.next()).is_some() {}
+        assert_eq!(
+            stream.reconnect_delay(),
+            Some(std::time::Duration::from_secs(5)),
+            "{body:?}"
+        );
+    }
+}
+
 /// A line with no colon is a field name with an empty value: a bare `data` dispatches an empty
 /// payload, a bare `event` names the empty event type, a bare `id` resets the last ID, and an
 /// unknown bare name is ignored.
