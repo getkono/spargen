@@ -346,7 +346,8 @@ impl<T> EventStream<T> {
         self.last_event_id.as_deref()
     }
 
-    /// The latest valid server-provided SSE `retry:` delay.
+    /// The latest valid server-provided SSE `retry:` delay. A `retry:` line applies as soon as it
+    /// is read, whether or not the body goes on to dispatch the event it is part of.
     pub fn reconnect_delay(&self) -> Option<Duration> {
         self.reconnect_delay
     }
@@ -374,7 +375,11 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
         let this = self.get_mut();
         loop {
             let at_eof = matches!(this.state, StreamState::Eof);
-            match next_frame(&mut this.buffer, this.framing, at_eof) {
+            let frame = next_frame(&mut this.buffer, this.framing, at_eof);
+            if let Some(retry) = this.buffer.retry.take() {
+                this.reconnect_delay = Some(Duration::from_millis(retry));
+            }
+            match frame {
                 FramePoll::Item { payload, metadata } => {
                     this.apply_metadata(metadata);
                     let item = deserialize_item::<T>(this.status, &this.headers, &payload);
@@ -504,9 +509,6 @@ impl<T> EventStream<T> {
     fn apply_metadata(&mut self, metadata: SseMetadata) {
         if let Some(id) = metadata.id {
             self.last_event_id = Some(id);
-        }
-        if let Some(retry) = metadata.retry {
-            self.reconnect_delay = Some(Duration::from_millis(retry));
         }
     }
 
@@ -688,6 +690,9 @@ struct FrameBuffer {
     scanned: usize,
     /// SSE only: the fields the lines before `line_start` set.
     event: SseFields,
+    /// SSE only: the latest valid `retry` value read and not yet taken by the stream. Unlike the
+    /// event's other fields it applies on read, not on dispatch, so `clear` keeps it.
+    retry: Option<u64>,
 }
 
 impl FrameBuffer {
@@ -703,7 +708,7 @@ impl FrameBuffer {
         self.bytes.is_empty()
     }
 
-    /// Drop every byte and everything read from them.
+    /// Drop every byte and everything read from them but `retry`, which applied when it was read.
     fn clear(&mut self) {
         self.bytes.clear();
         self.line_start = 0;
@@ -838,7 +843,6 @@ fn frame_item(payload: Vec<u8>) -> FramePoll {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct SseMetadata {
     id: Option<String>,
-    retry: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -870,7 +874,7 @@ fn sse_next(buffer: &mut FrameBuffer, at_eof: bool, output: SseOutput) -> FrameP
                     if line.is_empty() {
                         break Some(next);
                     }
-                    append_sse_field(line, &mut buffer.event);
+                    append_sse_field(line, &mut buffer.event, &mut buffer.retry);
                 }
                 Err(scanned) => {
                     buffer.scanned = scanned;
@@ -892,9 +896,13 @@ fn sse_next(buffer: &mut FrameBuffer, at_eof: bool, output: SseOutput) -> FrameP
                 fields
             }
             // The body ended before the blank line that dispatches the event in progress, so it
-            // is dropped, with the `id` and `retry` it set: "if the file ends in the middle of an
-            // event, before the final empty line, the incomplete event is not dispatched".
+            // is dropped, with the `id` it set: "if the file ends in the middle of an event,
+            // before the final empty line, the incomplete event is not dispatched". A `retry` it
+            // set has already applied, including one on a last line the final CR ends.
             None => {
+                if let Some(line) = buffer.bytes[buffer.line_start..].strip_suffix(b"\r") {
+                    append_sse_field(line, &mut buffer.event, &mut buffer.retry);
+                }
                 buffer.clear();
                 return FramePoll::NeedMore;
             }
@@ -906,7 +914,10 @@ fn sse_next(buffer: &mut FrameBuffer, at_eof: bool, output: SseOutput) -> FrameP
     }
 }
 
-fn append_sse_field(line: &[u8], fields: &mut SseFields) {
+/// Read one SSE field line into the event in progress. A valid `retry` value is also recorded in
+/// `retry`, for the stream to apply at once; one with a non-digit, or too large for a `u64`, is
+/// ignored, leaving any earlier value in place.
+fn append_sse_field(line: &[u8], fields: &mut SseFields, retry: &mut Option<u64>) {
     if line.first() == Some(&b':') {
         return;
     }
@@ -928,9 +939,13 @@ fn append_sse_field(line: &[u8], fields: &mut SseFields) {
         b"event" => fields.event = Some(value.to_vec()),
         b"id" if !value.contains(&0) => fields.id = Some(value.to_vec()),
         b"retry" if !value.is_empty() && value.iter().all(u8::is_ascii_digit) => {
-            fields.retry = std::str::from_utf8(value)
+            if let Some(value) = std::str::from_utf8(value)
                 .ok()
-                .and_then(|value| value.parse().ok());
+                .and_then(|value| value.parse().ok())
+            {
+                fields.retry = Some(value);
+                *retry = Some(value);
+            }
         }
         _ => {}
     }
@@ -942,7 +957,6 @@ fn finish_sse_fields(mut fields: SseFields, output: SseOutput) -> FramePoll {
             .id
             .as_deref()
             .map(|id| String::from_utf8_lossy(id).into_owned()),
-        retry: fields.retry,
     };
     if fields.data.is_empty() {
         return if metadata == SseMetadata::default() {

@@ -154,14 +154,14 @@ fn oas32_sse_does_not_treat_done_data_as_a_private_sentinel() {
 
 #[test]
 fn oas32_sse_json_data_yields_payload_and_retains_metadata() {
-    let mut buf = b"id: event-7\nretry: 1250\ndata: {\"kind\":\"ready\"}\n\n".to_vec();
-    let frame = next_frame(&mut buf, Framing::SseJsonData, false);
+    let mut framer = frame_buffer(b"id: event-7\nretry: 1250\ndata: {\"kind\":\"ready\"}\n\n");
+    let frame = super::next_frame(&mut framer, Framing::SseJsonData, false);
     let FramePoll::Item { payload, metadata } = frame else {
         panic!("expected one dispatched SSE event");
     };
     assert_eq!(payload, br#"{"kind":"ready"}"#);
     assert_eq!(metadata.id.as_deref(), Some("event-7"));
-    assert_eq!(metadata.retry, Some(1_250));
+    assert_eq!(framer.retry, Some(1_250));
 }
 
 #[test]
@@ -222,7 +222,8 @@ fn sse_tolerates_crlf_terminators() {
 
 /// Issue #1330: WHATWG's "if the file ends in the middle of an event, before the final empty line,
 /// the incomplete event is not dispatched", whether its last line is terminated or not, and the
-/// `id` and `retry` it set are dropped with it. Every framing of SSE reads it the same way.
+/// `id` it set is dropped with it (a `retry` applies on read, as #1423 pins). Every framing of SSE
+/// reads it the same way.
 #[test]
 fn sse_discards_an_event_cut_off_at_eof() {
     for framing in [Framing::Sse, Framing::SseEvent, Framing::SseJsonData] {
@@ -312,7 +313,6 @@ fn a_bare_cr_terminates_an_sse_line() {
             payload: b"1".to_vec(),
             metadata: SseMetadata {
                 id: Some("7".to_owned()),
-                retry: None,
             },
         }
     );
@@ -413,7 +413,6 @@ fn a_carried_frame_buffer_resumes_where_it_stopped() {
             payload: b"1\n2".to_vec(),
             metadata: SseMetadata {
                 id: Some("7".to_owned()),
-                retry: None,
             },
         }
     );
@@ -1108,28 +1107,30 @@ fn an_sse_retry_counts_only_as_ascii_digits() {
         ("retry:", None),
         ("retry: 99999999999999999999999", None),
     ] {
-        let mut buf = format!("{field}\ndata: 1\n\n").into_bytes();
+        let mut framer = frame_buffer(format!("{field}\ndata: 1\n\n").as_bytes());
         assert_eq!(
-            next_frame(&mut buf, Framing::SseJsonData, false),
-            FramePoll::Item {
-                payload: b"1".to_vec(),
-                metadata: SseMetadata { id: None, retry },
-            },
+            super::next_frame(&mut framer, Framing::SseJsonData, false),
+            super::frame_item(b"1".to_vec()),
             "{field}"
         );
+        assert_eq!(framer.retry, retry, "{field}");
     }
-    // An ignored `retry` leaves the one an earlier line of the same event set.
-    for field in ["retry: 12a", "retry:"] {
-        let mut buf = format!("retry: 5\n{field}\ndata: 1\n\n").into_bytes();
+    // An ignored `retry`, an overflowing one included, leaves the one an earlier line of the same
+    // event set, both for the stream and in the event envelope.
+    for field in ["retry: 12a", "retry:", "retry: 99999999999999999999999"] {
+        let body = format!("retry: 5\n{field}\ndata: 1\n\n");
+        let mut framer = frame_buffer(body.as_bytes());
         assert_eq!(
-            next_frame(&mut buf, Framing::SseJsonData, false),
-            FramePoll::Item {
-                payload: b"1".to_vec(),
-                metadata: SseMetadata {
-                    id: None,
-                    retry: Some(5)
-                },
-            },
+            super::next_frame(&mut framer, Framing::SseJsonData, false),
+            super::frame_item(b"1".to_vec()),
+            "{field}"
+        );
+        assert_eq!(framer.retry, Some(5), "{field}");
+        let mut buf = body.into_bytes();
+        let (items, _) = drain(&mut buf, Framing::SseEvent, false);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&items[0]).unwrap(),
+            serde_json::json!({"data": "1", "retry": 5}),
             "{field}"
         );
     }
