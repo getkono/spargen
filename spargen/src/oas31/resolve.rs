@@ -61,8 +61,10 @@ impl<'doc> Resolver<'doc> {
     /// apart from the schema that holds it, so the dialect that schema's `$schema` set, which the
     /// target inherited where the holder was parsed, is found again here. An enclosing `$schema`
     /// naming a dialect spargen does not read is `E002` where the holder is parsed, and is passed
-    /// over. The default applies to the referenced files too, which declare no `jsonSchemaDialect`
-    /// of their own that spargen reads.
+    /// over. The default is that of the file holding the node: the root document's
+    /// `jsonSchemaDialect` in the root document, a referenced file's own where that file is a
+    /// complete OpenAPI document declaring one, and otherwise the OAS dialect, since
+    /// `jsonSchemaDialect` is the default "within this OAS document" alone.
     pub(super) fn dialect_at(
         &self,
         file: crate::diag::FileId,
@@ -81,7 +83,14 @@ impl<'doc> Resolver<'doc> {
             }
             enclosing = at.parent();
         }
-        self.document.json_schema_dialect
+        if file == self.bundle.root_id() {
+            return self.document.json_schema_dialect;
+        }
+        self.document
+            .referenced_dialects
+            .get(&file)
+            .copied()
+            .unwrap_or(super::SchemaDialect::Oas)
     }
 
     /// The load-order-independent spelling of `file`: empty for the root document; the

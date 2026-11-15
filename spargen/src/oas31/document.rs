@@ -12,9 +12,13 @@ use super::Schema;
 pub(crate) struct Document {
     /// Whether the declared OpenAPI feature version is 3.2.x.
     pub(crate) is_oas32: bool,
-    /// The dialect `jsonSchemaDialect` names, the default of every Schema Object no `$schema`
-    /// overrides.
+    /// The dialect the root document's `jsonSchemaDialect` names, the default of every Schema
+    /// Object in it that no `$schema` overrides.
     pub(crate) json_schema_dialect: SchemaDialect,
+    /// The same default for each referenced file that is a complete OpenAPI document and whose
+    /// `jsonSchemaDialect` names a dialect other than the OAS one. Any other referenced file is
+    /// read under the OAS dialect.
+    pub(crate) referenced_dialects: std::collections::HashMap<crate::diag::FileId, SchemaDialect>,
     /// `info`.
     pub(crate) info: Info,
     /// `servers`.

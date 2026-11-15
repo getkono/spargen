@@ -76,39 +76,24 @@ pub(crate) fn parse_document(
 
     let is_oas32 = openapi_text.starts_with("3.2.");
 
-    let mut json_schema_dialect = SchemaDialect::Oas;
-    if let Some(dialect) = root.get("jsonSchemaDialect") {
-        let dialect_text = dialect.as_str();
-        let accepted = match dialect_text {
-            Some(OAS32_DIALECT) if !is_oas32 => None,
-            Some(uri) => schema_dialect(uri),
-            None => None,
-        };
-        if let Some(accepted) = accepted {
-            json_schema_dialect = accepted;
-        } else {
-            Diagnostic::error(
-                Code::UnsupportedDialect,
-                provenance(&root_pointer.push("jsonSchemaDialect"), dialect),
-            )
-            .message(
-                "jsonSchemaDialect is neither the OpenAPI Schema Object dialect nor plain JSON \
-                 Schema 2020-12",
-            )
-            .remedy(if is_oas32 {
-                format!(
-                    "set jsonSchemaDialect to `{OAS31_DIALECT}`, `{OAS32_DIALECT}` or \
-                     `{JSON_SCHEMA_2020_12_DIALECT}`, or omit it"
-                )
-            } else {
-                format!(
-                    "set jsonSchemaDialect to `{OAS31_DIALECT}` or \
-                     `{JSON_SCHEMA_2020_12_DIALECT}`, or omit it"
-                )
-            })
-            .emit(diags);
-        }
-    }
+    let json_schema_dialect = document_dialect(root, is_oas32, diags);
+    // `jsonSchemaDialect` is the default "within this OAS document", so it does not reach into a
+    // referenced file: a referenced file that is a complete OpenAPI document reads its own, and
+    // any other referenced file is read under the OAS dialect (3.2.0.md, Specifying Schema
+    // Dialects).
+    let referenced_dialects = bundle
+        .file_ids()
+        .filter(|&file| file != bundle.root_id())
+        .filter_map(|file| {
+            let value = bundle.value_at(file);
+            let openapi = value.get("openapi")?;
+            let is_oas32 = openapi
+                .as_str()
+                .is_some_and(|text| text.starts_with("3.2."));
+            Some((file, document_dialect(value, is_oas32, diags)))
+        })
+        .filter(|(_, dialect)| *dialect != SchemaDialect::Oas)
+        .collect();
 
     let mut info = root
         .get("info")
@@ -174,6 +159,7 @@ pub(crate) fn parse_document(
     let document = Document {
         is_oas32,
         json_schema_dialect,
+        referenced_dialects,
         info,
         servers,
         paths,
@@ -183,6 +169,45 @@ pub(crate) fn parse_document(
         provenance: provenance(&root_pointer, root),
     };
     diags.result(document)
+}
+
+/// The default dialect `jsonSchemaDialect` names at the root of the complete OpenAPI document
+/// `root`, a 3.2 document when `is_oas32`: the OAS dialect when it is absent, and `E002` (read as
+/// the OAS dialect) when it names one spargen does not read, or the 3.2 spelling in a 3.1
+/// document.
+fn document_dialect(root: &SpannedValue, is_oas32: bool, diags: &mut Diagnostics) -> SchemaDialect {
+    let Some(dialect) = root.get("jsonSchemaDialect") else {
+        return SchemaDialect::Oas;
+    };
+    let accepted = match dialect.as_str() {
+        Some(OAS32_DIALECT) if !is_oas32 => None,
+        Some(uri) => schema_dialect(uri),
+        None => None,
+    };
+    if let Some(accepted) = accepted {
+        return accepted;
+    }
+    Diagnostic::error(
+        Code::UnsupportedDialect,
+        provenance(&JsonPointer::root().push("jsonSchemaDialect"), dialect),
+    )
+    .message(
+        "jsonSchemaDialect is neither the OpenAPI Schema Object dialect nor plain JSON Schema \
+         2020-12",
+    )
+    .remedy(if is_oas32 {
+        format!(
+            "set jsonSchemaDialect to `{OAS31_DIALECT}`, `{OAS32_DIALECT}` or \
+             `{JSON_SCHEMA_2020_12_DIALECT}`, or omit it"
+        )
+    } else {
+        format!(
+            "set jsonSchemaDialect to `{OAS31_DIALECT}` or `{JSON_SCHEMA_2020_12_DIALECT}`, or \
+             omit it"
+        )
+    })
+    .emit(diags);
+    SchemaDialect::Oas
 }
 
 /// Whether an `openapi` value names a release spargen implements: `3.1.<patch>` or `3.2.<patch>`.
