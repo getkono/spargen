@@ -132,6 +132,15 @@ pub fn enum_variants(code: &str, ty: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether `name` is a struct's `…Required` struct in generated source `code`: the struct a model
+/// or `…Params` type converts from, holding its required members (#1441).
+#[allow(dead_code)]
+pub fn is_required_struct(code: &str, name: &str) -> bool {
+    let from = format!("impl std::convert::From<{name}>");
+    code.lines()
+        .any(|line| line.trim_start().starts_with(&from))
+}
+
 /// The names of `pub struct`s in generated source that begin with `prefix` and whose remainder
 /// satisfies `suffix_ok`, in source order.
 ///
@@ -139,13 +148,15 @@ pub fn enum_variants(code: &str, ty: &str) -> Vec<String> {
 /// generated module embeds the runtime, whose own items can share a prefix (`pub struct L` also
 /// matches `LinkPaginator`), and a count alone cannot say *which* types were emitted when it
 /// disagrees. Returning the names makes a failure legible and makes an off-by-a-constant bound
-/// impossible to mistake for a bound.
+/// impossible to mistake for a bound. A struct's `…Required` struct is no type a schema lowered
+/// to, so it is left out: a name some type converts from (#1441).
 #[allow(dead_code)]
 pub fn declared_types(code: &str, prefix: &str, suffix_ok: impl Fn(&str) -> bool) -> Vec<String> {
     code.lines()
         .filter_map(|line| line.trim_start().strip_prefix("pub struct "))
         .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
         .filter(|name| !name.is_empty())
+        .filter(|name| !is_required_struct(code, name))
         .filter_map(|name| name.strip_prefix(prefix).map(|tail| (name, tail)))
         .filter(|(_, tail)| suffix_ok(tail))
         .map(|(name, _)| name.to_owned())

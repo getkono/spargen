@@ -531,6 +531,18 @@ pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names
             }
         }
     });
+    let setters: Vec<TokenStream> = setters.collect();
+    // A bundle of required parameters alone has no setter, so no inherent `impl`. Setters named
+    // after fields can trip `wrong_self_convention` when a param is named `is_*`/`to_*`/etc.; a
+    // consuming builder setter is the intended shape, so allow it here.
+    let setters = (!setters.is_empty()).then(|| {
+        quote! {
+            #[allow(dead_code, deprecated, clippy::wrong_self_convention)]
+            impl #ident {
+                #(#setters)*
+            }
+        }
+    });
     let (derive_default, required) = if operation.params_required() {
         (
             None,
@@ -553,12 +565,7 @@ pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names
 
         #required
 
-        // Setters named after fields can trip `wrong_self_convention` when a param is named
-        // `is_*`/`to_*`/etc.; a consuming builder setter is the intended shape, so allow it here.
-        #[allow(dead_code, deprecated, clippy::wrong_self_convention)]
-        impl #ident {
-            #(#setters)*
-        }
+        #setters
     }
 }
 

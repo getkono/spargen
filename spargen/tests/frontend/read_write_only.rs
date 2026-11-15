@@ -1,6 +1,6 @@
 //! `readOnly`/`writeOnly` properties: `required` applies to them in one direction only, so the one
 //! generated struct relaxes it (`W015`) — a `writeOnly` member decodes as absent, and a `readOnly`
-//! one is never serialized and is not a `new` argument (#1326).
+//! one is never serialized and is not a field of its `…Required` struct (#1326).
 
 use super::*;
 
@@ -67,9 +67,9 @@ fn a_required_read_or_write_only_property_is_relaxed_and_warned() {
         relaxed(&report),
         [
             "property `id` of `User` is `required` and `readOnly`: a request leaves it out, so its \
-             member may be absent, is never serialized, and is not a `new` argument",
+             member may be absent, is never serialized, and is not a field of its `…Required` struct",
             "property `password` of `User` is `required` and `writeOnly`: a response leaves it \
-             out, so its member may be absent when decoded, and `new` still takes it",
+             out, so its member may be absent when decoded, and its `…Required` struct still holds it",
         ],
         "{report:#?}"
     );
@@ -82,9 +82,9 @@ fn a_required_read_or_write_only_property_is_relaxed_and_warned() {
             "#[serde(rename = \"name\")] pub name: UserName,",
             "#[serde( rename = \"password\", default, skip_serializing_if = \"Option::is_none\", deserialize_with = \"decode_present\", )] pub password: Option<UserPassword>,",
             "#[serde( rename = \"nickname\", default, skip_serializing, deserialize_with = \"decode_present\", )] pub nickname: Option<UserNickname>,",
-            // `new` takes the `writeOnly` member every request carries, not the `readOnly` one,
-            // which a setter sets as it does an optional member.
-            "pub fn new(name: UserName, password: UserPassword) -> Self { Self { id: None, name, password: Some(password), nickname: None, } }",
+            // The `…Required` struct holds the `writeOnly` member every request carries, not the
+            // `readOnly` one, which a setter sets as it does an optional member.
+            "fn from(required: UserRequired) -> Self { Self { id: None, name: required.name, password: Some(required.password), nickname: None, } }",
             "pub fn with_id(mut self, value: UserId) -> Self {",
         ],
     );
@@ -129,7 +129,8 @@ fn a_nullable_required_write_only_property_is_a_nullable_member() {
         &code,
         &[
             "pub token: super::support::Nullable<SecretToken>,",
-            "pub fn new(token: Option<SecretToken>) -> Self { Self { token: match token { \
+            "pub token: Option<SecretToken>, }",
+            "fn from(required: SecretRequired) -> Self { Self { token: match required.token { \
              Some(value) => super::support::Nullable::Value(value), None => \
              super::support::Nullable::Null, }, } }",
         ],

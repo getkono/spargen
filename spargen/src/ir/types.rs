@@ -499,7 +499,8 @@ pub(crate) struct Field {
     /// `deprecated: true`, emitted as a "Deprecated per the spec." rustdoc note on the field.
     pub(crate) deprecated: bool,
     /// `readOnly`: the server sets the member, so it is never serialized into a request, and is
-    /// not a `new` argument even when `required` (see [`Field::constructed`]).
+    /// not a field of its struct's `…Required` struct even when `required` (see
+    /// [`Field::constructed`]).
     pub(crate) read_only: bool,
     /// `writeOnly`: the server accepts the member in requests and leaves it out of responses, so
     /// it decodes as absent even when `required` (see [`Field::decodes_optional`]).
@@ -527,15 +528,16 @@ impl Field {
         !self.required || self.read_only || self.write_only
     }
 
-    /// Whether the struct's `new` takes the member: a `required` property that is not `readOnly`.
-    /// A `required` `writeOnly` one stays an argument, because every request must carry it, and
-    /// `new` stores `Some` of it.
+    /// Whether the struct's `…Required` struct holds the member: a `required` property that is
+    /// not `readOnly`.
+    /// A `required` `writeOnly` one stays in it, because every request must carry it, and the
+    /// conversion stores `Some` of it.
     pub(crate) fn constructed(&self) -> bool {
         self.required && !self.read_only
     }
 
     /// The schema `default` an absent member stands for, when it is [applied]: the value its
-    /// generated `{field}_or_default` accessor returns for an absent member. Decoding and `new`
+    /// generated `{field}_or_default` accessor returns for an absent member. Decoding and building
     /// leave the member absent either way.
     ///
     /// [applied]: FieldDefault::applied

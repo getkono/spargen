@@ -192,9 +192,9 @@ fn a_ref_with_a_union_sibling_is_intersected_with_its_target() {
             // The Rust type the position is bound to, read from where the position is used.
             let bound: String = match position {
                 "request body" => types
-                    .split("body: &types::")
+                    .split("body: impl Into<types::")
                     .nth(1)
-                    .and_then(|rest| rest.split([',', ')', '\n']).next())
+                    .and_then(|rest| rest.split(['>', ',', ')', '\n']).next())
                     .map(str::to_owned),
                 "response body" => types
                     .split("ResponseValue<types::")

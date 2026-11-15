@@ -348,12 +348,14 @@ paths:
     }
 }
 
-/// `new` takes every constructed member in declaration order (a required `writeOnly` one stored as
-/// present, `null` included) and sets every other member as decoding an absent one does; a
-/// setter follows for each member `new` does not take, a nullable one's beside its `_null`
-/// setter, and for the overflow map, then a `{field}_or_default` accessor per member with an
-/// applied default, returning a `Copy` value as it is and cloning any other. `Default` is derived
-/// where `new` takes nothing, and absent otherwise.
+/// A struct with a constructed member has a `…Required` struct holding each one in declaration
+/// order, typed as a required field is, and converts from it (a required `writeOnly` one stored as
+/// present, `null` included), setting every other member as decoding an absent one does; it has no
+/// `new` and no `Default`. A setter follows for each member the `…Required` struct does not hold,
+/// taking `impl Into<T>` but where `T` is numeric, a nullable one's beside its `_null` setter, and
+/// for the overflow map, then a `{field}_or_default` accessor per member with an applied default,
+/// returning a `Copy` value as it is and cloning any other. A struct with no constructed member
+/// has `new()` and derives `Default`.
 #[test]
 fn constructors_take_the_constructed_members_and_set_the_rest() {
     let types = types(false, false);
@@ -361,19 +363,30 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
         &types,
         &[
             concat!(
-                r#"implThing{///A`Thing`holdingtherequiredmembersgiven,indeclarationorder,andeveryoptionalmember"#,
-                r#"unset,amemberwithaschema`default`included."#,
-                r#"#[allow(clippy::too_many_arguments)]#[must_use]pubfnnew(label:ThingLabel,maybe:Option<ThingMaybe>,"#,
-                r#"secret:ThingSecret,hint:Option<ThingHint>,)->Self{Self{id:None,label,maybe,secret:Some(secret),"#,
-                r#"hint:matchhint{Some(value)=>super::support::Nullable::Value(value),None=>super::support::Nullable::Null,},"#,
+                r#"///Therequiredmembersof`Thing`,whichconvertsfromthiswitheveryothermemberunset."#,
+                r#"#[derive(Debug,Clone,PartialEq)]pubstructThingRequired{///The`label`member.publabel:ThingLabel,"#,
+                r#"///The`maybe`member.pubmaybe:Option<ThingMaybe>,///The`secret`member."#,
+                r#"///Write-only:theserveracceptsitinrequestsandomitsitfromresponses,soitdecodesasabsent."#,
+                r#"pubsecret:ThingSecret,///The`hint`member."#,
+                r#"///Write-only:theserveracceptsitinrequestsandomitsitfromresponses,soitdecodesasabsent."#,
+                r#"pubhint:Option<ThingHint>,}"#,
+                r#"implstd::convert::From<ThingRequired>forThing{"#,
+                r#"///A`Thing`holdingthemembers`ThingRequired`holds,andeveryoptionalmemberunset,"#,
+                r#"amemberwithaschema`default`included.fnfrom(required:ThingRequired)->Self{Self{id:None,"#,
+                r#"label:required.label,maybe:required.maybe,secret:Some(required.secret),"#,
+                r#"hint:matchrequired.hint{Some(value)=>super::support::Nullable::Value(value),None=>super::support::Nullable::Null,},"#,
                 r#"both:None,note:super::support::Nullable::Absent,count:None,"#,
-                r#"color:None,level:None,old:None,additional:BTreeMap::new(),}}"#,
-                r#"///Setthe`id`member.#[must_use]pubfnwith_id(mutself,value:ThingId)->Self{self.id=Some(value);self}"#,
-                r#"///Setthe`both`member.#[must_use]pubfnwith_both(mutself,value:ThingBoth)->Self{self.both=Some(value);self}"#,
+                r#"color:None,level:None,old:None,additional:BTreeMap::new(),}}}"#,
+                r#"implThing{///Setthe`id`member.#[must_use]pubfnwith_id(mutself,value:ThingId)->Self{self.id=Some(value);self}"#,
+                r#"///Setthe`both`member.#[must_use]pubfnwith_both(mutself,value:implstd::convert::Into<ThingBoth>)->Self"#,
+                r#"{self.both=Some(value.into());self}"#,
                 r#"///Setthe`note`member:avalue,or`Nullable::Null`foranexplicit`null`.#[must_use]pubfnwith_note(mutself,"#,
                 r#"value:implstd::convert::Into<super::support::Nullable<ThingNote>>,)->Self{self.note=value.into();self}"#,
                 r#"///Setthe`note`membertoanexplicit`null`.#[must_use]pubfnwith_note_null(mutself)->Self"#,
                 r#"{self.note=super::support::Nullable::Null;self}"#,
+                r#"///Setthe`count`member.#[must_use]pubfnwith_count(mutself,value:ThingCount)->Self{self.count=Some(value);self}"#,
+                r#"///Setthe`color`member.#[must_use]pubfnwith_color(mutself,value:implstd::convert::Into<Color>)->Self"#,
+                r#"{self.color=Some(value.into());self}"#,
             ),
             concat!(
                 r#"///Setthemembersnopropertydeclares,replacinganysetbefore.Anentrywhosekeyisadeclaredmember'snameisnotsent."#,
@@ -389,8 +402,7 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
             "#[derive(Debug,Clone,PartialEq,Default,Serialize,Deserialize)]pubstructLoose{",
             concat!(
                 r#"implLoose{///A`Loose`witheveryoptionalmemberunset,amemberwithaschema`default`included."#,
-                r#"`Default`buildsthesamevalue.#[allow(clippy::too_many_arguments)]"#,
-                r#"#[must_use]pubfnnew()->Self{Self{x:None}}"#,
+                r#"`Default`buildsthesamevalue.#[must_use]pubfnnew()->Self{Self{x:None}}"#,
             ),
             "#[derive(Debug,Clone,PartialEq,Default,Serialize,Deserialize)]pubstructDefaulted{",
             "pubfnnew()->Self{Self{n:None,s:None,b:None}}",
@@ -402,8 +414,10 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
             r#"pubfnb_or_default(&self)->DefaultedB{self.b.unwrap_or(true)}"#,
             concat!(
                 r#"#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]pubstructOnly{#[serde(rename="a")]puba:OnlyA,}"#,
-                r#"implOnly{///A`Only`holdingeverymembergiven,indeclarationorder.#[allow(clippy::too_many_arguments)]"#,
-                r#"#[must_use]pubfnnew(a:OnlyA)->Self{Self{a}}}"#,
+                r#"///Therequiredmembersof`Only`,whichconvertsfromthiswitheveryothermemberunset."#,
+                r#"#[derive(Debug,Clone,PartialEq)]pubstructOnlyRequired{///The`a`member.puba:OnlyA,}"#,
+                r#"implstd::convert::From<OnlyRequired>forOnly{///A`Only`holdingthemembers`OnlyRequired`holds."#,
+                r#"fnfrom(required:OnlyRequired)->Self{Self{a:required.a}}}"#,
             ),
         ],
     );
@@ -411,8 +425,11 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
     for absent in [
         "pubfnwith_label(",
         "pubfnwith_secret(",
+        "pubfnnew(",
         "implstd::default::DefaultforThing",
     ] {
         assert!(!thing.contains(absent), "`{absent}` in {thing}");
     }
+    // Every member of `Only` is required, so it has no inherent method at all.
+    assert!(!types.contains("implOnly{"), "{types}");
 }

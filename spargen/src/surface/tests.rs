@@ -198,7 +198,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
 fn the_kind_list_covers_the_whole_enum() {
     assert_eq!(
         all_kinds().len(),
-        57,
+        56,
         "a `ChangeKind` variant reached the exhaustive match without joining the list"
     );
 }

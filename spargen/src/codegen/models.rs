@@ -579,7 +579,8 @@ fn emit_base64_newtype(
 
 /// The name of the private associated function a struct with declared members and a typed
 /// overflow map carries: the overflow's `serialize_with`. The struct's other methods are `new`,
-/// the `with_` setters and the `_or_default` accessors, and this name is none of them.
+/// where no member is required, the `with_` setters and the `_or_default` accessors, and this
+/// name is none of them.
 const SERIALIZE_OVERFLOW: &str = "serialize_overflow";
 
 /// A struct's typed `additionalProperties` field, flattened into the struct's object, and the
@@ -825,26 +826,32 @@ struct StructConstructors {
     constructors: TokenStream,
 }
 
-/// The inherent `impl` of object struct `id`: `new`, taking every [constructed] member by value in
-/// declaration order (every required member but a `readOnly` one; a `writeOnly` one is stored as
-/// `Some` of it) and setting every other member as decoding an absent one does (`None` or
-/// `Nullable::Absent`, a schema `default` included, and the overflow map empty), then one
-/// consuming `with_<field>` setter per member `new` does not take and for the overflow map, in
-/// field order, then one `{field}_or_default` accessor per member with an
-/// [applied default](Field::applied_default) ([`default_accessor`]). A non-nullable member's
-/// setter takes the bare `T` by value, as the `…Params` setters take theirs, and stores `Some` of
-/// it. A nullable member's takes
-/// `impl Into<Nullable<T>>`, so a value or `Nullable::Null` fits, and stores what it converts to;
-/// `Nullable` has no `From<Option<T>>`, so a `None` meaning "unset" never becomes a `null` that
-/// clears the member. Its `with_<field>_null()` setter stores that explicit `null`. The overflow
-/// map's takes the whole map.
+/// How object struct `id` is built, and its inherent `impl`.
 ///
-/// So `new` with the constructed members equals what decoding an object of just those members
-/// yields, and so does serializing it: a member left unset is left off the wire. With no
-/// constructed member, `Default` is derived, and builds what `new()` does. Setter names are
-/// `with_` before the field identifier, or the null setter's stem ([`Names::null_setters`]),
-/// unraw, so they are distinct exactly when those identifiers are, which allocation makes them
-/// within one struct; the accessors are allocated after them ([`Names::default_accessors`]).
+/// With a [constructed] member (every required member but a `readOnly` one), the `{Type}Required`
+/// struct ([`Names::required_structs`]), one `pub` field per constructed member in declaration
+/// order, typed as a required field is (`T`, or `Option<T>` when nullable), and `From` it for the
+/// struct: each constructed member taken from it (a `writeOnly` one stored as `Some` of it), and
+/// every other member set as decoding an absent one does (`None` or `Nullable::Absent`, a schema
+/// `default` included, and the overflow map empty). With none, `new()`, building that value, and
+/// `Default`, derived, which builds the same.
+///
+/// Then one consuming `with_<field>` setter per member the `…Required` struct does not hold and
+/// for the overflow map, in field order, then one `{field}_or_default` accessor per member with an
+/// [applied default](Field::applied_default) ([`default_accessor`]). A non-nullable member's
+/// setter takes `impl Into<T>` ([`takes_into`]), as the `…Params` setters take theirs, and stores
+/// `Some` of it. A nullable member's takes `impl Into<Nullable<T>>`, so a value or
+/// `Nullable::Null` fits, and stores what it converts to; `Nullable` has no `From<Option<T>>`, so
+/// a `None` meaning "unset" never becomes a `null` that clears the member. Its
+/// `with_<field>_null()` setter stores that explicit `null`. The overflow map's takes the whole
+/// map.
+///
+/// So the struct built from its required members equals what decoding an object of just those
+/// members yields, and so does serializing it: a member left unset is left off the wire. Setter
+/// names are `with_` before the field identifier, or the null setter's stem
+/// ([`Names::null_setters`]), unraw, so they are distinct exactly when those identifiers are,
+/// which allocation makes them within one struct; the accessors are allocated after them
+/// ([`Names::default_accessors`]).
 ///
 /// [constructed]: Field::constructed
 fn emit_struct_constructors(

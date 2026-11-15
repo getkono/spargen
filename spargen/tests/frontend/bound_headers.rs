@@ -49,14 +49,14 @@ fn a_bound_header_leaves_every_operations_arguments() {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    // `listItems` keeps its other required header, in `ListItemsParams::new`, and its query
+    // `listItems` keeps its other required header, in `ListItemsParamsRequired`, and its query
     // bundle, and loses the bound one.
     assert!(
-        flat.contains("pub async fn list_items( &self, params: ListItemsParams, )"),
+        flat.contains("pub async fn list_items( &self, params: impl Into<ListItemsParams>, )"),
         "{code}"
     );
     assert!(
-        flat.contains("pub fn new(x_trace: impl Into<types::XTrace>) -> Self"),
+        flat.contains("pub struct ListItemsParamsRequired { ///The `X-Trace` parameter. pub x_trace: types::XTrace, }"),
         "{code}"
     );
     assert!(

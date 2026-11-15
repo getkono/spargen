@@ -1314,15 +1314,17 @@ paths:
             "{field}: {code}"
         );
     }
-    for (field, ty) in [("x_th", "XTh"), ("sq", "Sq")] {
+    // A setter takes `impl Into<T>`, but a number, whose literal takes its type from the argument.
+    for (field, ty, arg) in [
+        ("x_th", "XTh", "impl Into<types::XTh>"),
+        ("sq", "Sq", "types::Sq"),
+    ] {
         assert!(
             flat.contains(&format!("pub {field}: Option<types::{ty}>,")),
             "{field}: {code}"
         );
         assert!(
-            flat.contains(&format!(
-                "pub fn {field}(mut self, value: types::{ty}) -> Self"
-            )),
+            flat.contains(&format!("pub fn {field}(mut self, value: {arg}) -> Self")),
             "{field}: {code}"
         );
     }

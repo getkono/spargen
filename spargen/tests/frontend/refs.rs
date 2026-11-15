@@ -866,7 +866,7 @@ components:
         );
     }
     let code = std::fs::read_to_string(out).unwrap();
-    assert_eq!(code.matches("pub struct Pet").count(), 1, "{code}");
+    assert_eq!(code.matches("pub struct Pet {").count(), 1, "{code}");
 }
 
 /// A relative-file `$ref` whose target cannot be read is an `E011` located at that `$ref`, with its
