@@ -695,8 +695,9 @@ struct StructConstructors {
 /// `Nullable::Absent`, a schema `default` included, and the overflow map empty), then one
 /// consuming `with_<field>` setter per member `new` does not take and for the overflow map, in
 /// field order, then one `{field}_or_default` accessor per member with an
-/// [applied default](Field::applied_default) ([`default_accessor`]). A non-nullable member's setter takes the bare `T` by value, as
-/// the `…Params` setters take theirs, and stores `Some` of it. A nullable member's takes
+/// [applied default](Field::applied_default) ([`default_accessor`]). A non-nullable member's
+/// setter takes the bare `T` by value, as the `…Params` setters take theirs, and stores `Some` of
+/// it. A nullable member's takes
 /// `impl Into<Nullable<T>>`, so a value or `Nullable::Null` fits, and stores what it converts to;
 /// `Nullable` has no `From<Option<T>>`, so a `None` meaning "unset" never becomes a `null` that
 /// clears the member. Its `with_<field>_null()` setter stores that explicit `null`. The overflow
