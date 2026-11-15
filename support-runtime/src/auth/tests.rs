@@ -530,6 +530,39 @@ fn a_failed_token_provider_is_a_typed_credential_provider_error() {
     assert!(provider.downcast_ref::<AuthError>().is_some());
 }
 
+/// A provider whose token-endpoint call failed chains that failure: walking `source()` from the
+/// request error reaches the provider's own cause, and each level displays only its own text.
+#[test]
+fn a_failed_token_provider_chains_its_cause_below_the_auth_error() {
+    let mut core = core();
+    core.set_credential(
+        "token",
+        Credential::Provider(Arc::new(|| {
+            Box::pin(async {
+                Err(AuthError::with_source(
+                    "token endpoint",
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out"),
+                ))
+            }) as TokenFuture
+        })),
+    );
+    let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
+    assert!(matches!(
+        error,
+        Error::RequestConstruction(RequestError::CredentialProvider { .. })
+    ));
+    let request = std::error::Error::source(&error).expect("the request error");
+    let auth = std::error::Error::source(request).expect("the provider's error");
+    assert!(auth.downcast_ref::<AuthError>().is_some());
+    assert_eq!(auth.to_string(), "token endpoint");
+    let io = std::error::Error::source(auth)
+        .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+        .expect("the provider's cause is the io::Error it was built with");
+    assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
+    assert_eq!(io.to_string(), "connect timed out");
+    assert!(std::error::Error::source(io).is_none());
+}
+
 /// A provider under a scheme that takes no token is a registration mismatch, and it must stay
 /// one regardless of whether a refresh would have worked: the provider is never asked.
 ///
