@@ -237,6 +237,97 @@ paths:
     }
 }
 
+/// The plain JSON Schema 2020-12 dialect URI.
+const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
+
+/// #1452: the plain JSON Schema 2020-12 dialect is the OAS base dialect without the OAS
+/// vocabulary, so every keyword it defines is one spargen lowers or reports. It is accepted as
+/// `jsonSchemaDialect` and as a Schema Object's own `$schema`, on 3.1 and 3.2 alike, and an
+/// ordinary schema under it generates with nothing to report.
+#[test]
+fn the_plain_json_schema_2020_12_dialect_is_accepted_in_both_positions() {
+    let spec = |version: &str, document_dialect: &str, schema_dialect: &str| {
+        format!(
+            r##"
+openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
+{document_dialect}
+paths:
+  /ping:
+    get:
+      operationId: ping
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: {{ $ref: '#/components/schemas/S' }}
+components:
+  schemas:
+    S:
+      {schema_dialect}
+      type: object
+      required: [name]
+      properties:
+        name: {{ type: string }}
+"##
+        )
+    };
+    let document_dialect = format!("jsonSchemaDialect: {JSON_SCHEMA_2020_12}");
+    let schema_dialect = format!("$schema: {JSON_SCHEMA_2020_12}");
+    for version in ["3.1.0", "3.2.0"] {
+        for (document, schema) in [
+            (document_dialect.as_str(), ""),
+            ("", schema_dialect.as_str()),
+            (document_dialect.as_str(), schema_dialect.as_str()),
+        ] {
+            let report = generate(&spec(version, document, schema));
+            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(report.diagnostics().is_empty(), "{report:#?}");
+        }
+    }
+}
+
+/// Every other dialect stays `E002` in both positions: the plain 2020-12 URI is accepted by its
+/// exact spelling, and an earlier draft, or the same URI with a fragment or a trailing slash, is not
+/// it.
+#[test]
+fn e002_a_json_schema_dialect_other_than_2020_12_is_still_rejected() {
+    for dialect in [
+        "https://json-schema.org/draft/2019-09/schema",
+        "https://json-schema.org/draft/2020-12/schema#",
+        "https://json-schema.org/draft/2020-12/schema/",
+    ] {
+        let at_root = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\njsonSchemaDialect: {dialect}\npaths: {{}}\n"
+        );
+        let report = generate(&at_root);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{dialect}: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::UnsupportedDialect),
+            "{dialect}: {report:#?}"
+        );
+
+        let on_schema = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  schemas:\n    S:\n      $schema: '{dialect}'\n      type: string\n"
+        );
+        let report = generate(&on_schema);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{dialect}: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::UnsupportedDialect),
+            "{dialect}: {report:#?}"
+        );
+    }
+}
+
 #[test]
 fn oas32_query_method_operation_generates() {
     // The OpenAPI 3.2 fixed `QUERY` path-item method is fully supported: it lowers to an operation
