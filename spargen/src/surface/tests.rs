@@ -14,7 +14,6 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::OperationRemoved,
         ChangeKind::MethodRenamed,
         ChangeKind::UrlAccessorArgsChanged,
-        ChangeKind::PositionalArgsReordered,
         ChangeKind::RequestBodyAdded,
         ChangeKind::RequestBodyRemoved,
         ChangeKind::RequestBodyTypeChanged,
@@ -76,7 +75,6 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::UrlAccessorArgsChanged
-            | ChangeKind::PositionalArgsReordered
             | ChangeKind::RequestBodyAdded
             | ChangeKind::RequestBodyRemoved
             | ChangeKind::RequestBodyTypeChanged
@@ -141,7 +139,6 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::OperationRemoved => "OperationRemoved",
         ChangeKind::MethodRenamed => "MethodRenamed",
         ChangeKind::UrlAccessorArgsChanged => "UrlAccessorArgsChanged",
-        ChangeKind::PositionalArgsReordered => "PositionalArgsReordered",
         ChangeKind::RequestBodyAdded => "RequestBodyAdded",
         ChangeKind::RequestBodyRemoved => "RequestBodyRemoved",
         ChangeKind::RequestBodyTypeChanged => "RequestBodyTypeChanged",
@@ -316,7 +313,13 @@ fn the_surface_spellings_follow_the_table() {
     assert_eq!(UrlArgSurface::Params.to_string(), "parameters bundle");
     let kinds = [
         (
-            TypeSurface::Struct(BTreeMap::new(), None, BTreeMap::new(), BTreeSet::new()),
+            TypeSurface::Struct(
+                BTreeMap::new(),
+                None,
+                BTreeMap::new(),
+                BTreeSet::new(),
+                None,
+            ),
             "struct",
         ),
         (

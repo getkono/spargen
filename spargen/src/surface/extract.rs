@@ -52,18 +52,6 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
         if operation.url_takes_params() {
             url_args.push(UrlArgSurface::Params);
         }
-        // Then `…Params::new`'s arguments: every required bundled parameter, in declaration order,
-        // as codegen's `params_constructor` takes them.
-        let positional_args = positional
-            .into_iter()
-            .chain(
-                operation
-                    .params
-                    .iter()
-                    .filter(|param| param.required && !param.is_positional()),
-            )
-            .map(key_of)
-            .collect();
         for param in &operation.params {
             // A param that sends an explicit `null` is set through `Nullable<T>`, so the same
             // nullable type behind another serialization is a different surface.
@@ -130,7 +118,6 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                         ),
                     }),
                 url_args,
-                positional_args,
                 params,
                 param_fields,
                 request_body,
@@ -168,10 +155,10 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                     bindings.insert(field_name.clone(), field.name.wire.clone());
                     // An optional nullable field is a `Nullable<T>`, where a required one is the
                     // `Option<T>` `canon_ty` renders. A member is `required` here exactly when
-                    // `new` takes it, so a property gaining `readOnly` leaves `new` as a required
-                    // field turning optional does. A `writeOnly` one `new` still takes is an
-                    // optional member read back, so its type is spelled with the `Option` (or
-                    // `Nullable`) the struct declares.
+                    // the `…Required` struct holds it, so a property gaining `readOnly` leaves it
+                    // as a required field turning optional does. A `writeOnly` one it still
+                    // holds is an optional member read back, so its type is spelled with the
+                    // `Option` (or `Nullable`) the struct declares.
                     let ty = if field.decodes_optional() && field.ty.nullable {
                         nullable_canon_ty(field.ty, api, names, settings)
                     } else {
@@ -217,7 +204,11 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                             .to_owned()
                     })
                     .collect();
-                TypeSurface::Struct(fields, overflow, bindings, accessors)
+                let required = names
+                    .required_structs
+                    .get(&id)
+                    .map(|ident| ident.as_str().to_owned());
+                TypeSurface::Struct(fields, overflow, bindings, accessors, required)
             }
             // A string enum generates a real `pub enum` whose variants are surface; an integer or
             // boolean set a checked newtype whose scalar and associated `const`s are. A boolean set

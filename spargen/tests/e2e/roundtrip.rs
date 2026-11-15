@@ -25,6 +25,17 @@ fn union_and_allof_roundtrip_under_proptest() {
     let report = generate_fixture_crate(&spec, &out, "roundtrip_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
+    // A model with a required member is built only from its `…Required` struct: its inherent
+    // `impl` holds the optional members' setters and no positional `new` (#1441).
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    let person = generated
+        .split("    impl Person {\n")
+        .nth(1)
+        .expect("`Person` has an inherent impl for its optional member's setter");
+    let person = &person[..person.find("\n    }\n").expect("the impl closes")];
+    assert!(person.contains("fn with_nickname("), "{person}");
+    assert!(!person.contains("fn new("), "{person}");
+
     // The property-test dependency is exclusively scaffolding for this test harness's crate.
     let mut manifest = std::fs::read_to_string(out.join("Cargo.toml")).unwrap();
     assert!(
@@ -403,6 +414,26 @@ fn an_overflow_key_naming_a_declared_member_is_not_serialized() {
     let written = serde_json::to_string(&headers).unwrap();
     assert_eq!(written, r#"{"x-extra":"e"}"#);
 }
+
+// A model with required members is built from its `…Required` struct, which names each one, so
+// two same-typed members can never trade places at the call site (#1441). The optional member is
+// left unset, and set by name; the value round-trips.
+#[test]
+fn a_model_with_required_members_is_built_from_its_required_struct() {
+    let person = types::Person::from(types::PersonRequired {
+        first_name: "Ada".to_owned(),
+        last_name: "Lovelace".to_owned(),
+    });
+    assert_eq!(
+        serde_json::to_value(&person).unwrap(),
+        serde_json::json!({ "first_name": "Ada", "last_name": "Lovelace" })
+    );
+    let person = person.with_nickname("Countess");
+    let written = serde_json::to_value(&person).unwrap();
+    let back: types::Person = serde_json::from_value(written.clone()).unwrap();
+    assert_eq!(back, person);
+    assert_eq!(written["nickname"], "Countess");
+}
 "####;
 
 /// The spec generated for [`union_and_allof_roundtrip_under_proptest`]: a `User` object pulling in a
@@ -457,6 +488,14 @@ components:
         briefing: { $ref: "#/components/schemas/Briefing" }
         gadget: { $ref: "#/components/schemas/Gadget" }
         headers: { $ref: "#/components/schemas/Headers" }
+        person: { $ref: "#/components/schemas/Person" }
+    Person:
+      type: object
+      required: [first_name, last_name]
+      properties:
+        first_name: { type: string }
+        last_name: { type: string }
+        nickname: { type: string }
     Headers:
       type: object
       properties:

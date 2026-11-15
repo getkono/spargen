@@ -11,6 +11,7 @@ use crate::ir::{
 use crate::name::Names;
 
 use super::docs::{doc_tokens, normalize_rustdoc};
+use super::operation::takes_into;
 use super::ty::{prim_tokens, ty_tokens};
 use super::union::emit_union;
 use super::CodegenOptions;
@@ -276,7 +277,7 @@ fn emit_type_def(
             let StructConstructors {
                 derive_default,
                 constructors,
-            } = emit_struct_constructors(id, object, types, names);
+            } = emit_struct_constructors(id, object, types, names, deprecated.as_ref());
             quote! {
                 #docs
                 #deprecated
@@ -735,6 +736,21 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
         _ => None,
     }
     .map(|path| quote! { deserialize_with = #path, });
+    let notes = field_notes(field);
+    let notes = notes
+        .iter()
+        .map(|note| normalize_rustdoc(note))
+        .map(|note| quote! { #[doc = #note] });
+    quote! {
+        #(#notes)*
+        #[serde(rename = #wire, #serde_default #decode_with)]
+        pub #ident: #ty,
+    }
+}
+
+/// The rustdoc notes struct field `field` carries, on the struct and on its `…Required` struct
+/// alike: its deprecation, `readOnly`, `writeOnly` and schema `default`.
+fn field_notes(field: &Field) -> Vec<String> {
     let mut notes: Vec<String> = Vec::new();
     if field.deprecated {
         notes.push("Deprecated per the spec.".to_owned());
@@ -752,18 +768,18 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
     if let Some(default) = &field.default {
         notes.push(default.doc_note.clone());
     }
-    let notes = notes
-        .iter()
-        .map(|note| normalize_rustdoc(note))
-        .map(|note| quote! { #[doc = #note] });
-    quote! {
-        #(#notes)*
-        #[serde(rename = #wire, #serde_default #decode_with)]
-        pub #ident: #ty,
+    notes
+}
+
+/// `ty` with its nullability dropped.
+fn non_null(ty: Ty) -> Ty {
+    Ty {
+        nullable: false,
+        ..ty
     }
 }
 
-/// A struct field's declared Rust type. A required field is the type `ty_tokens` names, which
+/// A struct field's declared Rust type.A required field is the type `ty_tokens` names, which
 /// wraps a nullable one (`"null"` in the type array) in `Option`: present, but maybe `null`. An
 /// optional non-nullable field is `Option<T>`, its `None` the absent member. An optional nullable
 /// field has three wire states (absent, `null`, a value), so it is `support::Nullable<T>` over the
@@ -836,6 +852,7 @@ fn emit_struct_constructors(
     object: &crate::ir::Struct,
     types: &TypeGraph,
     names: &Names,
+    deprecated: Option<&TokenStream>,
 ) -> StructConstructors {
     let ident = names.types.get(&id).expect("type name allocated");
     let field_ident = |field: &Field| {
@@ -844,31 +861,40 @@ fn emit_struct_constructors(
             .get(&(id, field.name.wire.clone()))
             .expect("field name allocated")
     };
-    // A constructed member is taken as the type a required field has (`T`, or `Option<T>` when
+    // A constructed member is held as the type a required field has (`T`, or `Option<T>` when
     // nullable); a `writeOnly` one is stored as its optional member's value.
-    let params = object
+    let required_fields = object
         .fields
         .iter()
         .filter(|field| field.constructed())
         .map(|field| {
             let field_ident = field_ident(field);
             let ty = ty_tokens(field.ty, names, false);
-            quote! { #field_ident: #ty }
+            let doc = format!("The `{}` member.", field.name.wire);
+            let notes = field_notes(field)
+                .into_iter()
+                .map(|note| normalize_rustdoc(&note))
+                .map(|note| quote! { #[doc = #note] });
+            quote! {
+                #[doc = #doc]
+                #(#notes)*
+                pub #field_ident: #ty,
+            }
         });
     let inits = object.fields.iter().map(|field| {
         let field_ident = field_ident(field);
         if field.constructed() && !field.decodes_optional() {
-            quote! { #field_ident, }
+            quote! { #field_ident: required.#field_ident, }
         } else if field.constructed() && field.ty.nullable {
-            // The argument is a required member's `Option<T>`, its `None` the `null` it may be.
+            // The member is a required one's `Option<T>`, its `None` the `null` it may be.
             quote! {
-                #field_ident: match #field_ident {
+                #field_ident: match required.#field_ident {
                     Some(value) => super::support::Nullable::Value(value),
                     None => super::support::Nullable::Null,
                 },
             }
         } else if field.constructed() {
-            quote! { #field_ident: Some(#field_ident), }
+            quote! { #field_ident: Some(required.#field_ident), }
         } else if field.ty.nullable {
             quote! { #field_ident: super::support::Nullable::Absent, }
         } else {
@@ -912,6 +938,16 @@ fn emit_struct_constructors(
                     #[must_use]
                     pub fn #null_setter(mut self) -> Self {
                         self.#field_ident = super::support::Nullable::Null;
+                        self
+                    }
+                }
+            } else if takes_into(types, non_null(field.ty)) {
+                let doc = format!("Set the `{}` member.", field.name.wire);
+                quote! {
+                    #[doc = #doc]
+                    #[must_use]
+                    pub fn #setter(mut self, value: impl std::convert::Into<#inner>) -> Self {
+                        self.#field_ident = Some(value.into());
                         self
                     }
                 }
@@ -960,43 +996,79 @@ fn emit_struct_constructors(
         .filter(|field| field.constructed())
         .count();
     let optional_doc = "every optional member unset, a member with a schema `default` included.";
-    let new_doc = if required == 0 {
-        format!("A `{ident}` with {optional_doc} `Default` builds the same value.")
-    } else if setters.is_empty() {
-        format!("A `{ident}` holding every member given, in declaration order.")
-    } else {
-        format!(
-            "A `{ident}` holding the required members given, in declaration order, and \
-             {optional_doc}"
-        )
-    };
-    // With no constructed member, `new` sets every member to its type's `Default`.
-    let derive_default = (required == 0).then(|| quote! { Default, });
-    let accessors = object
+    let accessors: Vec<TokenStream> = object
         .fields
         .iter()
-        .filter_map(|field| default_accessor(id, field, types, names));
-    // A description decides how many members are required, and a consumer's `clippy.toml` where
-    // `too_many_arguments` fires, so `new` allows it whatever its arity.
+        .filter_map(|field| default_accessor(id, field, types, names))
+        .collect();
+    let has_methods = !setters.is_empty() || !accessors.is_empty();
+    let methods = quote! {
+        #(#setters)*
+
+        #(#accessors)*
+    };
+    if required == 0 {
+        // With no constructed member, `new` sets every member to its type's `Default`, so the
+        // derive builds what `new` does.
+        let new_doc = format!("A `{ident}` with {optional_doc} `Default` builds the same value.");
+        return StructConstructors {
+            derive_default: Some(quote! { Default, }),
+            constructors: quote! {
+                impl #ident {
+                    #[doc = #new_doc]
+                    #[must_use]
+                    pub fn new() -> Self {
+                        Self {
+                            #(#inits)*
+                            #overflow_init
+                        }
+                    }
+
+                    #methods
+                }
+            },
+        };
+    }
+    let required_ident = names
+        .required_structs
+        .get(&id)
+        .expect("`…Required` struct name allocated");
+    let required_doc = format!(
+        "The required members of `{ident}`, which converts from this with every other member \
+         unset."
+    );
+    let from_doc = if setters.is_empty() {
+        format!("A `{ident}` holding the members `{required_ident}` holds.")
+    } else {
+        format!("A `{ident}` holding the members `{required_ident}` holds, and {optional_doc}")
+    };
+    // A struct whose every member is required has no setter and, with no optional member, no
+    // `_or_default` accessor, so no inherent method at all.
+    let methods = has_methods.then(|| quote! { impl #ident { #methods } });
+    // Spelled by path: `name::TYPES_MODULE_NAMES` does not reserve `From`, so a schema may take
+    // that name in this module.
     let constructors = quote! {
-        impl #ident {
-            #[doc = #new_doc]
-            #[allow(clippy::too_many_arguments)]
-            #[must_use]
-            pub fn new(#(#params),*) -> Self {
+        #[doc = #required_doc]
+        #deprecated
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct #required_ident {
+            #(#required_fields)*
+        }
+
+        impl std::convert::From<#required_ident> for #ident {
+            #[doc = #from_doc]
+            fn from(required: #required_ident) -> Self {
                 Self {
                     #(#inits)*
                     #overflow_init
                 }
             }
-
-            #(#setters)*
-
-            #(#accessors)*
         }
+
+        #methods
     };
     StructConstructors {
-        derive_default,
+        derive_default: None,
         constructors,
     }
 }

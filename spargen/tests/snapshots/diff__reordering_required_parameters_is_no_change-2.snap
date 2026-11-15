@@ -2,5 +2,4 @@
 source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
-major|field-requiredness-changed|Pet.id|field now optional
-bump=major
+bump=patch

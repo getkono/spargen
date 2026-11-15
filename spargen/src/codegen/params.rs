@@ -8,7 +8,7 @@ use crate::ir::{Api, MediaType, Operation, ParamLoc, Ty};
 use crate::name::{Names, OperationBindings, OperationNames};
 
 use super::docs::normalize_rustdoc;
-use super::operation::takes_into_string;
+use super::operation::takes_into;
 use super::ty::ty_tokens;
 
 /// The percent-encoding set for one parameter, derived from its location, style, and
@@ -397,9 +397,8 @@ const EXPLICIT_NULL_SETTER_DOC: &str = "A value, or `Nullable::Null` to send the
 /// field, plus an `impl` of fluent `#[must_use]` consuming setters — one per optional param, named
 /// after its field. Where every parameter in it is optional, the struct derives `Default`, so
 /// callers write `…Params::default().foo(x).bar(y)` instead of a struct literal; where one is
-/// required, `…Params::new(required…)` takes the required ones in declaration order, by name at
-/// the call site's `.foo(x)` for the rest, so two same-typed required parameters can never trade
-/// places unseen behind a positional method argument.
+/// required, it converts from its `…Required` struct ([`params_required_struct`]), which names
+/// every required parameter at the call site, and `.foo(x)` sets the rest.
 pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
     let operation_names = names.operation(&operation.id);
     let ident = &operation_names.params_struct;
@@ -470,8 +469,9 @@ pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names
         }
     });
     // Fluent consuming setters, one per optional param, in field order. One whose field is an
-    // `Option<T>`, nullable or not, takes the bare `T` by value and stores `Some` of it; by value
-    // (not `impl Into<T>`) keeps inference trivial for every generated field type. One that sends
+    // `Option<T>`, nullable or not, takes anything that converts into the bare `T` and stores
+    // `Some` of it; a numeric `T` is taken as itself, so a literal still takes its type from the
+    // position ([`takes_into`]). One that sends
     // an explicit `null` takes `impl Into<Nullable<T>>`, as a nullable model member's setter does,
     // so a value or `Nullable::Null` fits, and is followed by its `{field}_null` setter storing
     // that `null`: `Nullable` has no `From<Option<T>>`, so no `None` reaches the wire as `null`.
@@ -505,6 +505,21 @@ pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names
                     self
                 }
             }
+        } else if takes_into(
+            &api.types,
+            Ty {
+                nullable: false,
+                ..param.ty
+            },
+        ) {
+            quote! {
+                #[doc = #doc]
+                #[must_use]
+                pub fn #ident(mut self, value: impl Into<#inner>) -> Self {
+                    self.#ident = Some(value.into());
+                    self
+                }
+            }
         } else {
             quote! {
                 #[doc = #doc]
@@ -516,8 +531,16 @@ pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names
             }
         }
     });
-    let (derive_default, constructor) = if operation.params_required() {
-        (None, Some(params_constructor(&bundled, api, names)))
+    let (derive_default, required) = if operation.params_required() {
+        (
+            None,
+            Some(params_required_struct(
+                ident,
+                &bundled,
+                operation_names,
+                names,
+            )),
+        )
     } else {
         (Some(quote! { Default, }), None)
     };
@@ -528,11 +551,12 @@ pub(super) fn emit_params_struct(operation: &Operation, api: &Api, names: &Names
             #(#fields)*
         }
 
+        #required
+
         // Setters named after fields can trip `wrong_self_convention` when a param is named
         // `is_*`/`to_*`/etc.; a consuming builder setter is the intended shape, so allow it here.
         #[allow(dead_code, deprecated, clippy::wrong_self_convention)]
         impl #ident {
-            #constructor
             #(#setters)*
         }
     }
@@ -550,53 +574,63 @@ fn param_notes(param: &crate::ir::Parameter) -> Vec<String> {
     notes
 }
 
-/// `…Params::new`, emitted where a bundled parameter is required: one argument per required
-/// parameter, in declaration order and named after its field, and every optional one unset. A
-/// plain `String` argument is an `impl Into<String>`, as a path parameter's is.
-fn params_constructor(
+/// The `…Required` struct of `…Params` struct `params`, emitted where a bundled parameter is
+/// required: one `pub` field per required parameter, in declaration order, named and typed as its
+/// `…Params` field, and `From` it for the bundle, which sets every optional parameter unset. A
+/// caller names each required parameter in a struct literal, so two same-typed ones can never
+/// trade places unseen, and reordering them in the description changes no call site.
+fn params_required_struct(
+    params: &crate::name::Ident,
     bundled: &[(&crate::ir::Parameter, &crate::name::Ident)],
-    api: &Api,
+    operation_names: &OperationNames,
     names: &Names,
 ) -> TokenStream {
+    let ident = operation_names.params_required();
     let required = bundled.iter().filter(|(param, _)| param.required);
-    let args = required.clone().map(|(param, ident)| {
+    let fields = required.clone().map(|(param, field)| {
         let ty = ty_tokens(param.ty, names, true);
-        if takes_into_string(api, param.ty) {
-            quote! { #ident: impl Into<#ty> }
-        } else {
-            quote! { #ident: #ty }
+        let doc = format!("The `{}` parameter.", param.name);
+        let notes = param_notes(param)
+            .into_iter()
+            .map(|note| normalize_rustdoc(&note))
+            .map(|note| quote! { #[doc = #note] });
+        quote! {
+            #[doc = #doc]
+            #(#notes)*
+            pub #field: #ty,
         }
     });
-    let inits = bundled.iter().map(|(param, ident)| {
+    let inits = bundled.iter().map(|(param, field)| {
         if param.required {
-            if takes_into_string(api, param.ty) {
-                quote! { #ident: #ident.into(), }
-            } else {
-                quote! { #ident, }
-            }
+            quote! { #field: required.#field, }
         } else if param.sends_explicit_null() {
-            quote! { #ident: support::Nullable::Absent, }
+            quote! { #field: support::Nullable::Absent, }
         } else {
-            quote! { #ident: None, }
+            quote! { #field: None, }
         }
     });
-    let wires: Vec<String> = required
-        .map(|(param, _)| format!("`{}`", param.name))
-        .collect();
     let doc = normalize_rustdoc(&format!(
-        "The parameters with every required one given, in declaration order ({}), and every \
-         optional one unset.",
-        wires.join(", ")
+        "The required parameters of `{params}`, which converts from this with every optional one \
+         unset."
     ));
-    // A description decides how many parameters are required, and a consumer's `clippy.toml`
-    // where `too_many_arguments` fires, so `new` allows it whatever its arity.
+    let from_doc = normalize_rustdoc(&format!(
+        "The parameters with every required one taken from `{ident}` and every optional one unset."
+    ));
     quote! {
         #[doc = #doc]
-        #[must_use]
-        #[allow(clippy::too_many_arguments)]
-        pub fn new(#(#args),*) -> Self {
-            Self {
-                #(#inits)*
+        #[allow(dead_code, deprecated)]
+        #[derive(Debug, Clone)]
+        pub struct #ident {
+            #(#fields)*
+        }
+
+        #[allow(deprecated)]
+        impl std::convert::From<#ident> for #params {
+            #[doc = #from_doc]
+            fn from(required: #ident) -> Self {
+                Self {
+                    #(#inits)*
+                }
             }
         }
     }

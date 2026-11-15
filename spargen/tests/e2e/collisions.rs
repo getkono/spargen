@@ -693,6 +693,128 @@ fn a_string_enum_valued_err_compiles() {
     );
 }
 
+/// Issue #1441: a schema spelled `PetRequired` beside a `Pet` with a required member, whose
+/// `…Required` struct would spell it too, and an operation whose `…Params` struct and its
+/// `…Required` struct sit beside them in the root module. The declared schema keeps its name.
+const REQUIRED_STRUCT_SPELLING_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      operationId: addPet
+      parameters:
+        - { name: owner, in: query, required: true, schema: { type: string } }
+        - { name: tag, in: query, required: false, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: "#/components/schemas/Pet" } }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/PetRequired" } }
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+    PetRequired:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+"##;
+
+/// What the fixture crate's own test asserts: each `…Required` struct converts into its type, and
+/// the operation takes both straight in.
+const REQUIRED_STRUCT_SPELLING_TEST: &str = r##"
+#[test]
+fn each_required_struct_builds_its_own_type() {
+    let declared = required_names::types::PetRequired::from(
+        required_names::types::PetRequiredRequired { id: 7 },
+    );
+    assert_eq!(declared.id, 7);
+    let params = required_names::AddPetParams::from(required_names::AddPetParamsRequired {
+        owner: "ada".to_owned(),
+    })
+    .tag("x");
+    assert_eq!(params.owner, "ada");
+    assert_eq!(params.tag.as_deref(), Some("x"));
+}
+
+#[allow(dead_code)]
+async fn the_operation_takes_each_required_struct(client: &required_names::Client) {
+    let _ = client
+        .add_pet(
+            required_names::AddPetParamsRequired { owner: "ada".to_owned() },
+            REQUIRED_PET,
+        )
+        .await;
+}
+"##;
+
+#[test]
+fn a_schema_spelled_as_a_required_struct_keeps_its_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "api.yaml", REQUIRED_STRUCT_SPELLING_SPEC);
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "required_names");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    // `Pet`'s companion yields to the schema, so it takes a pointer-seeded suffix.
+    let pet_required = generated
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("impl std::convert::From<")
+                .and_then(|rest| rest.strip_suffix("> for Pet {"))
+        })
+        .expect("`Pet` converts from its `…Required` struct");
+    assert!(
+        pet_required.starts_with("PetRequired") && pet_required != "PetRequired",
+        "`Pet`'s companion must yield to the schema `PetRequired`: {pet_required}"
+    );
+    assert!(
+        generated.contains("impl std::convert::From<PetRequiredRequired> for PetRequired {"),
+        "the schema `PetRequired` has a companion of its own:\n{generated}"
+    );
+
+    // The consumer test names `Pet`'s companion as generated.
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/required_names.rs"),
+        REQUIRED_STRUCT_SPELLING_TEST.replace(
+            "REQUIRED_PET",
+            &format!("required_names::types::{pet_required} {{ name: \"rex\".to_owned() }}"),
+        ),
+    )
+    .unwrap();
+    let output = fixture_cargo(&out)
+        .args(["test", "--test", "required_names"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a schema spelled as a `…Required` struct must compile and convert:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = fixture_cargo(&out)
+        .args(["clippy", "--all-features", "--", "-D", "warnings"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a schema spelled as a `…Required` struct must lint clean:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Issue #1324: spellings of the methods a generated type gets from a std trait or defines itself,
 /// taken by the spec. `operationId: clone` would emit an inherent `Client::clone` that shadows
 /// `Clone::clone`; an optional parameter `default` or `clone` a `…Params` setter that shadows

@@ -181,21 +181,6 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             ),
         ));
     }
-    // Only a reorder of the same parameters: one that appears, goes or turns positional is the
-    // parameter's own change below.
-    if old.positional_args != new.positional_args
-        && sorted(&old.positional_args) == sorted(&new.positional_args)
-    {
-        changes.push(Change::new(
-            ChangeKind::PositionalArgsReordered,
-            key,
-            format!(
-                "positional arguments [{}] -> [{}]",
-                params_label(&old.positional_args),
-                params_label(&new.positional_args)
-            ),
-        ));
-    }
     diff_member(
         &BODY,
         key,
@@ -364,22 +349,6 @@ fn diff_byte_stream(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut V
         }
         _ => {}
     }
-}
-
-/// Parameters as a change's detail lists them, comma-separated.
-fn params_label(params: &[ParamKey]) -> String {
-    params
-        .iter()
-        .map(param_key_label)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// `params` in a fixed order, so two lists holding the same parameters compare equal.
-fn sorted(params: &[ParamKey]) -> Vec<&ParamKey> {
-    let mut sorted: Vec<&ParamKey> = params.iter().collect();
-    sorted.sort();
-    sorted
 }
 
 /// A URL accessor's arguments as a change's detail lists them, comma-separated.
@@ -701,13 +670,60 @@ fn diff_types(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
     }
 }
 
+/// The `…Required` struct of struct `name` appearing, going, or renamed. It appears with the
+/// struct's first required member and goes with its last, which the struct's fields report too;
+/// a rename, an allocation yielding to a type spelled as it, breaks every literal of it.
+fn diff_required_struct(
+    name: &str,
+    old: Option<&str>,
+    new: Option<&str>,
+    changes: &mut Vec<Change>,
+) {
+    match (old, new) {
+        (None, Some(new)) => changes.push(Change::new(
+            ChangeKind::TypeAdded,
+            new,
+            format!("new public type: the required members of `{name}`"),
+        )),
+        (Some(old), None) => changes.push(Change::new(
+            ChangeKind::TypeRemoved,
+            old,
+            format!("public type removed: the required members of `{name}`"),
+        )),
+        (Some(old), Some(new)) if old != new => changes.push(Change::new(
+            ChangeKind::TypeRemoved,
+            old,
+            format!("the required members of `{name}` renamed `{old}` -> `{new}`"),
+        )),
+        _ => {}
+    }
+}
+
 fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec<Change>) {
     match (old, new) {
         (
-            TypeSurface::Struct(old_fields, old_overflow, old_bindings, old_accessors),
-            TypeSurface::Struct(new_fields, new_overflow, new_bindings, new_accessors),
+            TypeSurface::Struct(
+                old_fields,
+                old_overflow,
+                old_bindings,
+                old_accessors,
+                old_required,
+            ),
+            TypeSurface::Struct(
+                new_fields,
+                new_overflow,
+                new_bindings,
+                new_accessors,
+                new_required,
+            ),
         ) => {
             diff_struct(name, old_fields, new_fields, changes);
+            diff_required_struct(
+                name,
+                old_required.as_deref(),
+                new_required.as_deref(),
+                changes,
+            );
             diff_overflow(name, old_overflow.as_ref(), new_overflow.as_ref(), changes);
             diff_default_accessors(name, old_accessors, new_accessors, changes);
             diff_bindings(

@@ -134,11 +134,6 @@ struct OpSurface {
     /// The `{method}_url` accessor's arguments, in declaration order. Their types are those of
     /// `params`, compared there.
     url_args: Vec<UrlArgSurface>,
-    /// The parameters a call site passes by position, in order: the method's path arguments in URL
-    /// template order, then `…Params::new`'s arguments in declaration order. `params` holds what
-    /// each one is; this holds only the order, where two same-typed arguments trading places
-    /// still compiles at every call site.
-    positional_args: Vec<ParamKey>,
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
     params: BTreeMap<ParamKey, MemberSurface>,
@@ -228,11 +223,13 @@ struct HeadersSurface {
 /// header: its canonical type and whether it is required, which the consumer sees in each:
 ///
 /// - a path parameter is a positional method argument; every other parameter rides in the
-///   `…Params` struct, a required one as a `…Params::new` argument and an optional one as a field
-///   defaulting to unset;
-/// - a required body is a `&T` argument in the generated signature, an optional one `Option<&T>`;
+///   `…Params` struct, a required one as a field of its `…Required` struct too and an optional one
+///   as a field defaulting to unset;
+/// - a required body is an `impl Into<T>` argument in the generated signature (a `&T` where `T`
+///   is numeric or nullable), an optional one `Option<&T>`;
 /// - a struct field is both read (a required field is `T`, an optional one `Option<T>`) and
-///   constructed (a newly-required field breaks every existing constructor);
+///   constructed (a newly-required field is a new field of the struct's `…Required` struct, which
+///   breaks every literal of it);
 /// - a required header is a `T` field read with `require_header`, an optional one an `Option<T>`.
 struct MemberSurface {
     /// The canonical type.
@@ -255,11 +252,15 @@ enum TypeSurface {
     /// when it has one, the wire property name each field binds, keyed by field name, and the
     /// generated name of each `{field}_or_default` accessor it carries, one per member with an
     /// applied schema `default`. An accessor returns its field's type, which the field compares.
+    /// Last, the generated name of its `…Required` struct, where it has a required member: the
+    /// struct's required fields are its fields, which the struct's own compare, so the name is
+    /// all it adds, and a reorder of them, which no struct literal sees, is no change.
     Struct(
         BTreeMap<String, MemberSurface>,
         Option<OverflowSurface>,
         Bindings,
         BTreeSet<String>,
+        Option<String>,
     ),
     /// A string `enum`: the set of variant wire values, for an open enum (`open_narrowing`) the
     /// generated name of the variant holding any other string, and the wire value each listed
@@ -360,18 +361,15 @@ pub enum ChangeKind {
     /// went, or the `…Params` bundle started or stopped shaping the URL. **Major** — every call of
     /// the accessor breaks, even where the method's signature holds.
     UrlAccessorArgsChanged,
-    /// An operation's positional arguments — its path arguments, then `…Params::new`'s — are the
-    /// same parameters in another order. **Major** — two same-typed arguments trading places
-    /// still compiles at every call site, and silently sends each value as the other.
-    PositionalArgsReordered,
-    /// A request body was added to an operation. **Major** — a new `&T` or `Option<&T>` argument.
+    /// A request body was added to an operation. **Major** — a new required or `Option<&T>`
+    /// argument.
     RequestBodyAdded,
     /// An operation's request body was removed. **Major** — an argument disappears.
     RequestBodyRemoved,
     /// An operation's request-body type changed. **Major**.
     RequestBodyTypeChanged,
-    /// An operation's request body flipped between required and optional. **Major** — `&T` ↔
-    /// `Option<&T>`.
+    /// An operation's request body flipped between required and optional. **Major** — `impl
+    /// Into<T>` ↔ `Option<&T>`.
     RequestBodyRequirednessChanged,
     /// An operation's success return type changed, or its `{method}_stream` twin's did, or the
     /// success statuses it decodes did (any other 2xx is `Error::UnexpectedStatus`). **Major**.
@@ -384,8 +382,8 @@ pub enum ChangeKind {
     /// An operation's error type no longer implements `ApiErrorBody`. **Major** — `body()`,
     /// `Error::api_body()`, and `E: ApiErrorBody` bounds stop compiling.
     ApiErrorBodyRemoved,
-    /// A new required parameter was added. **Major** — a new positional argument: of the method
-    /// for a path parameter, of `…Params::new` for any other.
+    /// A new required parameter was added. **Major** — a new positional argument of the method for
+    /// a path parameter, a new field of the `…Required` struct for any other.
     RequiredParamAdded,
     /// A new optional parameter was added. **Major** — a new `pub` field of the `…Params` struct,
     /// so every struct literal of it stops compiling.
@@ -525,7 +523,6 @@ impl ChangeKind {
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::UrlAccessorArgsChanged
-            | ChangeKind::PositionalArgsReordered
             | ChangeKind::RequestBodyAdded
             | ChangeKind::RequestBodyRemoved
             | ChangeKind::RequestBodyTypeChanged
@@ -578,7 +575,6 @@ impl ChangeKind {
             ChangeKind::OperationRemoved => "operation-removed",
             ChangeKind::MethodRenamed => "method-renamed",
             ChangeKind::UrlAccessorArgsChanged => "url-accessor-args-changed",
-            ChangeKind::PositionalArgsReordered => "positional-args-reordered",
             ChangeKind::RequestBodyAdded => "request-body-added",
             ChangeKind::RequestBodyRemoved => "request-body-removed",
             ChangeKind::RequestBodyTypeChanged => "request-body-type-changed",

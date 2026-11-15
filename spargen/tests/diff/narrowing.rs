@@ -500,10 +500,14 @@ fn an_object_all_of_emits_no_meet_a_later_member_superseded() {
                     "{case}, open: {open} emits a superseded open copy:\n{source}"
                 );
                 // The second pair of `inner` structs meets in the one the body refers to; the
-                // first pair's meet is superseded.
+                // first pair's meet is superseded. A meet's `…Required` struct is not a meet.
                 assert!(
                     source
-                        .matches("pub struct ResponseBodyInnerIntersection")
+                        .lines()
+                        .filter(|line| {
+                            line.contains("pub struct ResponseBodyInnerIntersection")
+                                && !line.contains("Required")
+                        })
                         .count()
                         == usize::from(nested),
                     "{case}, open: {open} emits a superseded struct meet:\n{source}"
