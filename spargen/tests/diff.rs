@@ -257,10 +257,69 @@ fn added_optional_field_is_major() {
 
 #[test]
 fn added_required_field_is_major() {
-    // A newly-required field breaks every existing constructor of the type.
+    // A newly-required field is a new field of `PetRequired`, so every literal of it breaks.
     let with_tag = "        id: { type: integer }\n        name: { type: string }\n        tag: { type: string }\n";
     let report = diff(&base(), &spec("", "id, tag", with_tag, ""));
     assert_eq!(kinds(&report), vec![ChangeKind::RequiredFieldAdded]);
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn reordering_required_members_is_no_change() {
+    // Issue #1441: `Pet` is built from `PetRequired { id, name }`, whose members are named at
+    // every call site, so declaring them in another order changes nothing a consumer writes.
+    let id_then_name = "        id: { type: string }\n        name: { type: string }\n";
+    let name_then_id = "        name: { type: string }\n        id: { type: string }\n";
+    let report = diff(
+        &spec("", "id, name", id_then_name, ""),
+        &spec("", "name, id", name_then_id, ""),
+    );
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
+}
+
+#[test]
+fn a_required_struct_appearing_or_renamed_is_reported() {
+    // `Pet` gains its first required member, and with it `PetRequired`: the member turning
+    // required is the major change, and the new type is reported beside it.
+    let report = diff(&spec("", "", PET_PROPS, ""), &base());
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::FieldRequirednessChanged, ChangeKind::TypeAdded],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+
+    // A schema spelled `PetRequired` keeps its name, so `Pet`'s companion yields to it: every
+    // literal of the old `PetRequired` now names the other type.
+    let tags = "  /tags:
+    get:
+      operationId: listTags
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PetRequired' }
+";
+    let taken = format!(
+        "{}    PetRequired:\n      type: object\n      properties:\n        tag: {{ type: string }}\n",
+        spec("", "id", PET_PROPS, tags)
+    );
+    let report = diff(&base(), &taken);
+    assert!(
+        report
+            .changes
+            .iter()
+            .any(|change| change.kind == ChangeKind::TypeRemoved
+                && change.location == "PetRequired"
+                && change
+                    .detail
+                    .starts_with("the required members of `Pet` renamed")),
+        "{:?}",
+        report.changes
+    );
     assert_eq!(report.bump, Impact::Major);
 }
 

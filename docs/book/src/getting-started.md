@@ -173,7 +173,7 @@ let client = Client::new("https://api.example.com")?
 
 // One async method per operation. Path parameters are positional; every other parameter lives in
 // a per-operation `…Params` struct, which derives `Default` where all of them are optional and
-// otherwise takes the required ones in `…Params::new(..)`.
+// otherwise converts from its `…ParamsRequired` struct, whose fields are the required ones.
 let pets = client
     .list_pets(api::ListPetsParams { limit: Some(20), ..Default::default() })
     .await?;
@@ -198,12 +198,13 @@ Key points of the surface:
   `.into_inner()` unwraps the decoded body, and `.into_parts()` yields the status, headers and
   body, each owned. Required string parameters take `impl Into<String>`, and a `…Params` bundle
   holding only optional parameters takes `impl Into<Option<…>>`, so `None`, `Some(params)`, and
-  `params` all compile; one holding a required parameter is passed as it is, built with
-  `…Params::new(..)`.
-- An object struct is built with `types::Pet::new(..)`, taking its required members, then one
+  `params` all compile; one holding a required parameter takes `impl Into<…Params>`, so its
+  `…ParamsRequired` struct passes straight in, or the bundle built from it with `From`.
+- An object struct with a required member is built from its `<Type>Required` struct, whose
+  fields name those members (`types::Pet::from(types::PetRequired { id, name })`), then one
   `with_<member>(value)` per optional member, and compares with `==`; the
-  [generated surface](./generated-api.md#generated-surface) states what `new`
-  sets and when a struct implements `Default`.
+  [generated surface](./generated-api.md#generated-surface) states what the conversion sets and
+  when a struct has `new()` and implements `Default`.
 - `Client::with_bearer_auth(token)`, one typed setter per declared security scheme (here
   `bearerAuth`), registers a static secret (via `secrecy`), and its `_provider` and
   `_refreshable` siblings an async token provider; operation `security` requirements attach

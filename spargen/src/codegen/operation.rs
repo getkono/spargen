@@ -736,8 +736,7 @@ fn url_building(
     }
 }
 
-/// Whether a required parameter, a path argument or a `…Params::new` argument, is emitted as
-/// `impl Into<String>` rather than its concrete type.
+/// Whether a path argument is emitted as `impl Into<String>` rather than its concrete type.
 ///
 /// Exactly a non-nullable, unboxed [`Prim::String`](crate::ir::Prim::String). `Option<String>`
 /// and `Box<String>` positions stay concrete: `Into` would make `None` ambiguous at the call site
@@ -749,6 +748,34 @@ pub(super) fn takes_into_string(api: &Api, ty: Ty) -> bool {
         && matches!(
             api.types.get(ty.id).map(|definition| &definition.kind),
             Some(TypeKind::Primitive(crate::ir::Prim::String))
+        )
+}
+
+/// Whether a request-body argument or a setter's value of type `ty` is emitted as `impl Into<T>`
+/// rather than `T`, so a `…Required` struct literal, a `&str` or a model passes straight in.
+///
+/// Every type but three. A nullable one is an `Option<T>` position, where `Into` would leave a bare
+/// `None` uninferable. A numeric primitive: an integer or float literal takes its type from
+/// the position, which `impl Into<u8>` or `impl Into<f32>` no longer gives, so `5` would fall back
+/// to `i32` and stop compiling. And an uninhabited type: no value converts
+/// into it, and the `.into()` that would is an unreachable expression rustc warns of.
+pub(super) fn takes_into(types: &crate::ir::TypeGraph, ty: Ty) -> bool {
+    use crate::ir::Prim;
+    !ty.nullable
+        && !matches!(
+            types.get(ty.id).map(|definition| &definition.kind),
+            Some(
+                TypeKind::Never
+                    | TypeKind::Primitive(
+                        Prim::I32
+                            | Prim::I64
+                            | Prim::U8
+                            | Prim::U16
+                            | Prim::U32
+                            | Prim::U64
+                            | Prim::F64
+                    )
+            )
         )
 }
 
@@ -923,9 +950,14 @@ impl OperationSig {
         }
         if let Some(params_binding) = &bindings.params {
             let (decl, normalize) = if operation.params_required() {
-                // A required parameter rides in the bundle, so the bundle is always passed, built
-                // by `…Params::new(required…)`.
-                (quote! { #params_binding: #params_ident }, None)
+                // A required parameter rides in the bundle, so the bundle is always passed: the
+                // bundle itself, or its `…Required` struct, which converts into it.
+                (
+                    quote! { #params_binding: impl Into<#params_ident> },
+                    Some(quote! {
+                        let #params_binding: #params_ident = #params_binding.into();
+                    }),
+                )
             } else {
                 // `impl Into<Option<..>>` accepts the bundle directly as well as
                 // `None`/`Some(..)`, so a caller who sets optional parameters passes the bundle
@@ -944,8 +976,8 @@ impl OperationSig {
                 shapes_url: operation.url_takes_params(),
             });
         }
-        if let Some((body, ty)) = operation.typed_body() {
-            let ty = ty_tokens(ty, names, true);
+        if let Some((body, body_ty)) = operation.typed_body() {
+            let ty = ty_tokens(body_ty, names, true);
             let body_binding = bindings
                 .body
                 .as_ref()
@@ -959,7 +991,10 @@ impl OperationSig {
             // `filename` a caller sets for each: a required one is `&T` or a `MultipartBody`, so a
             // call passing the body alone sends every file part under its part name; an optional
             // one is the concrete `Option<MultipartBody>`, where `impl AsMultipartBody` would
-            // leave a bare `None` uninferable.
+            // leave a bare `None` uninferable. Any other required body is taken by value as
+            // anything that converts into its type ([`takes_into`]), so a `…Required` struct
+            // literal passes straight in, and is borrowed once converted, as the encoders read it;
+            // an optional one is `Option<&T>`.
             let files = api.multipart_file_parts(operation).is_some();
             let (decl, normalize) = match (api.sends_binary_body(operation), files, body.required) {
                 (true, _, true) => (quote! { #body_binding: impl Into<support::HttpBody> }, None),
@@ -973,6 +1008,10 @@ impl OperationSig {
                 (false, true, false) => (
                     quote! { #body_binding: Option<support::MultipartBody<'_, #ty>> },
                     None,
+                ),
+                (false, false, true) if takes_into(&api.types, body_ty) => (
+                    quote! { #body_binding: impl Into<#ty> },
+                    Some(quote! { let #body_binding: &#ty = &#body_binding.into(); }),
                 ),
                 (false, false, true) => (quote! { #body_binding: &#ty }, None),
                 (false, false, false) => (quote! { #body_binding: Option<&#ty> }, None),

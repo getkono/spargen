@@ -55,12 +55,15 @@ async fn main() {
     assert_eq!(pets.len(), 1);
     println!("listed {} pet(s): {}", pets.len(), pets[0].name);
 
-    // A typed JSON body in, a typed model out.
+    // A typed JSON body in, a typed model out: the body is built from its required members, named
+    // in `NewPetRequired`, then its optional `tag` is set by name.
     let created = client
-        .create_pet(&types::NewPet {
-            name: "Bella".to_owned(),
-            tag: Some("dog".to_owned()),
-        })
+        .create_pet(
+            types::NewPet::from(types::NewPetRequired {
+                name: "Bella".to_owned(),
+            })
+            .with_tag("dog"),
+        )
         .await
         .expect("create_pet");
     assert_eq!(created.status(), 201);

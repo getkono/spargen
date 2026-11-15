@@ -1482,37 +1482,24 @@ fn a_change_to_the_url_accessors_arguments_is_major() {
 }
 
 #[test]
-fn reordering_two_required_parameters_is_major() {
-    // Issue #1338: `ListPetsParams::new(from, to)` -> `new(to, from)`. Both are `i64`, so every
-    // call site still compiles and silently sends each value as the other: the same parameters,
-    // each unchanged, in another positional order.
+fn reordering_required_parameters_is_no_change() {
+    // Issue #1441: the required parameters are named fields of `ListPetsParamsRequired`, so a
+    // literal of it reads the same whatever order the description declares them in, and two
+    // same-typed ones cannot trade places at a call site.
     let report = diff(
         &declared_params(&[("from", "query", true), ("to", "query", true)]),
         &declared_params(&[("to", "query", true), ("from", "query", true)]),
     );
-    assert_eq!(
-        kinds_at(&report),
-        vec![(ChangeKind::PositionalArgsReordered, "GET /pets")],
-        "{:?}",
-        report.changes
-    );
-    assert_eq!(
-        report.changes[0].detail,
-        "positional arguments [`from` (query), `to` (query)] -> [`to` (query), `from` (query)]"
-    );
-    assert_eq!(report.bump, Impact::Major);
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
 
-    // Headers too: the URL accessor never takes them, so only the positional order reports it.
+    // Headers too.
     let report = diff(
         &declared_params(&[("x-org", "header", true), ("x-project", "header", true)]),
         &declared_params(&[("x-project", "header", true), ("x-org", "header", true)]),
     );
-    assert_eq!(
-        kinds_at(&report),
-        vec![(ChangeKind::PositionalArgsReordered, "GET /pets")],
-        "{:?}",
-        report.changes
-    );
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
 
     // An optional parameter is set by name, so reordering it beside a required one moves nothing.
     let report = diff(

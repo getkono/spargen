@@ -1536,7 +1536,7 @@ components:
         "body is a `types::StoreEscrowBody`",
         "body is a `types::AppendDropChunkBody`",
         "body: impl Into<support::HttpBody>,",
-        "body: &types::SubmitFormBody,",
+        "body: impl Into<types::SubmitFormBody>,",
         "pub struct CollideBody {",
     ] {
         assert!(code.contains(expected), "missing `{expected}` in {code}");

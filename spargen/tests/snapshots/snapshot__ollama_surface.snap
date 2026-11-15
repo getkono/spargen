@@ -39,7 +39,7 @@ operations (36):
   show_request
   version
   version_request
-types (259):
+types (274):
   BlockingClient
   ChatError
   Client
@@ -60,6 +60,7 @@ types (259):
   types::ChatMessageContent
   types::ChatMessageImages
   types::ChatMessageImagesItem
+  types::ChatMessageRequired
   types::ChatMessageRole
   types::ChatMessageToolCalls
   types::ChatRequest
@@ -72,6 +73,7 @@ types (259):
   types::ChatRequestLogprobs
   types::ChatRequestMessages
   types::ChatRequestModel
+  types::ChatRequestRequired
   types::ChatRequestStream
   types::ChatRequestThink
   types::ChatRequestThinkVariant0
@@ -110,6 +112,7 @@ types (259):
   types::ChatStreamEventModel
   types::CopyRequest
   types::CopyRequestDestination
+  types::CopyRequestRequired
   types::CopyRequestSource
   types::CreateRequest
   types::CreateRequestFrom
@@ -121,11 +124,13 @@ types (259):
   types::CreateRequestModel
   types::CreateRequestParameters
   types::CreateRequestQuantize
+  types::CreateRequestRequired
   types::CreateRequestStream
   types::CreateRequestSystem
   types::CreateRequestTemplate
   types::DeleteRequest
   types::DeleteRequestModel
+  types::DeleteRequestRequired
   types::EmbedRequest
   types::EmbedRequestDimensions
   types::EmbedRequestInput
@@ -134,6 +139,7 @@ types (259):
   types::EmbedRequestInputVariant1Item
   types::EmbedRequestKeepAlive
   types::EmbedRequestModel
+  types::EmbedRequestRequired
   types::EmbedRequestTruncate
   types::EmbedResponse
   types::EmbedResponseEmbeddings
@@ -158,6 +164,7 @@ types (259):
   types::GenerateRequestModel
   types::GenerateRequestPrompt
   types::GenerateRequestRaw
+  types::GenerateRequestRequired
   types::GenerateRequestStream
   types::GenerateRequestSuffix
   types::GenerateRequestSystem
@@ -241,13 +248,16 @@ types (259):
   types::PullRequest
   types::PullRequestInsecure
   types::PullRequestModel
+  types::PullRequestRequired
   types::PullRequestStream
   types::PushRequest
   types::PushRequestInsecure
   types::PushRequestModel
+  types::PushRequestRequired
   types::PushRequestStream
   types::ShowRequest
   types::ShowRequestModel
+  types::ShowRequestRequired
   types::ShowRequestVerbose
   types::ShowResponse
   types::ShowResponseCapabilities
@@ -275,15 +285,19 @@ types (259):
   types::ToolCallFunctionArguments
   types::ToolCallFunctionDescription
   types::ToolCallFunctionName
+  types::ToolCallFunctionRequired
   types::ToolDefinition
   types::ToolDefinitionFunction
   types::ToolDefinitionFunctionDescription
   types::ToolDefinitionFunctionName
   types::ToolDefinitionFunctionParameters
+  types::ToolDefinitionFunctionRequired
+  types::ToolDefinitionRequired
   types::ToolDefinitionType
   types::VersionResponse
   types::VersionResponseVersion
   types::WebFetchRequest
+  types::WebFetchRequestRequired
   types::WebFetchRequestUrl
   types::WebFetchResponse
   types::WebFetchResponseContent
@@ -293,6 +307,7 @@ types (259):
   types::WebSearchRequest
   types::WebSearchRequestMaxResults
   types::WebSearchRequestQuery
+  types::WebSearchRequestRequired
   types::WebSearchResponse
   types::WebSearchResponseResults
   types::WebSearchResult

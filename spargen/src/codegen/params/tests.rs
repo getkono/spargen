@@ -200,12 +200,17 @@ fn a_whole_query_value_renders_by_its_codec() {
 /// The `…Params` struct holds every parameter but a path one, in declaration order: a required
 /// one as its own type, an explicit-`null` one as a `Nullable` of the non-null type, and any other
 /// as an `Option`, each with its `deprecated` and `default` notes. Its setters cover the optional
-/// ones, an explicit-`null` one beside its `_null` setter, and `new` takes the required ones; a
-/// bundle of optional ones derives `Default` instead.
+/// ones, taking `impl Into<T>` but where `T` is numeric, an explicit-`null` one beside its `_null`
+/// setter, and it converts from its `…Required` struct, which holds the required ones in
+/// declaration order; a bundle of optional ones derives `Default` instead.
 #[test]
 fn the_params_struct_bundles_every_parameter_but_a_path_one() {
     let generated = generated(PARAMS);
-    let get_thing = between(&generated, "pubstructGetThingParams{", "#[derive(");
+    let get_thing = between(
+        &generated,
+        "pubstructGetThingParams{",
+        "///Setthe`X-Json`parameter.",
+    );
     assert_contains_all(
         get_thing,
         &[
@@ -224,21 +229,35 @@ fn the_params_struct_bundles_every_parameter_but_a_path_one() {
                 r#"#[serde(rename="X-Req")]pubx_req:types::XReq,"#,
             ),
             r#"#[serde(rename="cj",skip_serializing_if="Option::is_none")]pubcj:Option<types::Query>,}"#,
+            r#"///Therequiredparametersof`GetThingParams`,whichconvertsfromthiswitheveryoptionaloneunset."#,
             concat!(
-                r#"///Theparameterswitheveryrequiredonegiven,indeclarationorder(`q`,`X-Req`),andeveryoptionaloneunset."#,
-                r#"#[must_use]#[allow(clippy::too_many_arguments)]pubfnnew(q:implInto<types::Q>,x_req:implInto<types::XReq>)->Self"#,
-                r#"{Self{q:q.into(),r:None,sp:None,pp:None,deep:None,cq:support::Nullable::Absent,tq:None,old:None,nq:None,x_req:x_req.into(),x_json:None,ck:None,ce:None,cl:None,cj:None,}}"#,
-                r#"///Setthe`r`parameter.#[must_use]pubfnr(mutself,value:types::R)->Self{self.r=Some(value);self}"#,
+                r#"#[derive(Debug,Clone)]pubstructGetThingParamsRequired{///The`q`parameter.pubq:types::Q,"#,
+                r#"///The`X-Req`parameter.pubx_req:types::XReq,}"#,
             ),
+            concat!(
+                r#"implstd::convert::From<GetThingParamsRequired>forGetThingParams{"#,
+                r#"///Theparameterswitheveryrequiredonetakenfrom`GetThingParamsRequired`andeveryoptionaloneunset."#,
+                r#"fnfrom(required:GetThingParamsRequired)->Self{Self{q:required.q,r:None,sp:None,pp:None,deep:None,"#,
+                r#"cq:support::Nullable::Absent,tq:None,old:None,nq:None,x_req:required.x_req,x_json:None,ck:None,"#,
+                r#"ce:None,cl:None,cj:None,}}}"#,
+            ),
+            r#"///Setthe`r`parameter.#[must_use]pubfnr(mutself,value:implInto<types::R>)->Self{self.r=Some(value.into());self}"#,
             concat!(
                 r#"///Setthe`cq`parameter.//////Avalue,or`Nullable::Null`tosendtheJSON`null`;leavingtheparameterunsetomitsit."#,
                 r#"#[must_use]pubfncq(mutself,value:implInto<support::Nullable<types::Cq>>)->Self{self.cq=value.into();self}"#,
                 r#"///Sendthe`cq`parameterastheJSON`null`.#[must_use]pubfncq_null(mutself)->Self{self.cq=support::Nullable::Null;self}"#,
             ),
-            r#"///Setthe`nq`parameter.#[must_use]pubfnnq(mutself,value:types::Nq)->Self{self.nq=Some(value);self}"#,
+            r#"///Setthe`nq`parameter.#[must_use]pubfnnq(mutself,value:implInto<types::Nq>)->Self{self.nq=Some(value.into());self}"#,
         ],
     );
-    for absent in ["pubid:", "pubm:", "pubfnq(", "pubfnx_req(", "pubfnid("] {
+    for absent in [
+        "pubid:",
+        "pubm:",
+        "pubfnq(",
+        "pubfnx_req(",
+        "pubfnid(",
+        "pubfnnew(",
+    ] {
         assert!(!get_thing.contains(absent), "`{absent}` in {get_thing}");
     }
     assert_contains_all(
@@ -248,8 +267,15 @@ fn the_params_struct_bundles_every_parameter_but_a_path_one() {
                 r#"#[derive(Debug,Clone,Default,serde::Serialize)]pubstructListThingsParams{"#,
                 r#"#[serde(rename="page",skip_serializing_if="Option::is_none")]pubpage:Option<types::Page>,"#,
             ),
-            // A required parameter of a type other than a plain string is taken as it is.
-            r#"pubfnnew(filter:types::Query)->Self{Self{filter}}"#,
+            concat!(
+                r#"pubstructLookupParamsRequired{///The`filter`parameter.pubfilter:types::Query,}"#,
+                r#"#[allow(deprecated,missing_docs,unreachable_pub,dead_code,clippy::pedantic,clippy::nursery)]"#,
+                r#"implstd::convert::From<LookupParamsRequired>forLookupParams{"#,
+                r#"///Theparameterswitheveryrequiredonetakenfrom`LookupParamsRequired`andeveryoptionaloneunset."#,
+                r#"fnfrom(required:LookupParamsRequired)->Self{Self{filter:required.filter}}}"#,
+            ),
         ],
     );
+    // A bundle of only required parameters has no setter, so no inherent `impl`.
+    assert!(!generated.contains("implLookupParams{"), "{generated}");
 }

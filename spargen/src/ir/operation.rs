@@ -151,8 +151,8 @@ impl Operation {
         self.params.iter().any(|param| !param.is_positional())
     }
 
-    /// Whether the `…Params` bundle holds a required parameter, so the bundle is constructed with
-    /// `…Params::new(required…)` and the method takes it by value rather than as an optional
+    /// Whether the `…Params` bundle holds a required parameter, so the bundle converts from its
+    /// `…Required` struct and the method takes `impl Into<…Params>` rather than an optional
     /// `impl Into<Option<…Params>>`.
     pub(crate) fn params_required(&self) -> bool {
         self.params
