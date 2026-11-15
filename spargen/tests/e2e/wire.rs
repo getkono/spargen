@@ -1155,6 +1155,15 @@ paths:
       responses:
         "204":
           description: deleted
+  /problems:
+    get:
+      operationId: getProblem
+      responses:
+        "200":
+          description: any JSON-suffixed problem document
+          content:
+            application/*+json:
+              schema: { $ref: "#/components/schemas/Pet" }
   /reports:
     post:
       operationId: makeReport
@@ -1230,6 +1239,16 @@ fn two_bodied_statuses_ask_for_both_media() {
         "{}",
         request.head
     );
+}
+
+#[test]
+fn a_structured_suffix_range_leaves_accept_to_the_http_stack() {
+    // `application/*+json` is no RFC 9110 media range, so it is never sent as one.
+    let (base, server) =
+        common::serve_once("application/problem+json", "200 OK", br#"{"name":"a"}"#);
+    client(&base).get_problem().expect("the suffixed JSON decodes");
+    let request = server.join().unwrap();
+    assert_eq!(request.header("accept"), ["*/*"], "{}", request.head);
 }
 
 #[test]

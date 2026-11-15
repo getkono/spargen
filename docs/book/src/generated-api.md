@@ -55,6 +55,13 @@ use.
   a caller names an operation without copying its path. Every request an operation builds carries
   its `Operation` in its extensions, a replay or stream reconnect included, so a transport backend
   can sign, route or meter by operation.
+- A request asks, in `Accept`, for the media its success responses are decoded from: the essence
+  of each bodied success response's chosen `content` key, once each in document order and
+  comma-joined (`text/event-stream` for an SSE stream, `application/json` for a `200` that also
+  offers XML, `application/json, text/plain` for a JSON `200` beside a text `202`). An operation
+  with no bodied success response sets none, so the HTTP stack's own default goes out, and so
+  does one whose success is chosen from a structured-suffix range key (`application/*+json`),
+  which is no RFC 9110 media range a server need understand.
 - A `format: binary` request body is taken as `impl Into<HttpBody>`: `Bytes` or `Vec<u8>` move in
   without a copy, and `HttpBody::wrap` streams an upload as it is read. A `format: binary` success
   body read whole, as the one success body or as a status of a success enum, is bounded (64 MiB

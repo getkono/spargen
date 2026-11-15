@@ -55,10 +55,10 @@ pub(crate) struct Response {
     /// a bodied stream anywhere but the operation's single bodied success (see
     /// [`Responses::stream_outside_single_success`]).
     pub(crate) stream: Option<Framing>,
-    /// The selected content key's essence when the request announces it in `Accept`, which
-    /// lowering does for a CBOR key (`application/cbor`, or a `+cbor` suffix): such a body is
-    /// read as opaque octets, so the media type is the one place its representation is stated.
-    /// `None` for every other media, and for a bodyless response. See [`Responses::accept`].
+    /// The selected content key's essence, which the request announces in `Accept` when this is a
+    /// bodied success response; lowering records it for every chosen media, so a stream asks for
+    /// its framing and a response declaring several media asks for the one its decoder reads.
+    /// `None` for a bodyless response. See [`Responses::accept`].
     pub(crate) accept: Option<String>,
     /// Documented response headers, in source order. A `Content-Type` entry is dropped during
     /// lowering, because the specification says it is ignored.
@@ -289,10 +289,10 @@ impl Responses {
     }
 
     /// The `Accept` header value the operation's request sends: the distinct
-    /// [`Response::accept`] keys of the bodied success responses, comma-joined in document order,
-    /// when every bodied success response carries one. `None` when any bodied success response
-    /// carries none, so a success representation the document declares is never refused by the
-    /// header, and when no success response is bodied. Error responses do not contribute.
+    /// [`Response::accept`] keys of the bodied success responses, whatever their media,
+    /// comma-joined in document order. `None` when no success response is bodied, and when a
+    /// bodied success response records no key, so a success representation the document declares
+    /// is never refused by the header. Error responses do not contribute.
     pub(crate) fn accept(&self) -> Option<String> {
         let mut announced: Vec<&str> = Vec::new();
         for response in self.success_responses() {
