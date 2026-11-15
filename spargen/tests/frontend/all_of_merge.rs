@@ -1123,8 +1123,9 @@ fn closed_union_meet_spec(schemas: &str) -> String {
 /// JSON Schema 2020-12 would forbid them. In every spelling the departure is reported once at the
 /// closing keyword, naming every branch's properties the closing schema does not declare: an
 /// `allOf` with an inline union member or a `$ref` one, an `allOf` beside a union, a `$ref` to a
-/// union met with closing sibling keywords, a closed `$ref` target beside a union sibling, and a
-/// closed target met with sibling keywords and a union sibling together.
+/// union met with closing sibling keywords, a closed `$ref` target beside a union sibling, a
+/// closed target met with sibling keywords and a union sibling together, and closing sibling
+/// keywords beside an open `$ref` target and a union sibling.
 // W011 case: closed-all-of-merge
 #[test]
 fn w011_a_closed_object_met_with_a_union_branch_by_branch_is_reported() {
@@ -1192,6 +1193,18 @@ fn w011_a_closed_object_met_with_a_union_branch_by_branch_is_reported() {
       oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }]
 "##,
             "/components/schemas/Closed/additionalProperties",
+        ),
+        (
+            r##"
+    Open: { type: object }
+    S:
+      $ref: '#/components/schemas/Open'
+      type: object
+      properties: { x: { type: string } }
+      additionalProperties: false
+      oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }]
+"##,
+            "/components/schemas/S/additionalProperties",
         ),
     ];
     for (schemas, pointer) in cases {
