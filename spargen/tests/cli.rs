@@ -735,8 +735,9 @@ fn diff_exit_code_fails_exactly_a_breaking_change() {
     let (status, stdout, stderr) = spargen(temp.path(), &["diff", &two, &one, "--exit-code"]);
     assert_eq!(
         status,
-        Some(1),
-        "a major diff fails the gate: stdout {stdout} stderr {stderr}"
+        Some(4),
+        "a major diff fails the gate with its own status, apart from a rejection's 1: stdout \
+         {stdout} stderr {stderr}"
     );
     assert!(
         stdout.contains("recommended bump: major"),
@@ -816,7 +817,7 @@ fn diff_classifies_a_setting_only_one_sides_config_file_changes() {
     let (status, stdout, stderr) = spargen(temp.path(), &["diff", &old, &new, "--exit-code"]);
     assert_eq!(
         status,
-        Some(1),
+        Some(4),
         "a retyped success body fails the gate: stdout {stdout} stderr {stderr}"
     );
     assert!(
@@ -834,6 +835,39 @@ fn diff_classifies_a_setting_only_one_sides_config_file_changes() {
         stdout.contains("[testing-module-added] testing: `testing` module added")
             && stdout.contains("recommended bump: minor"),
         "{stdout}"
+    );
+}
+
+/// An omit rule naming a path only the new spec declares is satisfied on the old side: the diff
+/// is printed and exits zero, the omission a `W009` beside it (#1428). A rule naming a path neither
+/// spec declares is an `E019` on each side, and exits one.
+#[test]
+fn diff_raises_e019_only_for_an_omit_rule_matching_neither_spec() {
+    let temp = tempfile::tempdir().unwrap();
+    let old = spec_arg(temp.path(), "old.yaml", ONE_OPERATION);
+    let new = spec_arg(temp.path(), "new.yaml", TWO_OPERATIONS);
+
+    let (status, stdout, stderr) = spargen(
+        temp.path(),
+        &["diff", &old, &new, "--omit-path", "/pets/{id}"],
+    );
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(stdout.contains("recommended bump: patch"), "{stdout}");
+    assert!(
+        stderr.contains("W009") && !stderr.contains("E019"),
+        "only the new side omits anything: {stderr}"
+    );
+
+    let (status, stdout, stderr) = spargen(
+        temp.path(),
+        &["diff", &old, &new, "--omit-path", "/nowhere"],
+    );
+    assert_eq!(status, Some(1), "stdout {stdout} stderr {stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_eq!(stderr.matches("E019").count(), 2, "one per side: {stderr}");
+    assert!(
+        stderr.contains("old spec rejected:") && stderr.contains("new spec rejected:"),
+        "{stderr}"
     );
 }
 

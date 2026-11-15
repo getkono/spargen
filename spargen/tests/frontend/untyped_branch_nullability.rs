@@ -29,7 +29,7 @@ fn an_untyped_array_applicator_branch_leaves_null_undecided() {
             true,
         ),
         (
-            "{ type: [array, 'null'], oneOf: [ { prefixItems: [ { type: string } ] } ] }",
+            "{ type: [array, 'null'], oneOf: [ { prefixItems: [ { type: string } ], items: false } ] }",
             "{ type: [object, 'null'], oneOf: [ { required: [a] } ] }",
             true,
         ),

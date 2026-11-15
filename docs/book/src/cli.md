@@ -69,7 +69,11 @@ than replacing them. Each switch pair sets its setting in either direction, so `
 overrides `carve = true` in the file and `--uuid` overrides `uuid = false`; with neither flag of a
 pair given, the file's value stands, and giving both is rejected by argument parsing (exit status
 `2`). `diff` resolves each of its two specs this way on its own: absent `--config`, each side
-discovers the `spargen.toml` beside it, while `--config` applies its one file to both sides.
+discovers the `spargen.toml` beside it, while `--config` applies its one file to both sides. An
+omit or keep rule that matches nothing in one spec but something in the other is satisfied on the
+side that lacks its construct (a keep rule keeping nothing there), so `diff --omit-path /beta`
+works when only the new spec declares `/beta`; a rule is `E019` only when it matches neither spec,
+or on a side where its file is ambiguous.
 
 ### `spargen.toml` reference
 
@@ -103,7 +107,8 @@ its text, a bare URL is wrapped in `<…>`, and an HTML tag nothing closes has i
 `testing` under [testing with a mock backend](./runtime.md#testing-with-a-mock-backend),
 `bound_headers` on `Spec::add_bound_header` (each named header parameter, matched in any letter case,
 is no argument of any operation; the generated `with_bound_header(name, value)` sets the value
-every operation declaring it sends, refusing one that is not a valid header value, and a name no operation declares is `E026`), and the `[[omit]]` and `[[keep]]` rules the file may
+every operation declaring it sends, refusing a name that is not a valid header name (empty, or
+holding a space, a colon, a control or a non-ASCII byte) or a value that is not a valid header value, and a name no operation declares is `E026`), and the `[[omit]]` and `[[keep]]` rules the file may
 also carry under [keep rules](./compatibility.md#keep-rules-allow-list) and [`spargen.toml` and the analysis CLI](./compatibility.md#spargentoml-and-the-analysis-cli).
 An unknown key is a configuration error (exit status `3`).
 
@@ -112,9 +117,10 @@ An unknown key is a configuration error (exit status `3`).
 | Status | Meaning |
 | --- | --- |
 | `0` | Success, including a run that reported only warnings, and `--help` / `--version`. |
-| `1` | An error-severity diagnostic was reported (`check`, `deps`, `lock`, or a `diff` spec that cannot lower), `diff --exit-code` found a breaking (`major`) change, or output could not be written for a reason other than a closed stream. |
+| `1` | An error-severity diagnostic was reported (`check`, `deps`, `lock`, or a `diff` spec that cannot lower, with or without `--exit-code`), or output could not be written for a reason other than a closed stream. |
 | `2` | The command line did not parse: an unknown subcommand or flag, a missing argument, or two conflicting flags. |
 | `3` | A configuration or flag value was rejected (a missing `--config` target, a malformed `spargen.toml`, bad `--omit-*` or `--keep-operation` syntax), or `explain` was given an unknown code. |
+| `4` | `diff --exit-code` compared both specs and found a breaking (`major`) change. |
 
 A closed stdout or stderr (`spargen diff old.yaml new.yaml --format json | head -1`) is no failure:
 what would have gone to it is dropped, and the command exits with the status its outcome maps to.
@@ -232,8 +238,9 @@ spargen diff <OLD> <NEW> [--exit-code] [OPTIONS]
 ```
 
 It accepts `--format <human|json>` plus the shared spec options, applied to both specs.
-`--exit-code` exits `1` for a breaking (`major`) change; without it a successful comparison exits
-`0` whatever its bump. A spec that cannot lower is always a hard error and exits `1`. When either
+`--exit-code` exits `4` for a breaking (`major`) change; without it a successful comparison exits
+`0` whatever its bump. A spec that cannot lower is always a hard error and exits `1`, so a CI gate
+tells a breaking change from a broken spec by status alone. When either
 spec lowers with warnings, the comparison is printed on stdout as usual and those warnings go to
 stderr in the same format: each warning side's report under an `old spec:` / `new spec:` heading,
 or, under `--format json`, one object keyed `old` and `new`.
@@ -242,6 +249,12 @@ Each side is compared as generated under its own settings, so a `uuid`, `datetim
 setting that only one side's config file changes is classified like a spec change: every member it
 retypes is a type change (`major`), and the `testing` module appearing is `minor`, disappearing
 `major`.
+
+Adding a variant (to a closed or an open enum, a union, or a checked newtype's listed values), a
+struct field (optional, or a typed `additionalProperties` map), an optional parameter, or an
+optional response header is `major`: generated enums and unions are exhaustive and those fields are
+`pub`, so a consumer's exhaustive `match` or struct literal stops compiling. A new operation, type,
+server, server variable or `testing` module is `minor`.
 
 `--format json` prints one object: `changes`, an array of `{ kind, impact, location, detail }`
 sorted most-severe first, plus the top-level `bump`. `kind` is the stable kebab-case change code

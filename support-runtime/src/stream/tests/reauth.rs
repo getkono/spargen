@@ -31,7 +31,7 @@ fn signed_stream(core: &ClientCore) -> EventStream<serde_json::Value> {
     EventStream::new_reconnectable(response, Framing::SseJsonData, core, None)
         .resending(core, resend)
         .with_reconnect(policy)
-        .unwrap()
+        .unwrap_or_else(|(_, error)| panic!("reconnect should be available: {error}"))
 }
 
 /// Issue #1398: a stream whose first request was rejected, refreshed and replayed reconnects with

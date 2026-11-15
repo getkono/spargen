@@ -18,14 +18,14 @@ expression: basic_spec_module(|spec| spec)
 )]
 pub use support::{
     ApiErrorBody, ApiErrorProblem, AsMultipartBody, AuthError, ByteStream, ClientConfig,
-    ClientCore, Credential, Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend,
-    HttpBody, LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend,
-    MultipartBody, Next, Nullable, ParameterError, ProblemDetails, ProtocolError,
-    RedirectError, RejectionCheck, RequestCause, RequestError, RequestOptions,
-    ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
-    SecretString, TimeoutKind, TokenFuture, TokenProvider, TokenRefresher, TotalTimeout,
-    TransportConfig, TransportError, UnknownVariant, exponential_backoff, full_jitter,
-    next_link, token_provider,
+    ClientCore, Credential, CredentialKind, Error, ExecuteFuture, ExposeSecret,
+    HeaderError, HttpBackend, HttpBody, LinkPaginator, MaybeSend, MaybeSync, Middleware,
+    MiddlewareBackend, MultipartBody, Next, Nullable, ParameterError, ProblemDetails,
+    ProtocolError, RedirectError, RejectionCheck, RequestCause, RequestError,
+    RequestOptions, ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome,
+    RetryPolicy, RetryWait, SchemeCarrier, SecretString, TimeoutKind, TokenFuture,
+    TokenProvider, TokenRefresher, TotalTimeout, TransportConfig, TransportError,
+    UnknownVariant, exponential_backoff, full_jitter, next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -66,7 +66,7 @@ mod support {
         use std::future::Future;
         use std::sync::Arc;
         use bytes::Bytes;
-        use http::header::{HeaderValue, AUTHORIZATION, COOKIE};
+        use http::header::{HeaderName, HeaderValue, AUTHORIZATION, COOKIE};
         use super::wasm::{BoxFuture, MaybeSend, MaybeSync};
         use super::{ClientCore, Error, HttpBody, RequestBuilder, RequestError};
         use secrecy::zeroize::Zeroizing;
@@ -142,6 +142,8 @@ mod support {
         ///   [`super::RequestError::MissingCredential`];
         /// - the selected alternative has a credential of a variant its scheme cannot carry:
         ///   [`super::RequestError::CredentialMismatch`];
+        /// - the selected alternative's `http basic` scheme has a [`Credential::Basic`] whose username
+        ///   holds `:`, which RFC 7617 §2 forbids: [`super::RequestError::InvalidBasicUsername`];
         /// - the selected alternative's [`Credential::Provider`], or the token provider of its
         ///   [`Credential::Refreshable`], fails: [`super::RequestError::CredentialProvider`].
         ///
@@ -177,9 +179,10 @@ mod support {
             ///
             /// It is **not** accepted under an `http basic` scheme, which needs a username and password
             /// ([`Credential::Basic`]). There the call fails as
-            /// [`super::RequestError::CredentialMismatch`] with `required: "http basic"` and
-            /// `registered: "Provider"`, and the provider is never called. Under a `mutualTLS` scheme it is
-            /// ignored and never called, since the transport's client certificate satisfies the scheme.
+            /// [`super::RequestError::CredentialMismatch`] with `required: SchemeCarrier::HttpBasic`
+            /// and `registered: CredentialKind::Provider`, and the provider is never called. Under a
+            /// `mutualTLS` scheme it is ignored and never called, since the transport's client
+            /// certificate satisfies the scheme.
             Provider(TokenProvider),
             /// A token the runtime refreshes and replays once when the server rejects it.
             ///
@@ -216,7 +219,8 @@ mod support {
             Bearer,
             /// `Authorization: Basic <base64>`.
             Basic,
-            /// An `apiKey` sent as the named request header.
+            /// An `apiKey` sent as the named request header, replacing any value the request already
+            /// carries under that name.
             ApiKeyHeader(&'static str),
             /// An `apiKey` sent as the named query parameter.
             ApiKeyQuery(&'static str),
@@ -236,16 +240,78 @@ mod support {
             /// The wire carrier.
             pub kind: AuthKind,
         }
-        impl Credential {
-            /// The variant's name, as `Debug` renders it and as
-            /// [`super::RequestError::CredentialMismatch`] reports it in `registered`.
-            fn kind_name(&self) -> &'static str {
+        /// What a security scheme carries on the wire, as [`super::RequestError::CredentialMismatch`]
+        /// reports it in `required`.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum SchemeCarrier {
+            /// An `http basic` scheme: a username and password.
+            HttpBasic,
+            /// A bearer token: an `http bearer` scheme, and every `oauth2` and `openIdConnect` scheme,
+            /// which attach their token as a bearer credential.
+            Bearer,
+            /// An `apiKey` scheme, in a header, query or cookie.
+            ApiKey,
+        }
+        impl SchemeCarrier {
+            /// The carrier as the error message spells it: `"http basic"`, `"bearer"` or `"apiKey"`.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
                 match self {
-                    Credential::Bearer(_) => "Bearer",
-                    Credential::Basic { .. } => "Basic",
-                    Credential::ApiKey(_) => "ApiKey",
-                    Credential::Provider(_) => "Provider",
-                    Credential::Refreshable { .. } => "Refreshable",
+                    SchemeCarrier::HttpBasic => "http basic",
+                    SchemeCarrier::Bearer => "bearer",
+                    SchemeCarrier::ApiKey => "apiKey",
+                }
+            }
+        }
+        impl std::fmt::Display for SchemeCarrier {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+        /// Which [`Credential`] variant is registered, as [`super::RequestError::CredentialMismatch`]
+        /// reports it in `registered`.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum CredentialKind {
+            /// [`Credential::Bearer`].
+            Bearer,
+            /// [`Credential::Basic`].
+            Basic,
+            /// [`Credential::ApiKey`].
+            ApiKey,
+            /// [`Credential::Provider`].
+            Provider,
+            /// [`Credential::Refreshable`].
+            Refreshable,
+        }
+        impl CredentialKind {
+            /// The variant's name, as `Credential`'s `Debug` renders it: `"Bearer"`, `"Basic"`,
+            /// `"ApiKey"`, `"Provider"` or `"Refreshable"`.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    CredentialKind::Bearer => "Bearer",
+                    CredentialKind::Basic => "Basic",
+                    CredentialKind::ApiKey => "ApiKey",
+                    CredentialKind::Provider => "Provider",
+                    CredentialKind::Refreshable => "Refreshable",
+                }
+            }
+        }
+        impl std::fmt::Display for CredentialKind {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+        impl Credential {
+            /// The variant, as `Debug` renders it and as
+            /// [`super::RequestError::CredentialMismatch`] reports it in `registered`.
+            fn kind(&self) -> CredentialKind {
+                match self {
+                    Credential::Bearer(_) => CredentialKind::Bearer,
+                    Credential::Basic { .. } => CredentialKind::Basic,
+                    Credential::ApiKey(_) => CredentialKind::ApiKey,
+                    Credential::Provider(_) => CredentialKind::Provider,
+                    Credential::Refreshable { .. } => CredentialKind::Refreshable,
                 }
             }
             /// A [`Credential::Refreshable`] from closures: `token` as for [`token_provider`],
@@ -273,7 +339,7 @@ mod support {
         }
         impl std::fmt::Debug for Credential {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "Credential::{}(***)", self.kind_name())
+                write!(f, "Credential::{}(***)", self.kind())
             }
         }
         /// Attach credentials for an operation's security requirement. `requirements` is an OR
@@ -636,7 +702,9 @@ mod support {
                     match credential {
                         Credential::Basic { username, .. } if username.contains(':') => {
                             Err(
-                                credential_mismatch(scheme.name, "http basic", credential),
+                                Error::RequestConstruction(RequestError::InvalidBasicUsername {
+                                    scheme: scheme.name,
+                                }),
                             )
                         }
                         Credential::Basic { username, password } => {
@@ -648,7 +716,11 @@ mod support {
                         }
                         _ => {
                             Err(
-                                credential_mismatch(scheme.name, "http basic", credential),
+                                credential_mismatch(
+                                    scheme.name,
+                                    SchemeCarrier::HttpBasic,
+                                    credential,
+                                ),
                             )
                         }
                     }
@@ -665,20 +737,27 @@ mod support {
                             set_authorization(request, &value)
                         }
                         None => {
-                            Err(credential_mismatch(scheme.name, "bearer", credential))
+                            Err(
+                                credential_mismatch(
+                                    scheme.name,
+                                    SchemeCarrier::Bearer,
+                                    credential,
+                                ),
+                            )
                         }
                     }
                 }
                 AuthKind::ApiKeyHeader(name) => {
                     match token {
-                        Some(token) => {
-                            Ok(
-                                request
-                                    .header(name, sensitive_value(token.expose_secret())?),
-                            )
-                        }
+                        Some(token) => set_header(request, name, token.expose_secret()),
                         None => {
-                            Err(credential_mismatch(scheme.name, "apiKey", credential))
+                            Err(
+                                credential_mismatch(
+                                    scheme.name,
+                                    SchemeCarrier::ApiKey,
+                                    credential,
+                                ),
+                            )
                         }
                     }
                 }
@@ -688,7 +767,13 @@ mod support {
                             append_query_pair(request, name, token.expose_secret())
                         }
                         None => {
-                            Err(credential_mismatch(scheme.name, "apiKey", credential))
+                            Err(
+                                credential_mismatch(
+                                    scheme.name,
+                                    SchemeCarrier::ApiKey,
+                                    credential,
+                                ),
+                            )
                         }
                     }
                 }
@@ -699,7 +784,13 @@ mod support {
                             append_cookie(request, name, token.expose_secret())
                         }
                         None => {
-                            Err(credential_mismatch(scheme.name, "apiKey", credential))
+                            Err(
+                                credential_mismatch(
+                                    scheme.name,
+                                    SchemeCarrier::ApiKey,
+                                    credential,
+                                ),
+                            )
                         }
                     }
                 }
@@ -751,6 +842,25 @@ mod support {
                 .map_err(Error::request_construction)?;
             value.set_sensitive(true);
             Ok(value)
+        }
+        /// Set the request's header `name` to `value`, marked sensitive, replacing any value it already
+        /// carries under that name, as [`set_authorization`] does for `Authorization`: a header `apiKey`
+        /// named `Authorization` supersedes the `Basic` value a userinfo URL set, and one named after a
+        /// header the operation already sent is sent once. A name or value that does not convert fails
+        /// the call before anything is sent; a builder that already failed is left as it is, for `build`
+        /// to report its failure.
+        fn set_header(
+            mut request: RequestBuilder,
+            name: &str,
+            value: &str,
+        ) -> Result<RequestBuilder, Error<Infallible>> {
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(Error::request_construction)?;
+            let value = sensitive_value(value)?;
+            if let Some(headers) = request.headers_mut() {
+                headers.insert(name, value);
+            }
+            Ok(request)
         }
         /// Set the request's one `Authorization` header to `value`, marked sensitive, replacing any value
         /// it already carries: the field is a singleton, and a request built from a URL with userinfo
@@ -814,13 +924,13 @@ mod support {
         }
         fn credential_mismatch(
             scheme: &'static str,
-            required: &'static str,
+            required: SchemeCarrier,
             credential: &Credential,
         ) -> Error<Infallible> {
             Error::RequestConstruction(RequestError::CredentialMismatch {
                 scheme,
                 required,
-                registered: credential.kind_name(),
+                registered: credential.kind(),
             })
         }
     }
@@ -833,7 +943,8 @@ mod support {
         #[cfg(not(target_arch = "wasm32"))]
         use super::error::CrossOriginRedirect;
         #[cfg(not(target_arch = "wasm32"))]
-        use super::paginate::{same_origin, without_credentials};
+        use super::paginate::same_origin;
+        use super::paginate::without_credentials;
         use super::{
             Credential, Error, ExposeSecret, HttpBackend, LinkPaginator, ReqwestBackend,
             SecretString,
@@ -1014,7 +1125,7 @@ mod support {
         ///
         /// The generated `Client` wraps one of these and documents its own constructors; each of its
         /// operation methods delegates to the shared dispatch routines.
-        #[derive(Debug, Clone)]
+        #[derive(Clone)]
         pub struct ClientCore {
             backend: Arc<dyn HttpBackend>,
             base_url: Url,
@@ -1024,6 +1135,24 @@ mod support {
             /// Bound header values, keyed by the header name in ASCII lowercase. Held as `SecretString`s,
             /// as credentials' secrets are, so `Debug` prints each bound name and redacts its value.
             bound_headers: HashMap<String, SecretString>,
+        }
+        /// Prints the base URL without its userinfo and query, the two places a URL carries a credential
+        /// (a `user:password@` prefix the request builder sends as `Authorization: Basic`, an `apiKey`
+        /// query parameter); [`ClientCore::base_url`] returns it as configured.
+        impl std::fmt::Debug for ClientCore {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("ClientCore")
+                    .field("backend", &self.backend)
+                    .field(
+                        "base_url",
+                        &without_credentials(self.base_url.clone()).as_str(),
+                    )
+                    .field("config", &self.config)
+                    .field("options", &self.options)
+                    .field("credentials", &self.credentials)
+                    .field("bound_headers", &self.bound_headers)
+                    .finish()
+            }
         }
         impl ClientCore {
             /// Build a core with the default [`ClientConfig`] and [`TransportConfig`] and the given base
@@ -1046,7 +1175,9 @@ mod support {
                 transport: TransportConfig,
             ) -> Result<Self, Error<Infallible>> {
                 let base_url = parse_base_url(base_url)?;
-                let backend = Arc::new(ReqwestBackend::new(http_client(&transport)?));
+                let backend = Arc::new(
+                    ReqwestBackend::built_from(http_client(&transport)?, transport),
+                );
                 Ok(Self::assemble(backend, base_url, config))
             }
             /// Build a core executing requests on a caller-supplied `reqwest::Client` — the injection
@@ -1154,16 +1285,28 @@ mod support {
             /// sends it marked sensitive (`HeaderValue::set_sensitive`), so the request's `Debug` redacts
             /// it too.
             ///
-            /// Returns a request-construction error, leaving any value already bound to `name` in place,
-            /// if `value` is not a valid header value: it holds a control character other than a tab,
-            /// such as CR, LF, NUL or DEL. The error does not quote the value.
+            /// Returns a request-construction error, binding nothing and leaving any value already bound
+            /// in place, if `name` is not a valid header name (an empty name, or one holding a space, a
+            /// colon, a control character or a byte past ASCII), or if `value` is not a valid header
+            /// value: it holds a control character other than a tab, such as CR, LF, NUL or DEL. The
+            /// error names the header and does not quote the value.
             pub fn bind_header(
                 &mut self,
                 name: &str,
                 value: impl Into<String>,
             ) -> Result<(), Error<Infallible>> {
-                let value = value.into();
-                if http::HeaderValue::from_str(&value).is_err() {
+                let Ok(header) = http::HeaderName::from_bytes(name.as_bytes()) else {
+                    return Err(
+                        Error::request_message(
+                            format!(
+                                "`{}` is not a valid header name to bind a value to", name
+                                .escape_debug()
+                            ),
+                        ),
+                    );
+                };
+                let value = SecretString::from(value.into());
+                if http::HeaderValue::from_str(value.expose_secret()).is_err() {
                     return Err(
                         Error::request_message(
                             format!(
@@ -1173,17 +1316,15 @@ mod support {
                         ),
                     );
                 }
-                self.bound_headers
-                    .insert(name.to_ascii_lowercase(), SecretString::from(value));
+                self.bound_headers.insert(header.as_str().to_owned(), value);
                 Ok(())
             }
             /// Unbind the header `name`, matched in any letter case, returning the value bound to it if
-            /// there was one. An operation that requires the header then fails with
-            /// [`super::RequestError::MissingBoundParameter`] before anything is sent.
-            pub fn unbind_header(&mut self, name: &str) -> Option<String> {
-                self.bound_headers
-                    .remove(&name.to_ascii_lowercase())
-                    .map(|value| value.expose_secret().to_owned())
+            /// there was one, as the secret the core held it as, so its `Debug` redacts it. An operation
+            /// that requires the header then fails with [`super::RequestError::MissingBoundParameter`]
+            /// before anything is sent.
+            pub fn unbind_header(&mut self, name: &str) -> Option<SecretString> {
+                self.bound_headers.remove(&name.to_ascii_lowercase())
             }
             /// The value bound to the header `name`, matched in any letter case.
             pub fn bound_header(&self, name: &str) -> Option<&str> {
@@ -2039,7 +2180,7 @@ mod support {
         use reqwest::header::HeaderMap;
         use reqwest::StatusCode;
         use serde_json::{Map, Value};
-        use super::{AuthError, ResponseValue};
+        use super::{AuthError, CredentialKind, ResponseValue, SchemeCarrier};
         /// The closed error taxonomy shared by every spargen-generated client. `E` is the
         /// operation's typed error body (an enum when several error statuses are documented).
         ///
@@ -2060,7 +2201,7 @@ mod support {
             /// neither proof that nothing reached the server, nor proof that no response was already
             /// produced and delivered to the caller.
             ///
-            /// [`RequestError`] types the three credential causes, each raised before anything is sent;
+            /// [`RequestError`] types the four credential causes, each raised before anything is sent;
             /// every other cause arrives as [`RequestError::Other`], whose documentation says which of
             /// them are raised before anything is sent and which are not. Read it before retrying.
             RequestConstruction(RequestError),
@@ -2557,17 +2698,7 @@ mod support {
                     Error::Timeout(kind) => f.debug_tuple("Timeout").field(kind).finish(),
                     Error::Protocol(e) => f.debug_tuple("Protocol").field(e).finish(),
                     Error::Redirect(e) => f.debug_tuple("Redirect").field(e).finish(),
-                    Error::Api(value) => {
-                        f.debug_tuple("Api")
-                            .field(
-                                &RedactedResponse {
-                                    status: value.status(),
-                                    headers: value.headers(),
-                                    inner: value.inner(),
-                                },
-                            )
-                            .finish()
-                    }
+                    Error::Api(value) => f.debug_tuple("Api").field(value).finish(),
                     Error::UnexpectedStatus { status, headers, body } => {
                         f.debug_struct("UnexpectedStatus")
                             .field("status", status)
@@ -2605,25 +2736,10 @@ mod support {
                 }
             }
         }
-        /// The `Debug` of an [`Error::Api`]'s `ResponseValue`, laid out as its own derive lays it out,
-        /// with its headers redacted.
-        struct RedactedResponse<'a, E> {
-            status: StatusCode,
-            headers: &'a HeaderMap,
-            inner: &'a E,
-        }
-        impl<E: std::fmt::Debug> std::fmt::Debug for RedactedResponse<'_, E> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("ResponseValue")
-                    .field("status", &self.status)
-                    .field("headers", &RedactedHeaders(self.headers))
-                    .field("inner", self.inner)
-                    .finish()
-            }
-        }
         /// A response's headers as `HeaderMap`'s own `Debug` prints them, one entry per value, except
-        /// that a value [`is_redacted`] prints as `[redacted]`.
-        struct RedactedHeaders<'a>(&'a HeaderMap);
+        /// that a value [`is_redacted`] prints as `[redacted]`. The `Debug` of [`Error`] and of
+        /// [`super::ResponseValue`] print a response's headers through it, so both redact the same set.
+        pub(crate) struct RedactedHeaders<'a>(pub(crate) &'a HeaderMap);
         impl std::fmt::Debug for RedactedHeaders<'_> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let mut map = f.debug_map();
@@ -2637,7 +2753,7 @@ mod support {
                 map.finish()
             }
         }
-        /// Whether an error's `Debug` redacts a response header's value: a `Set-Cookie`,
+        /// Whether a response's `Debug` redacts a header's value: a `Set-Cookie`,
         /// `Authorization` or `Proxy-Authenticate` header, or a value marked sensitive.
         fn is_redacted(
             name: &reqwest::header::HeaderName,
@@ -2694,12 +2810,13 @@ mod support {
         impl std::error::Error for MessageError {}
         /// Request-construction failure (taxonomy #1).
         ///
-        /// The three credential causes are the ones a consumer routes on — they mean "unauthenticated",
+        /// The four credential causes are the ones a consumer routes on — they mean "unauthenticated",
         /// not "malformed request" — so each is a variant of its own: [`RequestError::MissingCredential`]
         /// when no registered credential satisfies the requirement,
         /// [`RequestError::CredentialMismatch`] when the selected alternative has a credential registered
-        /// that its scheme cannot carry, and [`RequestError::CredentialProvider`] when a registered token
-        /// provider fails. All three are raised before anything is sent, and so is
+        /// that its scheme cannot carry, [`RequestError::InvalidBasicUsername`] when its `http basic`
+        /// credential's username holds `:`, and [`RequestError::CredentialProvider`] when a registered
+        /// token provider fails. All four are raised before anything is sent, and so is
         /// [`RequestError::MissingBoundParameter`], when an operation declares a required header the
         /// client binds and no value is bound to it. Every other
         /// cause arrives as [`RequestError::Other`] with its source attached — and [`RequestError::Other`]
@@ -2728,9 +2845,7 @@ mod support {
             },
             /// The selected alternative has a credential registered under one of its schemes, but of a
             /// kind that scheme cannot carry — a `Credential::Basic` under a bearer or `apiKey` scheme, or
-            /// anything but `Credential::Basic` under an `http basic` one, or a `Credential::Basic` whose
-            /// username holds `:`, which RFC 7617 §2 forbids (the one case `registered` is `"Basic"` and
-            /// `required` is `"http basic"`). Raised before anything is sent,
+            /// anything but `Credential::Basic` under an `http basic` one. Raised before anything is sent,
             /// and before a registered token provider is asked for a token. The payload is the whole cause,
             /// so `source()` is `None`.
             ///
@@ -2739,13 +2854,21 @@ mod support {
             CredentialMismatch {
                 /// The `securitySchemes` key the credential is registered under.
                 scheme: &'static str,
-                /// What the scheme carries on the wire: `"http basic"`, `"bearer"` (also every `oauth2`
-                /// and `openIdConnect` scheme, which attach their token as a bearer credential), or
-                /// `"apiKey"`.
-                required: &'static str,
-                /// The `Credential` variant registered under `scheme`: `"Bearer"`, `"Basic"`, `"ApiKey"`,
-                /// or `"Provider"`.
-                registered: &'static str,
+                /// What the scheme carries on the wire.
+                required: SchemeCarrier,
+                /// The `Credential` variant registered under `scheme`.
+                registered: CredentialKind,
+            },
+            /// The selected alternative has a `Credential::Basic` registered under an `http basic` scheme
+            /// whose username holds `:`, which RFC 7617 §2 forbids: the server splits the decoded
+            /// credentials at their first colon, so it would read another user and password. Raised
+            /// before anything is sent. The payload is the whole cause, so `source()` is `None`.
+            ///
+            /// The registration is what needs correcting: attaching credentials never falls through to a
+            /// later alternative.
+            InvalidBasicUsername {
+                /// The `securitySchemes` key the credential is registered under.
+                scheme: &'static str,
             },
             /// The selected alternative's token provider returned an error. Raised before anything is
             /// sent; `source()` is the provider's [`AuthError`].
@@ -3121,11 +3244,7 @@ mod support {
                         }
                         f.write_str(")")
                     }
-                    RequestError::CredentialMismatch {
-                        scheme,
-                        required: "http basic",
-                        registered: "Basic",
-                    } => {
+                    RequestError::InvalidBasicUsername { scheme } => {
                         write!(
                             f,
                             "the `Credential::Basic` registered for security scheme `{scheme}` has a username \
@@ -3162,6 +3281,7 @@ mod support {
                 match self {
                     RequestError::MissingCredential { .. }
                     | RequestError::CredentialMismatch { .. }
+                    | RequestError::InvalidBasicUsername { .. }
                     | RequestError::MissingBoundParameter { .. } => None,
                     RequestError::CredentialProvider { source, .. } => Some(source),
                     RequestError::Other(cause) => {
@@ -5397,14 +5517,28 @@ mod support {
         use bytes::Bytes;
         use reqwest::header::HeaderMap;
         use reqwest::StatusCode;
+        use super::error::RedactedHeaders;
         use super::{Error, HttpBody};
         /// A successful response body paired with its status and headers. Returned inside
         /// `Result<ResponseValue<T>, Error<E>>` from every generated operation method.
-        #[derive(Debug, Clone)]
+        ///
+        /// Its `Debug` prints the status, the headers and the body, with each `Set-Cookie`,
+        /// `Authorization` and `Proxy-Authenticate` value, and each value marked sensitive, printed as
+        /// `[redacted]`, as [`Error`]'s `Debug` prints a response's headers.
+        #[derive(Clone)]
         pub struct ResponseValue<T> {
             status: StatusCode,
             headers: HeaderMap,
             inner: T,
+        }
+        impl<T: std::fmt::Debug> std::fmt::Debug for ResponseValue<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("ResponseValue")
+                    .field("status", &self.status)
+                    .field("headers", &RedactedHeaders(&self.headers))
+                    .field("inner", &self.inner)
+                    .finish()
+            }
         }
         impl<T> ResponseValue<T> {
             /// Wrap a decoded body with its status and headers.
@@ -6513,18 +6647,50 @@ mod support {
         /// own policy, reqwest's default following up to ten hops to any origin and forwarding every
         /// header but `Authorization`, `Cookie` and the other few reqwest strips (an `apiKey` header or a
         /// bound header among those forwarded).
-        #[derive(Debug, Clone)]
+        ///
+        /// Its `Debug` prints the connect and read timeouts `ClientCore` built its client with, each only
+        /// when set, and nothing of the wrapped client: reqwest's own `Debug` of a client prints its
+        /// default headers (an `Authorization` among them) and proxies in full. A backend wrapping a
+        /// caller's client prints as `ReqwestBackend { .. }`.
+        #[derive(Clone)]
         pub struct ReqwestBackend {
             client: reqwest::Client,
+            /// The connect and read timeouts the client was built with, when the runtime built it.
+            timeouts: Option<super::TransportConfig>,
         }
         impl ReqwestBackend {
             /// Wrap a `reqwest::Client` as the transport backend.
             pub fn new(client: reqwest::Client) -> Self {
-                Self { client }
+                Self { client, timeouts: None }
+            }
+            /// Wrap the client `ClientCore` built from `transport`, whose timeouts `Debug` prints. On
+            /// `wasm32` the client has neither timeout, and none is recorded.
+            pub(crate) fn built_from(
+                client: reqwest::Client,
+                transport: super::TransportConfig,
+            ) -> Self {
+                Self {
+                    client,
+                    timeouts: (!cfg!(target_arch = "wasm32")).then_some(transport),
+                }
             }
             /// The wrapped client.
             pub fn client(&self) -> &reqwest::Client {
                 &self.client
+            }
+        }
+        impl std::fmt::Debug for ReqwestBackend {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut debug = f.debug_struct("ReqwestBackend");
+                if let Some(transport) = &self.timeouts {
+                    if let Some(timeout) = &transport.connect_timeout {
+                        debug.field("connect_timeout", timeout);
+                    }
+                    if let Some(timeout) = &transport.read_timeout {
+                        debug.field("read_timeout", timeout);
+                    }
+                }
+                debug.finish_non_exhaustive()
             }
         }
         impl HttpBackend for ReqwestBackend {
@@ -6955,20 +7121,28 @@ mod support {
                     });
                 self
             }
+            /// Whether this stream holds a request it can resend, so that [`Self::with_reconnect`]
+            /// accepts a policy. `false` when the operation's request could not be cloned (a streaming
+            /// request body, for example) or the stream was decoded from a response alone.
+            pub fn can_reconnect(&self) -> bool {
+                self.reconnect.is_some()
+            }
             /// Enable automatic reconnects using a caller-owned policy and timer.
             ///
-            /// Returns [`Error::RequestConstruction`] when the stream holds no request it can resend,
-            /// because the operation's request could not be cloned (a streaming request body, for example).
+            /// When the stream holds no request it can resend ([`Self::can_reconnect`] is `false`), the
+            /// error is [`Error::RequestConstruction`] and comes with the stream itself, unchanged and
+            /// still readable without reconnects.
             pub fn with_reconnect(
                 mut self,
                 policy: Arc<dyn ReconnectPolicy>,
-            ) -> Result<Self, StreamError> {
+            ) -> Result<Self, (Self, StreamError)> {
                 let Some(reconnect) = self.reconnect.as_mut() else {
-                    return Err(
+                    return Err((
+                        self,
                         Error::request_message(
                             "this streaming request cannot be cloned safely for automatic reconnect",
                         ),
-                    );
+                    ));
                 };
                 reconnect.policy = Some(policy);
                 Ok(self)
@@ -8176,8 +8350,8 @@ mod support {
     }
     pub use auth::{
         attach_auth, attach_auth_replayable, replay_rejected, token_provider, AuthError,
-        AuthKind, AuthScheme, Credential, ExposeSecret, RejectionCheck, Replay,
-        SecretString, TokenFuture, TokenProvider, TokenRefresher,
+        AuthKind, AuthScheme, Credential, CredentialKind, ExposeSecret, RejectionCheck,
+        Replay, SchemeCarrier, SecretString, TokenFuture, TokenProvider, TokenRefresher,
     };
     pub use client::{ClientConfig, ClientCore, RequestOptions, TransportConfig};
     pub use dispatch::{

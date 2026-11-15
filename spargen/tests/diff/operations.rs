@@ -1322,12 +1322,12 @@ fn moving_a_parameter_to_another_location_compares_it_as_one_parameter() {
         kinds_at(&report),
         vec![
             (ChangeKind::UrlAccessorArgsChanged, "GET /pets"),
-            (ChangeKind::ParamRemoved, "GET /pets param `id` (query)"),
-            (ChangeKind::IdentifierRebound, "GET /pets params field `id`"),
             (
                 ChangeKind::OptionalParamAdded,
                 "GET /pets param `id` (header)"
             ),
+            (ChangeKind::ParamRemoved, "GET /pets param `id` (query)"),
+            (ChangeKind::IdentifierRebound, "GET /pets params field `id`"),
         ],
         "{:?}",
         report.changes
@@ -1405,7 +1405,8 @@ fn a_change_to_the_url_accessors_arguments_is_major() {
     );
     assert_eq!(report.bump, Impact::Major);
 
-    // A second optional query parameter rides in a bundle the accessor already takes: additive.
+    // A second optional query parameter rides in a bundle the accessor already takes, so the
+    // accessor holds; the parameter alone is the change, major as a new `pub` `…Params` field.
     let report = diff(
         &declared_params(&[("limit", "query", false)]),
         &declared_params(&[("limit", "query", false), ("offset", "query", false)]),
@@ -1419,7 +1420,7 @@ fn a_change_to_the_url_accessors_arguments_is_major() {
         "{:?}",
         report.changes
     );
-    assert_eq!(report.bump, Impact::Minor);
+    assert_eq!(report.bump, Impact::Major);
 }
 
 #[test]

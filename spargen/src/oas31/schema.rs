@@ -97,6 +97,9 @@ pub(crate) struct XmlHints {
     pub(crate) attribute: bool,
     /// OpenAPI 3.2 `nodeType`.
     pub(crate) node_type: Option<String>,
+    /// Where `nodeType` is written, whatever its value: a field only OpenAPI 3.2 defines, which
+    /// the audit rejects in a 3.1 document (`E011`) at this site.
+    pub(crate) node_type_provenance: Option<Provenance>,
     /// `xml.namespace`: an XML namespace URI (unsupported → `E009`/`W006`).
     pub(crate) namespace: Option<String>,
     /// `xml.prefix`: a namespace prefix (unsupported → `E009`/`W006`).

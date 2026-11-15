@@ -174,3 +174,50 @@ fn the_full_cause_chain_repeats_no_segment() {
         }
     }
 }
+
+/// `CredentialMismatch`'s fields are typed, and its `Display` spells each pair exactly as the
+/// string fields did before they were (#1415): the carrier as the scheme's wire name and the
+/// registered kind as its `Credential` variant. Every pair is pinned, and `InvalidBasicUsername`
+/// keeps the sentence the colon case had.
+#[test]
+fn credential_mismatch_renders_every_typed_pair_in_its_wire_and_variant_names() {
+    use crate::{CredentialKind, RequestError, SchemeCarrier};
+
+    let carriers = [
+        (SchemeCarrier::HttpBasic, "http basic"),
+        (SchemeCarrier::Bearer, "bearer"),
+        (SchemeCarrier::ApiKey, "apiKey"),
+    ];
+    let kinds = [
+        (CredentialKind::Bearer, "Bearer"),
+        (CredentialKind::Basic, "Basic"),
+        (CredentialKind::ApiKey, "ApiKey"),
+        (CredentialKind::Provider, "Provider"),
+        (CredentialKind::Refreshable, "Refreshable"),
+    ];
+    for (carrier, carrier_name) in carriers {
+        assert_eq!(carrier.as_str(), carrier_name);
+        assert_eq!(carrier.to_string(), carrier_name);
+        for (kind, kind_name) in kinds {
+            assert_eq!(kind.as_str(), kind_name);
+            assert_eq!(kind.to_string(), kind_name);
+            let error = RequestError::CredentialMismatch {
+                scheme: "login",
+                required: carrier,
+                registered: kind,
+            };
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "the `Credential::{kind_name}` registered for security scheme `login` cannot \
+                     satisfy its `{carrier_name}` type"
+                )
+            );
+        }
+    }
+    assert_eq!(
+        RequestError::InvalidBasicUsername { scheme: "login" }.to_string(),
+        "the `Credential::Basic` registered for security scheme `login` has a username holding \
+         `:`, which `http basic` cannot carry (RFC 7617 §2)"
+    );
+}

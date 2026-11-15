@@ -1,9 +1,9 @@
 //! What [`diff`](crate::diff) returns beside its [`DiffReport`]: each side's lowering
 //! [`Report`], or the [`DiffRejection`] of the sides that did not lower.
 
-use crate::pipeline::{carve_spec, lower_frontend};
+use crate::pipeline::{carve_spec_beside, lower_frontend_beside, matched_by};
 use crate::surface::{self, DiffReport};
-use crate::{diag, ir, name, Outcome, Report, Spec};
+use crate::{compat, diag, ir, name, Outcome, Report, Spec};
 
 /// The `Err` of a [`diff`](crate::diff) run: at least one spec failed to lower, so the two
 /// surfaces are not comparable and no [`DiffReport`] is produced.
@@ -133,8 +133,14 @@ impl serde::Serialize for DiffRejection {
 }
 
 /// The body of [`diff`](crate::diff), which runs it on the frontend stack.
+///
+/// Each side's omit profile is applied beside the other spec: a rule that matches nothing on one
+/// side but something in the other spec is satisfied there, so a rule is an `E019` only when it
+/// matches neither spec (#1428).
 pub(crate) fn diff_inner(old: &Spec, new: &Spec) -> Result<(DiffReport, DiffSides), DiffRejection> {
-    match (lower_side(old), lower_side(new)) {
+    let old_lowered = lower_side(old, &matched_by(old, new));
+    let new_lowered = lower_side(new, &matched_by(new, old));
+    match (old_lowered, new_lowered) {
         (Ok((old_api, old_names, old_report)), Ok((new_api, new_names, new_report))) => {
             // Each side under its own settings: the two specs are configured independently.
             let old_surface = surface::build(&old_api, &old_names, surface_settings(old));
@@ -164,21 +170,25 @@ fn surface_settings(spec: &Spec) -> surface::Settings {
     }
 }
 
-/// Lower one side of a [`diff`](crate::diff): through the carve driver when `spec.carve` asks for
+/// Lower one side of a [`diff`](crate::diff), its omit profile applied beside the rules
+/// `elsewhere` says the other spec matches: through the carve driver when `spec.carve` asks for
 /// it, as [`run_mode`](crate::pipeline::run_mode) does for every other entry point, and the plain
 /// frontend otherwise. A side that does not lower returns its rejection [`Report`]; one that
 /// lowers returns its [`Outcome::Clean`] report beside the lowered API, so its warnings reach the
 /// caller.
-fn lower_side(spec: &Spec) -> Result<(ir::Api, name::Names, Report), Report> {
+fn lower_side(
+    spec: &Spec,
+    elsewhere: &compat::MatchedElsewhere,
+) -> Result<(ir::Api, name::Names, Report), Report> {
     let carved;
     let spec = if spec.carve.is_on() {
-        carved = carve_spec(spec)?;
+        carved = carve_spec_beside(spec, elsewhere)?;
         &carved
     } else {
         spec
     };
     let mut diags = diag::Diagnostics::new(spec.batch_cap);
-    match lower_frontend(spec, &mut diags) {
+    match lower_frontend_beside(spec, elsewhere, &mut diags) {
         Ok((api, names)) => Ok((api, names, Report::new(diags, Outcome::Clean))),
         Err(()) => Err(Report::new(diags, Outcome::Rejected)),
     }

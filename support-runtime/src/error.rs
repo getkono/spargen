@@ -3,7 +3,7 @@ use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
 use serde_json::{Map, Value};
 
-use crate::{AuthError, ResponseValue};
+use crate::{AuthError, CredentialKind, ResponseValue, SchemeCarrier};
 
 /// The closed error taxonomy shared by every spargen-generated client. `E` is the
 /// operation's typed error body (an enum when several error statuses are documented).
@@ -25,7 +25,7 @@ pub enum Error<E> {
     /// neither proof that nothing reached the server, nor proof that no response was already
     /// produced and delivered to the caller.
     ///
-    /// [`RequestError`] types the three credential causes, each raised before anything is sent;
+    /// [`RequestError`] types the four credential causes, each raised before anything is sent;
     /// every other cause arrives as [`RequestError::Other`], whose documentation says which of
     /// them are raised before anything is sent and which are not. Read it before retrying.
     RequestConstruction(RequestError),
@@ -531,14 +531,8 @@ impl<E: std::fmt::Debug> std::fmt::Debug for Error<E> {
             Error::Timeout(kind) => f.debug_tuple("Timeout").field(kind).finish(),
             Error::Protocol(e) => f.debug_tuple("Protocol").field(e).finish(),
             Error::Redirect(e) => f.debug_tuple("Redirect").field(e).finish(),
-            Error::Api(value) => f
-                .debug_tuple("Api")
-                .field(&RedactedResponse {
-                    status: value.status(),
-                    headers: value.headers(),
-                    inner: value.inner(),
-                })
-                .finish(),
+            // `ResponseValue`'s own `Debug` redacts its headers.
+            Error::Api(value) => f.debug_tuple("Api").field(value).finish(),
             Error::UnexpectedStatus {
                 status,
                 headers,
@@ -581,27 +575,10 @@ impl<E: std::fmt::Debug> std::fmt::Debug for Error<E> {
     }
 }
 
-/// The `Debug` of an [`Error::Api`]'s `ResponseValue`, laid out as its own derive lays it out,
-/// with its headers redacted.
-struct RedactedResponse<'a, E> {
-    status: StatusCode,
-    headers: &'a HeaderMap,
-    inner: &'a E,
-}
-
-impl<E: std::fmt::Debug> std::fmt::Debug for RedactedResponse<'_, E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResponseValue")
-            .field("status", &self.status)
-            .field("headers", &RedactedHeaders(self.headers))
-            .field("inner", self.inner)
-            .finish()
-    }
-}
-
 /// A response's headers as `HeaderMap`'s own `Debug` prints them, one entry per value, except
-/// that a value [`is_redacted`] prints as `[redacted]`.
-struct RedactedHeaders<'a>(&'a HeaderMap);
+/// that a value [`is_redacted`] prints as `[redacted]`. The `Debug` of [`Error`] and of
+/// [`crate::ResponseValue`] print a response's headers through it, so both redact the same set.
+pub(crate) struct RedactedHeaders<'a>(pub(crate) &'a HeaderMap);
 
 impl std::fmt::Debug for RedactedHeaders<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -617,7 +594,7 @@ impl std::fmt::Debug for RedactedHeaders<'_> {
     }
 }
 
-/// Whether an error's `Debug` redacts a response header's value: a `Set-Cookie`,
+/// Whether a response's `Debug` redacts a header's value: a `Set-Cookie`,
 /// `Authorization` or `Proxy-Authenticate` header, or a value marked sensitive.
 fn is_redacted(name: &reqwest::header::HeaderName, value: &reqwest::header::HeaderValue) -> bool {
     value.is_sensitive()
@@ -674,12 +651,13 @@ impl std::error::Error for MessageError {}
 
 /// Request-construction failure (taxonomy #1).
 ///
-/// The three credential causes are the ones a consumer routes on — they mean "unauthenticated",
+/// The four credential causes are the ones a consumer routes on — they mean "unauthenticated",
 /// not "malformed request" — so each is a variant of its own: [`RequestError::MissingCredential`]
 /// when no registered credential satisfies the requirement,
 /// [`RequestError::CredentialMismatch`] when the selected alternative has a credential registered
-/// that its scheme cannot carry, and [`RequestError::CredentialProvider`] when a registered token
-/// provider fails. All three are raised before anything is sent, and so is
+/// that its scheme cannot carry, [`RequestError::InvalidBasicUsername`] when its `http basic`
+/// credential's username holds `:`, and [`RequestError::CredentialProvider`] when a registered
+/// token provider fails. All four are raised before anything is sent, and so is
 /// [`RequestError::MissingBoundParameter`], when an operation declares a required header the
 /// client binds and no value is bound to it. Every other
 /// cause arrives as [`RequestError::Other`] with its source attached — and [`RequestError::Other`]
@@ -708,9 +686,7 @@ pub enum RequestError {
     },
     /// The selected alternative has a credential registered under one of its schemes, but of a
     /// kind that scheme cannot carry — a `Credential::Basic` under a bearer or `apiKey` scheme, or
-    /// anything but `Credential::Basic` under an `http basic` one, or a `Credential::Basic` whose
-    /// username holds `:`, which RFC 7617 §2 forbids (the one case `registered` is `"Basic"` and
-    /// `required` is `"http basic"`). Raised before anything is sent,
+    /// anything but `Credential::Basic` under an `http basic` one. Raised before anything is sent,
     /// and before a registered token provider is asked for a token. The payload is the whole cause,
     /// so `source()` is `None`.
     ///
@@ -719,13 +695,21 @@ pub enum RequestError {
     CredentialMismatch {
         /// The `securitySchemes` key the credential is registered under.
         scheme: &'static str,
-        /// What the scheme carries on the wire: `"http basic"`, `"bearer"` (also every `oauth2`
-        /// and `openIdConnect` scheme, which attach their token as a bearer credential), or
-        /// `"apiKey"`.
-        required: &'static str,
-        /// The `Credential` variant registered under `scheme`: `"Bearer"`, `"Basic"`, `"ApiKey"`,
-        /// or `"Provider"`.
-        registered: &'static str,
+        /// What the scheme carries on the wire.
+        required: SchemeCarrier,
+        /// The `Credential` variant registered under `scheme`.
+        registered: CredentialKind,
+    },
+    /// The selected alternative has a `Credential::Basic` registered under an `http basic` scheme
+    /// whose username holds `:`, which RFC 7617 §2 forbids: the server splits the decoded
+    /// credentials at their first colon, so it would read another user and password. Raised
+    /// before anything is sent. The payload is the whole cause, so `source()` is `None`.
+    ///
+    /// The registration is what needs correcting: attaching credentials never falls through to a
+    /// later alternative.
+    InvalidBasicUsername {
+        /// The `securitySchemes` key the credential is registered under.
+        scheme: &'static str,
     },
     /// The selected alternative's token provider returned an error. Raised before anything is
     /// sent; `source()` is the provider's [`AuthError`].
@@ -1136,11 +1120,7 @@ impl std::fmt::Display for RequestError {
                 }
                 f.write_str(")")
             }
-            RequestError::CredentialMismatch {
-                scheme,
-                required: "http basic",
-                registered: "Basic",
-            } => write!(
+            RequestError::InvalidBasicUsername { scheme } => write!(
                 f,
                 "the `Credential::Basic` registered for security scheme `{scheme}` has a username \
                  holding `:`, which `http basic` cannot carry (RFC 7617 §2)"
@@ -1173,6 +1153,7 @@ impl std::error::Error for RequestError {
         match self {
             RequestError::MissingCredential { .. }
             | RequestError::CredentialMismatch { .. }
+            | RequestError::InvalidBasicUsername { .. }
             | RequestError::MissingBoundParameter { .. } => None,
             RequestError::CredentialProvider { source, .. } => Some(source),
             // The boxed cause itself, not its wrapper, so `downcast_ref` reaches the cause's own

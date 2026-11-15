@@ -839,7 +839,7 @@ fn diff_variant_set(
 }
 
 /// An open enum's catch-all is a variant like any other to a consumer that matches on the enum:
-/// opening a closed enum adds one (`VariantAdded`, the additive rule), closing an open one removes
+/// opening a closed enum adds one (`VariantAdded`, major like any added variant), closing an open one removes
 /// it, and renaming it — a listed value spelled `other` taking its name — is both.
 fn diff_open_variant(name: &str, old: Option<&str>, new: Option<&str>, changes: &mut Vec<Change>) {
     if old == new {

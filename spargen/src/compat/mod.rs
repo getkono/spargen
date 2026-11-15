@@ -38,8 +38,8 @@ use crate::diag::{
 use crate::source::{InputBundle, SpannedValue};
 
 pub(crate) use carve::{carve_rules, MAX_CARVE_ROUNDS};
-use rule::RuleMatch;
 pub use rule::{ComponentKind, KeepRule, OmitMethod, OmitRule, UnknownOmitToken};
+use rule::{RuleMatch, Unresolved};
 
 /// A compatibility omit profile.
 ///
@@ -62,6 +62,17 @@ impl Omit {
         self.rules.is_empty() && self.keep.is_empty()
     }
 
+    /// [`apply_beside`](Self::apply_beside) with [`MatchedElsewhere::default`]: each rule answers
+    /// to its own spec alone.
+    #[cfg(test)]
+    pub(crate) fn apply(
+        &self,
+        bundle: &mut InputBundle,
+        diags: &mut Diagnostics,
+    ) -> Result<(), Aborted> {
+        self.apply_beside(bundle, &MatchedElsewhere::default(), diags)
+    }
+
     /// Apply the profile to the loaded input bundle: resolve the keep rules against the document
     /// as written, apply the omit rules, then narrow what remains to the kept operations.
     ///
@@ -69,9 +80,18 @@ impl Omit {
     /// that removes nothing is satisfied, not an `E019`, when everything it matches in the
     /// document as written lies at or beneath a construct an earlier rule removed: an exact rule
     /// under a glob that already took its target, or a glob whose every match went before it.
-    pub(crate) fn apply(
+    ///
+    /// Beside the other spec of a `spargen diff` pair, a rule of this profile that removes or
+    /// keeps nothing here because its construct or file is absent here is also satisfied, not an
+    /// `E019`, when `elsewhere` holds it, so such a rule is an `E019` only when it matches neither
+    /// spec. A rule whose file is ambiguous here names no one construct, and stays an `E019`
+    /// whatever `elsewhere` holds. A keep rule satisfied that way keeps
+    /// nothing on this side. Every other entry point passes [`MatchedElsewhere::default`], under
+    /// which each rule answers to its own spec alone.
+    pub(crate) fn apply_beside(
         &self,
         bundle: &mut InputBundle,
+        elsewhere: &MatchedElsewhere,
         diags: &mut Diagnostics,
     ) -> Result<(), Aborted> {
         let kept = if self.keep.is_empty() {
@@ -79,7 +99,7 @@ impl Omit {
         } else {
             // A keep rule that names nothing is an `E019`, which fails the run below; narrowing
             // to the rules that did resolve would only add an `E020` for an empty `paths`.
-            Some(keep::resolve(&self.keep, bundle, diags))
+            Some(keep::resolve(&self.keep, &elsewhere.keep, bundle, diags))
         };
         let mut seen = HashSet::new();
         let rules: Vec<&OmitRule> = self
@@ -96,13 +116,42 @@ impl Omit {
             .collect();
         let mut removed = HashSet::new();
         for (rule, as_written) in rules.into_iter().zip(as_written) {
-            apply_rule(rule, as_written.as_ref(), &mut removed, bundle, diags);
+            let satisfied_elsewhere = elsewhere.rules.contains(rule);
+            apply_rule(
+                rule,
+                as_written.as_ref(),
+                satisfied_elsewhere,
+                &mut removed,
+                bundle,
+                diags,
+            );
         }
         if let Some(Some(kept)) = &kept {
             keep::retain(kept, bundle, diags);
         }
         validate_remaining(bundle, diags);
         diags.result(())
+    }
+
+    /// The rules of this profile that match something in `bundle` as written, before any rule
+    /// removes anything: an omit rule naming a construct the bundle declares (or a glob matching
+    /// one), and a keep rule naming an operation it declares. `spargen diff` reads it from the
+    /// other spec of its pair and applies this profile [`beside`](Self::apply_beside) it.
+    pub(crate) fn matched_in(&self, bundle: &InputBundle) -> MatchedElsewhere {
+        MatchedElsewhere {
+            rules: self
+                .rules
+                .iter()
+                .filter(|rule| !targets_as_written(rule, bundle).1.is_empty())
+                .cloned()
+                .collect(),
+            keep: self
+                .keep
+                .iter()
+                .filter(|rule| !keep::declared_paths(rule, bundle).is_empty())
+                .cloned()
+                .collect(),
+        }
     }
 
     /// Stable fingerprint used in generated provenance headers: [`fnv1a64`] over the profile's
@@ -170,6 +219,15 @@ impl Omit {
     }
 }
 
+/// The rules of a profile that match the other spec of a `spargen diff` pair as written, read by
+/// [`Omit::matched_in`]. On this side, such a rule that matches nothing is satisfied rather than
+/// an `E019`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MatchedElsewhere {
+    rules: HashSet<OmitRule>,
+    keep: HashSet<KeepRule>,
+}
+
 /// The constructs a rule matches in one file: the file and every matching pointer.
 type Targets = (FileId, Vec<JsonPointer>);
 
@@ -213,17 +271,20 @@ fn covered(targets: &Targets, removed: &HashSet<(FileId, JsonPointer)>) -> bool 
 
 /// Remove what `rule` matches from `bundle`, recording each removed construct in `removed` and
 /// emitting a `W009` for it, or the one `E019` that says why the rule removed nothing. A rule
-/// that removes nothing because earlier rules removed everything it matched `as_written`
-/// emits nothing.
+/// that removes nothing because earlier rules removed everything it matched `as_written`, or one
+/// `satisfied_elsewhere` (the other spec of a diff matches it) whose construct or file is absent
+/// here, emits nothing. A rule that names no one construct ([`Unresolved::Invalid`]: an
+/// ambiguous file, the document root) is an `E019` however it fares elsewhere.
 fn apply_rule(
     rule: &OmitRule,
     as_written: Option<&Targets>,
+    satisfied_elsewhere: bool,
     removed: &mut HashSet<(FileId, JsonPointer)>,
     bundle: &mut InputBundle,
     diags: &mut Diagnostics,
 ) {
     let applied = match rule.resolve(bundle) {
-        Err(invalid) => Err(invalid),
+        Err(unresolved) => Err(unresolved),
         Ok(RuleMatch::Exact { file, pointer }) => {
             match bundle.value_at_mut(file).remove_pointer(&pointer) {
                 Some(value) => {
@@ -231,7 +292,9 @@ fn apply_rule(
                     removed.insert((file, pointer));
                     Ok(())
                 }
-                None => Err("omit rule did not match any source construct".into()),
+                None => Err(Unresolved::Absent(
+                    "omit rule did not match any source construct".into(),
+                )),
             }
         }
         Ok(RuleMatch::Glob { file, mut pointers }) => {
@@ -251,13 +314,18 @@ fn apply_rule(
             if removed_any {
                 Ok(())
             } else {
-                Err("glob omit rule did not match any source construct".into())
+                Err(Unresolved::Absent(
+                    "glob omit rule did not match any source construct".into(),
+                ))
             }
         }
     };
-    if let Err(message) = applied {
-        if !as_written.is_some_and(|targets| covered(targets, removed)) {
-            emit_invalid_rule(rule, bundle, diags, message);
+    if let Err(unresolved) = applied {
+        let absent_here = matches!(unresolved, Unresolved::Absent(_));
+        if !(absent_here && satisfied_elsewhere)
+            && !as_written.is_some_and(|targets| covered(targets, removed))
+        {
+            emit_invalid_rule(rule, bundle, diags, unresolved.into_message());
         }
     }
 }
@@ -374,9 +442,10 @@ fn validate_remaining(bundle: &InputBundle, diags: &mut Diagnostics) {
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
+    use std::collections::HashSet;
 
     use super::glob::{glob_match, unescape_glob};
-    use super::{removal_order, ComponentKind, JsonPointer, Omit, OmitMethod, OmitRule};
+    use super::{removal_order, ComponentKind, JsonPointer, KeepRule, Omit, OmitMethod, OmitRule};
     use crate::diag::{Code, Diagnostics};
     use crate::source::InputBundle;
     use proptest::prelude::*;
@@ -724,6 +793,69 @@ components:
                 "{missing:?}"
             );
             assert_eq!(invalid_rule_messages(&diags).len(), 1, "{missing:?}");
+        }
+    }
+
+    /// A diff pair's other spec, declaring `/beta` and a `GET /beta` that `MULTI_SPEC` lacks.
+    const OTHER_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: t, version: 1.0.0 }
+paths:
+  /beta:
+    get: { responses: { "200": { description: ok } } }
+"#;
+
+    /// `matched_in` holds exactly the rules the other spec matches as written, omit and keep rules
+    /// alike. Applied beside it, a rule naming nothing here but something there is satisfied (no
+    /// `E019`, nothing removed, and a keep rule keeping nothing), while a rule naming nothing in
+    /// either spec stays an `E019`.
+    #[test]
+    fn a_rule_the_other_spec_matches_is_satisfied_beside_it() {
+        let beta = OmitRule::path("/beta");
+        let nowhere = OmitRule::path("/nowhere");
+        let keep_beta = KeepRule::operation(OmitMethod::Get, "/beta");
+        let keep_nowhere = KeepRule::operation(OmitMethod::Get, "/nowhere");
+        let profile = Omit {
+            rules: vec![beta.clone(), nowhere.clone()],
+            keep: vec![keep_beta.clone(), keep_nowhere.clone()],
+        };
+        let elsewhere = profile.matched_in(&bundle_of(OTHER_SPEC));
+        assert_eq!(elsewhere.rules, HashSet::from([beta.clone()]));
+        assert_eq!(elsewhere.keep, HashSet::from([keep_beta.clone()]));
+
+        let satisfied = Omit {
+            rules: vec![beta],
+            keep: vec![keep_beta],
+        };
+        let mut bundle = bundle_of(MULTI_SPEC);
+        let mut diags = Diagnostics::default();
+        satisfied
+            .apply_beside(&mut bundle, &elsewhere, &mut diags)
+            .unwrap();
+        assert!(invalid_rule_messages(&diags).is_empty(), "{diags:?}");
+        assert!(
+            keys_under(&bundle, "paths", None).is_empty(),
+            "the satisfied keep rule keeps nothing here"
+        );
+
+        for (rules, keep, expected) in [
+            (
+                vec![nowhere],
+                Vec::new(),
+                "omit rule did not match any source construct: path /nowhere",
+            ),
+            (
+                Vec::new(),
+                vec![keep_nowhere],
+                "keep rule did not name a declared operation: keep get /nowhere",
+            ),
+        ] {
+            let mut bundle = bundle_of(MULTI_SPEC);
+            let mut diags = Diagnostics::default();
+            assert!(Omit { rules, keep }
+                .apply_beside(&mut bundle, &elsewhere, &mut diags)
+                .is_err());
+            assert_eq!(invalid_rule_messages(&diags), [expected]);
         }
     }
 

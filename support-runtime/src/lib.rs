@@ -86,8 +86,8 @@ mod xml;
 
 pub use auth::{
     attach_auth, attach_auth_replayable, replay_rejected, token_provider, AuthError, AuthKind,
-    AuthScheme, Credential, ExposeSecret, RejectionCheck, Replay, SecretString, TokenFuture,
-    TokenProvider, TokenRefresher,
+    AuthScheme, Credential, CredentialKind, ExposeSecret, RejectionCheck, Replay, SchemeCarrier,
+    SecretString, TokenFuture, TokenProvider, TokenRefresher,
 };
 pub use base64::{deserialize_base64, serialize_base64};
 #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]

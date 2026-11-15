@@ -90,8 +90,11 @@ fn a_params_field_rebound_to_another_wire_name_is_major() {
         &with_query(&["pageSize", "page-size"]),
     );
     assert_eq!(
-        kinds(&report)[0],
-        ChangeKind::IdentifierRebound,
+        kinds(&report),
+        vec![
+            ChangeKind::OptionalParamAdded,
+            ChangeKind::IdentifierRebound
+        ],
         "{:?}",
         report.changes
     );
@@ -144,10 +147,10 @@ fn a_struct_field_rebound_to_another_wire_name_is_major() {
 #[test]
 fn a_property_inserted_ahead_of_one_spelled_as_its_identifier_does_not_take_it() {
     // Declaration order no longer decides who keeps a contested spelling: `foo_bar` keeps
-    // `foo_bar`, and the new `fooBar` is a disambiguated optional field, which is additive.
+    // `foo_bar`, and the new `fooBar` is a disambiguated optional field, an added field only.
     let report = diff(&pet_with(&["foo_bar"]), &pet_with(&["fooBar", "foo_bar"]));
     assert_eq!(codes(&report), vec!["field-added"], "{:?}", report.changes);
-    assert_eq!(report.bump, Impact::Minor);
+    assert_eq!(report.bump, Impact::Major);
 }
 
 #[test]
@@ -164,8 +167,8 @@ fn an_enum_variant_rebound_to_another_wire_value_is_major() {
     // `A_B` sorts before `a-b`, so it takes `AB`, and `Kind::AB` would now send `A_B`.
     let report = diff(&kind_with("a-b"), &kind_with("A_B, a-b"));
     assert_eq!(
-        kinds(&report)[0],
-        ChangeKind::IdentifierRebound,
+        kinds(&report),
+        vec![ChangeKind::VariantAdded, ChangeKind::IdentifierRebound],
         "{:?}",
         report.changes
     );
@@ -181,5 +184,5 @@ fn a_value_inserted_ahead_of_one_spelled_as_its_variant_does_not_take_it() {
         "{:?}",
         report.changes
     );
-    assert_eq!(report.bump, Impact::Minor);
+    assert_eq!(report.bump, Impact::Major);
 }

@@ -41,8 +41,9 @@ const SANDBOX: &str = "  - url: 'https://sandbox.example.com'
 ";
 
 #[test]
-fn adding_a_server_variable_value_is_minor_and_removing_one_is_major() {
-    // A variable's `enum` is a generated `pub enum` a consumer passes to its setter (#726).
+fn adding_a_server_variable_value_is_major_and_removing_one_is_major() {
+    // A variable's `enum` is a generated `pub enum` a consumer passes to its setter (#726), and
+    // exhaustive, so a new value breaks a consumer's exhaustive `match`.
     let added = diff(
         &with_servers(REGIONS_US_EU),
         &with_servers(REGIONS_US_EU_AP),
@@ -53,7 +54,7 @@ fn adding_a_server_variable_value_is_minor_and_removing_one_is_major() {
         "{:?}",
         added.changes
     );
-    assert_eq!(added.bump, Impact::Minor);
+    assert_eq!(added.bump, Impact::Major);
 
     let removed = diff(
         &with_servers(REGIONS_US_EU_AP),

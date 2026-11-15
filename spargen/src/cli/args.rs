@@ -224,7 +224,7 @@ pub(crate) struct DiffArgs {
     pub(crate) old: Utf8PathBuf,
     /// Path to the NEW (candidate) OpenAPI document.
     pub(crate) new: Utf8PathBuf,
-    /// Exit non-zero (status 1) when the diff is a breaking (`major`) change — a CI gate. Without
+    /// Exit non-zero (status 4) when the diff is a breaking (`major`) change — a CI gate. Without
     /// this flag a completed comparison exits 0 whatever its bump; a spec that fails to lower
     /// exits 1, and a configuration error 3, either way.
     #[arg(long)]

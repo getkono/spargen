@@ -47,7 +47,7 @@ fn a_204_reconnect_response_ends_the_stream() {
             prepared(&core, request),
         )
         .with_reconnect(policy.clone())
-        .unwrap();
+        .unwrap_or_else(|(_, error)| panic!("reconnect should be available: {error}"));
 
         assert_eq!(
             poll_ready(stream.next()).unwrap().unwrap(),
@@ -148,7 +148,7 @@ fn refused_reconnect_stream(
         prepared(&core, request),
     )
     .with_reconnect(policy)
-    .unwrap()
+    .unwrap_or_else(|(_, error)| panic!("reconnect should be available: {error}"))
 }
 
 /// A refused reconnect's body is retained only up to `max_error_body`: the `Decode` error holds

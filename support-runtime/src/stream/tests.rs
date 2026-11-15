@@ -577,7 +577,7 @@ fn reconnectable_stream_over(
     );
     match stream.with_reconnect(policy) {
         Ok(stream) => stream,
-        Err(error) => panic!("reconnect should be available: {error}"),
+        Err((_, error)) => panic!("reconnect should be available: {error}"),
     }
 }
 
@@ -665,7 +665,9 @@ fn a_reconnect_carries_the_cores_option_headers_and_extensions() {
         max_attempts: 1,
         ..ImmediateReconnect::default()
     });
-    let mut stream = stream.with_reconnect(policy).unwrap();
+    let mut stream = stream
+        .with_reconnect(policy)
+        .unwrap_or_else(|(_, error)| panic!("reconnect should be available: {error}"));
 
     assert_eq!(
         poll_ready(stream.next()).unwrap().unwrap(),
@@ -734,7 +736,7 @@ fn an_unsendable_sse_id_reconnects_without_last_event_id() {
     );
     let mut stream = match stream.with_reconnect(policy.clone()) {
         Ok(stream) => stream,
-        Err(error) => panic!("reconnect should be available: {error}"),
+        Err((_, error)) => panic!("reconnect should be available: {error}"),
     };
 
     assert_eq!(
@@ -774,7 +776,7 @@ fn an_empty_sse_id_reconnects_without_last_event_id() {
     );
     let mut stream = match stream.with_reconnect(policy.clone()) {
         Ok(stream) => stream,
-        Err(error) => panic!("reconnect should be available: {error}"),
+        Err((_, error)) => panic!("reconnect should be available: {error}"),
     };
 
     assert_eq!(
@@ -843,7 +845,7 @@ fn a_rejected_reconnect_outlives_its_core_and_keeps_its_error_body_cap() {
     drop(core);
     let mut stream = match stream.with_reconnect(policy) {
         Ok(stream) => stream,
-        Err(error) => panic!("reconnect should be available: {error}"),
+        Err((_, error)) => panic!("reconnect should be available: {error}"),
     };
 
     match poll_ready(stream.next()) {
@@ -976,27 +978,53 @@ fn the_reconnect_attempt_resets_after_a_decoded_item_and_not_after_a_decode_erro
     );
 }
 
-/// A stream built without a replayable request refuses a reconnect policy rather than
-/// accepting one it could never act on.
+/// A stream built without a replayable request reports that it cannot reconnect, and refuses a
+/// reconnect policy rather than accepting one it could never act on, handing the stream back
+/// with the error so the caller can keep reading it without reconnects.
 #[test]
 fn with_reconnect_refuses_a_stream_that_holds_no_replayable_request() {
     let policy: Arc<dyn ReconnectPolicy> = Arc::new(ImmediateReconnect::default());
     let core = core();
     for stream in [
-        EventStream::<serde_json::Value>::new(response(""), Framing::Sse),
-        EventStream::new_reconnectable(response(""), Framing::Sse, &core, None),
+        EventStream::<serde_json::Value>::new(response("{\"seq\":1}\n"), Framing::Ndjson),
+        EventStream::new_reconnectable(response("{\"seq\":1}\n"), Framing::Ndjson, &core, None),
     ] {
-        match stream.with_reconnect(policy.clone()) {
-            Err(Error::RequestConstruction(cause)) => assert_eq!(
-                std::error::Error::source(&cause)
-                    .expect("the message is the cause")
-                    .to_string(),
-                "this streaming request cannot be cloned safely for automatic reconnect"
-            ),
-            Err(error) => panic!("expected RequestConstruction, got {error}"),
+        assert!(!stream.can_reconnect());
+        let mut stream = match stream.with_reconnect(policy.clone()) {
+            Err((stream, Error::RequestConstruction(cause))) => {
+                assert_eq!(
+                    std::error::Error::source(&cause)
+                        .expect("the message is the cause")
+                        .to_string(),
+                    "this streaming request cannot be cloned safely for automatic reconnect"
+                );
+                stream
+            }
+            Err((_, error)) => panic!("expected RequestConstruction, got {error}"),
             Ok(_) => panic!("a stream without a request accepted a reconnect policy"),
-        }
+        };
+        assert!(!stream.can_reconnect());
+        assert_eq!(
+            poll_ready(stream.next()).unwrap().unwrap(),
+            serde_json::json!({"seq": 1})
+        );
+        assert!(poll_ready(stream.next()).is_none());
     }
+}
+
+/// A stream holding a replayable request reports that it can reconnect, before and after a
+/// policy is set.
+#[test]
+fn a_stream_holding_a_replayable_request_can_reconnect() {
+    let core = core();
+    let request = crate::tests::builder(Method::GET, "https://example.com/events");
+    let stream: EventStream<serde_json::Value> =
+        EventStream::new_reconnectable(response(""), Framing::Sse, &core, prepared(&core, request));
+    assert!(stream.can_reconnect());
+    let stream = stream
+        .with_reconnect(Arc::new(ImmediateReconnect::default()))
+        .unwrap_or_else(|(_, error)| panic!("reconnect should be available: {error}"));
+    assert!(stream.can_reconnect());
 }
 
 /// A request whose body is a one-shot stream cannot be cloned for the replay. [`Resend::attach`]
@@ -1027,7 +1055,9 @@ fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
         EventStream::new_reconnectable(response(""), Framing::SseJsonData, &core, Some(resend));
     let mut stream = match stream.with_reconnect(policy.clone()) {
         Ok(stream) => stream,
-        Err(error) => panic!("the stream holds a request, so reconnect is available: {error}"),
+        Err((_, error)) => {
+            panic!("the stream holds a request, so reconnect is available: {error}")
+        }
     };
 
     match poll_ready(stream.next()) {
@@ -1262,7 +1292,7 @@ fn bounded_stream(
         .with_reconnect(policy)
     {
         Ok(stream) => stream,
-        Err(error) => panic!("reconnect should be available: {error}"),
+        Err((_, error)) => panic!("reconnect should be available: {error}"),
     }
 }
 
