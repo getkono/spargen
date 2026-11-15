@@ -401,6 +401,31 @@ fn component_nullability_propagates_through_ref() {
 }
 
 #[test]
+fn an_absent_required_nullable_member_fails_decode() {
+    // `priority` is required: a `null` is an admitted value, but leaving the member out is not, so
+    // the payload must not decode as if it held `null` (#1407).
+    let error = serde_json::from_str::<basic_client::types::Ticket>(r#"{"history": []}"#)
+        .expect_err("an absent required member is refused");
+    assert_eq!(error.classify(), serde_json::error::Category::Data, "{error}");
+    assert!(error.to_string().contains("missing field `priority`"), "{error}");
+    // Read from a parsed value too, which cannot fail on syntax.
+    let error = serde_json::from_value::<basic_client::types::Ticket>(
+        serde_json::json!({ "history": [] }),
+    )
+    .expect_err("an absent required member is refused");
+    assert!(error.to_string().contains("missing field `priority`"), "{error}");
+
+    // An explicit `null` still decodes as `None`, and is written back.
+    let null_priority: basic_client::types::Ticket =
+        serde_json::from_str(r#"{"priority": null, "history": []}"#).unwrap();
+    assert_eq!(null_priority.priority, None);
+    assert_eq!(
+        serde_json::to_value(&null_priority).unwrap(),
+        serde_json::json!({ "priority": null, "history": [] })
+    );
+}
+
+#[test]
 fn all_of_merged_struct_carries_every_member_field() {
     // `Account` merged a `$ref` base (id, required), an inline member (label, required) and a
     // sibling property (owner, optional). Required fields are plain, the optional is `Option`, and a
@@ -654,14 +679,16 @@ fn xml_body_types_carry_attribute_and_rename() {
     assert!(xml.starts_with("<order "), "{xml}");
     assert!(xml.ends_with("</order>"), "{xml}");
 
-    let receipt: basic_client::types::XmlReceipt =
-        quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
+    let receipt: basic_client::types::XmlReceipt = quick_xml::de::from_str(
+        r#"<XmlReceipt count="7"><ReceiptCode>OK</ReceiptCode></XmlReceipt>"#,
+    )
+    .unwrap();
     assert_eq!(receipt.code, "OK");
     assert_eq!(receipt.note, None);
     // Without a root `xml.name`, the component name `xml-receipt` names the root element, as
     // OpenAPI infers it, in place of the Rust type's name.
     let xml = quick_xml::se::to_string(&receipt).unwrap();
-    assert_eq!(xml, "<xml-receipt><ReceiptCode>OK</ReceiptCode></xml-receipt>");
+    assert_eq!(xml, r#"<xml-receipt count="7"><ReceiptCode>OK</ReceiptCode></xml-receipt>"#);
     // A present optional element is decoded as the field's own type through its present-value
     // deserializer, not through quick-xml's `Option` handling.
     let noted: basic_client::types::XmlReceipt = quick_xml::de::from_str(
@@ -669,6 +696,21 @@ fn xml_body_types_carry_attribute_and_rename() {
     )
     .unwrap();
     assert_eq!(noted.note.as_deref(), Some("late"));
+}
+
+#[test]
+fn an_omitted_required_nullable_xml_attribute_decodes_as_none() {
+    // OAS 3.2 writes a `null` attribute by omitting it (§Handling `null` Values,
+    // `productWithNulls.xml`), so a required nullable attribute that is absent is `null`, not a
+    // missing member.
+    let receipt: basic_client::types::XmlReceipt =
+        quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
+    assert_eq!(receipt.count, None);
+    let counted: basic_client::types::XmlReceipt = quick_xml::de::from_str(
+        r#"<XmlReceipt count="42"><ReceiptCode>OK</ReceiptCode></XmlReceipt>"#,
+    )
+    .unwrap();
+    assert_eq!(counted.count, Some(42.0));
 }
 
 #[test]

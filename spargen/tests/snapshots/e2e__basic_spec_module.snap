@@ -8840,6 +8840,18 @@ pub mod types {
     {
         T::deserialize(deserializer).map(Some)
     }
+    /// The `deserialize_with` of every required, nullable field but an XML attribute, which
+    /// writes `null` by omission. It decodes a present value as `Option<T>` does, `null` as
+    /// `None`. A field with a `deserialize_with` and no `default` is one serde refuses as
+    /// `missing field` when it is absent, where a bare `Option<T>` field would read the
+    /// absent member as `None`.
+    fn decode_required<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        T: serde::Deserialize<'de>,
+    {
+        <Option<T> as serde::Deserialize<'de>>::deserialize(deserializer)
+    }
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct DeepFilter {
         #[serde(rename = "kind")]
@@ -8920,7 +8932,7 @@ pub mod types {
         pub run_id: RefinedMember1RunId,
         #[serde(rename = "status")]
         pub status: RefinedMember1Status,
-        #[serde(rename = "marker")]
+        #[serde(rename = "marker", deserialize_with = "decode_required")]
         pub marker: Option<RefinedMarkerIntersection>,
         #[serde(rename = "labels")]
         pub labels: RefinedLabelsIntersection,
@@ -11987,7 +11999,7 @@ pub mod types {
     }
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Ticket {
-        #[serde(rename = "priority")]
+        #[serde(rename = "priority", deserialize_with = "decode_required")]
         pub priority: Option<Priority>,
         #[serde(rename = "history")]
         pub history: TicketHistory,
@@ -12446,6 +12458,8 @@ pub mod types {
     pub struct XmlReceipt {
         #[serde(rename = "ReceiptCode")]
         pub code: XmlReceiptCode,
+        #[serde(rename = "@count")]
+        pub count: Option<XmlReceiptCount>,
         #[serde(
             rename = "note",
             default,
@@ -12458,8 +12472,8 @@ pub mod types {
         ///A `XmlReceipt` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
-        pub fn new(code: XmlReceiptCode) -> Self {
-            Self { code, note: None }
+        pub fn new(code: XmlReceiptCode, count: Option<XmlReceiptCount>) -> Self {
+            Self { code, count, note: None }
         }
         ///Set the `note` member.
         #[must_use]
@@ -12469,6 +12483,7 @@ pub mod types {
         }
     }
     pub type XmlReceiptCode = String;
+    pub type XmlReceiptCount = f64;
     pub type XmlReceiptNote = String;
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(rename = "meta")]
@@ -12653,9 +12668,9 @@ pub mod types {
     }
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct PostNullableBytesBody {
-        #[serde(rename = "digest")]
+        #[serde(rename = "digest", deserialize_with = "decode_required")]
         pub digest: Option<PostNullableBytesBodyDigest>,
-        #[serde(rename = "previous")]
+        #[serde(rename = "previous", deserialize_with = "decode_required")]
         pub previous: Option<PostNullableBytesBodyPrevious>,
     }
     impl PostNullableBytesBody {
@@ -12705,7 +12720,7 @@ pub mod types {
     }
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ResponseBody8899a140 {
-        #[serde(rename = "digest")]
+        #[serde(rename = "digest", deserialize_with = "decode_required")]
         pub digest: Option<ResponseBodyDigest>,
     }
     impl ResponseBody8899a140 {
@@ -12720,7 +12735,7 @@ pub mod types {
     pub type PostNullablePartsBodyThumb = bytes::Bytes;
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct PostNullablePartsBody {
-        #[serde(rename = "file")]
+        #[serde(rename = "file", deserialize_with = "decode_required")]
         pub file: Option<PostNullablePartsBodyFile>,
         #[serde(
             rename = "thumb",
