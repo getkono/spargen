@@ -1096,3 +1096,132 @@ components:
         "{types}"
     );
 }
+
+/// The schemas every [`closed_union_meet_spec`] document holds: `A` and `B` each require a
+/// property `Closed`, and each closing object the cases write, does not declare.
+const CLOSED_UNION_BRANCHES: &str = r##"
+    A: { type: object, required: [a], properties: { a: { type: string } } }
+    B: { type: object, required: [b], properties: { b: { type: string } } }
+    U:
+      oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }]
+    Closed:
+      type: object
+      properties: { x: { type: string } }
+      additionalProperties: false
+"##;
+
+/// A document whose schemas are [`CLOSED_UNION_BRANCHES`] and `schemas`.
+fn closed_union_meet_spec(schemas: &str) -> String {
+    format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+         schemas:{CLOSED_UNION_BRANCHES}{schemas}"
+    )
+}
+
+/// #1500: a closed object met with a union branch by branch is the closed `allOf` merge's reading
+/// once per branch: each met branch keeps its own properties beside the closing object's, where
+/// JSON Schema 2020-12 would forbid them. In every spelling the departure is reported once at the
+/// closing keyword, naming every branch's properties the closing schema does not declare: an
+/// `allOf` with an inline union member or a `$ref` one, an `allOf` beside a union, a `$ref` to a
+/// union met with closing sibling keywords, a closed `$ref` target beside a union sibling, and a
+/// closed target met with sibling keywords and a union sibling together.
+// W011 case: closed-all-of-merge
+#[test]
+fn w011_a_closed_object_met_with_a_union_branch_by_branch_is_reported() {
+    let cases = [
+        (
+            r##"
+    S:
+      allOf:
+        - oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }]
+        - { type: object, properties: { x: { type: string } }, additionalProperties: false }
+"##,
+            "/components/schemas/S/allOf/1/additionalProperties",
+        ),
+        (
+            r##"
+    S:
+      allOf:
+        - $ref: '#/components/schemas/U'
+        - { type: object, properties: { x: { type: string } }, additionalProperties: false }
+"##,
+            "/components/schemas/S/allOf/1/additionalProperties",
+        ),
+        (
+            r##"
+    S:
+      oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }]
+      allOf:
+        - { type: object, properties: { x: { type: string } }, additionalProperties: false }
+"##,
+            "/components/schemas/S/allOf/0/additionalProperties",
+        ),
+        (
+            r##"
+    S:
+      $ref: '#/components/schemas/U'
+      type: object
+      properties: { x: { type: string } }
+      additionalProperties: false
+"##,
+            "/components/schemas/S/additionalProperties",
+        ),
+        (
+            r##"
+    S:
+      $ref: '#/components/schemas/Closed'
+      oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }]
+"##,
+            "/components/schemas/Closed/additionalProperties",
+        ),
+        (
+            r##"
+    S:
+      $ref: '#/components/schemas/Closed'
+      type: object
+      properties: { x: { type: string } }
+      oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }]
+"##,
+            "/components/schemas/Closed/additionalProperties",
+        ),
+    ];
+    for (schemas, pointer) in cases {
+        let spec = closed_union_meet_spec(schemas);
+        let report = generate(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{spec}\n{report:#?}");
+        let warnings = closed_merge_warnings(&report);
+        let at: Vec<_> = warnings.iter().filter(|(at, _)| at == pointer).collect();
+        assert_eq!(at.len(), 1, "{spec}\n{report:#?}");
+        let message = &at[0].1;
+        assert!(message.contains("`a`, `b`"), "{spec}\n{message}");
+        assert!(!message.contains("`x`"), "{spec}\n{message}");
+        assert!(message.contains("branch"), "{spec}\n{message}");
+    }
+}
+
+/// A union whose branches declare no property the closing object does not is read by JSON Schema
+/// as spargen reads it, so nothing is reported: branches that only narrow `x`, in the `allOf`
+/// union-member spelling and the `$ref` union-target spelling.
+#[test]
+fn a_closed_object_met_with_a_union_declaring_nothing_more_is_not_reported() {
+    let spec = closed_union_meet_spec(
+        r##"
+    N:
+      oneOf:
+        - { type: object, required: [x], properties: { x: { type: string, minLength: 1 } } }
+        - { type: object, properties: { x: { type: string, maxLength: 3 } } }
+    S:
+      allOf:
+        - $ref: '#/components/schemas/N'
+        - { type: object, properties: { x: { type: string } }, additionalProperties: false }
+    R:
+      $ref: '#/components/schemas/N'
+      type: object
+      properties: { x: { type: string } }
+      additionalProperties: false
+"##,
+    );
+    let report = generate(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(closed_merge_warnings(&report).is_empty(), "{report:#?}");
+}
