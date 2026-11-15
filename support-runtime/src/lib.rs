@@ -91,7 +91,7 @@ pub use auth::{
 };
 pub use base64::{deserialize_base64, serialize_base64};
 #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
-pub use blocking::BlockingRuntime;
+pub use blocking::{BlockingRuntime, NestedRuntime};
 #[cfg(feature = "stream")]
 pub use chunked::read_as_it_arrives;
 pub use client::{ClientConfig, ClientCore, RequestOptions, TransportConfig};
