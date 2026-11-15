@@ -34,10 +34,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         match representable_default(&classified, kind) {
             Some(value) => {
                 let display = default_display(&value);
-                // A serde default only fires for an absent field on deserialization, so it is wired
-                // only for a plain optional (decoded as not required, non-nullable) scalar. A field
-                // decoded as required is always present, and a nullable field already carries
-                // `Option`; both are documented in rustdoc instead of silently ignored.
+                // A default stands for an absent member, which its `{field}_or_default` accessor
+                // reads, so it is applied only for a plain optional (decoded as not required,
+                // non-nullable) scalar. A field decoded as required is always present, and a
+                // nullable field's absence is a state of its own (`Nullable::Absent`); both are
+                // documented in rustdoc instead of silently ignored.
                 let applied = (!decodes_required && !ty.nullable).then_some(value);
                 Some(FieldDefault {
                     doc_note: format!("Default: `{display}`."),

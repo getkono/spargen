@@ -72,11 +72,17 @@ use.
   already spells `{Method}StreamResponse`.
 - Every object struct in `types` derives `PartialEq`, as does every type it can hold, so a test
   compares a decoded value with an expected one by `assert_eq!`. `Type::new(..)` takes the
-  required members by value in declaration order and sets each optional member as decoding an
-  absent one does (its schema `default`, else `None`); a consuming `with_<member>(value)` per
-  optional member, and per typed `additionalProperties` map, sets the rest, so a new optional
-  member leaves code built that way compiling. A struct with no required member implements
-  `Default` as `new()`.
+  required members by value in declaration order and leaves each optional member unset, as
+  decoding an absent one does, so serializing it writes only the members given; a consuming
+  `with_<member>(value)` per optional member, and per typed `additionalProperties` map, sets the
+  rest, so a new optional member leaves code built that way compiling. A struct with no required
+  member derives `Default`, which builds what `new()` does.
+- An optional, non-nullable member whose schema `default` is a scalar of its type stays `None`
+  when absent, on decode and from `new()` alike, so a decoded value sent back never pins a
+  default the server chose; `<member>_or_default()` returns its value, else that default, and its
+  rustdoc names the default. Where `<member>_or_default` would spell another method of the
+  struct, such as the `with_` setter of a member named `<x>_or_default`, the accessor takes a
+  disambiguated name and the setter keeps its own.
 - A member that is both optional and nullable has three wire states, so it is a
   `Nullable<T>` (re-exported at the root): `Nullable::Absent` leaves it off the wire and is what a
   missing member decodes as, `Nullable::Null` writes and reads an explicit `null`, and
