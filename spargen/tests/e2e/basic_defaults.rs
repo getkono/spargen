@@ -324,6 +324,17 @@ fn overlapping_unions_enforce_one_of_and_canonicalize_any_of() {
         owner,
         basic_client::types::AnyOwner::DetailedOwner(_)
     ));
+    // `BroadOwner` declares no member, so under anyOf it takes only an object holding none.
+    let empty: basic_client::types::AnyOwner = serde_json::from_str("{}").unwrap();
+    assert!(matches!(
+        empty,
+        basic_client::types::AnyOwner::BroadOwner(_)
+    ));
+    // Neither variant declares `x`, so each would drop it, and the payload fails to decode.
+    assert_refuses::<basic_client::types::AnyOwner>(
+        r#"{"id":7,"x":1}"#,
+        "AnyOwner decoding a member no variant declares",
+    );
 
     // Both branches accept `special`, so oneOf rejects it. A manually constructed broad branch is
     // revalidated during serialization and rejected for the same reason.

@@ -321,6 +321,66 @@ fn a_trial_string_variant_refuses_a_one_key_object() {
     let back: types::Status = serde_json::from_value(serde_json::json!("queued")).unwrap();
     assert_eq!(back, types::Status::Phase(Box::new(types::Phase::Queued)));
 }
+
+// An `anyOf` variant that decodes a payload by ignoring members it does not declare is not a
+// match (#1404): the variant that keeps the payload is selected over a more specific one that
+// would drop `a`, and writes it back unchanged.
+#[test]
+fn an_any_of_trial_selects_the_variant_that_keeps_the_payload() {
+    let payload = serde_json::json!({ "a": 5 });
+    let thing: types::Thing = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(thing, types::Thing::ThingVariant0(_)), "{thing:?}");
+    assert_eq!(serde_json::to_value(&thing).unwrap(), payload);
+}
+
+// A payload every `anyOf` variant decodes only by dropping a member is a decode error naming the
+// union, not a lossy pick.
+#[test]
+fn an_any_of_payload_every_variant_would_drop_part_of_does_not_decode() {
+    let error = serde_json::from_value::<types::Thing>(serde_json::json!({ "z": 1 }))
+        .expect_err("no variant keeps `z`")
+        .to_string();
+    assert!(error.contains("union Thing"), "{error}");
+}
+
+// Where more than one `anyOf` variant keeps the payload, the more specific one is selected, as
+// before; one only the broader variant keeps decodes as that one.
+#[test]
+fn an_any_of_trial_selects_the_more_specific_of_two_lossless_variants() {
+    let payload = serde_json::json!({ "a": 1 });
+    let brief: types::Briefing = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(brief, types::Briefing::Fuller(_)), "{brief:?}");
+    assert_eq!(serde_json::to_value(&brief).unwrap(), payload);
+    let payload = serde_json::json!({ "a": 1, "b": "x" });
+    let full: types::Briefing = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(full, types::Briefing::Fuller(_)), "{full:?}");
+    assert_eq!(serde_json::to_value(&full).unwrap(), payload);
+    let payload = serde_json::json!({ "a": 1, "c": true });
+    let brief: types::Briefing = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(brief, types::Briefing::Brief(_)), "{brief:?}");
+    assert_eq!(serde_json::to_value(&brief).unwrap(), payload);
+    // A `readOnly` member is declared, so a payload carrying it is kept, though a request leaves
+    // it out when the value is written back.
+    let full: types::Briefing =
+        serde_json::from_value(serde_json::json!({ "a": 1, "d": "server" })).unwrap();
+    assert!(matches!(full, types::Briefing::Fuller(_)), "{full:?}");
+}
+
+// The untagged members of a discriminated `anyOf` are selected by the same rule: a payload no tag
+// selects decodes as the member that keeps it, and one no member keeps does not decode.
+#[test]
+fn an_untagged_discriminated_any_of_member_is_selected_only_where_it_keeps_the_payload() {
+    let payload = serde_json::json!({ "kind": "bike", "a": 1 });
+    let gadget: types::Gadget = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(gadget, types::Gadget::GadgetVariant1(_)), "{gadget:?}");
+    assert_eq!(serde_json::to_value(&gadget).unwrap(), payload);
+    let payload = serde_json::json!({ "kind": "bike", "b": "x" });
+    let gadget: types::Gadget = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(gadget, types::Gadget::GadgetVariant2(_)), "{gadget:?}");
+    assert_eq!(serde_json::to_value(&gadget).unwrap(), payload);
+    let decoded = serde_json::from_value::<types::Gadget>(serde_json::json!({ "kind": "bike", "z": 1 }));
+    assert!(decoded.is_err(), "no member keeps `z`: {decoded:?}");
+}
 "####;
 
 /// The spec generated for [`union_and_allof_roundtrip_under_proptest`]: a `User` object pulling in a
@@ -330,7 +390,10 @@ fn a_trial_string_variant_refuses_a_one_key_object() {
 /// category must not satisfy: two open objects and an array as a `oneOf` (`Mixed`) and an `anyOf`
 /// (`MixedAny`), a string enum beside a string (`Status`), and a discriminated union with an
 /// untagged object member (`Vehicle`); a discriminated union lowered while its member `Node` is
-/// still being lowered (`Chain`), and one with a union member and two string members (`Creature`).
+/// still being lowered (`Chain`), and one with a union member and two string members (`Creature`);
+/// two `anyOf` unions of open objects whose selection keeps every member of the payload, one of
+/// inline members no specificity favours correctly (`Thing`) and one ranked by it (`Briefing`), and
+/// a discriminated `anyOf` whose untagged members are held to the same rule (`Gadget`).
 /// One operation references `User` so every type is emitted. The document is 3.1, so the
 /// `defaultMapping` union (`Ride`) is in `OAS32_SPEC`, whose fixture's `wire` test drives it.
 const ROUNDTRIP_SPEC: &str = r##"
@@ -367,6 +430,49 @@ components:
         vehicle: { $ref: "#/components/schemas/Vehicle" }
         node: { $ref: "#/components/schemas/Node" }
         creature: { $ref: "#/components/schemas/Creature" }
+        thing: { $ref: "#/components/schemas/Thing" }
+        briefing: { $ref: "#/components/schemas/Briefing" }
+        gadget: { $ref: "#/components/schemas/Gadget" }
+    Thing:
+      anyOf:
+        - type: object
+          properties:
+            a: { type: integer }
+        - type: object
+          properties:
+            b: { type: string }
+            c: { type: string }
+    Brief:
+      type: object
+      properties:
+        a: { type: integer }
+        c: { type: boolean }
+    Fuller:
+      type: object
+      properties:
+        a: { type: integer }
+        b: { type: string }
+        d: { type: string, readOnly: true }
+    Briefing:
+      anyOf:
+        - $ref: "#/components/schemas/Brief"
+        - $ref: "#/components/schemas/Fuller"
+    Gadget:
+      anyOf:
+        - $ref: "#/components/schemas/Car"
+        - type: object
+          properties:
+            kind: { type: string }
+            a: { type: integer }
+        - type: object
+          properties:
+            kind: { type: string }
+            b: { type: string }
+            c: { type: string }
+      discriminator:
+        propertyName: kind
+        mapping:
+          car: "#/components/schemas/Car"
     Bird:
       type: object
       required: [kind]
