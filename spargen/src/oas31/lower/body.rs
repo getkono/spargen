@@ -406,7 +406,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///   other definition's member, and no other body, response or parameter.
     ///
     /// A multipart body struct that a serde codec also carries is one Rust type for both, and its
-    /// members take the serde answer: the part is then sent as text.
+    /// members take the serde answer: the part is then sent as text. A union variant beside a
+    /// variant that is, or would become, a `String` keeps its bytes, since retyping it would leave
+    /// two variants no value tells apart.
     ///
     /// A definition no raw position holds is retyped in place, keeping its name; one that a raw
     /// position holds too keeps its bytes, and the serde positions take a `String` copy of it.
@@ -491,8 +493,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                 }
                 TypeKind::Union(union) => {
+                    // A variant beside another that is, or would become, a plain `String` keeps its
+                    // bytes: the two would be variants no value tells apart, a union lowering
+                    // already merges or reports, and that this pass cannot re-dispatch.
+                    let stringly = |ty: Ty| {
+                        raw(&self.graph, ty.id)
+                            || matches!(
+                                self.graph.get(ty.id).map(|definition| &definition.kind),
+                                Some(TypeKind::Primitive(Prim::String))
+                            )
+                    };
                     for (index, variant) in union.variants.iter().enumerate() {
-                        if raw(&self.graph, variant.ty.id) {
+                        if !raw(&self.graph, variant.ty.id) {
+                            continue;
+                        }
+                        let collides = union
+                            .variants
+                            .iter()
+                            .enumerate()
+                            .any(|(other, sibling)| other != index && stringly(sibling.ty));
+                        if collides {
+                            raw_uses.insert(variant.ty.id);
+                        } else {
                             hold(variant.ty.id, SerdeSlot::Variant { owner, index });
                         }
                     }

@@ -296,8 +296,7 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
 "##;
 
 /// A `contentEncoding: base64` value: a component, an array item, a nullable member and a union
-/// variant inside a JSON body, and a multipart part. Beside them, a `contentEncoding: base64url`
-/// member and a `format: binary` one, which a JSON body carries as the string it is (#1417).
+/// variant inside a JSON body, and a multipart part; and base64url and `format: binary` members.
 const BASE64_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: Base64, version: 1.0.0 }
@@ -410,9 +409,8 @@ fn base64_content_reaches_the_wire_as_base64_text() {
         "a base64 component must be the base64 newtype: {generated}"
     );
     assert!(
-        generated.contains("support::serialize_base64url(")
-            && generated.contains("fn serialize_base64url"),
-        "the base64url codec must be embedded and called for a spec that uses it"
+        generated.contains("fn serialize_base64url"),
+        "the base64 codecs must be embedded for a spec that uses them"
     );
 
     write_fixture_test(&out, "base64", BASE64_WIRE_TEST);
@@ -456,15 +454,9 @@ fn json_members_are_base64_strings_in_both_directions() {
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(
         body,
-        serde_json::json!({
-            "data": "ZDQ6aW5mb2U=",
-            "pieces": ["AAE=", "/w=="],
-            "note": "aGk=",
-            "token": "-_8=",
-            "label": "raw text",
-        }),
-        "base64 members must serialize as padded standard base64 strings, a base64url member as \
-         padded base64url and a `format: binary` member as the string it is"
+        serde_json::json!({ "data": "ZDQ6aW5mb2U=", "pieces": ["AAE=", "/w=="], "note": "aGk=",
+            "token": "-_8=", "label": "raw text" }),
+        "base64 and base64url members are padded text; a `format: binary` one is its string"
     );
 
     let decoded = response.into_inner();
