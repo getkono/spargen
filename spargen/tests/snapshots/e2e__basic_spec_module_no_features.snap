@@ -3916,8 +3916,10 @@ mod support {
             /// A path parameter rendered to the empty string (`path_segment`), which would leave an
             /// empty segment and send the request to a different resource (`/users/{id}` to `/users/`).
             EmptyPathSegment,
-            /// A value held an `f64` or `f32` NaN or infinity, which no parameter style can represent:
-            /// serialized, it would reach the wire as an undefined value instead.
+            /// A value held an `f64` or `f32` NaN or infinity, which neither a parameter style nor JSON
+            /// can represent: serialized, it would reach the wire as an undefined value or a JSON `null`
+            /// instead. A parameter, a JSON request body (`to_json_vec`) and a JSON-encoded part
+            /// (`to_json_string`) are each refused this way.
             NonFiniteNumber,
         }
         impl fmt::Display for ParameterError {
@@ -3973,8 +3975,8 @@ mod support {
                     Self::NonFiniteNumber => {
                         formatter
                             .write_str(
-                                "a parameter value holds a NaN or infinite number, which no parameter style can \
-                 represent",
+                                "a parameter or request body value holds a NaN or infinite number, which neither \
+                 a parameter style nor JSON can represent",
                             )
                     }
                 }
@@ -4014,6 +4016,22 @@ mod support {
                 Ok(rendered)
             }
         }
+        /// `value` as JSON text, for a JSON `content` parameter or a JSON-encoded multipart part, refused
+        /// as `ParameterError::NonFiniteNumber` where it holds an `f64` or `f32` NaN or infinity anywhere:
+        /// `serde_json` writes such a number as `null`, so the request would carry `null` where the
+        /// caller passed a number.
+        pub fn to_json_string<T: Serialize>(
+            value: &T,
+        ) -> Result<String, ParameterError> {
+            check_finite(value)?;
+            Ok(serde_json::to_string(value)?)
+        }
+        /// `value` as JSON bytes, for a JSON request body, refused as `ParameterError::NonFiniteNumber`
+        /// where it holds an `f64` or `f32` NaN or infinity anywhere, as [`to_json_string`] is.
+        pub fn to_json_vec<T: Serialize>(value: &T) -> Result<Vec<u8>, ParameterError> {
+            check_finite(value)?;
+            Ok(serde_json::to_vec(value)?)
+        }
         /// `value` as the JSON value every style renders from, refused as
         /// `ParameterError::NonFiniteNumber` where it holds an `f64` or `f32` NaN or infinity:
         /// `serde_json` would turn that number into `null`, which every style renders as undefined, so a
@@ -4021,6 +4039,13 @@ mod support {
         fn to_json<T: Serialize>(value: &T) -> Result<Value, ParameterError> {
             check_finite(value)?;
             Ok(serde_json::to_value(value)?)
+        }
+        /// Whether `value` holds an `f64` or `f32` NaN or infinity anywhere. A generated union's
+        /// `Serialize` asks before it goes through `serde_json::Value`, which would turn the number into
+        /// `null`: where it is `true`, the union serializes its variant straight into the outer
+        /// serializer, so the check [`to_json_string`] and [`to_json_vec`] make reaches the number.
+        pub fn holds_non_finite<T: Serialize + ?Sized>(value: &T) -> bool {
+            matches!(value.serialize(FiniteCheck), Err(FiniteError::NonFinite))
         }
         /// Refuse `value` as `ParameterError::NonFiniteNumber` where it holds an `f64` or `f32` NaN or
         /// infinity anywhere. A failure of its own `Serialize` implementation passes here, and the real
@@ -8566,10 +8591,11 @@ mod support {
     pub use nullable::Nullable;
     pub use header::{parse_header, require_header, HeaderError, HeaderShape};
     pub use parameter::{
-        cookie_pair, encode, path_segment, serialize_deep_object, serialize_delimited,
-        serialize_form, serialize_form_body, serialize_label, serialize_matrix,
-        serialize_multipart_values, serialize_simple, CookieValue, Delimiter, FormMode,
-        FormProperty, FormStyle, ParameterError, PercentEncoding,
+        cookie_pair, encode, holds_non_finite, path_segment, serialize_deep_object,
+        serialize_delimited, serialize_form, serialize_form_body, serialize_label,
+        serialize_matrix, serialize_multipart_values, serialize_simple, to_json_string,
+        to_json_vec, CookieValue, Delimiter, FormMode, FormProperty, FormStyle,
+        ParameterError, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
     pub use request::{
@@ -10142,9 +10168,15 @@ pub mod types {
         {
             let value = match self {
                 AnyString::AnyStringVariant0(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
                 AnyString::StringLiteral(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
             };
@@ -10233,9 +10265,15 @@ pub mod types {
         {
             let value = match self {
                 AnyNumber::AnyNumberVariant0(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
                 AnyNumber::AnyNumberVariant1(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
             };
@@ -10328,9 +10366,15 @@ pub mod types {
         {
             let value = match self {
                 OneOverlap::OneOverlapVariant0(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
                 OneOverlap::StringLiteral(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
             };
@@ -10447,9 +10491,15 @@ pub mod types {
         {
             let value = match self {
                 AnyOwner::BroadOwner(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
                 AnyOwner::DetailedOwner(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
             };
@@ -10629,18 +10679,27 @@ pub mod types {
         {
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 MixedContent::MixedContentVariant0(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         None,
                     )
                 }
                 MixedContent::ContentFile(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("file"),
                     )
                 }
                 MixedContent::ContentLink(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("symlink"),
@@ -11222,12 +11281,18 @@ pub mod types {
         {
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 Pet::Cat(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("cat"),
                     )
                 }
                 Pet::Dog(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("dog"),
@@ -11422,18 +11487,27 @@ pub mod types {
         {
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 LooseAnimal::Cat(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("Cat"),
                     )
                 }
                 LooseAnimal::Dog(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("Dog"),
                     )
                 }
                 LooseAnimal::LooseAnimalVariant2(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         None,
@@ -11658,12 +11732,18 @@ pub mod types {
         {
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 Channel::Webhook(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("webhook"),
                     )
                 }
                 Channel::Apprise(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("apprise"),
@@ -16421,7 +16501,7 @@ impl Client {
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
-        let body = serde_json::to_vec(body)
+        let body = support::to_json_vec(body)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -18483,7 +18563,7 @@ Response `409`: Conflict*/
         }
         if let Some(value) = &body.tags {
             let mut part = support::MultipartPart::text(
-                serde_json::to_string(value)
+                support::to_json_string(value)
                     .map_err(support::Error::request_construction)?,
             );
             part = part.mime_str("application/json").map_err(support::Error::widen)?;
@@ -18785,7 +18865,7 @@ Response `409`: Conflict*/
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         request = request.header(reqwest::header::ACCEPT, "application/json");
-        let body = serde_json::to_vec(body)
+        let body = support::to_json_vec(body)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -20090,7 +20170,7 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::PATCH, url);
-        let body = serde_json::to_vec(body)
+        let body = support::to_json_vec(body)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/merge-patch+json")
@@ -20269,7 +20349,7 @@ Response `409`: binary error*/
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
         request = request.header(reqwest::header::ACCEPT, "application/json");
-        let body = serde_json::to_vec(body)
+        let body = support::to_json_vec(body)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -21041,7 +21121,7 @@ Response `409`: binary error*/
                 "{json}",
                 &support::path_segment(
                         support::encode(
-                            &serde_json::to_string(&json)
+                            &support::to_json_string(&json)
                                 .map_err(support::Error::request_construction)?,
                             support::PercentEncoding::Unreserved,
                         ),
@@ -21065,7 +21145,7 @@ Response `409`: binary error*/
         request = request
             .header(
                 "X-Json",
-                serde_json::to_string(&params.x_json)
+                support::to_json_string(&params.x_json)
                     .map_err(support::Error::request_construction)?,
             );
         let replay: Option<support::Replay> = None;
@@ -21162,7 +21242,7 @@ Response `409`: binary error*/
                 "{json}",
                 &support::path_segment(
                         support::encode(
-                            &serde_json::to_string(&json)
+                            &support::to_json_string(&json)
                                 .map_err(support::Error::request_construction)?,
                             support::PercentEncoding::Unreserved,
                         ),
@@ -21495,7 +21575,7 @@ Response `409`: binary error*/
                 continue;
             }
             let mut part = support::MultipartPart::text(
-                serde_json::to_string(value)
+                support::to_json_string(value)
                     .map_err(support::Error::request_construction)?,
             );
             part = part.mime_str("application/json").map_err(support::Error::widen)?;

@@ -147,6 +147,9 @@ use.
   re-target `/users/{id}` at `/users/`, is `ParameterError::EmptyPathSegment`, and an `f64` or
   `f32` NaN or infinity anywhere in a styled parameter or form-urlencoded value, which would
   otherwise reach the wire as an undefined value (`ratio=`), is `ParameterError::NonFiniteNumber`.
+  The same number in a JSON `content` parameter, a JSON `in: querystring` value, a JSON request
+  body or a JSON-encoded multipart part, where `serde_json` would write `null`, is refused the
+  same way, including inside a union-typed value.
 - A closed error taxonomy, identical across all spargen output: request-construction
   (`Error::RequestConstruction`, carrying a `RequestError` — one of the four credential causes
   above, the missing bound header above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
