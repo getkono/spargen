@@ -313,3 +313,106 @@ fn well_typed_schema_keywords_generate_cleanly() {
         "`id` is `{id}`: {types}"
     );
 }
+
+/// Each `(pointer, message)` of `code` in `report`.
+fn located_messages(report: &Report, code: Code) -> Vec<(&str, &str)> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == code)
+        .map(|d| (d.pointer.as_str(), d.message.as_str()))
+        .collect()
+}
+
+#[test]
+fn e006_a_recursive_ref_or_anchor_is_rejected_like_a_dynamic_ref() {
+    // #1446: draft 2019-09's `$recursiveRef`, which 2020-12 replaced with `$dynamicRef`, used to
+    // be an unknown keyword, so the property holding it generated as `serde_json::Value` with
+    // nothing said, though its author meant a recursive type.
+    for (body, at) in [
+        (
+            "      type: object\n      properties: { c: { $recursiveRef: '#' } }",
+            "/components/schemas/U/properties/c",
+        ),
+        ("      $recursiveAnchor: true\n      type: object", U),
+    ] {
+        let report = generate(&single_component_document(body));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+        assert_eq!(
+            located_messages(&report, Code::DynamicRefRejected),
+            [(
+                at,
+                "`$recursiveRef` and `$recursiveAnchor` are JSON Schema 2019-09 keywords, which \
+                 2020-12 replaced with `$dynamicRef`/`$dynamicAnchor`, and require dynamic schema \
+                 scope evaluation"
+            )],
+            "{body}: {report:#?}"
+        );
+        let remedy = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::DynamicRefRejected)
+            .and_then(|d| d.remedy.as_deref())
+            .unwrap_or_default();
+        assert!(
+            remedy.contains("JSON Pointer `$ref`"),
+            "{body}: {report:#?}"
+        );
+    }
+}
+
+// W001 case: pre-2020-keyword
+#[test]
+fn a_pre_2020_12_keyword_is_warned_and_generates() {
+    // #1446: draft 2019-09/draft-7's `additionalItems` and `dependencies` are no keywords of
+    // JSON Schema 2020-12, so the constraints they state used to be dropped with nothing said.
+    // Each is `W001` at the schema carrying it, naming the 2020-12 keywords that replace it.
+    for (body, expected) in [
+        (
+            "      type: array\n      items: { type: string }\n      additionalItems: false",
+            (
+                U,
+                "`additionalItems` is a JSON Schema keyword older than 2020-12, which replaced \
+                 it with `items` beside `prefixItems`: the constraint it states is not enforced",
+            ),
+        ),
+        (
+            "      type: object\n      properties: { a: { type: string } }\n      \
+             dependencies: { a: [b], b: { required: [a] } }",
+            (
+                U,
+                "`dependencies` is a JSON Schema keyword older than 2020-12, which split it into \
+                 `dependentRequired` and `dependentSchemas`: the constraint it states is not \
+                 enforced",
+            ),
+        ),
+    ] {
+        let report = generate(&single_component_document(body));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+        assert_eq!(
+            located_messages(&report, Code::ValidationKeywordIgnored),
+            [expected],
+            "{body}: {report:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_reference_under_a_pre_2020_12_keyword_is_resolved() {
+    // The subschemas `additionalItems` and `dependencies` hold are parsed and audited like the
+    // other unlowered applicators', so a reference under one that resolves nowhere is still
+    // reported rather than dropped with the keyword.
+    for body in [
+        "      type: array\n      items: { type: string }\n      \
+         additionalItems: { $ref: '#/components/schemas/Missing' }",
+        "      type: object\n      properties: { a: { type: string } }\n      \
+         dependencies: { a: { $ref: '#/components/schemas/Missing' } }",
+    ] {
+        let report = generate(&single_component_document(body));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+        assert!(
+            has_code(&report, Code::UnresolvedRef),
+            "{body}: {report:#?}"
+        );
+    }
+}
