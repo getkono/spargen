@@ -258,7 +258,7 @@ fn each_member_takes_its_serde_attribute_and_type() {
                 "{}///Read-only:theserversetsit,soitisneversentinarequest.\
                  ///Write-only:theserveracceptsitinrequestsandomitsitfromresponses,soitdecodesasabsent.{}{}\
                  ///Default:`5`.{}///Default:`green`.{}///Default:`3`.{}///Deprecatedperthespec.{}\
-                 #[serde(flatten)]pubadditional:BTreeMap<String,ThingAdditional>,}}",
+                 #[serde(flatten,serialize_with=\"Thing::serialize_overflow\")]pubadditional:BTreeMap<String,ThingAdditional>,}}",
                 member(
                     "hint",
                     ",default,skip_serializing_if=\"super::support::Nullable::is_absent\",",
@@ -336,7 +336,8 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
                 r#"{self.note=super::support::Nullable::Null;self}"#,
             ),
             concat!(
-                r#"///Setthemembersnopropertydeclares,replacinganysetbefore.#[must_use]pubfnwith_additional(mutself,"#,
+                r#"///Setthemembersnopropertydeclares,replacinganysetbefore.Anentrywhosekeyisadeclaredmember'snameisnotsent."#,
+                r#"#[must_use]pubfnwith_additional(mutself,"#,
                 r#"value:BTreeMap<String,ThingAdditional>,)->Self{self.additional=value;self}"#,
                 r#"///The`count`memberwhereitisset,elseitsschemadefault.//////Default:`5`.#[must_use]"#,
                 r#"pubfncount_or_default(&self)->ThingCount{self.count.unwrap_or(5)}"#,

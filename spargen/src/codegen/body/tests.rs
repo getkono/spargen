@@ -197,13 +197,17 @@ fn a_form_body_sends_each_property_in_its_resolved_mode() {
              support::FormProperty{name:\"blob\",mode:support::FormMode::Json,},\
              support::FormProperty{name:\"plain\",mode:support::FormMode::Text,},];",
             "support::serialize_form_body(body,FORM_PROPERTIES,\
-             Some((support::FormMode::Text,body.additional.len())),)",
+             Some((support::FormMode::Text,body.additional.keys().filter(|key|{\
+             !matches!(key.as_str(),\"name\"|\"tags\"|\"deep\"|\"blob\"|\"plain\")}).count(),)),)",
             "\"application/x-www-form-urlencoded\").body(body);",
         ],
     );
     assert_contains_all(
         preparer(&generated, "put_nullable_form"),
-        &["Some((support::FormMode::Text,body.as_ref().map_or(0,|value|value.additional.len()),))"],
+        &[
+            "Some((support::FormMode::Text,body.as_ref().map_or(0,|value|{value.additional.keys()\
+           .filter(|key|!matches!(key.as_str(),\"a\")).count()},),)),",
+        ],
     );
 }
 
