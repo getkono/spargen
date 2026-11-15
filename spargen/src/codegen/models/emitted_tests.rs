@@ -308,6 +308,46 @@ fn each_member_takes_its_serde_attribute_and_type() {
     );
 }
 
+/// A required nullable XML attribute leaves its `None` off the wire, as OpenAPI writes a `null`
+/// attribute, and decodes an absent one as `None`; a required nullable element keeps its
+/// `missing field` decode and writes its `None`.
+#[test]
+fn a_required_nullable_xml_attribute_skips_its_null() {
+    const XML: &str = r#"openapi: 3.1.0
+info: {title: T, version: '1'}
+paths:
+  /receipt:
+    post:
+      operationId: postReceipt
+      requestBody:
+        required: true
+        content:
+          application/xml:
+            schema:
+              type: object
+              xml: {name: Receipt}
+              required: [count, note]
+              properties:
+                count: {type: [number, 'null'], xml: {attribute: true}}
+                note: {type: [string, 'null']}
+      responses:
+        '204': {description: none}
+"#;
+    for testing in [false, true] {
+        let generated = generated_with(XML, |spec| {
+            spec.with_testing(crate::TestingModule::from_on(testing))
+        });
+        assert_contains_all(
+            between(&generated, "pubmodtypes{", "pubstructClient{"),
+            &[concat!(
+                r#"#[serde(rename="@count",skip_serializing_if="Option::is_none")]"#,
+                r#"pubcount:Option<PostReceiptBodyCount>,"#,
+                r#"#[serde(rename="note",deserialize_with="decode_required")]pubnote:Option<"#,
+            )],
+        );
+    }
+}
+
 /// `new` takes every constructed member in declaration order (a required `writeOnly` one stored as
 /// present, `null` included) and sets every other member as decoding an absent one does; a
 /// setter follows for each member `new` does not take, a nullable one's beside its `_null`
