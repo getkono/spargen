@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9a9f11c8de1a178ca9c7ae7d198a50658f5b6204dae57f40e91f494124cf41df # shrinks to spellings = ["application/json", "application/json", "MULtiPART/foRm-data", "applicATioN/VND.apI+jSON", "applicAtion/x-wWW-fORm-urlencODeD", "APpliCatIOn/JsoN", "tEXt/evenT-STreaM", "APPLICatIOn/ocTet-streAM", "Text/*"]

@@ -2,5 +2,6 @@
 source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
+major|field-type-changed|ListPetsBody.photo|field type `String` -> `Bytes`
 minor|file-name-setter-added|GET /pets|file name setter `photo_file_name` added
-bump=minor
+bump=major

@@ -61,16 +61,17 @@ paths:
             schema: { type: string }
       responses:
         "204": { description: ok }
-  /binary-array:
-    get:
+  /binary-part:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
       responses:
-        "200":
-          description: ok
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { type: string, format: binary }
+        "204": { description: ok }
   /xml:
     get:
       responses:
@@ -1555,11 +1556,12 @@ paths:
 }
 
 /// A union met with an `allOf`'s other members is lowered on its own first, and the branch the
-/// meet drops is withheld from the output (#561). A `format: date`, `format: uuid` or
-/// `format: binary` bytes branch that only that withheld lowering holds is no type of the client,
-/// so it declares neither the `time` nor the `uuid` dependency nor the `bytes` `serde` feature, and
-/// embeds no RFC 3339 newtype. Each spec's control keeps the branch, so the same spelling is shown
-/// to reach the requirement.
+/// meet drops is withheld from the output (#561). A `format: date` or `format: uuid` branch that
+/// only that withheld lowering holds is no type of the client, so it declares neither the `time`
+/// nor the `uuid` dependency, and embeds no RFC 3339 newtype. Each spec's control keeps the branch,
+/// so the same spelling is shown to reach the requirement. (A `format: binary` branch of a JSON
+/// body is the `String` its wire holds, #1417, so no spelling of it here reaches `bytes`' `serde`
+/// feature.)
 #[test]
 fn a_withheld_union_branch_adds_no_runtime_requirement() {
     fn spec(branch: &str, other: &str) -> String {
@@ -1588,8 +1590,7 @@ components:
     }
     let date = "{ type: string, format: date }";
     let uuid = "{ type: string, format: uuid }";
-    let bytes = "{ type: string, format: binary }";
-    for (branch, needle) in [(date, "time ="), (uuid, "uuid ="), (bytes, "\"serde\"")] {
+    for (branch, needle) in [(date, "time ="), (uuid, "uuid =")] {
         // The control: met with an object, the object branch survives the meet.
         let kept = spec(branch, "{ type: object }");
         let block = manifest_block(&kept);
