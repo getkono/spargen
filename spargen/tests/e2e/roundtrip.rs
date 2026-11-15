@@ -381,6 +381,28 @@ fn an_untagged_discriminated_any_of_member_is_selected_only_where_it_keeps_the_p
     let decoded = serde_json::from_value::<types::Gadget>(serde_json::json!({ "kind": "bike", "z": 1 }));
     assert!(decoded.is_err(), "no member keeps `z`: {decoded:?}");
 }
+
+// An overflow entry whose key is a declared member's name is never written, so the declared
+// member's own value is the only one on the wire, as the form and multipart encoders already do
+// (#1412).
+#[test]
+fn an_overflow_key_naming_a_declared_member_is_not_serialized() {
+    let overflow = std::collections::BTreeMap::from([
+        ("host".to_owned(), "b".to_owned()),
+        ("code".to_owned(), "c".to_owned()),
+        ("x-extra".to_owned(), "e".to_owned()),
+    ]);
+    let headers = types::Headers::new()
+        .with_host("a".to_owned())
+        .with_code("z".to_owned())
+        .with_additional(overflow.clone());
+    let written = serde_json::to_string(&headers).unwrap();
+    assert_eq!(written, r#"{"host":"a","code":"z","x-extra":"e"}"#);
+    // With the declared members unset, the overflow still does not stand in for them.
+    let headers = types::Headers::new().with_additional(overflow);
+    let written = serde_json::to_string(&headers).unwrap();
+    assert_eq!(written, r#"{"x-extra":"e"}"#);
+}
 "####;
 
 /// The spec generated for [`union_and_allof_roundtrip_under_proptest`]: a `User` object pulling in a
@@ -393,7 +415,8 @@ fn an_untagged_discriminated_any_of_member_is_selected_only_where_it_keeps_the_p
 /// still being lowered (`Chain`), and one with a union member and two string members (`Creature`);
 /// two `anyOf` unions of open objects whose selection keeps every member of the payload, one of
 /// inline members no specificity favours correctly (`Thing`) and one ranked by it (`Briefing`), and
-/// a discriminated `anyOf` whose untagged members are held to the same rule (`Gadget`).
+/// a discriminated `anyOf` whose untagged members are held to the same rule (`Gadget`); and a
+/// struct with a typed overflow map beside declared members (`Headers`).
 /// One operation references `User` so every type is emitted. The document is 3.1, so the
 /// `defaultMapping` union (`Ride`) is in `OAS32_SPEC`, whose fixture's `wire` test drives it.
 const ROUNDTRIP_SPEC: &str = r##"
@@ -433,6 +456,13 @@ components:
         thing: { $ref: "#/components/schemas/Thing" }
         briefing: { $ref: "#/components/schemas/Briefing" }
         gadget: { $ref: "#/components/schemas/Gadget" }
+        headers: { $ref: "#/components/schemas/Headers" }
+    Headers:
+      type: object
+      properties:
+        host: { type: string }
+        code: { type: string }
+      additionalProperties: { type: string }
     Thing:
       anyOf:
         - type: object
