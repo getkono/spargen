@@ -4,8 +4,8 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::ir::{
-    DisjointFeature, JsonCategory, Ty, TypeGraph, TypeKind, Union, UnionMode, UnionStrategy,
-    UnionVariant, VariantDispatch,
+    AdditionalProps, DisjointFeature, JsonCategory, Ty, TypeGraph, TypeKind, Union, UnionMode,
+    UnionStrategy, UnionVariant, VariantDispatch,
 };
 use crate::name::Names;
 
@@ -248,8 +248,12 @@ pub(super) fn emit_union(
                     let variant_ident = union_variant_ident(names, id, variant);
                     let ty = boxed_ty_tokens(variant.ty, names, false);
                     let unknown = open_member_unknown_test(types, names, variant.ty);
-                    let guard =
-                        trial_guard_tokens(untagged_category(types, variant.ty), variant.ty);
+                    let guard = trial_guard(
+                        types,
+                        untagged_category(types, variant.ty),
+                        variant.ty,
+                        *mode,
+                    );
                     Some(trial_attempt_tokens(
                         ident,
                         variant_ident,
@@ -257,7 +261,6 @@ pub(super) fn emit_union(
                         priority,
                         guard.as_ref(),
                         unknown.as_ref(),
-                        *mode,
                     ))
                 })
                 .collect();
@@ -506,7 +509,7 @@ pub(super) fn emit_union(
                 let variant_ident = union_variant_ident(names, id, variant);
                 let ty = boxed_ty_tokens(variant.ty, names, false);
                 let unknown = open_member_unknown_test(types, names, variant.ty);
-                let guard = trial_guard_tokens(category, variant.ty);
+                let guard = trial_guard(types, category, variant.ty, *mode);
                 trial_attempt_tokens(
                     ident,
                     variant_ident,
@@ -514,7 +517,6 @@ pub(super) fn emit_union(
                     priority,
                     guard.as_ref(),
                     unknown.as_ref(),
-                    *mode,
                 )
             });
             let ser_arms = union.variants.iter().map(|variant| {
@@ -531,20 +533,11 @@ pub(super) fn emit_union(
                 .any(|variant| open_member_unknown_test(types, names, variant.ty).is_some());
             // A value an open member decodes only as its `Unknown` is held to the same rule on
             // serialize as on decode: it counts only when no variant matches outright. A variant
-            // is tried on the written value under the same category guard as on decode, and under
-            // `anyOf` counts only where it keeps the written value, as on decode.
-            let keeps = keeps_payload_tokens(*mode);
+            // is tried on the written value under the same guard as on decode, so under `anyOf`
+            // only where it declares every member the written value holds.
             let validations = union.variants.iter().map(|variant| {
                 let ty = boxed_ty_tokens(variant.ty, names, false);
-                let guard = trial_guard_tokens(trial_dispatch(variant).1, variant.ty);
-                let count = match &keeps {
-                    Some(keeps) => quote! {
-                        if #keeps {
-                            match_count += 1;
-                        }
-                    },
-                    None => quote! { match_count += 1; },
-                };
+                let guard = trial_guard(types, trial_dispatch(variant).1, variant.ty, *mode);
                 match open_member_unknown_test(types, names, variant.ty) {
                     Some(unknown) => {
                         let (pattern, attempt) = guarded_decode_tokens(&ty, guard.as_ref());
@@ -553,16 +546,8 @@ pub(super) fn emit_union(
                                 if #unknown {
                                     unknown_match = true;
                                 } else {
-                                    #count
+                                    match_count += 1;
                                 }
-                            }
-                        }
-                    }
-                    None if keeps.is_some() => {
-                        let (pattern, attempt) = guarded_decode_tokens(&ty, guard.as_ref());
-                        quote! {
-                            if let #pattern = #attempt {
-                                #count
                             }
                         }
                     }
@@ -578,7 +563,7 @@ pub(super) fn emit_union(
             });
             let (expected, keeping) = match mode {
                 UnionMode::OneOf => ("exactly one", ""),
-                UnionMode::AnyOf => ("at least one", ", keeping every member of it"),
+                UnionMode::AnyOf => ("at least one", " that declares every member it holds"),
             };
             let de_valid = trial_match_rule_tokens(*mode);
             let ser_valid = de_valid.clone();
@@ -827,6 +812,58 @@ fn trial_guard_tokens(category: Option<JsonCategory>, ty: Ty) -> Option<TokenStr
     })
 }
 
+/// The test a buffered `value` passes before a trial under `mode` tries a variant of type `ty`
+/// whose values all serialize as `category`: its category guard ([`trial_guard_tokens`]) and,
+/// under `anyOf`, its member guard ([`declared_members_tokens`]). `None` where it has neither.
+fn trial_guard(
+    types: &TypeGraph,
+    category: Option<JsonCategory>,
+    ty: Ty,
+    mode: UnionMode,
+) -> Option<TokenStream> {
+    let category = trial_guard_tokens(category, ty);
+    let members = match mode {
+        UnionMode::OneOf => None,
+        UnionMode::AnyOf => declared_members_tokens(types, ty),
+    };
+    match (category, members) {
+        (Some(category), Some(members)) => Some(quote! { (#category && #members) }),
+        (category, members) => category.or(members),
+    }
+}
+
+/// For an `anyOf` variant of type `ty` that is an object struct ignoring unknown properties, the
+/// test that a buffered `value` holds no member the struct does not declare; `None` for any other
+/// type. The struct would decode such a payload by dropping those members, so the trial would
+/// select a variant that loses part of what it read whenever that variant ranks more specific
+/// than one that keeps it, and write back less than it read (#1404). A struct refusing unknown
+/// properties already fails to decode one, a typed overflow map keeps it, and a declared member
+/// is kept whether or not it is `readOnly`, which only a request leaves out. A `null` or other
+/// non-object value holds no member, so passes.
+fn declared_members_tokens(types: &TypeGraph, ty: Ty) -> Option<TokenStream> {
+    let TypeKind::Struct(object) = &types.get(ty.id)?.kind else {
+        return None;
+    };
+    if !matches!(object.additional, AdditionalProps::Allow) {
+        return None;
+    }
+    let declared: Vec<&str> = object
+        .fields
+        .iter()
+        .map(|field| field.name.wire.as_str())
+        .collect();
+    let declares_all = if declared.is_empty() {
+        quote! { members.is_empty() }
+    } else {
+        quote! {
+            members
+                .keys()
+                .all(|key| matches!(key.as_str(), #(#declared)|*))
+        }
+    };
+    Some(quote! { value.as_object().is_none_or(|members| #declares_all) })
+}
+
 /// The `if let` pattern and scrutinee that decode `value` as `ty` into `inner`, only when `guard`
 /// ([`trial_guard_tokens`]) holds where there is one.
 fn guarded_decode_tokens(
@@ -847,20 +884,16 @@ fn guarded_decode_tokens(
 /// match, and keep it when its priority beats the one selected so far (the earlier variant wins a
 /// tie). The emitted block expects `value`, `match_count`, and `selected: Option<(u32, Self)>` in
 /// scope. `Trial` tries every variant through it, and `Discriminated` its untagged variants, so
-/// the two strategies share one selection rule. `guard` ([`trial_guard_tokens`]) is the category
-/// test the payload must pass before the variant is tried at all.
+/// the two strategies share one selection rule. `guard` ([`trial_guard`]) is the test the payload
+/// must pass before the variant is tried at all: its JSON category and, under `anyOf`, that it
+/// holds no member the variant would drop, so a more specific variant that would drop one is never
+/// selected over one that keeps it, and a payload every variant would drop part of fails.
 ///
 /// `unknown` is [`open_member_unknown_test`] for a variant that is itself an open union: a value
 /// it decodes only as its `Unknown` is not counted as a match but kept, the first such one, in
 /// `unknown_fallback` ([`unknown_fallback_decl_tokens`]), which the trial takes only when no
 /// variant matched. Counting it would let an open member's catch-all overlap every other object
 /// variant, and fail a `oneOf` that decodes with the member closed.
-///
-/// Under `anyOf`, a decode counts only where the variant keeps the payload
-/// ([`keeps_payload_tokens`]): one that decodes by dropping members it does not declare is no
-/// match, so a less specific variant that keeps them is selected over it, and a payload no
-/// variant keeps fails the trial (#1404). `oneOf` counts every decode, as its exactly-one rule
-/// already refuses a payload two variants take.
 fn trial_attempt_tokens(
     ident: &crate::name::Ident,
     variant_ident: &crate::name::Ident,
@@ -868,7 +901,6 @@ fn trial_attempt_tokens(
     priority: u32,
     guard: Option<&TokenStream>,
     unknown: Option<&TokenStream>,
-    mode: UnionMode,
 ) -> TokenStream {
     let (pattern, attempt) = guarded_decode_tokens(ty, guard);
     let count = quote! {
@@ -880,14 +912,6 @@ fn trial_attempt_tokens(
         if replace {
             selected = Some((#priority, #ident::#variant_ident(inner)));
         }
-    };
-    let count = match keeps_payload_tokens(mode) {
-        Some(keeps) => quote! {
-            if #keeps {
-                #count
-            }
-        },
-        None => count,
     };
     match unknown {
         Some(unknown) => quote! {
@@ -931,70 +955,6 @@ fn open_member_unknown_test(types: &TypeGraph, names: &Names, ty: Ty) -> Option<
         quote! { matches!(inner.as_deref(), Some(#member::#unknown { .. })) }
     } else {
         quote! { matches!(*inner, #member::#unknown { .. }) }
-    })
-}
-
-/// The name of the private function `types` carries wherever an `anyOf` union is trial-matched
-/// ([`keeps_payload_decl`]). Snake case, so it cannot collide with a `PascalCase` type.
-const KEEPS_PAYLOAD: &str = "keeps_payload";
-
-/// Under `anyOf`, the test that the variant decoded into `inner` from `value` keeps the payload
-/// ([`keeps_payload_decl`]); `None` under `oneOf`, which counts every decode.
-fn keeps_payload_tokens(mode: UnionMode) -> Option<TokenStream> {
-    let keeps = quote::format_ident!("{KEEPS_PAYLOAD}");
-    matches!(mode, UnionMode::AnyOf).then(|| quote! { #keeps(&value, &inner) })
-}
-
-/// The private `keeps_payload` function of the `types` module, when `types` holds a union an
-/// `anyOf` trial matches, whether every variant or a discriminated union's untagged ones:
-/// whether `decoded`, written back, keeps every member of `read`, the payload it was decoded
-/// from. An object keeps it where every key of `read` is written with a value that keeps that
-/// key's, an array where it has as many items and each keeps its counterpart, and a scalar where
-/// it is a scalar of the same JSON type: its value was already checked by decoding it, and a
-/// spelling decoding normalises (`1` read as `1.0`, an RFC 3339 offset) is the same value.
-pub(super) fn keeps_payload_decl(types: &TypeGraph) -> Option<TokenStream> {
-    let any_of_trial = types.emitted().any(|(_, definition)| {
-        matches!(
-            &definition.kind,
-            TypeKind::Union(Union {
-                strategy: UnionStrategy::Trial {
-                    mode: UnionMode::AnyOf
-                } | UnionStrategy::Discriminated {
-                    mode: UnionMode::AnyOf,
-                    ..
-                },
-                ..
-            })
-        )
-    });
-    let keeps = quote::format_ident!("{KEEPS_PAYLOAD}");
-    any_of_trial.then(|| {
-        quote! {
-            /// Whether `decoded`, a variant an `anyOf` trial decoded from `read`, writes back
-            /// every member of `read`: a variant that decodes a payload by dropping members it
-            /// does not declare is not selected.
-            fn #keeps<T: Serialize>(read: &serde_json::Value, decoded: &T) -> bool {
-                fn kept(read: &serde_json::Value, written: &serde_json::Value) -> bool {
-                    match (read, written) {
-                        (serde_json::Value::Object(read), serde_json::Value::Object(written)) => {
-                            read.iter().all(|(key, member)| {
-                                written.get(key).is_some_and(|written| kept(member, written))
-                            })
-                        }
-                        (serde_json::Value::Array(read), serde_json::Value::Array(written)) => {
-                            read.len() == written.len()
-                                && read.iter().zip(written).all(|(item, written)| kept(item, written))
-                        }
-                        (serde_json::Value::Object(_) | serde_json::Value::Array(_), _)
-                        | (_, serde_json::Value::Object(_) | serde_json::Value::Array(_)) => false,
-                        (read, written) => {
-                            std::mem::discriminant(read) == std::mem::discriminant(written)
-                        }
-                    }
-                }
-                serde_json::to_value(decoded).is_ok_and(|written| kept(read, &written))
-            }
-        }
     })
 }
 

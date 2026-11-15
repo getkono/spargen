@@ -12,7 +12,7 @@ use crate::name::Names;
 
 use super::docs::{doc_tokens, normalize_rustdoc};
 use super::ty::{prim_tokens, ty_tokens};
-use super::union::{emit_union, keeps_payload_decl};
+use super::union::emit_union;
 use super::CodegenOptions;
 
 /// Emit the `types` (models) module for every type the graph emits (every one but those lowering
@@ -29,7 +29,6 @@ pub(super) fn emit_models(
         .emitted()
         .map(|(id, def)| emit_type_def(id, def, &api.types, names, options));
     let decode_present = format_ident!("{DECODE_PRESENT}");
-    let keeps_payload = keeps_payload_decl(&api.types);
     // The RFC 3339 newtypes live beside `types`, so bring them into scope under the same bare names
     // `prim_tokens` emits; at the generated root the prelude re-export supplies them instead.
     let datetime_import = uses_time.then(|| {
@@ -53,8 +52,6 @@ pub(super) fn emit_models(
             {
                 T::deserialize(deserializer).map(Some)
             }
-
-            #keeps_payload
 
             #(#items)*
         }

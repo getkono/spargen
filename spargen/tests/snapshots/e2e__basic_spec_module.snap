@@ -8515,36 +8515,6 @@ pub mod types {
     {
         T::deserialize(deserializer).map(Some)
     }
-    /// Whether `decoded`, a variant an `anyOf` trial decoded from `read`, writes back
-    /// every member of `read`: a variant that decodes a payload by dropping members it
-    /// does not declare is not selected.
-    fn keeps_payload<T: Serialize>(read: &serde_json::Value, decoded: &T) -> bool {
-        fn kept(read: &serde_json::Value, written: &serde_json::Value) -> bool {
-            match (read, written) {
-                (serde_json::Value::Object(read), serde_json::Value::Object(written)) => {
-                    read.iter()
-                        .all(|(key, member)| {
-                            written.get(key).is_some_and(|written| kept(member, written))
-                        })
-                }
-                (serde_json::Value::Array(read), serde_json::Value::Array(written)) => {
-                    read.len() == written.len()
-                        && read
-                            .iter()
-                            .zip(written)
-                            .all(|(item, written)| kept(item, written))
-                }
-                (serde_json::Value::Object(_) | serde_json::Value::Array(_), _)
-                | (_, serde_json::Value::Object(_) | serde_json::Value::Array(_)) => {
-                    false
-                }
-                (read, written) => {
-                    std::mem::discriminant(read) == std::mem::discriminant(written)
-                }
-            }
-        }
-        serde_json::to_value(decoded).is_ok_and(|written| kept(read, &written))
-    }
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct DeepFilter {
         #[serde(rename = "kind")]
@@ -10011,42 +9981,38 @@ pub mod types {
                 .is_string()
                 .then(|| serde_json::from_value::<Box<AnyStringVariant0>>(value.clone()))
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                    let replace = match &selected {
-                        Some((selected_priority, _)) => 500u32 > *selected_priority,
-                        None => true,
-                    };
-                    if replace {
-                        selected = Some((500u32, AnyString::AnyStringVariant0(inner)));
-                    }
+                match_count += 1;
+                let replace = match &selected {
+                    Some((selected_priority, _)) => 500u32 > *selected_priority,
+                    None => true,
+                };
+                if replace {
+                    selected = Some((500u32, AnyString::AnyStringVariant0(inner)));
                 }
             }
             if let Some(Ok(inner)) = value
                 .is_string()
                 .then(|| serde_json::from_value::<Box<StringLiteral>>(value.clone()))
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                    let replace = match &selected {
-                        Some((selected_priority, _)) => 1999u32 > *selected_priority,
-                        None => true,
-                    };
-                    if replace {
-                        selected = Some((1999u32, AnyString::StringLiteral(inner)));
-                    }
+                match_count += 1;
+                let replace = match &selected {
+                    Some((selected_priority, _)) => 1999u32 > *selected_priority,
+                    None => true,
+                };
+                if replace {
+                    selected = Some((1999u32, AnyString::StringLiteral(inner)));
                 }
             }
             if match_count >= 1 {
                 selected
                     .map(|(_, value)| value)
                     .ok_or_else(|| serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyString, keeping every member of it",
+                        "data must match at least one typed variant of union AnyString that declares every member it holds",
                     ))
             } else {
                 Err(
                     serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyString, keeping every member of it",
+                        "data must match at least one typed variant of union AnyString that declares every member it holds",
                     ),
                 )
             }
@@ -10066,28 +10032,23 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if let Some(Ok(inner)) = value
-                .is_string()
-                .then(|| serde_json::from_value::<Box<AnyStringVariant0>>(value.clone()))
+            if value.is_string()
+                && serde_json::from_value::<Box<AnyStringVariant0>>(value.clone())
+                    .is_ok()
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                }
+                match_count += 1;
             }
-            if let Some(Ok(inner)) = value
-                .is_string()
-                .then(|| serde_json::from_value::<Box<StringLiteral>>(value.clone()))
+            if value.is_string()
+                && serde_json::from_value::<Box<StringLiteral>>(value.clone()).is_ok()
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                }
+                match_count += 1;
             }
             if match_count >= 1 {
                 value.serialize(serializer)
             } else {
                 Err(
                     serde::ser::Error::custom(
-                        "serialized value must match at least one typed variant of union AnyString, keeping every member of it",
+                        "serialized value must match at least one typed variant of union AnyString that declares every member it holds",
                     ),
                 )
             }
@@ -10111,42 +10072,38 @@ pub mod types {
                 .is_number()
                 .then(|| serde_json::from_value::<Box<AnyNumberVariant0>>(value.clone()))
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                    let replace = match &selected {
-                        Some((selected_priority, _)) => 500u32 > *selected_priority,
-                        None => true,
-                    };
-                    if replace {
-                        selected = Some((500u32, AnyNumber::AnyNumberVariant0(inner)));
-                    }
+                match_count += 1;
+                let replace = match &selected {
+                    Some((selected_priority, _)) => 500u32 > *selected_priority,
+                    None => true,
+                };
+                if replace {
+                    selected = Some((500u32, AnyNumber::AnyNumberVariant0(inner)));
                 }
             }
             if let Some(Ok(inner)) = value
                 .is_number()
                 .then(|| serde_json::from_value::<Box<AnyNumberVariant1>>(value.clone()))
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                    let replace = match &selected {
-                        Some((selected_priority, _)) => 650u32 > *selected_priority,
-                        None => true,
-                    };
-                    if replace {
-                        selected = Some((650u32, AnyNumber::AnyNumberVariant1(inner)));
-                    }
+                match_count += 1;
+                let replace = match &selected {
+                    Some((selected_priority, _)) => 650u32 > *selected_priority,
+                    None => true,
+                };
+                if replace {
+                    selected = Some((650u32, AnyNumber::AnyNumberVariant1(inner)));
                 }
             }
             if match_count >= 1 {
                 selected
                     .map(|(_, value)| value)
                     .ok_or_else(|| serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyNumber, keeping every member of it",
+                        "data must match at least one typed variant of union AnyNumber that declares every member it holds",
                     ))
             } else {
                 Err(
                     serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyNumber, keeping every member of it",
+                        "data must match at least one typed variant of union AnyNumber that declares every member it holds",
                     ),
                 )
             }
@@ -10166,28 +10123,24 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if let Some(Ok(inner)) = value
-                .is_number()
-                .then(|| serde_json::from_value::<Box<AnyNumberVariant0>>(value.clone()))
+            if value.is_number()
+                && serde_json::from_value::<Box<AnyNumberVariant0>>(value.clone())
+                    .is_ok()
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                }
+                match_count += 1;
             }
-            if let Some(Ok(inner)) = value
-                .is_number()
-                .then(|| serde_json::from_value::<Box<AnyNumberVariant1>>(value.clone()))
+            if value.is_number()
+                && serde_json::from_value::<Box<AnyNumberVariant1>>(value.clone())
+                    .is_ok()
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                }
+                match_count += 1;
             }
             if match_count >= 1 {
                 value.serialize(serializer)
             } else {
                 Err(
                     serde::ser::Error::custom(
-                        "serialized value must match at least one typed variant of union AnyNumber, keeping every member of it",
+                        "serialized value must match at least one typed variant of union AnyNumber that declares every member it holds",
                     ),
                 )
             }
@@ -10325,46 +10278,46 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Some(Ok(inner)) = value
-                .is_object()
+            if let Some(Ok(inner)) = (value.is_object()
+                && value.as_object().is_none_or(|members| members.is_empty()))
                 .then(|| serde_json::from_value::<Box<BroadOwner>>(value.clone()))
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                    let replace = match &selected {
-                        Some((selected_priority, _)) => 1000u32 > *selected_priority,
-                        None => true,
-                    };
-                    if replace {
-                        selected = Some((1000u32, AnyOwner::BroadOwner(inner)));
-                    }
+                match_count += 1;
+                let replace = match &selected {
+                    Some((selected_priority, _)) => 1000u32 > *selected_priority,
+                    None => true,
+                };
+                if replace {
+                    selected = Some((1000u32, AnyOwner::BroadOwner(inner)));
                 }
             }
-            if let Some(Ok(inner)) = value
-                .is_object()
+            if let Some(Ok(inner)) = (value.is_object()
+                && value
+                    .as_object()
+                    .is_none_or(|members| {
+                        members.keys().all(|key| matches!(key.as_str(), "id"))
+                    }))
                 .then(|| serde_json::from_value::<Box<DetailedOwner>>(value.clone()))
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                    let replace = match &selected {
-                        Some((selected_priority, _)) => 1021u32 > *selected_priority,
-                        None => true,
-                    };
-                    if replace {
-                        selected = Some((1021u32, AnyOwner::DetailedOwner(inner)));
-                    }
+                match_count += 1;
+                let replace = match &selected {
+                    Some((selected_priority, _)) => 1021u32 > *selected_priority,
+                    None => true,
+                };
+                if replace {
+                    selected = Some((1021u32, AnyOwner::DetailedOwner(inner)));
                 }
             }
             if match_count >= 1 {
                 selected
                     .map(|(_, value)| value)
                     .ok_or_else(|| serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyOwner, keeping every member of it",
+                        "data must match at least one typed variant of union AnyOwner that declares every member it holds",
                     ))
             } else {
                 Err(
                     serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyOwner, keeping every member of it",
+                        "data must match at least one typed variant of union AnyOwner that declares every member it holds",
                     ),
                 )
             }
@@ -10384,28 +10337,28 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if let Some(Ok(inner)) = value
-                .is_object()
-                .then(|| serde_json::from_value::<Box<BroadOwner>>(value.clone()))
+            if (value.is_object()
+                && value.as_object().is_none_or(|members| members.is_empty()))
+                && serde_json::from_value::<Box<BroadOwner>>(value.clone()).is_ok()
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                }
+                match_count += 1;
             }
-            if let Some(Ok(inner)) = value
-                .is_object()
-                .then(|| serde_json::from_value::<Box<DetailedOwner>>(value.clone()))
+            if (value.is_object()
+                && value
+                    .as_object()
+                    .is_none_or(|members| {
+                        members.keys().all(|key| matches!(key.as_str(), "id"))
+                    }))
+                && serde_json::from_value::<Box<DetailedOwner>>(value.clone()).is_ok()
             {
-                if keeps_payload(&value, &inner) {
-                    match_count += 1;
-                }
+                match_count += 1;
             }
             if match_count >= 1 {
                 value.serialize(serializer)
             } else {
                 Err(
                     serde::ser::Error::custom(
-                        "serialized value must match at least one typed variant of union AnyOwner, keeping every member of it",
+                        "serialized value must match at least one typed variant of union AnyOwner that declares every member it holds",
                     ),
                 )
             }
@@ -11257,24 +11210,28 @@ pub mod types {
                 return {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    if let Some(Ok(inner)) = value
-                        .is_object()
+                    if let Some(Ok(inner)) = (value.is_object()
+                        && value
+                            .as_object()
+                            .is_none_or(|members| {
+                                members
+                                    .keys()
+                                    .all(|key| matches!(key.as_str(), "petType" | "fins"))
+                            }))
                         .then(|| serde_json::from_value::<
                             Box<LooseAnimalVariant2>,
                         >(value.clone()))
                     {
-                        if keeps_payload(&value, &inner) {
-                            match_count += 1;
-                            let replace = match &selected {
-                                Some((selected_priority, _)) => 1042u32 > *selected_priority,
-                                None => true,
-                            };
-                            if replace {
-                                selected = Some((
-                                    1042u32,
-                                    LooseAnimal::LooseAnimalVariant2(inner),
-                                ));
-                            }
+                        match_count += 1;
+                        let replace = match &selected {
+                            Some((selected_priority, _)) => 1042u32 > *selected_priority,
+                            None => true,
+                        };
+                        if replace {
+                            selected = Some((
+                                1042u32,
+                                LooseAnimal::LooseAnimalVariant2(inner),
+                            ));
                         }
                     }
                     match selected {
@@ -11303,24 +11260,28 @@ pub mod types {
                 _ => {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    if let Some(Ok(inner)) = value
-                        .is_object()
+                    if let Some(Ok(inner)) = (value.is_object()
+                        && value
+                            .as_object()
+                            .is_none_or(|members| {
+                                members
+                                    .keys()
+                                    .all(|key| matches!(key.as_str(), "petType" | "fins"))
+                            }))
                         .then(|| serde_json::from_value::<
                             Box<LooseAnimalVariant2>,
                         >(value.clone()))
                     {
-                        if keeps_payload(&value, &inner) {
-                            match_count += 1;
-                            let replace = match &selected {
-                                Some((selected_priority, _)) => 1042u32 > *selected_priority,
-                                None => true,
-                            };
-                            if replace {
-                                selected = Some((
-                                    1042u32,
-                                    LooseAnimal::LooseAnimalVariant2(inner),
-                                ));
-                            }
+                        match_count += 1;
+                        let replace = match &selected {
+                            Some((selected_priority, _)) => 1042u32 > *selected_priority,
+                            None => true,
+                        };
+                        if replace {
+                            selected = Some((
+                                1042u32,
+                                LooseAnimal::LooseAnimalVariant2(inner),
+                            ));
                         }
                     }
                     match selected {

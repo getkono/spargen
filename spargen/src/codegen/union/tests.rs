@@ -195,7 +195,8 @@ fn a_default_mapping_falls_back_after_the_trial_and_guards_its_payload() {
     assert_contains_all(union(&types, "Lone"), &["Lone::Fallback(_)=>None,"]);
 }
 
-/// A union with no discriminator tries every member, each under its category guard, the higher
+/// A union with no discriminator tries every member, each under its category guard and, under
+/// `anyOf`, an object struct only on a payload holding no member it does not declare, the higher
 /// priority winning, and holds the count to its applicator, `anyOf` at least one and `oneOf`
 /// exactly one, on decode and on serialize alike; one of statically disjoint JSON types is
 /// dispatched by type.
@@ -208,21 +209,21 @@ fn an_untagged_union_tries_each_member_under_its_applicator() {
         &[
             concat!(
                 r#"letmutmatch_count=0_usize;letmutselected:Option<(u32,Self)>=None;"#,
-                r#"ifletSome(Ok(inner))=value.is_object().then(||serde_json::from_value::<Box<Tick>>(value.clone()))"#,
+                r#"ifletSome(Ok(inner))=(value.is_object()&&value.as_object().is_none_or(|members|{members.keys().all(|key|matches!(key.as_str(),"kind"|"n"))})).then(||serde_json::from_value::<Box<Tick>>(value.clone()))"#,
                 r#"{match_count+=1;letreplace=match&selected{Some((selected_priority,_))=>1042u32>*selected_priority,None=>true,};"#,
                 r#"ifreplace{selected=Some((1042u32,Choice::Tick(inner)));}}"#,
-                r#"ifletSome(Ok(inner))=value.is_object().then(||serde_json::from_value::<Box<ChoiceVariant1>>(value.clone()))"#,
+                r#"ifletSome(Ok(inner))=(value.is_object()&&value.as_object().is_none_or(|members|{members.keys().all(|key|matches!(key.as_str(),"note"))})).then(||serde_json::from_value::<Box<ChoiceVariant1>>(value.clone()))"#,
                 r#"{match_count+=1;letreplace=match&selected{Some((selected_priority,_))=>1021u32>*selected_priority,None=>true,};"#,
                 r#"ifreplace{selected=Some((1021u32,Choice::ChoiceVariant1(inner)));}}"#,
                 r#"ifletOk(inner)=serde_json::from_value::<Box<Event>>(value.clone()){match_count+=1;"#,
             ),
             concat!(
                 r#"ifmatch_count>=1{selected.map(|(_,value)|value).ok_or_else(||serde::de::Error::custom("#,
-                r#""datamustmatchatleastonetypedvariantofunionChoice",))}else{Err("#,
+                r#""datamustmatchatleastonetypedvariantofunionChoicethatdeclareseverymemberitholds",))}else{Err("#,
             ),
             concat!(
-                r#"letmutmatch_count=0_usize;ifvalue.is_object()&&serde_json::from_value::<Box<Tick>>(value.clone()).is_ok(){match_count+=1;}"#,
-                r#"ifvalue.is_object()&&serde_json::from_value::<Box<ChoiceVariant1>>(value.clone()).is_ok(){match_count+=1;}"#,
+                r#"letmutmatch_count=0_usize;if(value.is_object()&&value.as_object().is_none_or(|members|{members.keys().all(|key|matches!(key.as_str(),"kind"|"n"))}))&&serde_json::from_value::<Box<Tick>>(value.clone()).is_ok(){match_count+=1;}"#,
+                r#"if(value.is_object()&&value.as_object().is_none_or(|members|{members.keys().all(|key|matches!(key.as_str(),"note"))}))&&serde_json::from_value::<Box<ChoiceVariant1>>(value.clone()).is_ok(){match_count+=1;}"#,
                 r#"ifserde_json::from_value::<Box<Event>>(value.clone()).is_ok(){match_count+=1;}"#,
                 r#"ifmatch_count>=1{value.serialize(serializer)}"#,
             ),
@@ -285,12 +286,12 @@ fn an_open_union_keeps_an_unlisted_tag_in_unknown() {
             ),
             concat!(
                 r#"}elseifmatch_count==0{unknown_fallback.ok_or_else(||serde::de::Error::custom("#,
-                r#""datamustmatchatleastonetypedvariantofunionChoice",))}"#,
+                r#""datamustmatchatleastonetypedvariantofunionChoicethatdeclareseverymemberitholds",))}"#,
             ),
             concat!(
                 r#"letmutmatch_count=0_usize;letmutunknown_match=false;"#,
-                r#"ifvalue.is_object()&&serde_json::from_value::<Box<Tick>>(value.clone()).is_ok(){match_count+=1;}"#,
-                r#"ifvalue.is_object()&&serde_json::from_value::<Box<ChoiceVariant1>>(value.clone()).is_ok(){match_count+=1;}"#,
+                r#"if(value.is_object()&&value.as_object().is_none_or(|members|{members.keys().all(|key|matches!(key.as_str(),"kind"|"n"))}))&&serde_json::from_value::<Box<Tick>>(value.clone()).is_ok(){match_count+=1;}"#,
+                r#"if(value.is_object()&&value.as_object().is_none_or(|members|{members.keys().all(|key|matches!(key.as_str(),"note"))}))&&serde_json::from_value::<Box<ChoiceVariant1>>(value.clone()).is_ok(){match_count+=1;}"#,
                 r#"ifletOk(inner)=serde_json::from_value::<Box<Event>>(value.clone()){ifmatches!(*inner,Event::Unknown{..})"#,
                 r#"{unknown_match=true;}else{match_count+=1;}}ifmatch_count>=1||(match_count==0&&unknown_match)"#,
             ),

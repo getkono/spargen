@@ -359,6 +359,11 @@ fn an_any_of_trial_selects_the_more_specific_of_two_lossless_variants() {
     let brief: types::Briefing = serde_json::from_value(payload.clone()).unwrap();
     assert!(matches!(brief, types::Briefing::Brief(_)), "{brief:?}");
     assert_eq!(serde_json::to_value(&brief).unwrap(), payload);
+    // A `readOnly` member is declared, so a payload carrying it is kept, though a request leaves
+    // it out when the value is written back.
+    let full: types::Briefing =
+        serde_json::from_value(serde_json::json!({ "a": 1, "d": "server" })).unwrap();
+    assert!(matches!(full, types::Briefing::Fuller(_)), "{full:?}");
 }
 
 // The untagged members of a discriminated `anyOf` are selected by the same rule: a payload no tag
@@ -447,7 +452,7 @@ components:
       properties:
         a: { type: integer }
         b: { type: string }
-        d: { type: string }
+        d: { type: string, readOnly: true }
     Briefing:
       anyOf:
         - $ref: "#/components/schemas/Brief"

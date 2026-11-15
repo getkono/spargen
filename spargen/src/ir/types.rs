@@ -254,8 +254,8 @@ pub(crate) enum UnionMode {
     /// Exactly one variant must deserialize successfully.
     OneOf,
     /// One or more variants may match; the most specific typed match is selected. A variant
-    /// matches only where it writes back every member of the payload it decoded, so one that
-    /// decodes by dropping undeclared members is never selected.
+    /// that is an object struct ignoring unknown properties matches only a payload holding no
+    /// member it does not declare, so one that would decode by dropping members is never selected.
     AnyOf,
 }
 
