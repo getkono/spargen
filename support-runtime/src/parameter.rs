@@ -90,6 +90,12 @@ pub enum ParameterError {
         /// The parameter's declared name.
         parameter: String,
     },
+    /// A path parameter rendered to the empty string (`path_segment`), which would leave an
+    /// empty segment and send the request to a different resource (`/users/{id}` to `/users/`).
+    EmptyPathSegment,
+    /// A value held an `f64` or `f32` NaN or infinity, which no parameter style can represent:
+    /// serialized, it would reach the wire as an undefined value instead.
+    NonFiniteNumber,
 }
 
 impl fmt::Display for ParameterError {
@@ -116,6 +122,14 @@ impl fmt::Display for ParameterError {
                 formatter,
                 "cookie parameter `{parameter}` holds a byte RFC 6265 does not admit in a cookie"
             ),
+            Self::EmptyPathSegment => formatter.write_str(
+                "a path parameter rendered to an empty segment, which would send the request to \
+                 a different resource",
+            ),
+            Self::NonFiniteNumber => formatter.write_str(
+                "a parameter value holds a NaN or infinite number, which no parameter style can \
+                 represent",
+            ),
         }
     }
 }
@@ -129,7 +143,9 @@ impl std::error::Error for ParameterError {
             | Self::FormBodyNotObject
             | Self::DeepObjectInMultipart
             | Self::ExpectedComposite
-            | Self::InvalidCookie { .. } => None,
+            | Self::InvalidCookie { .. }
+            | Self::EmptyPathSegment
+            | Self::NonFiniteNumber => None,
         }
     }
 }
@@ -137,6 +153,271 @@ impl std::error::Error for ParameterError {
 impl From<serde_json::Error> for ParameterError {
     fn from(error: serde_json::Error) -> Self {
         Self::Serialize(error)
+    }
+}
+
+/// Check one rendered path parameter value before it is substituted into the path template, and
+/// return it unchanged where it is not empty.
+///
+/// An empty rendering (`""`, an empty array under `style: simple`) is refused as
+/// `ParameterError::EmptyPathSegment`: substituted, it would leave an empty segment and send the
+/// request to a different resource (`/users/{id}` to `/users/`, `/users/{id}/keys` to
+/// `/users//keys`). `label` and `matrix` renderings always start with their prefix, so they pass.
+pub fn path_segment(rendered: String) -> Result<String, ParameterError> {
+    if rendered.is_empty() {
+        Err(ParameterError::EmptyPathSegment)
+    } else {
+        Ok(rendered)
+    }
+}
+
+/// `value` as the JSON value every style renders from, refused as
+/// `ParameterError::NonFiniteNumber` where it holds an `f64` or `f32` NaN or infinity:
+/// `serde_json` would turn that number into `null`, which every style renders as undefined, so a
+/// different request would go out.
+fn to_json<T: Serialize>(value: &T) -> Result<Value, ParameterError> {
+    check_finite(value)?;
+    Ok(serde_json::to_value(value)?)
+}
+
+/// Refuse `value` as `ParameterError::NonFiniteNumber` where it holds an `f64` or `f32` NaN or
+/// infinity anywhere. A failure of its own `Serialize` implementation passes here, and the real
+/// serialization reports it.
+fn check_finite<T: Serialize>(value: &T) -> Result<(), ParameterError> {
+    match value.serialize(FiniteCheck) {
+        Err(FiniteError::NonFinite) => Err(ParameterError::NonFiniteNumber),
+        Ok(()) | Err(FiniteError::Other) => Ok(()),
+    }
+}
+
+/// Why [`FiniteCheck`] stopped: a non-finite number, or a failure of the value's own `Serialize`
+/// implementation, which the real serialization then reports as `ParameterError::Serialize`.
+#[derive(Debug)]
+enum FiniteError {
+    NonFinite,
+    Other,
+}
+
+impl fmt::Display for FiniteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NonFinite => "non-finite number",
+            Self::Other => "serialization failed",
+        })
+    }
+}
+
+impl std::error::Error for FiniteError {}
+
+impl serde::ser::Error for FiniteError {
+    fn custom<M: fmt::Display>(_: M) -> Self {
+        Self::Other
+    }
+}
+
+/// A `Serializer` that writes nothing and fails on the first non-finite `f64` or `f32` anywhere
+/// in a value: the check [`to_json`] makes before `serde_json` can collapse one to `null`.
+struct FiniteCheck;
+
+/// The scalar `serialize_*` methods, none of which can hold a float.
+macro_rules! finite_scalars {
+    ($($method:ident: $ty:ty),* $(,)?) => {
+        $(fn $method(self, _: $ty) -> Result<(), FiniteError> {
+            Ok(())
+        })*
+    };
+}
+
+impl serde::Serializer for FiniteCheck {
+    type Ok = ();
+    type Error = FiniteError;
+    type SerializeSeq = Self;
+    type SerializeTuple = Self;
+    type SerializeTupleStruct = Self;
+    type SerializeTupleVariant = Self;
+    type SerializeMap = Self;
+    type SerializeStruct = Self;
+    type SerializeStructVariant = Self;
+
+    finite_scalars! {
+        serialize_bool: bool,
+        serialize_i8: i8,
+        serialize_i16: i16,
+        serialize_i32: i32,
+        serialize_i64: i64,
+        serialize_i128: i128,
+        serialize_u8: u8,
+        serialize_u16: u16,
+        serialize_u32: u32,
+        serialize_u64: u64,
+        serialize_u128: u128,
+        serialize_char: char,
+        serialize_str: &str,
+        serialize_bytes: &[u8],
+        serialize_unit_struct: &'static str,
+    }
+
+    fn serialize_f32(self, value: f32) -> Result<(), FiniteError> {
+        if value.is_finite() {
+            Ok(())
+        } else {
+            Err(FiniteError::NonFinite)
+        }
+    }
+
+    fn serialize_f64(self, value: f64) -> Result<(), FiniteError> {
+        if value.is_finite() {
+            Ok(())
+        } else {
+            Err(FiniteError::NonFinite)
+        }
+    }
+
+    fn serialize_none(self) -> Result<(), FiniteError> {
+        Ok(())
+    }
+
+    fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<(), FiniteError> {
+        value.serialize(self)
+    }
+
+    fn serialize_unit(self) -> Result<(), FiniteError> {
+        Ok(())
+    }
+
+    fn serialize_unit_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+    ) -> Result<(), FiniteError> {
+        Ok(())
+    }
+
+    fn serialize_newtype_struct<T: Serialize + ?Sized>(
+        self,
+        _: &'static str,
+        value: &T,
+    ) -> Result<(), FiniteError> {
+        value.serialize(self)
+    }
+
+    fn serialize_newtype_variant<T: Serialize + ?Sized>(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        value: &T,
+    ) -> Result<(), FiniteError> {
+        value.serialize(self)
+    }
+
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self, FiniteError> {
+        Ok(self)
+    }
+
+    fn serialize_tuple(self, _: usize) -> Result<Self, FiniteError> {
+        Ok(self)
+    }
+
+    fn serialize_tuple_struct(self, _: &'static str, _: usize) -> Result<Self, FiniteError> {
+        Ok(self)
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self, FiniteError> {
+        Ok(self)
+    }
+
+    fn serialize_map(self, _: Option<usize>) -> Result<Self, FiniteError> {
+        Ok(self)
+    }
+
+    fn serialize_struct(self, _: &'static str, _: usize) -> Result<Self, FiniteError> {
+        Ok(self)
+    }
+
+    fn serialize_struct_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self, FiniteError> {
+        Ok(self)
+    }
+}
+
+/// The element-checking half of every compound `serialize_*` trait [`FiniteCheck`] returns
+/// itself as.
+macro_rules! finite_compound {
+    ($($trait:ident :: $method:ident),* $(,)?) => {
+        $(impl serde::ser::$trait for FiniteCheck {
+            type Ok = ();
+            type Error = FiniteError;
+            fn $method<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), FiniteError> {
+                value.serialize(FiniteCheck)
+            }
+            fn end(self) -> Result<(), FiniteError> {
+                Ok(())
+            }
+        })*
+    };
+}
+
+finite_compound! {
+    SerializeSeq::serialize_element,
+    SerializeTuple::serialize_element,
+    SerializeTupleStruct::serialize_field,
+    SerializeTupleVariant::serialize_field,
+}
+
+impl serde::ser::SerializeMap for FiniteCheck {
+    type Ok = ();
+    type Error = FiniteError;
+    fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), FiniteError> {
+        key.serialize(FiniteCheck)
+    }
+    fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), FiniteError> {
+        value.serialize(FiniteCheck)
+    }
+    fn end(self) -> Result<(), FiniteError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStruct for FiniteCheck {
+    type Ok = ();
+    type Error = FiniteError;
+    fn serialize_field<T: Serialize + ?Sized>(
+        &mut self,
+        _: &'static str,
+        value: &T,
+    ) -> Result<(), FiniteError> {
+        value.serialize(FiniteCheck)
+    }
+    fn end(self) -> Result<(), FiniteError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStructVariant for FiniteCheck {
+    type Ok = ();
+    type Error = FiniteError;
+    fn serialize_field<T: Serialize + ?Sized>(
+        &mut self,
+        _: &'static str,
+        value: &T,
+    ) -> Result<(), FiniteError> {
+        value.serialize(FiniteCheck)
+    }
+    fn end(self) -> Result<(), FiniteError> {
+        Ok(())
     }
 }
 
@@ -253,7 +534,7 @@ pub fn serialize_simple<T: Serialize>(
     explode: bool,
     encoding: PercentEncoding,
 ) -> Result<String, ParameterError> {
-    match serde_json::to_value(value)? {
+    match to_json(value)? {
         Value::Null => Ok(String::new()),
         Value::Array(values) => join_scalars(values.iter(), ",", encoding),
         Value::Object(values) if explode => Ok(object_pairs(&values, encoding)?.join(",")),
@@ -272,7 +553,7 @@ pub fn serialize_matrix<T: Serialize>(
     encoding: PercentEncoding,
 ) -> Result<String, ParameterError> {
     let name = encode(name, encoding);
-    match empty_as_undefined(serde_json::to_value(value)?) {
+    match empty_as_undefined(to_json(value)?) {
         // An undefined value still carries the name, with no `=`.
         Value::Null => Ok(format!(";{name}")),
         Value::Array(values) if explode => values
@@ -303,7 +584,7 @@ pub fn serialize_label<T: Serialize>(
     explode: bool,
     encoding: PercentEncoding,
 ) -> Result<String, ParameterError> {
-    let rendered = match serde_json::to_value(value)? {
+    let rendered = match to_json(value)? {
         Value::Null => String::new(),
         Value::Array(values) if explode => join_scalars(values.iter(), ".", encoding)?,
         Value::Array(values) => join_scalars(values.iter(), ",", encoding)?,
@@ -330,7 +611,7 @@ pub fn serialize_form<T: Serialize>(
     explode: bool,
     encoding: PercentEncoding,
 ) -> Result<Vec<String>, ParameterError> {
-    let value = serde_json::to_value(value)?;
+    let value = to_json(value)?;
     let value = if name.is_empty() {
         value
     } else {
@@ -450,7 +731,7 @@ pub fn serialize_delimited<T: Serialize>(
     encoding: PercentEncoding,
 ) -> Result<Vec<String>, ParameterError> {
     let name = encode(name, encoding);
-    match serde_json::to_value(value)? {
+    match to_json(value)? {
         Value::Array(values) => Ok(vec![format!(
             "{name}={}",
             join_scalars(values.iter(), delimiter.as_str(), encoding)?
@@ -478,7 +759,7 @@ pub fn serialize_deep_object<T: Serialize>(
     encoding: PercentEncoding,
 ) -> Result<Vec<String>, ParameterError> {
     let name = encode(name, encoding);
-    match serde_json::to_value(value)? {
+    match to_json(value)? {
         Value::Object(values) => values
             .iter()
             .map(|(key, value)| {
@@ -559,6 +840,7 @@ pub fn serialize_form_body<T: Serialize>(
     // `serde_json::Value` map keeps one entry per key, so a flattened overflow member would
     // overwrite the declared field of the same name, or stand in for it when that field is
     // skipped as `None`.
+    check_finite(value)?;
     let text = serde_json::to_vec(value)?;
     if text.first() != Some(&b'{') {
         return Err(ParameterError::FormBodyNotObject);
@@ -672,7 +954,7 @@ pub fn serialize_multipart_values<T: Serialize>(
         // Defined only for `in: query`: its `name[key]=value` syntax has no meaning as a part value.
         FormStyle::DeepObject => return Err(ParameterError::DeepObjectInMultipart),
     };
-    match serde_json::to_value(value)? {
+    match to_json(value)? {
         Value::Null => Ok(vec![String::new()]),
         Value::Array(values) if explode => values
             .iter()
