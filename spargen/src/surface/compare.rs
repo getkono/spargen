@@ -227,6 +227,27 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             key,
             format!("success type `{}` -> `{}`", old.success, new.success),
         ));
+    } else if old.success_statuses != new.success_statuses {
+        // The same success type, decoded from other statuses: a 2xx only one side documents
+        // succeeds on that side and is `Error::UnexpectedStatus` on the other. A success enum's
+        // statuses are its variants, so this is reached only by a unit or single-body success.
+        let label = |statuses: &[String]| {
+            if statuses.is_empty() {
+                "none".to_owned()
+            } else {
+                statuses.join(", ")
+            }
+        };
+        changes.push(Change::new(
+            ChangeKind::SuccessTypeChanged,
+            key,
+            format!(
+                "success statuses `{}` -> `{}` of success type `{}`",
+                label(&old.success_statuses),
+                label(&new.success_statuses),
+                new.success
+            ),
+        ));
     }
     diff_byte_stream(key, old, new, changes);
     if old.error != new.error {

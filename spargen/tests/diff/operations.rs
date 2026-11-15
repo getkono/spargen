@@ -515,6 +515,54 @@ fn success_type_detail(old: &str, new: &str) -> String {
 }
 
 #[test]
+fn a_changed_success_status_under_the_same_success_type_is_major() {
+    // Issue #1426: a unit or single-body success decodes only its documented 2xx statuses, so
+    // moving or adding one changes which responses succeed though the success type stays put.
+    let pets = |responses: &str| {
+        full(
+            &format!(
+                "  /pets:\n    get:\n      operationId: listPets\n      responses:\n{responses}"
+            ),
+            PET_SCHEMA,
+        )
+    };
+    let bodied = |status: &str| {
+        format!(
+            "        '{status}':\n          description: ok\n          content:\n            \
+             application/json:\n              schema: {PET_REF}\n"
+        )
+    };
+    let bodyless = |status: &str| format!("        '{status}': {{ description: ok }}\n");
+
+    assert_eq!(
+        success_type_detail(&pets(&bodied("200")), &pets(&bodied("201"))),
+        "success statuses `200` -> `201` of success type `Pet`"
+    );
+    assert_eq!(
+        success_type_detail(
+            &pets(&bodyless("204")),
+            &pets(&format!("{}{}", bodyless("202"), bodyless("204")))
+        ),
+        "success statuses `204` -> `202, 204` of success type `()`"
+    );
+    assert_eq!(
+        success_type_detail(&pets(&bodyless("200")), &pets(&bodyless("2XX"))),
+        "success statuses `200` -> `2xx` of success type `()`"
+    );
+    // Neither a 2xx nor a `default`: no 2xx succeeds.
+    assert_eq!(
+        success_type_detail(&pets(&bodyless("204")), &pets(&bodyless("404"))),
+        "success statuses `204` -> `none` of success type `()`"
+    );
+    // A `2XX` range and a lone `default` each document every 2xx, so they decode alike.
+    let ranged = pets(&bodyless("2XX"));
+    let fallback = pets("        default: { description: ok }\n");
+    let report = diff(&ranged, &fallback);
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
+}
+
+#[test]
 fn a_one_position_tuple_is_labelled_with_its_trailing_comma() {
     // Issue #449: `(i64)` is Rust for a parenthesized `i64`; the generated type is `(i64,)`.
     let pair_ref = "{ $ref: '#/components/schemas/Pair' }";

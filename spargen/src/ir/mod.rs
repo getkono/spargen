@@ -158,8 +158,8 @@ impl Api {
     pub(crate) fn streams_binary_success(&self, operation: &Operation) -> bool {
         operation.responses.stream_success().is_none()
             && match operation.responses.success() {
-                SuccessShape::Unit => false,
-                SuccessShape::Plain(ty) => self.is_raw_bytes(ty),
+                SuccessShape::Unit(_) => false,
+                SuccessShape::Plain(ty, _) => self.is_raw_bytes(ty),
                 SuccessShape::Enum(entries) => {
                     entries.iter().any(|(_, ty)| self.streams_binary_arm(*ty))
                 }

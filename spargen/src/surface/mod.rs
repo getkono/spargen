@@ -156,6 +156,10 @@ struct OpSurface {
     file_name_setters: BTreeSet<String>,
     /// Canonical rendering of the success return type.
     success: String,
+    /// The success selectors the method decodes, labelled as their Responses Object keys in decode
+    /// precedence: any other 2xx is `Error::UnexpectedStatus`, so a change to them changes which
+    /// responses succeed even where the success type stays the same.
+    success_statuses: Vec<String>,
     /// Canonical rendering of the error type.
     error: String,
     /// The canonical `<E as ApiErrorBody>::Body` of the error type, or `None` when it does not
@@ -369,7 +373,8 @@ pub enum ChangeKind {
     /// An operation's request body flipped between required and optional. **Major** — `&T` ↔
     /// `Option<&T>`.
     RequestBodyRequirednessChanged,
-    /// An operation's success return type changed, or its `{method}_stream` twin's did. **Major**.
+    /// An operation's success return type changed, or its `{method}_stream` twin's did, or the
+    /// success statuses it decodes did (any other 2xx is `Error::UnexpectedStatus`). **Major**.
     SuccessTypeChanged,
     /// An operation's error type changed. **Major**.
     ErrorTypeChanged,

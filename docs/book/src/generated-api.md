@@ -150,6 +150,13 @@ use.
   The same number in a JSON `content` parameter, a JSON `in: querystring` value, a JSON request
   body or a JSON-encoded multipart part, where `serde_json` would write `null`, is refused the
   same way, including inside a union-typed value.
+- A response succeeds only with a 2xx status the operation documents, whatever its success shape
+  (`()`, one body, a stream, a success enum, or a `_stream` twin): an exact code, then a `2XX`
+  range, or, where no 2xx is declared, a `default`, which then documents every 2xx. Any other
+  2xx is `Error::UnexpectedStatus` with its status, headers and capped body, read before any
+  body is decoded or stream opened: a `202` to an operation documenting only `201` is not decoded
+  as the `201` body, and a `200` to one documenting only `204` does not drop its body as `()`. An
+  operation that documents neither a 2xx nor a `default` succeeds with no status.
 - A closed error taxonomy, identical across all spargen output: request-construction
   (`Error::RequestConstruction`, carrying a `RequestError` — one of the four credential causes
   above, the missing bound header above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout

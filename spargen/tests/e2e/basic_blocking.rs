@@ -896,39 +896,53 @@ fn default_beside_multiple_bodied_successes_stays_on_the_error_side() {
 
 // Issue #151: beside a declared success status, `default` satisfies no undeclared 2xx in any of
 // the three success shapes. The enum shape is pinned above (`getMultiDefault`'s 202 is
-// `UnexpectedStatus`); here the plain and unit shapes take an undeclared 201 as their one success,
-// and a `default`-shaped 201 body is never decoded as `Problem`.
+// `UnexpectedStatus`); here the plain and unit shapes do the same (#1426): an undeclared 201 is
+// `UnexpectedStatus` with its body kept, neither decoded as the declared success nor as `Problem`,
+// nor discarded as `()`.
 #[test]
 fn an_undeclared_2xx_is_never_decoded_through_default_beside_a_declared_success() {
     let problem: &'static [u8] = br#"{"title":"t","detail":"d"}"#;
 
-    // Plain: the 201 is the single success body, `MultiOk`.
-    let (base, server) = serve_once("application/json", "201 Created", br#"{"ok":"yes"}"#);
+    // Plain: the declared 200 is the single success body, `MultiOk`.
+    let (base, server) = serve_once("application/json", "200 OK", br#"{"ok":"yes"}"#);
     let client = basic_client::BlockingClient::new(&base).unwrap();
-    let response = client.get_plain_default().expect("any 2xx is the plain success");
-    assert_eq!(response.status(), 201);
+    let response = client.get_plain_default().expect("the declared 200 is the plain success");
+    assert_eq!(response.status(), 200);
     assert_eq!(response.into_inner().ok, "yes");
     server.join().unwrap();
 
-    // A `Problem` body on that 201 is a malformed `MultiOk`, not a `default` decode.
-    let (base, server) = serve_once("application/json", "201 Created", problem);
-    let client = basic_client::BlockingClient::new(&base).unwrap();
-    match client.get_plain_default().unwrap_err() {
-        basic_client::Error::Decode { status, headers, body, .. } => {
-            assert_eq!(status, 201);
-            assert_eq!(headers.get("content-type").unwrap(), "application/json");
-            assert_eq!(&body[..], problem);
+    // An undeclared 201, whether its body is a `MultiOk` or a `Problem`, decodes as neither.
+    for body in [&br#"{"ok":"yes"}"#[..], problem] {
+        let (base, server) = serve_once("application/json", "201 Created", body);
+        let client = basic_client::BlockingClient::new(&base).unwrap();
+        match client.get_plain_default().unwrap_err() {
+            basic_client::Error::UnexpectedStatus { status, headers, body: kept } => {
+                assert_eq!(status, 201);
+                assert_eq!(headers.get("content-type").unwrap(), "application/json");
+                assert_eq!(&kept[..], body);
+            }
+            other => panic!("an undeclared 2xx must be unexpected, got {other:?}"),
         }
-        other => panic!("a 2xx must decode as the declared success, got {other:?}"),
+        server.join().unwrap();
     }
+
+    // Unit: the declared 204 is `()`; an undeclared 201 keeps its `Problem` body as unexpected.
+    let (base, server) = serve_once("application/json", "204 No Content", b"");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    let response = client.get_unit_default().expect("the declared 204 is the unit success");
+    assert_eq!(response.status(), 204);
+    let () = response.into_inner();
     server.join().unwrap();
 
-    // Unit: the 201 is `()`, its `Problem` body discarded rather than decoded.
     let (base, server) = serve_once("application/json", "201 Created", problem);
     let client = basic_client::BlockingClient::new(&base).unwrap();
-    let response = client.get_unit_default().expect("any 2xx is the unit success");
-    assert_eq!(response.status(), 201);
-    let () = response.into_inner();
+    match client.get_unit_default().unwrap_err() {
+        basic_client::Error::UnexpectedStatus { status, body, .. } => {
+            assert_eq!(status, 201);
+            assert_eq!(&body[..], problem);
+        }
+        other => panic!("an undeclared 2xx must be unexpected, got {other:?}"),
+    }
     server.join().unwrap();
 
     // Both still classify a non-2xx through `default`.

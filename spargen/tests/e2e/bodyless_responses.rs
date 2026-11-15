@@ -11,8 +11,9 @@ use super::*;
 /// A `HEAD` that reuses its `GET` response's JSON body and documents a header, a listing whose
 /// `204` and `304` declare content, and a `PUT` whose `205` does. Then one operation per success
 /// shape whose documented statuses leave other 2xx statuses undocumented: a `201`-only body, a
-/// `204`-only delete, an NDJSON stream and a binary download with its `_stream` twin; and the two
-/// selectors that document every 2xx, a `2XX` range and a `default` with no 2xx beside it.
+/// `204`-only delete, an NDJSON stream, a binary download with its `_stream` twin, and a `410`
+/// alone, which documents no 2xx; and the two selectors that document every 2xx, a `2XX` range
+/// and a `default` with no 2xx beside it.
 const BODYLESS_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: Bodyless, version: 1.0.0 }
@@ -87,6 +88,11 @@ paths:
           description: the events
           content:
             application/x-ndjson: { schema: { type: string } }
+  /gone:
+    get:
+      operationId: getGone
+      responses:
+        "410": { description: gone }
   /blob:
     get:
       operationId: getBlob
@@ -269,6 +275,17 @@ fn a_2xx_range_and_a_lone_default_document_every_2xx() {
         });
         assert_eq!(block_on(client(&mock).get_fallback()).unwrap().into_inner(), "fallback");
     }
+}
+
+#[test]
+fn an_operation_documenting_no_2xx_and_no_default_decodes_no_2xx() {
+    let mock = testing::MockBackend::new().on_get_gone(|_| {
+        testing::get_gone::Reply::from_reply(testing::Reply::new(200).body("here after all"))
+    });
+    assert_eq!(
+        unexpected(block_on(client(&mock).get_gone())),
+        (200, b"here after all".to_vec())
+    );
 }
 
 #[test]

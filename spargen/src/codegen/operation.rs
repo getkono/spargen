@@ -11,7 +11,7 @@ use crate::name::{ByteStreamNames, Names, OperationNames};
 use super::body::{accept_tokens, body_send_tokens};
 use super::dispatch::{
     attach_auth_tokens, error_branch_tokens, success_decode_tokens, success_enum_dispatch,
-    success_type,
+    success_type, undocumented_success_guard,
 };
 use super::docs::{doc_tokens, normalize_rustdoc};
 use super::params::{
@@ -119,6 +119,19 @@ pub(super) fn emit_operation(
     );
     let error_branch = error_branch_tokens(operation, api, names, error_ident);
     let success_decode = success_decode_tokens(operation, api, names, success_ty, error_ident);
+    // An operation documenting no 2xx answers one as its error branch answers every undocumented
+    // status, `Error::UnexpectedStatus` (no error entry is a 2xx), so it is the whole decode.
+    let decode_by_class = if operation.responses.success().documents_no_2xx() {
+        error_branch.clone()
+    } else {
+        quote! {
+            if response.status().is_success() {
+                #success_decode
+            } else {
+                #error_branch
+            }
+        }
+    };
     let url_accessor = emit_operation_url(operation_names, sig, &url_building);
     let preparer = &operation_names.preparer;
     let request_builder = &operation_names.request_builder;
@@ -219,14 +232,19 @@ pub(super) fn emit_operation(
                     true,
                 ),
             ),
-            _ => (
-                quote! { support::ByteStream },
-                quote! {
-                    Ok(support::stream_success_bytes(
-                        response.map(support::read_as_it_arrives),
-                    ))
-                },
-            ),
+            (_, shape) => {
+                // The single binary body's twin decodes the 2xx statuses its method does.
+                let guard = undocumented_success_guard(&shape, error_ident);
+                (
+                    quote! { support::ByteStream },
+                    quote! {
+                        #guard
+                        Ok(support::stream_success_bytes(
+                            response.map(support::read_as_it_arrives),
+                        ))
+                    },
+                )
+            }
         };
         let twin_return = quote! {
             Result<support::ResponseValue<#twin_success_ty>, support::Error<#error_ty>>
@@ -350,11 +368,7 @@ pub(super) fn emit_operation(
             response: http::Response<support::HttpBody>,
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
             #body_limits
-            if response.status().is_success() {
-                #success_decode
-            } else {
-                #error_branch
-            }
+            #decode_by_class
         }
 
         #url_accessor
