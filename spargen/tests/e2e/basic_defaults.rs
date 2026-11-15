@@ -30,14 +30,60 @@ fn assert_refuses<T: serde::de::DeserializeOwned + std::fmt::Debug>(document: &s
 }
 
 #[test]
-fn absent_optional_fields_use_schema_defaults() {
-    let settings: basic_client::types::Settings =
-        serde_json::from_str(r#"{"retries": 7}"#).unwrap();
-    assert_eq!(settings.color.as_deref(), Some("red"));
-    assert_eq!(settings.enabled, Some(true));
-    assert_eq!(settings.ratio, Some(1.5));
+fn an_absent_defaulted_member_decodes_as_absent_and_its_accessor_reads_the_default() {
+    use basic_client::types::{Mode, Settings};
+    let settings: Settings = serde_json::from_str(r#"{"retries": 7}"#).unwrap();
+    // Absent means the server's choice: nothing is filled in, so nothing is re-sent.
+    assert_eq!(settings.color, None);
+    assert_eq!(settings.enabled, None);
+    assert_eq!(settings.ratio, None);
+    assert_eq!(settings.mode, None);
     assert_eq!(settings.retries, 7);
-    assert_eq!(settings.mode, Some(basic_client::types::Mode::Auto));
+    assert_eq!(serde_json::to_string(&settings).unwrap(), r#"{"retries":7}"#);
+    // The accessor supplies the schema default for an absent member...
+    assert_eq!(settings.color_or_default(), "red");
+    assert!(settings.enabled_or_default());
+    assert_eq!(settings.ratio_or_default(), 1.5);
+    assert_eq!(settings.mode_or_default(), Mode::Auto);
+    // ...and the member's own value for a present one.
+    let present: Settings = serde_json::from_str(
+        r#"{"retries": 7, "color": "blue", "enabled": false, "ratio": 0.5, "mode": "manual"}"#,
+    )
+    .unwrap();
+    assert_eq!(present.color_or_default(), "blue");
+    assert!(!present.enabled_or_default());
+    assert_eq!(present.ratio_or_default(), 0.5);
+    assert_eq!(present.mode_or_default(), Mode::Manual);
+}
+
+#[test]
+fn new_leaves_a_defaulted_member_unset_so_it_is_not_sent() {
+    use basic_client::types::{MergedDefault, Settings};
+    let settings = Settings::new(3);
+    assert_eq!(settings.color, None);
+    assert_eq!(settings.enabled, None);
+    assert_eq!(serde_json::to_string(&settings).unwrap(), r#"{"retries":3}"#);
+    // Setting one member sends that member alone, never the defaults beside it.
+    assert_eq!(
+        serde_json::to_string(&Settings::new(3).with_color("blue".to_owned())).unwrap(),
+        r#"{"color":"blue","retries":3}"#
+    );
+    // A struct with no required member derives `Default`, which is `new()`: every member unset.
+    let merged = MergedDefault::default();
+    assert_eq!(merged, MergedDefault::new());
+    assert_eq!(merged.p, None);
+    assert_eq!(serde_json::to_string(&merged).unwrap(), "{}");
+}
+
+#[test]
+fn a_default_accessor_never_takes_a_setters_name() {
+    // `with_b`'s accessor would spell `with_b_or_default`, the setter of `b_or_default`: the
+    // setter keeps its name, and the accessor takes a disambiguated one.
+    let clash = basic_client::types::DefaultAccessorClash::new()
+        .with_b_or_default("set".to_owned())
+        .with_with_b("w".to_owned());
+    assert_eq!(clash.b_or_default.as_deref(), Some("set"));
+    assert_eq!(clash.with_b.as_deref(), Some("w"));
 }
 
 #[test]
@@ -58,50 +104,56 @@ fn an_uninhabited_optional_field_drops_its_members_default() {
 
 #[test]
 fn a_narrowing_meet_retypes_or_drops_its_members_default() {
-    // Absent, `valid` takes the default as the enum's variant and `ratio` as an integer, on both
-    // spellings of the meet; `bad` and `fraction` admit no default of the narrowed type.
+    // `valid` reads the default as the enum's variant and `ratio` as an integer, on both spellings
+    // of the meet; `bad` and `fraction` admit no default of the narrowed type, so they have no
+    // accessor. Absent, every member decodes as absent.
     let merged: basic_client::types::NarrowDefault = serde_json::from_str("{}").unwrap();
     let sibling: basic_client::types::NarrowDefaultSibling = serde_json::from_str("{}").unwrap();
+    assert_eq!(serde_json::to_string(&merged).unwrap(), "{}");
+    assert_eq!(serde_json::to_string(&sibling).unwrap(), "{}");
     // The two spellings name their enums differently, so each is compared through its wire form.
     for (valid, bad, ratio, fraction) in [
         (
-            serde_json::to_value(&merged.valid).unwrap(),
+            serde_json::to_value(merged.valid_or_default()).unwrap(),
             serde_json::to_value(&merged.bad).unwrap(),
-            merged.ratio,
+            merged.ratio_or_default(),
             merged.fraction,
         ),
         (
-            serde_json::to_value(&sibling.valid).unwrap(),
+            serde_json::to_value(sibling.valid_or_default()).unwrap(),
             serde_json::to_value(&sibling.bad).unwrap(),
-            sibling.ratio,
+            sibling.ratio_or_default(),
             sibling.fraction,
         ),
     ] {
         assert_eq!(valid, serde_json::json!("a"));
         assert!(bad.is_null());
-        assert_eq!(ratio, Some(3_i64));
+        assert_eq!(ratio, 3_i64);
         assert!(fraction.is_none());
     }
     // The wider member keeps its own defaults as it wrote them.
     let base: basic_client::types::NarrowDefaultBase = serde_json::from_str("{}").unwrap();
-    assert_eq!(base.valid.as_deref(), Some("a"));
-    assert_eq!(base.bad.as_deref(), Some("zzz"));
-    assert_eq!(base.fraction, Some(2.5));
+    assert_eq!(base.valid, None);
+    assert_eq!(base.valid_or_default(), "a");
+    assert_eq!(base.bad_or_default(), "zzz");
+    assert_eq!(base.fraction_or_default(), 2.5);
 }
 
 #[test]
 fn a_meet_applies_a_default_only_a_later_side_declares() {
     use basic_client::types::{MergedDefault, MergedDefaultClash, MergedDefaultSibling};
     let merged: MergedDefault = serde_json::from_str("{}").unwrap();
-    assert_eq!(merged.p.as_deref(), Some("hello"));
+    assert_eq!(merged.p, None);
+    assert_eq!(merged.p_or_default(), "hello");
     let sibling: MergedDefaultSibling = serde_json::from_str("{}").unwrap();
-    assert_eq!(sibling.p.as_deref(), Some("hello"));
+    assert_eq!(sibling.p_or_default(), "hello");
     // `world` comes first here, yet the clash keeps `hello`, as it does in the other order.
     let clash: MergedDefaultClash = serde_json::from_str("{}").unwrap();
-    assert_eq!(clash.p.as_deref(), Some("hello"));
+    assert_eq!(clash.p_or_default(), "hello");
     // A present value is still the value.
     let present: MergedDefault = serde_json::from_str(r#"{"p": "x"}"#).unwrap();
     assert_eq!(present.p.as_deref(), Some("x"));
+    assert_eq!(present.p_or_default(), "x");
 }
 
 // An optional uninhabited field is `Option<Never>`, and serde's `Option<T>` maps a JSON `null` to
@@ -156,10 +208,11 @@ fn an_optional_non_nullable_field_rejects_a_present_null() {
         let document = format!(r#"{{"{field}": null}}"#);
         assert_refuses::<OptionalFields>(&document, &format!("`{field}` is not nullable"));
     }
-    // Absence is still `None` (or the schema default), and serialises back to absence.
+    // Absence is still `None`, a defaulted member included, and serialises back to absence.
     let absent: OptionalFields = serde_json::from_str("{}").unwrap();
     assert!(absent.name.is_none() && absent.count.is_none() && absent.choice.is_none());
-    assert_eq!(absent.colour.as_deref(), Some("red"));
+    assert_eq!(absent.colour, None);
+    assert_eq!(absent.colour_or_default(), "red");
     // A present, well-typed value still decodes.
     let present: OptionalFields = serde_json::from_str(
         r#"{"name": "n", "count": 2, "flag": false, "tags": [], "mode": "manual", "nested": {},
@@ -174,14 +227,14 @@ fn an_optional_non_nullable_field_rejects_a_present_null() {
     assert_eq!(untyped.anything, Some(serde_json::Value::Null));
     assert_eq!(
         serde_json::to_value(&untyped).unwrap(),
-        serde_json::json!({"anything": null, "colour": "red"})
+        serde_json::json!({"anything": null})
     );
     // A nullable optional property keeps `null` and absence apart, on decode and on the wire.
     let nullable: OptionalFields = serde_json::from_str(r#"{"maybe": null}"#).unwrap();
     assert_eq!(nullable.maybe, basic_client::Nullable::Null);
     assert_eq!(
         serde_json::to_value(&nullable).unwrap(),
-        serde_json::json!({"maybe": null, "colour": "red"})
+        serde_json::json!({"maybe": null})
     );
     assert_eq!(absent.maybe, basic_client::Nullable::Absent);
 }

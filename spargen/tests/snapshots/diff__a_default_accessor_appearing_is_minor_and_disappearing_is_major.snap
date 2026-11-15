@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+minor|default-accessor-added|Pet::name_or_default|default accessor `name_or_default()` added
+bump=minor

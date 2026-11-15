@@ -203,7 +203,20 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                     }),
                     AdditionalProps::Allow | AdditionalProps::Deny => None,
                 };
-                TypeSurface::Struct(fields, overflow, bindings)
+                let accessors = object
+                    .fields
+                    .iter()
+                    .filter(|field| field.applied_default().is_some())
+                    .map(|field| {
+                        names
+                            .default_accessors
+                            .get(&(id, field.name.wire.clone()))
+                            .expect("default accessor allocated")
+                            .as_str()
+                            .to_owned()
+                    })
+                    .collect();
+                TypeSurface::Struct(fields, overflow, bindings, accessors)
             }
             // A string enum generates a real `pub enum` whose variants are surface; an integer or
             // boolean set a checked newtype whose scalar and associated `const`s are. A boolean set

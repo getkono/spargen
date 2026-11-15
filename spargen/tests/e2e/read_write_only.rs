@@ -118,8 +118,8 @@ fn a_request_omits_the_read_only_member_and_a_response_omits_the_write_only_one(
 }
 
 /// A relaxed `required` member may be absent from a decoded payload everywhere decoding reads it:
-/// a union does not route by its key, an absent one takes its schema `default` as every other
-/// optional member does, and an `allOf` merge relaxes it whichever member says `readOnly`.
+/// a union does not route by its key, an absent one reads its schema `default` through its
+/// `{field}_or_default` accessor as every other optional member does, and an `allOf` merge relaxes it whichever member says `readOnly`.
 #[test]
 fn a_relaxed_member_decodes_as_absent_in_unions_defaults_and_all_of_merges() {
     let temp = tempfile::tempdir().unwrap();
@@ -226,10 +226,12 @@ fn a_union_routes_a_payload_without_a_relaxed_key() {
 }
 
 #[test]
-fn an_absent_relaxed_member_takes_its_schema_default() {
+fn an_absent_relaxed_member_reads_its_schema_default_through_the_accessor() {
     let defaulted: Defaulted = serde_json::from_str("{}").expect("both members may be absent");
-    assert_eq!(defaulted.state.as_deref(), Some("active"));
-    assert_eq!(defaulted.token.as_deref(), Some("none"));
+    assert_eq!(defaulted.state, None);
+    assert_eq!(defaulted.token, None);
+    assert_eq!(defaulted.state_or_default(), "active");
+    assert_eq!(defaulted.token_or_default(), "none");
 }
 
 #[test]

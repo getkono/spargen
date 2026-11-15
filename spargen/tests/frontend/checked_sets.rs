@@ -249,7 +249,7 @@ fn a_repeated_value_is_one_member_of_the_set() {
 }
 
 /// A representable `default` on an optional field whose type is a checked newtype is the newtype
-/// over the listed value, so the provider compiles against the field's type.
+/// over the listed value, so its `{field}_or_default` accessor compiles against the field's type.
 #[test]
 fn a_default_on_a_checked_field_is_the_newtype_over_its_value() {
     let (report, code) = generate_with_code(&with_schemas(
@@ -262,7 +262,10 @@ fn a_default_on_a_checked_field_is_the_newtype_over_its_value() {
     ));
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let types = flat(&types_module(&code));
-    for item in ["Some(SettingsLevel(2))", "Some(SettingsFlag(true))"] {
+    for item in [
+        "unwrap_or(SettingsLevel(2))",
+        "unwrap_or(SettingsFlag(true))",
+    ] {
         assert!(types.contains(item), "no `{item}` in {types}");
     }
 }
