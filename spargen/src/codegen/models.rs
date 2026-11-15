@@ -657,8 +657,9 @@ fn serde_wire(field: &Field) -> String {
         .unwrap_or_else(|| field.name.wire.clone())
 }
 
-/// One struct field: its rustdoc notes, its serde attribute (wire name, default, and the
-/// present-value decode an optional non-nullable field takes), and its declaration. `testing` is
+/// One struct field: its rustdoc notes, its serde attribute (wire name, default, the skip a
+/// required nullable XML attribute's `null` takes, and the present-value decode an optional
+/// non-nullable field takes), and its declaration. `testing` is
 /// whether the `testing` module is emitted, whose typed replies serialize a `readOnly` or
 /// `writeOnly` member in the response direction.
 fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool) -> TokenStream {
@@ -703,8 +704,13 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
         }
         _ => quote! { skip_serializing_if = #skip, },
     };
+    // A required nullable XML attribute writes its `null` by leaving the attribute out (OAS
+    // §Handling `null` Values), never as an empty `name=""` no reader recovers as `null`; decoding
+    // reads that absent attribute back as `None`, below.
     let serde_default = if field.decodes_optional() {
         quote! { default, #skip }
+    } else if field.ty.nullable && field.xml.attribute {
+        quote! { skip_serializing_if = "Option::is_none", }
     } else {
         quote! {}
     };

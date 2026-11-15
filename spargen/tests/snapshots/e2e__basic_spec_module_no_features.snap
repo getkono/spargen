@@ -12352,7 +12352,7 @@ pub mod types {
     pub struct XmlReceipt {
         #[serde(rename = "ReceiptCode")]
         pub code: XmlReceiptCode,
-        #[serde(rename = "@count")]
+        #[serde(rename = "@count", skip_serializing_if = "Option::is_none")]
         pub count: Option<XmlReceiptCount>,
         #[serde(
             rename = "note",
