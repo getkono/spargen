@@ -735,6 +735,8 @@ fn write_fixture_test(out: &std::path::Path, name: &str, source: &str) {
     std::fs::write(tests.join(format!("{name}.rs")), source).unwrap();
 }
 
+#[path = "e2e/accept.rs"]
+mod accept;
 #[path = "e2e/basic_blocking.rs"]
 mod basic_blocking;
 #[path = "e2e/basic_crate.rs"]

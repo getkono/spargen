@@ -149,6 +149,7 @@ fn each_codec_sends_its_body_under_its_declared_content_type() {
         preparer(&generated, "put_json"),
         &[&format!(
             "letmutrequest=support::RequestBuilder::new(reqwest::Method::PUT,url);\
+             request=request.header(reqwest::header::ACCEPT,\"application/json\");\
              letbody=serde_json::to_vec(body).map_err(support::Error::request_construction)?;\
              {content_type}\"application/merge-patch+json\").body(body);letreplay"
         )],
@@ -297,9 +298,9 @@ fn file_name_setters_merge_every_operations_file_parts_in_field_order() {
     );
 }
 
-/// A CBOR success body announces its media in `Accept`; a JSON one sends none.
+/// A success body announces its chosen media in `Accept`, a CBOR one and a JSON one alike.
 #[test]
-fn a_cbor_success_body_announces_its_media_in_accept() {
+fn a_success_body_announces_its_media_in_accept() {
     let generated = generated(
         r##"openapi: 3.1.0
 info: {title: T, version: '1'}
@@ -316,8 +317,10 @@ paths:
         &["request=request.header(reqwest::header::ACCEPT,\"application/cbor\");"],
     );
     let bodies = self::generated(BODIES);
-    let json = preparer(&bodies, "put_json");
-    assert!(!json.contains("ACCEPT"), "{json}");
+    assert_contains_all(
+        preparer(&bodies, "put_json"),
+        &["request=request.header(reqwest::header::ACCEPT,\"application/json\");"],
+    );
 }
 
 /// A reservation never reaches codegen; were one to, the multipart emitter refuses it rather than
