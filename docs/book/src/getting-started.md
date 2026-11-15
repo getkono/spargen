@@ -24,7 +24,7 @@ never ask for an output path they would not use. Both types have private fields 
 setters, so a new knob is additive rather than breaking.
 
 `Spec`'s knobs are `uuid`, `datetime`, `error_body_cap`, `batch_cap`, `carve`, `open_narrowing`,
-`open_unions`, `verbatim_docs` and `testing`, each set by its `with_` setter, and the lists
+`open_unions`, `closed_enums`, `verbatim_docs` and `testing`, each set by its `with_` setter, and the lists
 `add_omit`/`add_omit_rule`/`add_keep_operation` and `add_bound_header` append to, read back by
 `omissions` and `bound_headers`. They can equally be read from a
 [`spargen.toml`](./cli.md#spargentoml-reference) (`Spec::config_file`,

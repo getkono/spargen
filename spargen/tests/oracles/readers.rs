@@ -112,7 +112,9 @@ pub fn alias_target(code: &str, ty: &str) -> Option<String> {
 }
 
 /// The variant declarations `pub enum ty` carries, in source order, each trimmed of its trailing
-/// comma, attributes and doc lines skipped.
+/// comma, attributes and doc lines skipped. An open string enum's catch-all, the variant holding
+/// an `UnknownValue`, is no value the schema lists, so it is left out too: what is read is the
+/// listed values, the same for an open and a closed enum.
 ///
 /// The union counterpart of [`declared_fields`], and the only way to see a union *member* go
 /// missing. Binding the enum's name says the union was represented; it does not say how many
@@ -128,6 +130,7 @@ pub fn enum_variants(code: &str, ty: &str) -> Vec<String> {
     lines
         .take_while(|line| !line.starts_with('}'))
         .filter(|line| !line.is_empty() && !line.starts_with("#[") && !line.starts_with("///"))
+        .filter(|line| !line.contains("support::UnknownValue<"))
         .map(|line| line.trim_end_matches(',').to_owned())
         .collect()
 }

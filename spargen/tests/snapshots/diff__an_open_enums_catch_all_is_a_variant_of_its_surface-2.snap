@@ -2,7 +2,7 @@
 source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
-major|variant-added|ResponseBodyMember1Type|variant added: `OtherD4d133db(String)`, holding any unlisted value
-major|variant-added|ResponseBodyMember1Type|variant added: `other`
-major|variant-removed|ResponseBodyMember1Type|variant removed: `Other(String)`, which held any unlisted value
+major|variant-added|ResponseBodyMember1Type|variant added: `UnknownD4d133db(UnknownValue<Self>)`, holding any unlisted value
+major|variant-added|ResponseBodyMember1Type|variant added: `unknown`
+major|variant-removed|ResponseBodyMember1Type|variant removed: `Unknown(UnknownValue<Self>)`, which held any unlisted value
 bump=major

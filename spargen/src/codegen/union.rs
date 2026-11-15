@@ -342,12 +342,17 @@ pub(super) fn emit_union(
                 } else {
                     otherwise
                 };
+                let tried = scoped_trial_tokens(
+                    types,
+                    quote! { #(#attempts)* },
+                    fallback_member.then(|| quote! { unknown_fallback.is_some() }),
+                );
                 quote! {
                     {
                         let mut match_count = 0_usize;
                         let mut selected: Option<(u32, Self)> = None;
                         #fallback_decl
-                        #(#attempts)*
+                        #tried
                         match selected {
                             Some((_, selected)) if #valid => Ok(selected),
                             _ => #otherwise,
@@ -405,12 +410,17 @@ pub(super) fn emit_union(
                             ident.as_str(),
                             fallback_ident.as_str()
                         );
+                        let tried = scoped_trial_tokens(
+                            types,
+                            quote! { #(#attempts)* },
+                            fallback_member.then(|| quote! { unknown_fallback.is_some() }),
+                        );
                         quote! {
                             if #reaches_trial {
                                 let mut match_count = 0_usize;
                                 let mut selected: Option<(u32, Self)> = None;
                                 #fallback_decl
-                                #(#attempts)*
+                                #tried
                                 let claimant = match selected {
                                     Some((_, selected)) if #valid => Some(selected),
                                     _ => #unmatched,
@@ -615,6 +625,16 @@ pub(super) fn emit_union(
                 ident.as_str()
             );
             let fallback_decl = fallback_member.then(unknown_fallback_decl_tokens);
+            let attempts = scoped_trial_tokens(
+                types,
+                quote! { #(#attempts)* },
+                fallback_member.then(|| quote! { unknown_fallback.is_some() }),
+            );
+            let validations = scoped_trial_tokens(
+                types,
+                quote! { #(#validations)* },
+                fallback_member.then(|| quote! { unknown_match }),
+            );
             let fallback_arm = fallback_member.then(|| {
                 quote! {
                     else if match_count == 0 {
@@ -641,7 +661,7 @@ pub(super) fn emit_union(
                         let mut match_count = 0_usize;
                         let mut selected: Option<(u32, Self)> = None;
                         #fallback_decl
-                        #(#attempts)*
+                        #attempts
                         if #de_valid {
                             selected
                                 .map(|(_, value)| value)
@@ -662,7 +682,7 @@ pub(super) fn emit_union(
                         };
                         let mut match_count = 0_usize;
                         #unknown_match_decl
-                        #(#validations)*
+                        #validations
                         if #ser_valid {
                             value.serialize(serializer)
                         } else {
@@ -924,8 +944,7 @@ fn guarded_decode_tokens(
 /// holds no member the variant would drop, so a more specific variant that would drop one is never
 /// selected over one that keeps it, and a payload every variant would drop part of fails.
 ///
-/// `unknown` is [`open_member_unknown_test`] for a variant that is itself an open union or an open
-/// string enum: a value
+/// `unknown` is [`open_member_unknown_test`] for a variant that is itself an open union: a value
 /// it decodes only as its `Unknown` is not counted as a match but kept, the first such one, in
 /// `unknown_fallback` ([`unknown_fallback_decl_tokens`]), which the trial takes only when no
 /// variant matched. Counting it would let an open member's catch-all overlap every other object
@@ -975,19 +994,15 @@ fn unknown_fallback_decl_tokens() -> TokenStream {
     quote! { let mut unknown_fallback: Option<Self> = None; }
 }
 
-/// For a union variant of type `ty` that is itself an open union or an open string enum, the test
-/// that its decoded payload `inner` (`Box<T>`, or `Option<Box<T>>` when nullable) is that type's
-/// `Unknown`; `None` for any other variant type.
+/// For a union variant of type `ty` that is itself an open union, the test that its decoded
+/// payload `inner` (`Box<T>`, or `Option<Box<T>>` when nullable) is that union's `Unknown`; `None`
+/// for any other variant type. An open string enum, at any depth of a variant, is held to the
+/// same rule by [`scoped_trial_tokens`] instead.
 fn open_member_unknown_test(types: &TypeGraph, names: &Names, ty: Ty) -> Option<TokenStream> {
-    let kind = &types.get(ty.id)?.kind;
-    let open = if let TypeKind::Union(union) = kind {
-        union.is_open()
-    } else if let TypeKind::Enum(set) = kind {
-        set.repr == ScalarRepr::String && set.is_open()
-    } else {
-        false
+    let TypeKind::Union(union) = &types.get(ty.id)?.kind else {
+        return None;
     };
-    if !open {
+    if !union.is_open() {
         return None;
     }
     let member = names.types.get(&ty.id).expect("type name allocated");
@@ -997,6 +1012,40 @@ fn open_member_unknown_test(types: &TypeGraph, names: &Names, ty: Ty) -> Option<
     } else {
         quote! { matches!(*inner, #member::#unknown(_)) }
     })
+}
+
+/// A trial's `attempts` (or serialize validations), run where the API has an open string enum
+/// first inside a closed `EnumScope`, which refuses a value an open enum does not list, and again
+/// as decoded anywhere else only where that pass matched no variant (and, with `kept`, kept no
+/// open member's `Unknown`). A variant is told apart by what it refuses, and an open enum anywhere
+/// inside it refuses no string: tried open alone, two variants that each list a different value
+/// of one property would both take either. So a value some variant lists selects as it would with
+/// every enum closed, and an unlisted one only where the variants that still match it open meet
+/// the applicator's rule. `attempts` count into `match_count`. Where the API has no open string
+/// enum, `attempts` alone.
+fn scoped_trial_tokens(
+    types: &TypeGraph,
+    attempts: TokenStream,
+    kept: Option<TokenStream>,
+) -> TokenStream {
+    let open_enum = types.emitted().any(|(_, def)| {
+        matches!(&def.kind, TypeKind::Enum(set) if set.repr == ScalarRepr::String && set.is_open())
+    });
+    if !open_enum {
+        return attempts;
+    }
+    let kept = kept.map(|kept| quote! { || #kept });
+    quote! {
+        for closed in [true, false] {
+            {
+                let _scope = super::support::EnumScope::enter(closed);
+                #attempts
+            }
+            if match_count > 0 #kept {
+                break;
+            }
+        }
+    }
 }
 
 /// The condition a trial's `match_count` must meet for the union's applicator: exactly one

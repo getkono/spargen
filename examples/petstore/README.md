@@ -42,10 +42,11 @@ What it exercises:
   exponential-backoff `RetryPolicy` on a tokio timer, recovers a route that answers `503` once and
   then `200`, replaying the request exactly once.
 - **Problem details** — `createPet` and `deletePet` document RFC 9457 problems whose `type` each
-  status narrows to one value. `build.rs` turns on `open_narrowing`, so when the mock answers with
-  a problem type the description does not list, the call still fails as the typed `409` body
-  (without the option it would be `Error::Decode`), and one `Error::problem()` reader, generic over
-  the operation, reads `type` and `detail` from both operations' problems.
+  status narrows to one value. Every string enum is open by default, so when the mock answers with
+  a problem type the description does not list, the call still fails as the typed `409` body, its
+  `type` the enum's `Unknown` variant (under `closed_enums` it would be `Error::Decode`), and one
+  `Error::problem()` reader, generic over the operation, reads `type` and `detail` from both
+  operations' problems.
 
 Streams, XML, pagination, the blocking client, and apiKey and basic auth are not exercised here;
 spargen's own test suite compile-checks and drives them.

@@ -305,3 +305,54 @@ fn an_open_union_keeps_an_unlisted_tag_in_unknown() {
         ],
     );
 }
+
+/// A `oneOf` of two objects told apart by a string enum each lists one value of: both enums are
+/// open, so each variant would take the other's value as `Unknown`.
+const ENUM_TOLD: &str = r##"openapi: 3.1.0
+info: {title: T, version: '1'}
+components:
+  schemas:
+    Cat: {type: object, required: [kind], properties: {kind: {type: string, enum: [cat]}}}
+    Dog: {type: object, required: [kind], properties: {kind: {type: string, enum: [dog]}}}
+    Pet:
+      oneOf: [{$ref: '#/components/schemas/Cat'}, {$ref: '#/components/schemas/Dog'}]
+paths:
+  /pets:
+    post:
+      operationId: postPet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Pet'}
+      responses:
+        '204': {description: done}
+"##;
+
+/// Where the API has an open string enum, a trial tries its variants with every open enum decoded
+/// closed first, and open only where that matched nothing, on decode and on serialize alike; under
+/// `closed_enums` it tries them once.
+#[test]
+fn a_trial_tries_its_variants_with_open_enums_closed_first() {
+    let scoped = concat!(
+        r#"forclosedin[true,false]{{let_scope=super::support::EnumScope::enter(closed);"#,
+        r#"ifletSome(Ok(inner))=value.is_object().then(||serde_json::from_value::<Box<Cat>>(value.clone())){"#,
+    );
+    let open = generated_with(ENUM_TOLD, |spec| spec);
+    let pet = union(&open, "Pet");
+    assert_contains_all(
+        pet,
+        &[
+            scoped,
+            r#"}}ifmatch_count>0{break;}}if"#,
+            concat!(
+                r#"forclosedin[true,false]{{let_scope=super::support::EnumScope::enter(closed);"#,
+                r#"ifvalue.is_object()&&serde_json::from_value::<Box<Cat>>(value.clone()).is_ok(){match_count+=1;}"#,
+            ),
+        ],
+    );
+    let closed = generated_with(ENUM_TOLD, |spec| {
+        spec.with_closed_enums(crate::StringEnums::Closed)
+    });
+    assert!(!closed.contains("EnumScope::enter"), "{closed}");
+}

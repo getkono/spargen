@@ -500,9 +500,9 @@ fn omit_component_and_omit_pointer_flags_apply_to_analysis() {
     }
 }
 
-/// A response body that narrows a plain `string` to two values: closed, an enum of exactly those;
-/// under `open_narrowing`, an open enum with an `Other(String)` catch-all, which `diff` reports as
-/// a variant added.
+/// A response body that narrows a plain `string` to two values: by default an open enum with an
+/// `Unknown(UnknownValue<Self>)` catch-all; under `closed_enums`, an enum of exactly those, which
+/// `diff` reports as a variant removed.
 #[cfg(feature = "cli")]
 const NARROWED: &str = r##"
 openapi: 3.1.0
@@ -536,23 +536,23 @@ fn diff(dir: &Path, old: &Path, new: &Path, extra: &[&str]) -> Output {
 
 #[cfg(feature = "cli")]
 #[test]
-fn open_narrowing_is_a_flag_and_a_config_key() {
-    // What it changes in emitted code is pinned by
-    // `open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed` in
-    // `e2e/open_narrowing.rs`. Here the change is read off `diff`, which discovers each spec's `spargen.toml` beside it: the same
-    // document in two directories, only the new one's config opening the narrowing.
+fn closed_enums_is_a_flag_and_a_config_key() {
+    // What it changes in emitted code is pinned by `closed_enums_restores_the_closed_copy_shape`
+    // in `e2e/basic_crate.rs`. Here the change is read off `diff`, which discovers each spec's
+    // `spargen.toml` beside it: the same document in two directories, only the new one's config
+    // closing its enums.
     let temp = tempfile::tempdir().unwrap();
-    let (closed_dir, open_dir) = (temp.path().join("closed"), temp.path().join("open"));
-    std::fs::create_dir_all(&closed_dir).unwrap();
+    let (open_dir, closed_dir) = (temp.path().join("open"), temp.path().join("closed"));
     std::fs::create_dir_all(&open_dir).unwrap();
-    let (closed, open) = (
-        closed_dir.join("openapi.yaml"),
+    std::fs::create_dir_all(&closed_dir).unwrap();
+    let (open, closed) = (
         open_dir.join("openapi.yaml"),
+        closed_dir.join("openapi.yaml"),
     );
-    std::fs::write(&closed, NARROWED).unwrap();
     std::fs::write(&open, NARROWED).unwrap();
+    std::fs::write(&closed, NARROWED).unwrap();
 
-    let same = diff(temp.path(), &closed, &open, &["--format", "json"]);
+    let same = diff(temp.path(), &open, &closed, &["--format", "json"]);
     assert!(same.status.success(), "{same:?}");
     assert_eq!(
         String::from_utf8_lossy(&same.stdout).trim_end(),
@@ -562,36 +562,51 @@ fn open_narrowing_is_a_flag_and_a_config_key() {
 
     // The key, read from the new spec's directory only: if the old side read it too, or neither
     // did, the surfaces would still match.
-    std::fs::write(open_dir.join("spargen.toml"), "open_narrowing = true\n").unwrap();
-    let key = diff(temp.path(), &closed, &open, &["--format", "json"]);
-    assert!(key.status.success(), "{key:?}");
+    std::fs::write(closed_dir.join("spargen.toml"), "closed_enums = true\n").unwrap();
+    let key = diff(temp.path(), &open, &closed, &["--format", "json"]);
     let key = String::from_utf8_lossy(&key.stdout);
     assert!(
-        key.contains(r#""kind":"variant-added""#) && key.contains("Other(String)"),
-        "the new side's config opens its narrowing: {key}"
+        key.contains(r#""kind":"variant-removed""#) && key.contains("Unknown(UnknownValue<Self>)"),
+        "the new side's config closes its enum: {key}"
     );
 
-    // The flag applies to both sides, so it opens the old one too and the surfaces match again.
+    // The flag applies to both sides, so it closes the old one too and the surfaces match again.
     let flag = diff(
         temp.path(),
-        &closed,
         &open,
-        &["--open-narrowing", "--format", "json"],
+        &closed,
+        &["--closed-enums", "--format", "json"],
     );
     assert!(flag.status.success(), "{flag:?}");
     assert_eq!(
         String::from_utf8_lossy(&flag.stdout).trim_end(),
         r#"{"changes":[],"bump":"patch"}"#,
-        "the flag opens the old side's narrowing as well"
+        "the flag closes the old side's enum as well"
     );
 
-    std::fs::write(open_dir.join("spargen.toml"), "open_narrowing = 1\n").unwrap();
-    let mistyped = check(temp.path(), &open, &[]);
+    std::fs::write(closed_dir.join("spargen.toml"), "closed_enums = 1\n").unwrap();
+    let mistyped = check(temp.path(), &closed, &[]);
+    assert_eq!(mistyped.status.code(), Some(3), "{mistyped:?}");
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn open_narrowing_is_a_config_key() {
+    // What it changes in emitted code is pinned by `e2e/checked_sets.rs`; an open checked
+    // newtype keeps its API, so `diff` cannot see it. A mistyped value is refused.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, NARROWED).unwrap();
+    std::fs::write(temp.path().join("spargen.toml"), "open_narrowing = true\n").unwrap();
+    let accepted = check(temp.path(), &spec, &[]);
+    assert!(accepted.status.success(), "{accepted:?}");
+    std::fs::write(temp.path().join("spargen.toml"), "open_narrowing = 1\n").unwrap();
+    let mistyped = check(temp.path(), &spec, &[]);
     assert_eq!(mistyped.status.code(), Some(3), "{mistyped:?}");
 }
 
 /// A discriminated union: closed, a decode failure on a tag it does not list; under
-/// `open_unions`, an `Unknown { tag, value }` variant, which `diff` reports as a variant added.
+/// `open_unions`, an `Unknown(UnknownPayload<Self>)` variant, which `diff` reports as a variant added.
 #[cfg(feature = "cli")]
 const DISCRIMINATED: &str = r##"
 openapi: 3.1.0
@@ -628,7 +643,7 @@ components:
 fn open_unions_is_a_flag_and_a_config_key() {
     // What it changes in emitted code is pinned by
     // `open_unions_decodes_an_unlisted_tag_into_the_unknown_variant` in `e2e/open_unions.rs`.
-    // Here the change is read off `diff`, as for `open_narrowing` above.
+    // Here the change is read off `diff`, as for `closed_enums` above.
     let temp = tempfile::tempdir().unwrap();
     let (closed_dir, open_dir) = (temp.path().join("closed"), temp.path().join("open"));
     std::fs::create_dir_all(&closed_dir).unwrap();

@@ -115,7 +115,9 @@ pub use error::{
 pub use header::{parse_header, require_header, HeaderError, HeaderShape};
 pub use middleware::{Middleware, MiddlewareBackend, Next};
 pub use nullable::Nullable;
-pub use open::{deserialize_open, parse_open, OpenEnum, OpenUnion, UnknownPayload, UnknownValue};
+pub use open::{
+    deserialize_open, parse_open, EnumScope, OpenEnum, OpenUnion, UnknownPayload, UnknownValue,
+};
 pub use paginate::{next_link, LinkPaginator};
 pub use parameter::{
     cookie_pair, encode, holds_non_finite, path_segment, serialize_deep_object,

@@ -420,3 +420,60 @@ fn generated_module_compiles_in_basic_oas31_crate() {
         "the BlockingClient round-trip must pass with --features blocking"
     );
 }
+
+/// The fixture test `closed_enums_restores_the_closed_copy_shape` runs against the closed client.
+const CLOSED_TEST: &str = r##"use closed_client::types::Priority;
+
+fn copied<T: Copy>(value: T) -> (T, T) {
+    (value, value)
+}
+
+#[test]
+fn a_closed_enum_is_copy_and_refuses_an_unlisted_value() {
+    let (a, b) = copied(Priority::High);
+    assert_eq!(a, b);
+    const HIGH: &str = Priority::High.as_str();
+    assert_eq!(HIGH, "high");
+    assert_eq!(Priority::ALL, [Priority::Low, Priority::Medium, Priority::High]);
+    let error = "urgent".parse::<Priority>().unwrap_err();
+    assert_eq!(error.value(), "urgent");
+    assert!(serde_json::from_str::<Priority>(r#""urgent""#).is_err());
+    assert_eq!(
+        serde_json::from_str::<Priority>(r#""low""#).unwrap(),
+        Priority::Low
+    );
+}
+"##;
+
+/// `closed_enums` restores the closed shape: every string enum lists its values and nothing else,
+/// is `Copy` with a `const` `as_str`, and its `FromStr` fails with `UnknownVariant` on a value it
+/// does not list, as decoding does. The whole basic spec compiles and lints that way too.
+#[test]
+fn closed_enums_restores_the_closed_copy_shape() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", BASIC_SPEC);
+    let out = temp.path().join("client");
+    let report = generate_configured_fixture_crate(&spec, &out, "closed_client", "2021", |spec| {
+        spec.with_closed_enums(spargen::StringEnums::Closed)
+    });
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the closed enums must pass clippy -D warnings"
+    );
+
+    write_fixture_test(&out, "closed", CLOSED_TEST);
+    let status = fixture_cargo(&out)
+        .args(["test", "--test", "closed"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the closed enums must behave as documented"
+    );
+}

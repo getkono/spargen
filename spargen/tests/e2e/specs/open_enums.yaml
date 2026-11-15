@@ -14,7 +14,7 @@ paths:
                 - properties: { type: { const: "https://example.com/probs/request" } }
       responses:
         "200":
-          description: a narrowed success body opens too
+          description: a narrowed success body is open too
           content:
             application/json:
               schema:
@@ -22,7 +22,7 @@ paths:
                   - $ref: "#/components/schemas/Problem"
                   - properties: { type: { const: "https://example.com/probs/none" } }
         "400":
-          description: a union of narrowed problems stays closed
+          description: a union of narrowed problems, told apart by the type each lists
           content:
             application/problem+json:
               schema:
@@ -34,7 +34,7 @@ paths:
                       - $ref: "#/components/schemas/Problem"
                       - properties: { type: { const: "https://example.com/probs/b" } }
         "403":
-          description: the narrowing value is itself a component, which stays closed
+          description: the narrowing value is itself a component, open like every string enum
           content:
             application/problem+json:
               schema:
@@ -50,19 +50,19 @@ paths:
                   - $ref: "#/components/schemas/Problem"
                   - properties: { type: { const: "https://example.com/probs/not-found" } }
         "409":
-          description: conflict, narrowed beside the `$ref`, with a value spelled `other`
+          description: conflict, narrowed beside the `$ref`, with a value spelled `unknown`
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
-                properties: { type: { enum: ["https://example.com/probs/conflict", "other"] } }
+                properties: { type: { enum: ["https://example.com/probs/conflict", "unknown"] } }
         "410":
-          description: a component's narrowing stays closed
+          description: a component's narrowing is open too
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/GoneProblem" }
         "422":
-          description: a response's own set met by a union, the union last, keeps its variants closed
+          description: a response's own set met by a union, the union last, tells its variants apart
           content:
             application/json:
               schema:
@@ -140,7 +140,7 @@ paths:
                       - { enum: [a, b, c] }
                       - { type: string }
         "428":
-          description: a set narrowed against a uuid string after a plain string opened it
+          description: a set narrowed against a uuid string after a plain string
           content:
             application/json:
               schema:
@@ -166,7 +166,7 @@ paths:
                       - { enum: ["00000000-0000-0000-0000-000000000001"] }
                       - { type: string }
         "430":
-          description: an optional, defaulted member whose narrowing opens, read through its accessor
+          description: an optional, defaulted open member, read through its accessor
           content:
             application/json:
               schema:

@@ -641,16 +641,20 @@ components:
         role: { $ref: '#/components/schemas/WireBlobRole' }
 "#;
 
-/// Issue #1266: a closed string enum is `Copy` and `Hash`, names its wire value through a `const`
-/// `as_str` that `Display` writes, lists its variants in `ALL`, and parses with `FromStr`, which
-/// accepts exactly the values serde decodes and fails with the root-nameable `UnknownVariant`.
+/// Issue #1266: under `closed_enums`, a string enum is `Copy` and `Hash`, names its wire value
+/// through a `const` `as_str` that `Display` writes, lists its variants in `ALL`, and parses with
+/// `FromStr`, which accepts exactly the values serde decodes and fails with the root-nameable
+/// `UnknownVariant`.
 #[test]
 fn closed_string_enums_name_list_and_parse_their_wire_values() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", CLOSED_ENUMS_SPEC);
     let out = temp.path().join("client");
 
-    let report = generate_fixture_crate(&spec, &out, "closed_enums_client");
+    let report =
+        generate_configured_fixture_crate(&spec, &out, "closed_enums_client", "2021", |spec| {
+            spec.with_closed_enums(spargen::StringEnums::Closed)
+        });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     std::fs::create_dir_all(out.join("tests")).unwrap();

@@ -12,7 +12,15 @@
 //! An open discriminated union's `Unknown(UnknownPayload<Self>)` is built the same way, by
 //! [`UnknownPayload::from_payload`], which reads the tag from the payload and refuses one the
 //! union's [`OpenUnion::lists_tag`] names.
+//!
+//! A union with no discriminator tells its variants apart by what each refuses, and an open enum
+//! anywhere inside a variant refuses no string. So a generated union tries its variants inside an
+//! [`EnumScope`] that decodes every open enum closed first, and only where none matches tries them
+//! again as decoded anywhere else: a value every variant lists decodes as it would with every enum
+//! closed, and an unlisted one is kept only where exactly the variants that matching rule needs
+//! take it.
 
+use std::cell::Cell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -26,8 +34,8 @@ pub trait OpenEnum: Sized {
     fn unknown(value: UnknownValue<Self>) -> Self;
 }
 
-/// A string an open enum `E` does not list, as decoded or parsed. Built only by [`parse_open`]
-/// and [`deserialize_open`], each of which first gives every listed value its own variant.
+/// A string an open enum `E` does not list, as decoded or parsed. Built only by `parse_open`
+/// and `deserialize_open`, each of which first gives every listed value its own variant.
 pub struct UnknownValue<E> {
     value: String,
     enumeration: PhantomData<fn() -> E>,
@@ -90,19 +98,53 @@ pub fn parse_open<E: OpenEnum>(value: &str) -> E {
     })
 }
 
-/// Decode a string as the open enum `E`, as [`parse_open`] reads it. Anything but a string fails.
+/// Decode a string as the open enum `E`, as [`parse_open`] reads it, except inside a closed
+/// [`EnumScope`], where a value `E` does not list fails. Anything but a string fails.
 pub fn deserialize_open<'de, D, E>(deserializer: D) -> Result<E, D::Error>
 where
     D: serde::Deserializer<'de>,
     E: OpenEnum,
 {
     let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-    Ok(E::listed(&value).unwrap_or_else(|| {
-        E::unknown(UnknownValue {
-            value,
-            enumeration: PhantomData,
-        })
+    if let Some(listed) = E::listed(&value) {
+        return Ok(listed);
+    }
+    if CLOSED.with(Cell::get) {
+        return Err(serde::de::Error::custom(format_args!(
+            "{value:?} is not a listed value"
+        )));
+    }
+    Ok(E::unknown(UnknownValue {
+        value,
+        enumeration: PhantomData,
     }))
+}
+
+std::thread_local! {
+    /// Whether [`deserialize_open`] refuses a value its enum does not list, as [`EnumScope`] set
+    /// it on this thread.
+    static CLOSED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// How [`deserialize_open`] reads an unlisted value on this thread while the scope lives: refused
+/// where `closed`, kept in `Unknown` otherwise. Dropping it restores the enclosing scope's reading.
+pub struct EnumScope {
+    enclosing: bool,
+}
+
+impl EnumScope {
+    /// Decode every open enum closed, or open, until the scope is dropped.
+    pub fn enter(closed: bool) -> Self {
+        Self {
+            enclosing: CLOSED.with(|cell| cell.replace(closed)),
+        }
+    }
+}
+
+impl Drop for EnumScope {
+    fn drop(&mut self) {
+        CLOSED.with(|cell| cell.set(self.enclosing));
+    }
 }
 
 /// A generated open discriminated union: the property its tag rides in, and the tags it lists.
@@ -184,7 +226,9 @@ impl<U> fmt::Debug for UnknownPayload<U> {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{deserialize_open, parse_open, OpenEnum, OpenUnion, UnknownPayload, UnknownValue};
+    use super::{
+        deserialize_open, parse_open, EnumScope, OpenEnum, OpenUnion, UnknownPayload, UnknownValue,
+    };
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     enum Priority {
@@ -244,6 +288,36 @@ mod tests {
     #[test]
     fn a_non_string_fails_to_decode() {
         assert!(serde_json::from_str::<Priority>("3").is_err());
+    }
+
+    #[test]
+    fn a_closed_scope_refuses_an_unlisted_value_until_it_is_dropped() {
+        {
+            let _closed = EnumScope::enter(true);
+            assert_eq!(
+                serde_json::from_str::<Priority>(r#""low""#).unwrap(),
+                Priority::Low
+            );
+            let error = serde_json::from_str::<Priority>(r#""urgent""#).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(r#""urgent" is not a listed value"#),
+                "{error}"
+            );
+            // `FromStr` is not decoding, and keeps every value.
+            assert!(matches!(
+                parse_open::<Priority>("urgent"),
+                Priority::Unknown(_)
+            ));
+            {
+                // A nested open scope reads it open, and gives the closed one back.
+                let _open = EnumScope::enter(false);
+                assert!(serde_json::from_str::<Priority>(r#""urgent""#).is_ok());
+            }
+            assert!(serde_json::from_str::<Priority>(r#""urgent""#).is_err());
+        }
+        assert!(serde_json::from_str::<Priority>(r#""urgent""#).is_ok());
     }
 
     struct Pet;
