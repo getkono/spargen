@@ -383,9 +383,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .or_else(|| self.reject_all_of_required_property(schema, &name));
         }
 
-        // Apply the required union, then keep required fields consistent: a serde default only fires
-        // for an absent optional field, so a field promoted to required by another member drops its
-        // applied default (it stays documented in rustdoc).
+        // Apply the required union, then keep required fields consistent: only an optional member
+        // gets a `{field}_or_default` accessor, so a field promoted to required by another member
+        // drops its applied default (it stays documented in rustdoc).
         let mut fields: Vec<Field> = fields.into_values().collect();
         for field in &mut fields {
             if required.contains(&field.name.wire) {

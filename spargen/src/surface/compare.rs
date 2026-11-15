@@ -683,11 +683,12 @@ fn diff_types(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
 fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec<Change>) {
     match (old, new) {
         (
-            TypeSurface::Struct(old_fields, old_overflow, old_bindings),
-            TypeSurface::Struct(new_fields, new_overflow, new_bindings),
+            TypeSurface::Struct(old_fields, old_overflow, old_bindings, old_accessors),
+            TypeSurface::Struct(new_fields, new_overflow, new_bindings, new_accessors),
         ) => {
             diff_struct(name, old_fields, new_fields, changes);
             diff_overflow(name, old_overflow.as_ref(), new_overflow.as_ref(), changes);
+            diff_default_accessors(name, old_accessors, new_accessors, changes);
             diff_bindings(
                 old_bindings,
                 new_bindings,
@@ -751,6 +752,31 @@ fn push_kind_change(name: &str, old: &str, new: &str, changes: &mut Vec<Change>)
         name,
         format!("type kind `{old}` -> `{new}`"),
     ));
+}
+
+/// The changes to a struct's `{field}_or_default` accessors, compared by name: an accessor that
+/// renames is the old one removed and a new one added. Its return type is its field's, which
+/// [`diff_struct`] compares.
+fn diff_default_accessors(
+    name: &str,
+    old: &BTreeSet<String>,
+    new: &BTreeSet<String>,
+    changes: &mut Vec<Change>,
+) {
+    for accessor in old.difference(new) {
+        changes.push(Change::new(
+            ChangeKind::DefaultAccessorRemoved,
+            format!("{name}::{accessor}"),
+            format!("default accessor `{accessor}()` removed"),
+        ));
+    }
+    for accessor in new.difference(old) {
+        changes.push(Change::new(
+            ChangeKind::DefaultAccessorAdded,
+            format!("{name}::{accessor}"),
+            format!("default accessor `{accessor}()` added"),
+        ));
+    }
 }
 
 /// The changes to a struct's typed `additionalProperties` map. A map that moves to another field
