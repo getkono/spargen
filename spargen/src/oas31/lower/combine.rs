@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::diag::Provenance;
+use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{AdditionalProps, Docs, Field, FieldDefault, Struct, Ty, TypeKind};
 use crate::name::hint_segment;
 use crate::oas31::{JsonType, Resolver, Schema, SchemaOr};
@@ -394,6 +394,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             drop_applied_default_if_required(field);
         }
 
+        if matches!(additional, AdditionalProps::Deny) {
+            self.warn_closed_merge(contributions);
+        }
         // A property repeated by three or more members is met pair by pair, and each meet replaces
         // the field's type, so the struct refers to the last meet and not to the ones before it.
         let kind = TypeKind::Struct(Struct { fields, additional });
@@ -404,6 +407,147 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ty.nullable = object_all_of_admits_null(contributions);
         self.elide_unused_lowerings(object_member_lowerings(contributions));
         Some(ty)
+    }
+
+    /// Report, as `W011` at each closing member's `additionalProperties`, a merge that member
+    /// closes while another member declares a property it does not (#1431). The merged struct is
+    /// closed to the fields every member declares (see `object_body`), which is the reading such
+    /// a document usually means, but JSON Schema 2020-12 applies the keyword to its own schema's
+    /// `properties` alone, so it would forbid those properties too.
+    fn warn_closed_merge(&mut self, contributions: &[Contribution]) {
+        let members: Vec<(&[Field], Option<&Provenance>)> = contributions
+            .iter()
+            .filter_map(|contribution| match contribution {
+                Contribution::Object {
+                    fields, closed_at, ..
+                } => Some((fields.as_slice(), closed_at.as_ref())),
+                _ => None,
+            })
+            .collect();
+        self.warn_closed_members(&members, ClosedMerge::AllOf);
+    }
+
+    /// The `W011` [`Self::warn_closed_merge`] reports, for `schema`'s `$ref` to `reference`
+    /// (lowered to `target`) met as an object with its sibling keywords (lowered to `sibling`):
+    /// the meet keeps a side's `additionalProperties: false` (`merge_additional`), so it is the
+    /// same closed reading. A side closed by a composition of its own has no one keyword to point
+    /// at, so the schema holding the `$ref` locates it.
+    pub(super) fn warn_closed_ref_meet(
+        &mut self,
+        schema: &Schema,
+        reference: &str,
+        target: Ty,
+        sibling: Ty,
+    ) {
+        let (Some(TypeKind::Struct(target)), Some(TypeKind::Struct(sibling))) =
+            (self.kind_of(target.id), self.kind_of(sibling.id))
+        else {
+            return;
+        };
+        let (target, sibling) = (target.clone(), sibling.clone());
+        let closed = |ctx: &Self, structure: &Struct, keyword: Option<&Schema>| {
+            matches!(structure.additional, AdditionalProps::Deny).then(|| {
+                keyword
+                    .and_then(|keyword| ctx.closing_keyword(keyword))
+                    .unwrap_or_else(|| schema.provenance.clone())
+            })
+        };
+        let body = self.ref_target_body(reference, &schema.provenance);
+        let target_at = closed(self, &target, body.as_deref());
+        let sibling_at = closed(self, &sibling, Some(schema));
+        self.warn_closed_members(
+            &[
+                (&target.fields, target_at.as_ref()),
+                (&sibling.fields, sibling_at.as_ref()),
+            ],
+            ClosedMerge::RefSiblings,
+        );
+    }
+
+    /// The `W011` [`Self::warn_closed_merge`] reports, over the object members of a merge spelled
+    /// as `spelling` says: each member's fields beside where it writes the
+    /// `additionalProperties: false` that closes it, if it does. A closing member is reported
+    /// where another member declares a property it does not.
+    fn warn_closed_members(
+        &mut self,
+        members: &[(&[Field], Option<&Provenance>)],
+        spelling: ClosedMerge,
+    ) {
+        for (index, (own, closed_at)) in members.iter().enumerate() {
+            let Some(at) = closed_at else {
+                continue;
+            };
+            let declared_by_own = |wire: &str| {
+                own.iter()
+                    .any(|field| !field.undeclared && field.name.wire == wire)
+            };
+            let mut others: IndexSet<&str> = IndexSet::new();
+            for (other, (fields, _)) in members.iter().enumerate() {
+                if other == index {
+                    continue;
+                }
+                others.extend(
+                    fields
+                        .iter()
+                        .filter(|field| !field.undeclared && !declared_by_own(&field.name.wire))
+                        .map(|field| field.name.wire.as_str()),
+                );
+            }
+            if others.is_empty() {
+                continue;
+            }
+            let names = others
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let (verb, pronoun) = if others.len() == 1 {
+                ("is", "it")
+            } else {
+                ("are", "them")
+            };
+            let (merged, other, composing) = match spelling {
+                ClosedMerge::AllOf => (
+                    "the merged `allOf` object to the fields every member declares",
+                    "another member",
+                    "the composing schema",
+                ),
+                ClosedMerge::RefSiblings => (
+                    "the object a `$ref` and its sibling keywords compose to the fields both \
+                     declare",
+                    "the other side",
+                    "the schema holding the `$ref`",
+                ),
+            };
+            // W011 case: closed-all-of-merge
+            Diagnostic::warning(Code::DeclarationHasNoEffect, (*at).clone())
+                .message(format!(
+                    "`additionalProperties: false` here is read as closing {merged}, so \
+                     {names}, declared by {other}, {verb} accepted; JSON Schema 2020-12 applies \
+                     the keyword to this schema's own `properties` alone, so it would forbid \
+                     {pronoun} as well. The generated struct still refuses every other key; JSON \
+                     Schema spells that closed merge as `unevaluatedProperties: false` on \
+                     {composing}"
+                ))
+                .emit(self.diags);
+        }
+    }
+
+    /// Where `schema` writes `additionalProperties: false`, if it does: the keyword's pointer,
+    /// with the span of the value written there when its file holds one.
+    fn closing_keyword(&self, schema: &Schema) -> Option<Provenance> {
+        if !matches!(
+            schema.additional_properties.as_deref(),
+            Some(SchemaOr::Bool(false))
+        ) {
+            return None;
+        }
+        let pointer = schema.provenance.pointer.push("additionalProperties");
+        let span = self
+            .resolver
+            .node_at(self.resolver.written_in(&schema.provenance), &pointer)
+            .map(|node| node.span);
+        Some(Provenance::new(pointer, span))
     }
 
     /// Gather every member of `schema.all_of` (source order) plus the enclosing schema's own object
@@ -435,6 +579,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 nullable: stated_nullability(schema),
                 union: None,
                 lowered: None,
+                closed_at: self.closing_keyword(schema),
             });
         }
         Some(())
@@ -831,10 +976,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .map(|field| field.name.wire.clone())
                     .collect();
                 let additional = structure.additional.clone();
-                let union = self
-                    .ref_target_body(reference, provenance)
-                    .is_some_and(|target| schema_has_union(&target))
+                let target = self.ref_target_body(reference, provenance);
+                let union = target
+                    .as_deref()
+                    .is_some_and(schema_has_union)
                     .then_some(ty);
+                // A target closed by a composition of its own has no one keyword to point at, so
+                // the `$ref` written here locates it.
+                let closed_at = matches!(additional, AdditionalProps::Deny).then(|| {
+                    target
+                        .as_deref()
+                        .and_then(|target| self.closing_keyword(target))
+                        .unwrap_or_else(|| provenance.clone())
+                });
                 // A copied field keeps its `undeclared` mark, so one the component carries only
                 // for its own `required` still gives way to a later member's declaration.
                 out.push(Contribution::Object {
@@ -844,6 +998,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     nullable: decides_null.then_some(ty.nullable),
                     union,
                     lowered: None,
+                    closed_at,
                 });
             }
             _ => out.push(Contribution::Scalar(ty)),
@@ -881,6 +1036,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 nullable: stated_nullability(schema),
                 union,
                 lowered,
+                closed_at: self.closing_keyword(schema),
             });
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
@@ -903,6 +1059,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Otherwise the member is a pure annotation (`{description: ...}`): no constraint.
         Some(())
     }
+}
+
+/// Which spelling of a merge [`LowerCtx::warn_closed_members`] reports a closing member of, for
+/// the wording of its `W011`.
+#[derive(Clone, Copy)]
+enum ClosedMerge {
+    /// The members of an `allOf`, the composing schema's own keywords among them.
+    AllOf,
+    /// A `$ref` met with its shape-bearing sibling keywords.
+    RefSiblings,
 }
 
 /// One `allOf` member's contribution to the merged type: a set of object fields (with its
@@ -938,6 +1104,12 @@ pub(super) enum Contribution {
         /// leaves it unused ([`LowerCtx::elide_unused_lowering`]). `None` for every other
         /// object member.
         lowered: Option<Range<u32>>,
+        /// Where the member writes the `additionalProperties: false` that closes it: its own
+        /// keyword, inline or on the `$ref` target it copies, or the `$ref` member itself where
+        /// the target is closed by its own composition. `None` for a member that is not closed.
+        /// The merge reports it ([`LowerCtx::warn_closed_merge`]) where another member declares a
+        /// property this one does not.
+        closed_at: Option<Provenance>,
     },
     Scalar(Ty),
     /// A member of untyped array applicators alone (`items`, `prefixItems`, no `type`): the
