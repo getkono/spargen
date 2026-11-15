@@ -591,3 +591,118 @@ components:
     );
     assert!(!has_code(&report, Code::InvalidInput), "{report:#?}");
 }
+
+/// A referenced sub-file holding a `Pet` union whose `discriminator` maps `kitty` to `Cat`, with
+/// `header` written at the file's root.
+fn dialect_sub_file(header: &str) -> String {
+    format!(
+        r##"
+{header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - {{ $ref: '#/components/schemas/Cat' }}
+        - {{ $ref: '#/components/schemas/Dog' }}
+      discriminator:
+        propertyName: kind
+        mapping: {{ kitty: Cat }}
+    Cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }} }} }}
+    Dog: {{ type: object, required: [kind, bark], properties: {{ kind: {{ type: string }}, bark: {{ type: boolean }} }} }}
+"##
+    )
+}
+
+/// #1452: `jsonSchemaDialect` is the default "within this OAS document" (3.2.0.md, Specifying
+/// Schema Dialects), so it does not reach into a referenced file. A sub-file that is a complete
+/// OpenAPI document reads Schema Objects under its own `jsonSchemaDialect`, or the OAS dialect when
+/// it declares none; one that is not a complete document is read under the OAS dialect, as the
+/// specification says it SHOULD be. A sub-file `jsonSchemaDialect` spargen does not read is
+/// `E002` there, as at the root.
+#[test]
+fn a_referenced_file_reads_its_own_dialect_default_not_the_roots() {
+    const PET: &str = "/components/schemas/Pet/discriminator";
+    let root = |dialect: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+{dialect}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /pet:
+    get:
+      operationId: getPet
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: './lib.yaml#/components/schemas/Pet' }} }}
+"##
+        )
+    };
+    let plain = format!("jsonSchemaDialect: {JSON_SCHEMA_2020_12}");
+    let complete = "openapi: 3.1.0\ninfo: { title: L, version: 1.0.0 }";
+    let complete_plain = format!("{complete}\n{plain}");
+    let cases: [(&str, String, String, bool); 4] = [
+        (
+            "fragment file under a plain root",
+            root(&plain),
+            dialect_sub_file(""),
+            false,
+        ),
+        (
+            "complete file without a dialect under a plain root",
+            root(&plain),
+            dialect_sub_file(complete),
+            false,
+        ),
+        (
+            "complete plain file under an OAS root",
+            root(""),
+            dialect_sub_file(&complete_plain),
+            true,
+        ),
+        (
+            "fragment file declaring a dialect it is not a document to declare",
+            root(""),
+            dialect_sub_file(&plain),
+            false,
+        ),
+    ];
+    for (what, root, lib, inert) in cases {
+        let (report, _, code) =
+            generate_and_check_files(&[("openapi.yaml", &root), ("lib.yaml", &lib)]);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        let w011: Vec<_> = located_messages(&report, Code::DeclarationHasNoEffect)
+            .into_iter()
+            .map(|(pointer, _)| pointer)
+            .filter(|pointer| *pointer == PET)
+            .collect();
+        assert_eq!(!w011.is_empty(), inert, "{what}: {report:#?}");
+        assert_eq!(
+            code.contains("\"kitty\""),
+            !inert,
+            "{what}: the tag dispatches exactly when the discriminator is read:\n{code}"
+        );
+    }
+
+    let (report, _, _) = generate_and_check_files(&[
+        ("openapi.yaml", &root("")),
+        (
+            "lib.yaml",
+            &dialect_sub_file(&format!(
+                "{complete}\njsonSchemaDialect: https://json-schema.org/draft/2019-09/schema"
+            )),
+        ),
+    ]);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        located_messages(&report, Code::UnsupportedDialect)
+            .into_iter()
+            .map(|(pointer, _)| pointer)
+            .collect::<Vec<_>>(),
+        ["/jsonSchemaDialect"],
+        "{report:#?}"
+    );
+}
