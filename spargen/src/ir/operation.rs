@@ -208,6 +208,11 @@ pub(crate) struct Parameter {
     /// (never serde-wired: a params struct is only serialized, and a server-side default means the
     /// client may legitimately omit the value).
     pub(crate) default_display: Option<String>,
+    /// The resolved Encoding Objects of a form-urlencoded `in: querystring` parameter, one entry
+    /// per property of its object schema, lowered by the rules of a form-urlencoded request body
+    /// (the specification applies them "in the same way"). `Some` exactly for that parameter,
+    /// which [`check_invariants`](super::check_invariants) holds; `None` for every other one.
+    pub(crate) form_encoding: Option<super::BodyEncoding>,
 }
 
 impl Parameter {

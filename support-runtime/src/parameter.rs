@@ -75,7 +75,7 @@ pub enum ParameterError {
     /// A `style: deepObject` query parameter's value was not an object
     /// (`serialize_deep_object`).
     ExpectedObject,
-    /// A form-urlencoded request body did not serialize to a JSON object
+    /// A form-urlencoded request body or `in: querystring` value did not serialize to a JSON object
     /// (`serialize_form_body`).
     FormBodyNotObject,
     /// A multipart part was asked for the query-only `deepObject` style
@@ -532,7 +532,9 @@ pub enum FormStyle {
     DeepObject,
 }
 
-/// Serialize a whole `application/x-www-form-urlencoded` request body.
+/// Serialize a whole `application/x-www-form-urlencoded` value: a request body, or the query
+/// string of a form-urlencoded `in: querystring` parameter, which the specification encodes the
+/// same way.
 ///
 /// `value` must serialize to a JSON object. Each property is rendered by its own resolved
 /// `FormProperty`, in the order codegen emitted them, so output is deterministic. A property whose

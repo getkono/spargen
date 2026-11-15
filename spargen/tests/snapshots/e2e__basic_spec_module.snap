@@ -3907,7 +3907,7 @@ mod support {
             /// A `style: deepObject` query parameter's value was not an object
             /// (`serialize_deep_object`).
             ExpectedObject,
-            /// A form-urlencoded request body did not serialize to a JSON object
+            /// A form-urlencoded request body or `in: querystring` value did not serialize to a JSON object
             /// (`serialize_form_body`).
             FormBodyNotObject,
             /// A multipart part was asked for the query-only `deepObject` style
@@ -4357,7 +4357,9 @@ mod support {
             /// `style: deepObject`.
             DeepObject,
         }
-        /// Serialize a whole `application/x-www-form-urlencoded` request body.
+        /// Serialize a whole `application/x-www-form-urlencoded` value: a request body, or the query
+        /// string of a form-urlencoded `in: querystring` parameter, which the specification encodes the
+        /// same way.
         ///
         /// `value` must serialize to a JSON object. Each property is rendered by its own resolved
         /// `FormProperty`, in the order codegen emitted them, so output is deterministic. A property whose
@@ -21002,26 +21004,28 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
-        const FORM_PROPERTIES: &[support::FormProperty] = &[
-            support::FormProperty {
-                name: "name",
-                mode: support::FormMode::Text,
-            },
-            support::FormProperty {
-                name: "tags",
-                mode: support::FormMode::Style {
-                    style: support::FormStyle::Delimited(support::Delimiter::Pipe),
-                    explode: false,
-                    encoding: support::PercentEncoding::Form,
+        let body = {
+            const FORM_PROPERTIES: &[support::FormProperty] = &[
+                support::FormProperty {
+                    name: "name",
+                    mode: support::FormMode::Text,
                 },
-            },
-            support::FormProperty {
-                name: "blob",
-                mode: support::FormMode::Json,
-            },
-        ];
-        let body = support::serialize_form_body(body, FORM_PROPERTIES, None)
-            .map_err(support::Error::request_construction)?;
+                support::FormProperty {
+                    name: "tags",
+                    mode: support::FormMode::Style {
+                        style: support::FormStyle::Delimited(support::Delimiter::Pipe),
+                        explode: false,
+                        encoding: support::PercentEncoding::Form,
+                    },
+                },
+                support::FormProperty {
+                    name: "blob",
+                    mode: support::FormMode::Json,
+                },
+            ];
+            support::serialize_form_body(body, FORM_PROPERTIES, None)
+                .map_err(support::Error::request_construction)?
+        };
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(body);
@@ -21099,18 +21103,20 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
-        const FORM_PROPERTIES: &[support::FormProperty] = &[
-            support::FormProperty {
-                name: "a",
-                mode: support::FormMode::Text,
-            },
-        ];
-        let body = support::serialize_form_body(
-                body,
-                FORM_PROPERTIES,
-                Some((support::FormMode::Text, body.additional.len())),
-            )
-            .map_err(support::Error::request_construction)?;
+        let body = {
+            const FORM_PROPERTIES: &[support::FormProperty] = &[
+                support::FormProperty {
+                    name: "a",
+                    mode: support::FormMode::Text,
+                },
+            ];
+            support::serialize_form_body(
+                    body,
+                    FORM_PROPERTIES,
+                    Some((support::FormMode::Text, body.additional.len())),
+                )
+                .map_err(support::Error::request_construction)?
+        };
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(body);
@@ -21191,21 +21197,23 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
-        const FORM_PROPERTIES: &[support::FormProperty] = &[
-            support::FormProperty {
-                name: "a",
-                mode: support::FormMode::Text,
-            },
-        ];
-        let body = support::serialize_form_body(
-                body,
-                FORM_PROPERTIES,
-                Some((
-                    support::FormMode::Text,
-                    body.as_ref().map_or(0, |body| body.additional.len()),
-                )),
-            )
-            .map_err(support::Error::request_construction)?;
+        let body = {
+            const FORM_PROPERTIES: &[support::FormProperty] = &[
+                support::FormProperty {
+                    name: "a",
+                    mode: support::FormMode::Text,
+                },
+            ];
+            support::serialize_form_body(
+                    body,
+                    FORM_PROPERTIES,
+                    Some((
+                        support::FormMode::Text,
+                        body.as_ref().map_or(0, |value| value.additional.len()),
+                    )),
+                )
+                .map_err(support::Error::request_construction)?
+        };
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(body);

@@ -1,114 +1,7 @@
-//! Parameters: styles, `allowReserved` and `allowEmptyValue`, `querystring`, content parameters,
-//! and uninhabited parameter schemas.
+//! Parameters: styles, `allowReserved` and `allowEmptyValue`, content parameters, and uninhabited
+//! parameter schemas. `in: querystring` has its own module, `parameters_querystring`.
 
 use super::*;
-
-#[test]
-fn oas32_querystring_param_generates_a_typed_argument() {
-    let spec = r##"
-openapi: 3.2.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /search:
-    get:
-      operationId: search
-      parameters:
-        - name: q
-          in: querystring
-          content:
-            application/x-www-form-urlencoded:
-              schema:
-                type: object
-      responses:
-        '200': { description: ok }
-"##;
-    let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        !has_code(&report, Code::Oas32ConstructIgnored),
-        "{report:#?}"
-    );
-    assert!(!has_code(&report, Code::InvalidInput), "{report:#?}");
-    assert!(code.contains("pub q: Option<types::Q>"), "{code}");
-    // The embedded runtime's `pub use` list names both helpers in every generated module, so a
-    // bare name proves nothing: assert the calls the operation body makes, whitespace-flattened.
-    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        flat.contains(
-            "query .extend( support::serialize_form( \"\", value, true, \
-             support::PercentEncoding::Form, )"
-        ),
-        "{code}"
-    );
-    assert!(
-        flat.contains(
-            "let url = support::build_url_with_query_string_on( &self.core, None, &path, \
-             &query, raw_query.as_deref(), )"
-        ),
-        "{code}"
-    );
-}
-
-#[test]
-fn oas32_querystring_and_named_query_are_rejected_together() {
-    let spec = r##"
-openapi: 3.2.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /search:
-    get:
-      parameters:
-        - name: whole
-          in: querystring
-          content:
-            application/json:
-              schema: { type: object }
-        - name: page
-          in: query
-          schema: { type: integer }
-      responses:
-        '200': { description: ok }
-"##;
-    let report = generate(spec);
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
-}
-
-/// The 3.2 metaschema refuses `querystring` beside `query` within one `parameters` list, so the
-/// spec above never reaches lowering's own rule. Split across the Path Item and the Operation, the
-/// metaschema admits the pair, and only the merged parameter set the operation lowers has both.
-#[test]
-fn oas32_querystring_and_named_query_are_rejected_across_path_item_and_operation() {
-    let spec = r##"
-openapi: 3.2.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /search:
-    parameters:
-      - name: whole
-        in: querystring
-        content:
-          application/json:
-            schema: { type: object }
-    get:
-      parameters:
-        - name: page
-          in: query
-          schema: { type: integer }
-      responses:
-        '200': { description: ok }
-"##;
-    let report = generate(spec);
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert_eq!(
-        messages_for(&report, Code::InvalidInput),
-        [
-            "an operation may declare at most one `in: querystring` parameter and may not \
-             combine it with `in: query` parameters"
-        ],
-        "{report:#?}"
-    );
-}
 
 #[test]
 fn oas32_cookie_style_generates_cookie_header_serialization() {
@@ -973,51 +866,6 @@ paths:
 }
 
 #[test]
-fn e011_querystring_parameter_without_one_content_entry() {
-    // The official 3.2 document schema requires `content` on an `in: querystring` parameter and
-    // holds `content` to exactly one entry, so neither shape reaches lowering's own `E010` arm.
-    let without_content = r##"
-openapi: 3.2.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /x:
-    get:
-      operationId: getX
-      parameters:
-        - name: q
-          in: querystring
-          schema: { type: object }
-      responses:
-        "204": { description: No Content }
-"##;
-    let two_entries = r##"
-openapi: 3.2.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /x:
-    get:
-      operationId: getX
-      parameters:
-        - name: q
-          in: querystring
-          content:
-            application/json: { schema: { type: object } }
-            application/x-www-form-urlencoded: { schema: { type: object } }
-      responses:
-        "204": { description: No Content }
-"##;
-    for spec in [without_content, two_entries] {
-        let report = generate(spec);
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
-        assert!(
-            !has_code(&report, Code::UnsupportedParameterStyle),
-            "{report:#?}"
-        );
-    }
-}
-
-#[test]
 fn allow_reserved_query_parameter_generates() {
     // `allowReserved: true` selects RFC 6570 reserved expansion — a different encoding set, not an
     // unrepresentable construct.
@@ -1330,41 +1178,6 @@ paths:
                     && diagnostic.message == "media type `text/plain/extra` is not supported"
             }),
             "{report:#?}"
-        );
-    }
-}
-
-/// A `querystring` parameter is one typed argument, so its content entry needs a schema to type
-/// it, and a form-urlencoded entry an object schema whose properties become the query's pairs.
-/// Each shortfall is `E010` in its own words.
-// E010 case: querystring-content
-#[test]
-fn e010_a_querystring_content_entry_with_no_usable_schema_is_unsupported() {
-    for (content, expected) in [
-        (
-            "application/json: {}",
-            "querystring content requires a schema for a typed client argument",
-        ),
-        (
-            "application/x-www-form-urlencoded: { schema: { type: string } }",
-            "form-urlencoded querystring parameters require an object schema",
-        ),
-    ] {
-        let report = generate(&format!(
-            "openapi: 3.2.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths:\n  /search:\n    \
-             get:\n      operationId: search\n      parameters:\n        - name: q\n          \
-             in: querystring\n          content: {{ {content} }}\n      responses:\n        \
-             '204': {{ description: ok }}\n"
-        ));
-        assert_eq!(
-            report.outcome(),
-            Outcome::Rejected,
-            "{content}: {report:#?}"
-        );
-        assert_eq!(
-            messages_for(&report, Code::UnsupportedParameterStyle),
-            [expected],
-            "{content}: {report:#?}"
         );
     }
 }
