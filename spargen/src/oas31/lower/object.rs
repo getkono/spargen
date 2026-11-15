@@ -78,7 +78,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `deny_unknown_fields` — and this field is one of them; reading it strictly instead
         // (every undeclared key forbidden, so the object is uninhabited) would reject the common
         // `allOf: [{$ref: Base}, {additionalProperties: false, required: [id]}]`, which that same
-        // reading generates when `Base` declares `id`.
+        // reading generates when `Base` declares `id`. In a composition that reading departs
+        // from JSON Schema wherever another member declares a property this schema does not, and
+        // the merge reports it there (`W011`, `warn_closed_merge`).
         for name in undeclared_required(schema) {
             let ty = match (&additional, schema.additional_properties.as_deref()) {
                 (AdditionalProps::Typed(ty), Some(SchemaOr::Schema(_))) => {

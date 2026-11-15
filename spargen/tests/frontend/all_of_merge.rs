@@ -938,13 +938,13 @@ fn closed_merge_warnings(report: &Report) -> Vec<(String, String)> {
         .collect()
 }
 
-// W011 case: closed-all-of-merge
 /// #1431: an `allOf` member's `additionalProperties: false` is read as closing the *merged*
 /// object to the fields every member declares, which departs from JSON Schema 2020-12, where the
 /// keyword sees only its own schema's `properties` and so also forbids `id`, which `Base`
 /// requires. Generation is unchanged — the closed struct `{id, x}` — and the departure is
 /// reported at the member's `additionalProperties`, naming `id` and the keyword that states the
 /// closed merge.
+// W011 case: closed-all-of-merge
 #[test]
 fn w011_an_all_of_member_closing_the_merge_is_reported() {
     let spec = closed_merge_spec(

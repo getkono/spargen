@@ -935,6 +935,11 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                                 name the root document also declares",
                 reserved_wording: None,
             },
+            Case {
+                tag: "closed-all-of-merge",
+                stated_as: "an `allOf` member's `additionalProperties: false`",
+                reserved_wording: None,
+            },
         ],
     ),
 ];
