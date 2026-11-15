@@ -241,11 +241,15 @@ components:
     );
 }
 
-/// A union variant is a serde position too: beside an integer the `format: binary` branch is the
-/// `String` its wire holds. Beside a plain string it keeps its bytes, since two `String` variants
-/// are ones no value tells apart, and the union still generates (#1417).
+/// A union variant is a serde position too, so its `format: binary` branch is the `String` its
+/// wire holds wherever it stands (#1417). Beside a plain string branch of a `oneOf` the two are
+/// then variants no value tells apart, so they merge as any two `String` branches do, reported as
+/// `W001` at the union (#1511): the whole union is `String` where every branch merges, one
+/// variant of the enum where only some do, and a union holding such a union merges in turn. An
+/// `anyOf` keeps both, since one match decodes it.
+// W001 case: indistinguishable-branches
 #[test]
-fn a_binary_union_variant_is_a_string_unless_a_string_variant_stands_beside_it() {
+fn a_binary_union_variant_is_a_string_and_merges_with_a_string_branch() {
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
@@ -255,6 +259,12 @@ components:
   schemas:
     Mixed: { oneOf: [{ type: string, format: binary }, { type: integer }] }
     Alike: { oneOf: [{ type: string, format: binary }, { type: string }] }
+    Partly: { oneOf: [{ type: string, format: binary }, { type: string }, { type: integer }] }
+    Nested:
+      oneOf:
+        - oneOf: [{ type: string, format: binary }, { type: string }]
+        - { type: string }
+    Either: { anyOf: [{ type: string, format: binary }, { type: string }] }
 "##,
     );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
@@ -264,10 +274,35 @@ components:
         Some("String"),
         "{types}"
     );
-    assert_eq!(
-        alias_target(&types, "AlikeVariant0").as_deref(),
-        Some("bytes::Bytes"),
-        "{types}"
+    for merged in ["Alike", "Nested"] {
+        assert_eq!(
+            alias_target(&types, merged).as_deref(),
+            Some("String"),
+            "{merged}: {types}"
+        );
+    }
+    assert_eq!(enum_variants(&types, "Partly").len(), 2, "{types}");
+    assert_eq!(enum_variants(&types, "Either").len(), 2, "{types}");
+    assert!(
+        !types.contains("bytes::Bytes"),
+        "no serde position keeps raw bytes: {types}"
     );
-    assert_eq!(binary_format_warnings(&report), 1, "{report:#?}");
+    for (union, warned) in [
+        ("Alike", true),
+        ("Partly", true),
+        ("Nested", true),
+        ("Mixed", false),
+        ("Either", false),
+    ] {
+        let at = format!("/components/schemas/{union}");
+        assert_eq!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == at
+                    && d.message.contains("lower to the same generated type")
+            }),
+            warned,
+            "{union}: {report:#?}"
+        );
+    }
 }
