@@ -246,7 +246,7 @@ fn each_member_takes_its_serde_attribute_and_type() {
                 member("label", "", "ThingLabel"),
                 member(
                     "maybe",
-                    ",deserialize_with=\"decode_required\",",
+                    ",deserialize_with=\"decode_required\"",
                     "Option<ThingMaybe>"
                 ),
             ),
