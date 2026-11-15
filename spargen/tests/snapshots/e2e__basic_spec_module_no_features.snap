@@ -16541,6 +16541,7 @@ impl Client {
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let replay;
         (request, replay) = support::attach_auth_replayable(
                 &self.core,
@@ -16684,6 +16685,7 @@ impl Client {
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -17076,6 +17078,7 @@ Response `default`: Anything else*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -17188,6 +17191,7 @@ Response `default`: Anything else*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -17788,6 +17792,7 @@ Response `404`: Not Found*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -18399,6 +18404,7 @@ Response `409`: Conflict*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let body = serde_json::to_vec(body)
             .map_err(support::Error::request_construction)?;
         request = request
@@ -18599,6 +18605,7 @@ Response `409`: Conflict*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "text/html");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -18678,6 +18685,7 @@ Response `409`: Conflict*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/octocat-stream");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -18758,6 +18766,7 @@ Response `409`: Conflict*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/octet-stream");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, streaming);
@@ -18883,6 +18892,7 @@ Response `409`: Conflict*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::PUT, url);
+        request = request.header(reqwest::header::ACCEPT, "application/octet-stream");
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
             .body(body);
@@ -19021,6 +19031,7 @@ Response `409`: Conflict*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "image/*");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, streaming);
@@ -19341,6 +19352,8 @@ Response `400`: textual failure*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request
+            .header(reqwest::header::ACCEPT, "text/plain, application/octet-stream");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, streaming);
@@ -19584,6 +19597,7 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
+        request = request.header(reqwest::header::ACCEPT, "application/xml");
         let body = support::to_xml(body).map_err(support::Error::widen)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/xml")
@@ -19856,6 +19870,7 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::POST, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let body = serde_json::to_vec(body)
             .map_err(support::Error::request_construction)?;
         request = request
@@ -19945,6 +19960,7 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "text/event-stream");
         let replay;
         let reconnect_request;
         (request, replay, reconnect_request) = support::Resend::attach(
@@ -20042,6 +20058,7 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/x-ndjson");
         let replay;
         let reconnect_request;
         (request, replay, reconnect_request) = support::Resend::attach(
@@ -20140,6 +20157,7 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json-seq");
         let replay;
         let reconnect_request;
         (request, replay, reconnect_request) = support::Resend::attach(
@@ -21198,6 +21216,7 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -21310,6 +21329,7 @@ Response `default`: Anything else*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -21414,6 +21434,7 @@ Response `204`: No Content*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/xml");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -21517,6 +21538,7 @@ Response `204`: No Content*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -21623,6 +21645,7 @@ Response `206`: A range of it*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -21725,6 +21748,7 @@ Response `200`: OK*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);
@@ -21838,6 +21862,7 @@ Response `409`: Conflict*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = support::RequestBuilder::new(reqwest::Method::GET, url);
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         let replay: Option<support::Replay> = None;
         let request = request.build()?;
         let mut request = support::prepare(&self.core, request, false);

@@ -1082,7 +1082,7 @@ fn cbor_is_sent_and_asked_for_under_its_own_media_type() {
 }
 
 #[test]
-fn octet_stream_still_leaves_accept_to_the_http_stack() {
+fn octet_stream_is_asked_for_under_its_own_media_type() {
     let (base, server) = common::serve_once("application/octet-stream", "200 OK", SIGNED);
     let client = cbor_client::BlockingClient::new(&base).unwrap();
     client
@@ -1091,8 +1091,7 @@ fn octet_stream_still_leaves_accept_to_the_http_stack() {
     let request = server.join().unwrap();
     let head = &request.head;
     assert_eq!(request.header("content-type"), ["application/octet-stream"], "{head}");
-    // The generated method sets no `Accept`; what arrives is the HTTP stack's own default.
-    assert_eq!(request.header("accept"), ["*/*"], "{head}");
+    assert_eq!(request.header("accept"), ["application/octet-stream"], "{head}");
 }
 "##,
     );

@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::ir::MediaType;
-use crate::oas31::media::{classify_media, classify_media_range, is_cbor, media_essence};
+use crate::oas31::media::{classify_media, classify_media_range, media_essence};
 
 /// The codec a `content` key's essence classifies as, or `None` with an `E009` for one spargen
 /// does not support.
@@ -63,12 +63,13 @@ pub(super) struct ChosenMedia<'a, T> {
 /// `None` with nothing reported for an empty `content`, and `None` with an `E009` naming the first
 /// key when no key classifies. Otherwise the selection, with the `W014` naming every other key
 /// built but not emitted ([`ChosenMedia::narrowing`]); `None` there when nothing else is offered.
-/// A response whose selection classifies as octet-stream — `application/octet-stream`, a
+/// A response whose selection classifies as octet-stream — `application/octet-stream`, CBOR, a
 /// non-text range such as `video/*`, or an `image`/`audio`/`video` member such as `image/png` —
 /// leaves out of that `W014` each other octet-classified alternative `opaque` proves constrains
 /// nothing, since it would decode exactly like the selection. `opaque` answers that without
-/// lowering anything. A selected CBOR key is not exempt: it is sent as `Accept`, so its
-/// alternatives are narrowed at the wire.
+/// lowering anything. A success response's selection is still the only one of those keys its
+/// request names in `Accept`, so a server that honors the header strictly may refuse with a status
+/// the client reports as an error; it never answers with a body decoded as something else.
 pub(super) fn choose_media<'a, T>(
     content: &'a IndexMap<String, T>,
     provenance: &crate::diag::Provenance,
@@ -120,11 +121,14 @@ pub(super) fn choose_media<'a, T>(
         //   the types do, and nothing is suppressed there.
         // - An octet alternative carrying an object schema is rejected by the octet gate, not
         //   decoded as bytes, so suppressing it would hide a rejection.
-        // - A selected CBOR key's alternatives are always reported: the choice is made one
-        //   response at a time, before the operation's `Accept` (`Responses::accept`) is known.
-        let suppressible = position == BodyPosition::Response
-            && classified == MediaType::OctetStream
-            && !is_cbor(media_essence(media));
+        //
+        // On a success response the selection's key is the one its request names in `Accept`
+        // (`Responses::accept`), so a byte-identical alternative is not asked for. That is no
+        // silent mis-decode: every such body is `bytes::Bytes`, and a server that honors the
+        // header strictly refuses with a status the client reports as an error. CBOR selects like
+        // every other octet-classified key, so a CBOR selection is suppressed alike.
+        let suppressible =
+            position == BodyPosition::Response && classified == MediaType::OctetStream;
         let ignored: Vec<&str> = content
             .iter()
             .filter(|(candidate, _)| candidate.as_str() != media)

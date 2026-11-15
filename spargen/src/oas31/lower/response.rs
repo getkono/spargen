@@ -2,7 +2,7 @@
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{Docs, MediaType, Response, ResponseHeader, Responses, StatusSpec, Ty, TypeKind};
-use crate::oas31::media::{is_cbor, media_essence, media_object_is_opaque};
+use crate::oas31::media::{media_essence, media_essence_is_suffix_range, media_object_is_opaque};
 use crate::oas31::{MediaTypeObject, ResponseObject};
 
 use super::content::{choose_media, lower_media_type, BodyPosition, ChosenMedia};
@@ -109,10 +109,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if let Some(narrowing) = narrowing {
                     self.diags.emit(narrowing);
                 }
-                // A CBOR body is read as opaque octets, so its key is announced in `Accept`: the
-                // media type is the only place the response's representation is stated.
+                // The chosen key's essence is announced in `Accept`, whatever its media: a stream
+                // asks for its framing, and a response declaring several media asks for the one
+                // its decoder reads rather than whichever the server would send first. A
+                // structured-suffix range (`application/*+json`) is no RFC 9110 media range, so a
+                // server could refuse it: such a key records none, and the operation's request
+                // then sets no `Accept` (`Responses::accept`).
                 let essence = media_essence(media_name);
-                let accept = is_cbor(essence).then(|| essence.to_owned());
+                let accept = (!media_essence_is_suffix_range(essence)).then(|| essence.to_owned());
                 Some((lowered, accept))
             },
         );
