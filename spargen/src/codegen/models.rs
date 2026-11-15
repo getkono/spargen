@@ -29,6 +29,7 @@ pub(super) fn emit_models(
         .emitted()
         .map(|(id, def)| emit_type_def(id, def, &api.types, names, options));
     let decode_present = format_ident!("{DECODE_PRESENT}");
+    let decode_required = format_ident!("{DECODE_REQUIRED}");
     // The RFC 3339 newtypes live beside `types`, so bring them into scope under the same bare names
     // `prim_tokens` emits; at the generated root the prelude re-export supplies them instead.
     let datetime_import = uses_time.then(|| {
@@ -51,6 +52,18 @@ pub(super) fn emit_models(
                 T: serde::Deserialize<'de>,
             {
                 T::deserialize(deserializer).map(Some)
+            }
+
+            /// The `deserialize_with` of every required, nullable field. It decodes a present value
+            /// as `Option<T>` does, `null` as `None`. A field with a `deserialize_with` and no
+            /// `default` is one serde refuses as `missing field` when it is absent, where a bare
+            /// `Option<T>` field would read the absent member as `None`.
+            fn #decode_required<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+                T: serde::Deserialize<'de>,
+            {
+                <Option<T> as serde::Deserialize<'de>>::deserialize(deserializer)
             }
 
             #(#items)*
@@ -633,10 +646,17 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
     // rejects it wherever `T` does (an uninhabited `T` rejects every value); an absent field still
     // takes `default`. A nullable one is a `Nullable`, whose own decode reads `null` as `Null`, an
     // admitted value there.
-    let decode_present = (field.decodes_optional() && !field.ty.nullable).then(|| {
-        let path = DECODE_PRESENT;
-        quote! { deserialize_with = #path, }
-    });
+    //
+    // A required nullable field is an `Option<T>` too, its `None` a present `null`. serde-derive
+    // reads a missing `Option` field as `None` unless the field has a `deserialize_with`, so an
+    // absent member would decode as an explicit `null`. `decode_required` decodes exactly as
+    // `Option<T>` does and, with no `default` beside it, makes the absent member `missing field`.
+    let decode_with = match (field.decodes_optional(), field.ty.nullable) {
+        (true, false) => Some(DECODE_PRESENT),
+        (false, true) => Some(DECODE_REQUIRED),
+        _ => None,
+    }
+    .map(|path| quote! { deserialize_with = #path, });
     let mut notes: Vec<String> = Vec::new();
     if field.deprecated {
         notes.push("Deprecated per the spec.".to_owned());
@@ -660,7 +680,7 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
         .map(|note| quote! { #[doc = #note] });
     quote! {
         #(#notes)*
-        #[serde(rename = #wire, #serde_default #decode_present)]
+        #[serde(rename = #wire, #serde_default #decode_with)]
         pub #ident: #ty,
     }
 }
@@ -901,6 +921,11 @@ fn emit_struct_constructors(
 /// `deserialize_with` target that decodes a present value, `null` included, as the field's own
 /// type. Snake case, so it cannot collide with a `PascalCase` type.
 const DECODE_PRESENT: &str = "decode_present";
+
+/// The name of the private function `types` carries for every required, nullable field: a
+/// `deserialize_with` target that decodes as `Option<T>` does, so an absent member is serde's
+/// `missing field` rather than `None`. Snake case, so it cannot collide with a `PascalCase` type.
+const DECODE_REQUIRED: &str = "decode_required";
 
 /// The `{field}_or_default` accessor of struct `id`'s `field`, when it has an
 /// [applied default](Field::applied_default): `pub fn …(&self) -> T`, the member's value where it

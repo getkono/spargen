@@ -1554,8 +1554,8 @@ components:
         $ref: "#/components/schemas/Dict"
     # Null-mixed enum: the `null` member is stripped and the remaining homogeneous string
     # scalars lower as a real Rust enum; the `"null"` in the type array makes every use nullable, so
-    # a field of this type is emitted as `Option<Priority>`. An absent or `null` value deserializes
-    # to `None`; a string value to the matching variant.
+    # a field of this type is emitted as `Option<Priority>`. A `null` value deserializes to `None`;
+    # a string value to the matching variant.
     Priority:
       type: [string, "null"]
       enum: [low, medium, high, null]
