@@ -736,7 +736,7 @@ fn every_spelling_of_exactly_null_is_the_null_type_written_outright() {
             "Nullable<()>".to_owned(),
         )),
         Some((
-            "#[serde(rename = \"r\")]".to_owned(),
+            "#[serde(rename = \"r\", deserialize_with = \"decode_required\")]".to_owned(),
             "Option<()>".to_owned(),
         )),
     );

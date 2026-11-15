@@ -221,7 +221,7 @@ fn a_struct_is_renamed_for_xml_only_where_its_element_name_differs() {
 }
 
 /// Each member's serde attribute and type: a required one as its own type, a required nullable
-/// one as an `Option`, an optional one as an `Option` decoded only when present, an optional
+/// one as an `Option` whose absence is `missing field`, an optional one as an `Option` decoded only when present, an optional
 /// nullable one as a `Nullable`; `readOnly` never serialized (nor a member both `readOnly` and
 /// `writeOnly`, whatever direction the `testing` module asks), `writeOnly` decoded as absent; a
 /// member with a representable `default` decoded as absent like any other, its rustdoc naming the
@@ -244,7 +244,11 @@ fn each_member_takes_its_serde_attribute_and_type() {
                     "Option<ThingId>"
                 ),
                 member("label", "", "ThingLabel"),
-                member("maybe", "", "Option<ThingMaybe>"),
+                member(
+                    "maybe",
+                    ",deserialize_with=\"decode_required\"",
+                    "Option<ThingMaybe>"
+                ),
             ),
             &format!(
                 "///Write-only:theserveracceptsitinrequestsandomitsitfromresponses,soitdecodesasabsent.{}",
