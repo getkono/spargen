@@ -2,7 +2,7 @@
 //! a met union keeps or drops.
 
 use crate::diag::{Code, Diagnostic};
-use crate::ir::{Docs, Ty, TypeId, TypeKind, Union, UnionMode, UnionStrategy};
+use crate::ir::{Docs, Operation, Ty, TypeId, TypeKind, Union, UnionMode, UnionStrategy};
 use crate::oas31::Schema;
 
 use super::meet::same_ty;
@@ -341,6 +341,104 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 "variant",
             );
         }
+    }
+
+    /// Merge the variants of each union in `unions` that decode the same values now that
+    /// [`Self::retype_serde_binary`] made a `format: binary` variant the `String` its wire holds
+    /// (#1511), as lowering merges such branches ([`Self::merge_indistinguishable_variants`]): only
+    /// a `oneOf` decoded by trial matching, since a discriminator tells its variants apart by tag
+    /// and an `anyOf` decodes with any one match. A union all of whose variants merge becomes
+    /// their one type in its own definition, keeping its name, and every `oneOf` holding it as a
+    /// variant is merged in turn. What a merge leaves unreferenced is elided.
+    pub(super) fn merge_retyped_unions(&mut self, unions: Vec<TypeId>, operations: &[Operation]) {
+        let mut pending = unions;
+        let mut merged_any = false;
+        while let Some(id) = pending.pop() {
+            if !self.merge_retyped_union(id) {
+                continue;
+            }
+            merged_any = true;
+            if matches!(self.kind_of(id), Some(TypeKind::Union(_))) {
+                continue;
+            }
+            pending.extend(
+                self.graph
+                    .emitted()
+                    .filter(|(_, definition)| {
+                        if let TypeKind::Union(union) = &definition.kind {
+                            union.variants.iter().any(|variant| variant.ty.id == id)
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|(holder, _)| holder),
+            );
+        }
+        if merged_any {
+            self.elide_unreachable(operations);
+        }
+    }
+
+    /// [`Self::merge_retyped_unions`] for the one union `id`, reported as `W001` at it; whether
+    /// any variants merged. `null` follows the `oneOf` rule [`Self::merge_intersected_one_of`]
+    /// applies: it stays where exactly one variant accepts it, and is invalid everywhere where two
+    /// or more do. The report numbers the union's variants as generated.
+    fn merge_retyped_union(&mut self, id: TypeId) -> bool {
+        let Some(definition) = self.graph.get(id) else {
+            return false;
+        };
+        let TypeKind::Union(union) = &definition.kind else {
+            return false;
+        };
+        if !matches!(
+            union.strategy,
+            UnionStrategy::Trial {
+                mode: UnionMode::OneOf
+            }
+        ) {
+            return false;
+        }
+        let (union, provenance) = (union.clone(), definition.provenance.clone());
+        let groups = group_alike(&union.variants, |kept, variant| {
+            self.graph.same_decoded_values(kept.ty, variant.ty)
+        });
+        if groups.len() == union.variants.len() {
+            return false;
+        }
+        let slices: Vec<&[usize]> = groups.iter().map(Vec::as_slice).collect();
+        self.warn_indistinguishable_branches(&provenance, &slices);
+        let kind = if let [_] = &groups[..] {
+            // Every variant is one type: `same_decoded_values` holds them to one nullability, so
+            // two or more that accept `null` put it in two branches, and it is invalid.
+            let common = union.variants[0].ty.id;
+            self.kind_of(common)
+                .cloned()
+                .expect("a union variant is in the graph")
+        } else {
+            let accepting_null = |group: &Vec<usize>| {
+                group
+                    .iter()
+                    .filter(|index| union.variants[**index].ty.nullable)
+                    .count()
+            };
+            let null_twice = groups.iter().map(accepting_null).sum::<usize>() > 1;
+            let retained: Vec<usize> = groups.iter().map(|group| group[0]).collect();
+            let variants = groups
+                .iter()
+                .map(|group| {
+                    let mut variant = union.variants[group[0]].clone();
+                    variant.ty.nullable = accepting_null(group) == 1 && !null_twice;
+                    variant
+                })
+                .collect();
+            let strategy = retain_strategy(&union.strategy, &retained);
+            TypeKind::Union(Union { variants, strategy })
+        };
+        self.graph
+            .get_mut(id)
+            .expect("a merged union is in the graph")
+            .kind = kind;
+        true
     }
 
     /// The `oneOf` union `ty` a `$ref` met its own sibling to, with the variants that lower to one
