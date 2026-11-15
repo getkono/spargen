@@ -432,36 +432,106 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// the meet keeps a side's `additionalProperties: false` (`merge_additional`), so it is the
     /// same closed reading. A side closed by a composition of its own has no one keyword to point
     /// at, so the schema holding the `$ref` locates it.
+    ///
+    /// Where one side is a union and the other a closed object, the two are met branch by branch
+    /// (a union target beside object siblings, or a closed target beside a union sibling), and
+    /// the closed side is reported against the union's branches instead
+    /// ([`Self::warn_closed_union_meet`], #1500). `sibling` is lowered from `keywords`, the
+    /// sibling keywords as they were lowered.
     pub(super) fn warn_closed_ref_meet(
         &mut self,
         schema: &Schema,
         reference: &str,
         target: Ty,
-        sibling: Ty,
+        (sibling, keywords): (Ty, &Schema),
     ) {
-        let (Some(TypeKind::Struct(target)), Some(TypeKind::Struct(sibling))) =
-            (self.kind_of(target.id), self.kind_of(sibling.id))
-        else {
+        let (Some(target_kind), Some(sibling_kind)) = (
+            self.kind_of(target.id).cloned(),
+            self.kind_of(sibling.id).cloned(),
+        ) else {
             return;
         };
-        let (target, sibling) = (target.clone(), sibling.clone());
-        let closed = |ctx: &Self, structure: &Struct, keyword: Option<&Schema>| {
-            matches!(structure.additional, AdditionalProps::Deny).then(|| {
-                keyword
-                    .and_then(|keyword| ctx.closing_keyword(keyword))
-                    .unwrap_or_else(|| schema.provenance.clone())
-            })
-        };
         let body = self.ref_target_body(reference, &schema.provenance);
-        let target_at = closed(self, &target, body.as_deref());
-        let sibling_at = closed(self, &sibling, Some(schema));
-        self.warn_closed_members(
-            &[
-                (&target.fields, target_at.as_ref()),
-                (&sibling.fields, sibling_at.as_ref()),
-            ],
-            ClosedMerge::RefSiblings,
-        );
+        let target_at = self.closed_at(target, body.as_deref(), &schema.provenance);
+        let sibling_at = self.closed_at(sibling, Some(keywords), &schema.provenance);
+        match (&target_kind, &sibling_kind) {
+            // A reservation's body is still being lowered, so nothing is known of what it
+            // declares or closes; the meet itself refuses one (`intersect_types`).
+            (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => {}
+            (TypeKind::Struct(target), TypeKind::Struct(sibling)) => self.warn_closed_members(
+                &[
+                    (&target.fields, target_at.as_ref()),
+                    (&sibling.fields, sibling_at.as_ref()),
+                ],
+                ClosedMerge::RefSiblings,
+            ),
+            (TypeKind::Struct(closed), _) => {
+                self.warn_closed_union_meet(&closed.fields, target_at.as_slice(), sibling);
+            }
+            (_, TypeKind::Struct(closed)) => {
+                self.warn_closed_union_meet(&closed.fields, sibling_at.as_slice(), target);
+            }
+            _ => {}
+        }
+    }
+
+    /// Where the object `ty`, lowered from `keyword` where that is known, writes the
+    /// `additionalProperties: false` that closes it: the keyword's own pointer, or `fallback`
+    /// where `ty` is closed by a composition of its own and so has no one keyword to point at.
+    /// `None` where `ty` is no closed object.
+    pub(super) fn closed_at(
+        &self,
+        ty: Ty,
+        keyword: Option<&Schema>,
+        fallback: &Provenance,
+    ) -> Option<Provenance> {
+        let Some(TypeKind::Struct(structure)) = self.kind_of(ty.id) else {
+            return None;
+        };
+        matches!(structure.additional, AdditionalProps::Deny).then(|| {
+            keyword
+                .and_then(|keyword| self.closing_keyword(keyword))
+                .unwrap_or_else(|| fallback.clone())
+        })
+    }
+
+    /// The `W011` [`Self::warn_closed_merge`] reports, for a closed object whose fields are
+    /// `declared` met with `union` branch by branch (#1500): each met branch is closed to the
+    /// fields it and the object declare, the same reading as the closed merge, so each site in
+    /// `closing` is reported once, naming every property a branch declares that `declared`
+    /// does not. A `union` that lowered to one object is that object's one branch; anything else
+    /// that is no union declares nothing here.
+    pub(super) fn warn_closed_union_meet(
+        &mut self,
+        declared: &[Field],
+        closing: &[Provenance],
+        union: Ty,
+    ) {
+        if closing.is_empty() {
+            return;
+        }
+        let mut branches = Vec::new();
+        let mut pending = vec![union];
+        let mut seen = HashSet::new();
+        while let Some(ty) = pending.pop() {
+            if !seen.insert(ty.id) {
+                continue;
+            }
+            match self.kind_of(ty.id) {
+                Some(TypeKind::Union(union)) => {
+                    pending.extend(union.variants.iter().rev().map(|variant| variant.ty));
+                }
+                Some(TypeKind::Struct(branch)) => branches.extend(branch.fields.iter().cloned()),
+                // A branch closing a cycle is a reservation whose fields are not known yet, so it
+                // names no property here.
+                Some(TypeKind::Reserved) => {}
+                _ => {}
+            }
+        }
+        let mut members: Vec<(&[Field], Option<&Provenance>)> =
+            closing.iter().map(|at| (declared, Some(at))).collect();
+        members.push((&branches, None));
+        self.warn_closed_members(&members, ClosedMerge::UnionBranches);
     }
 
     /// The `W011` [`Self::warn_closed_merge`] reports, over the object members of a merge spelled
@@ -517,6 +587,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      declare",
                     "the other side",
                     "the schema holding the `$ref`",
+                ),
+                ClosedMerge::UnionBranches => (
+                    "each branch of the union it is met with to the fields the branch and this \
+                     object declare",
+                    "a branch",
+                    "the composing schema",
                 ),
             };
             // W011 case: closed-all-of-merge
@@ -1069,6 +1145,8 @@ enum ClosedMerge {
     AllOf,
     /// A `$ref` met with its shape-bearing sibling keywords.
     RefSiblings,
+    /// A closed object met with a union branch by branch.
+    UnionBranches,
 }
 
 /// One `allOf` member's contribution to the merged type: a set of object fields (with its
