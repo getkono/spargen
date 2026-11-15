@@ -1015,10 +1015,10 @@ paths:
 }
 
 #[test]
-fn w014_reports_what_a_cbor_response_asks_against() {
-    // A selected CBOR response is announced in `Accept`, so a byte-identical alternative is asked
-    // against at the wire and is reported; one selected ahead of a CBOR alternative sends no
-    // `Accept`, and narrows nothing.
+fn w014_treats_a_cbor_selection_like_every_other_octet_selection() {
+    // A CBOR body decodes as `bytes::Bytes` exactly like an octet-stream one, so a selected CBOR
+    // key leaves a byte-identical octet alternative out of `W014` in either order, as every
+    // octet-classified selection does. The request still names only the selection in `Accept`.
     let document = |first: &str, second: &str| {
         format!(
             r##"
@@ -1037,25 +1037,37 @@ paths:
 "##
         )
     };
-    let report = generate(&document("application/cbor", "application/octet-stream"));
+    for (first, second) in [
+        ("application/cbor", "application/octet-stream"),
+        ("application/octet-stream", "application/cbor"),
+        ("application/cbor", "image/png"),
+    ] {
+        let (report, code) = generate_with_code(&document(first, second));
+        assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{first} beside {second}: {report:#?}"
+        );
+        let method = method_source(&code, "get_doc");
+        assert!(
+            method.contains(&format!("reqwest::header::ACCEPT, \"{first}\"")),
+            "{method}"
+        );
+    }
+
+    // An alternative that does not decode alike is still reported beside a CBOR selection.
+    let report = generate(&document("application/cbor", "text/plain"));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert_eq!(
         messages_for(&report, Code::AlternativeMediaIgnored),
         [
             "`application/cbor` is selected; the alternative media type(s) \
-          `application/octet-stream` are not"
+          `text/plain` are not"
         ],
         "{report:#?}"
     );
-    let report = generate(&document("application/octet-stream", "application/cbor"));
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        !has_code(&report, Code::AlternativeMediaIgnored),
-        "{report:#?}"
-    );
 
-    // An error response's CBOR key is never announced in `Accept`, and its alternatives are
-    // reported all the same: the selection is made per response, before `Accept` is known.
+    // An error response's CBOR selection is suppressed alike, and is never announced in `Accept`.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -1073,12 +1085,8 @@ paths:
 "##;
     let (report, code) = generate_with_code(spec);
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    assert_eq!(
-        messages_for(&report, Code::AlternativeMediaIgnored),
-        [
-            "`application/cbor` is selected; the alternative media type(s) \
-          `application/octet-stream` are not"
-        ],
+    assert!(
+        !has_code(&report, Code::AlternativeMediaIgnored),
         "{report:#?}"
     );
     let method = method_source(&code, "get_doc");
