@@ -259,9 +259,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // parameter or property from the generated client.
             return self.reject_ref_sibling_intersection(schema);
         };
-        if !has_union_sibling {
-            self.warn_closed_ref_meet(schema, reference, referenced, sibling);
-        }
+        // Beside a union sibling the meet is branch by branch, and a closed target is reported
+        // against the union's branches (#1500).
+        self.warn_closed_ref_meet(schema, reference, referenced, (sibling, schema));
         // The met union is collapsed by which union it holds. Beside a `oneOf`/`anyOf` sibling it
         // is the sibling's, lowered with its merge held back. Beside a non-union sibling it is a
         // union target met branch by branch (#1014): the target merged the branches alike on

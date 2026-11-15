@@ -1142,6 +1142,15 @@ fn w011_a_closed_object_met_with_a_union_branch_by_branch_is_reported() {
             r##"
     S:
       allOf:
+        - oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }]
+        - { properties: { x: { type: string } }, additionalProperties: false }
+"##,
+            "/components/schemas/S/allOf/1/additionalProperties",
+        ),
+        (
+            r##"
+    S:
+      allOf:
         - $ref: '#/components/schemas/U'
         - { type: object, properties: { x: { type: string } }, additionalProperties: false }
 "##,
@@ -1197,6 +1206,39 @@ fn w011_a_closed_object_met_with_a_union_branch_by_branch_is_reported() {
         assert!(!message.contains("`x`"), "{spec}\n{message}");
         assert!(message.contains("branch"), "{spec}\n{message}");
     }
+}
+
+/// A closed `$ref` target met with sibling keywords and a union sibling together: the keywords'
+/// `y` and the branches' `a` and `b` are each reported at the target's keyword, once apiece, and
+/// the met union is still generated.
+#[test]
+fn w011_a_closed_target_beside_keywords_and_a_union_names_both() {
+    let spec = closed_union_meet_spec(
+        r##"
+    S:
+      $ref: '#/components/schemas/Closed'
+      type: object
+      properties: { y: { type: string } }
+      oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }]
+"##,
+    );
+    let report = generate(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let warnings = closed_merge_warnings(&report);
+    let at: Vec<&str> = warnings
+        .iter()
+        .filter(|(at, _)| at == "/components/schemas/Closed/additionalProperties")
+        .map(|(_, message)| message.as_str())
+        .collect();
+    assert_eq!(at.len(), 2, "{report:#?}");
+    let keywords = at.iter().find(|message| message.contains("`y`"));
+    let keywords = keywords.unwrap_or_else(|| panic!("{report:#?}"));
+    assert!(keywords.contains("`$ref`"), "{keywords}");
+    assert!(!keywords.contains("`a`"), "{keywords}");
+    let branches = at.iter().find(|message| message.contains("`a`, `b`"));
+    let branches = branches.unwrap_or_else(|| panic!("{report:#?}"));
+    assert!(!branches.contains("`y`"), "{branches}");
+    assert!(branches.contains("branch"), "{branches}");
 }
 
 /// A union whose branches declare no property the closing object does not is read by JSON Schema
