@@ -952,9 +952,9 @@ fn allocate_required_structs(
     structs.iter().map(|(id, ..)| *id).zip(allocated).collect()
 }
 
-/// Whether a type's `pointer` is a declared schema's own:a component (`/components/schemas/{name}`)
-/// or a whole document (the empty pointer, which a sub-file schema carries), rather than a
-/// position inside one.
+/// Whether a type's `pointer` is a declared schema's own: a component
+/// (`/components/schemas/{name}`) or a whole document (the empty pointer, which a sub-file schema
+/// carries), rather than a position inside one.
 fn is_declared_schema(pointer: &crate::diag::JsonPointer) -> bool {
     let tokens = pointer.tokens();
     tokens.is_empty()

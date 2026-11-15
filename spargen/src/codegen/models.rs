@@ -780,7 +780,7 @@ fn non_null(ty: Ty) -> Ty {
     }
 }
 
-/// A struct field's declared Rust type.A required field is the type `ty_tokens` names, which
+/// A struct field's declared Rust type. A required field is the type `ty_tokens` names, which
 /// wraps a nullable one (`"null"` in the type array) in `Option`: present, but maybe `null`. An
 /// optional non-nullable field is `Option<T>`, its `None` the absent member. An optional nullable
 /// field has three wire states (absent, `null`, a value), so it is `support::Nullable<T>` over the

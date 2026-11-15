@@ -736,8 +736,7 @@ fn url_building(
     }
 }
 
-/// Whether a required parameter, a path argument or a `…Params::new` argument, is emitted as
-/// `impl Into<String>` rather than its concrete type.
+/// Whether a path argument is emitted as `impl Into<String>` rather than its concrete type.
 ///
 /// Exactly a non-nullable, unboxed [`Prim::String`](crate::ir::Prim::String). `Option<String>`
 /// and `Box<String>` positions stay concrete: `Into` would make `None` ambiguous at the call site
