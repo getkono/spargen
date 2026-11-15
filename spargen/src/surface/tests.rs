@@ -64,6 +64,8 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::TestingModuleRemoved,
         ChangeKind::FileNameSetterAdded,
         ChangeKind::FileNameSetterRemoved,
+        ChangeKind::DefaultAccessorAdded,
+        ChangeKind::DefaultAccessorRemoved,
         ChangeKind::IdentifierRebound,
     ];
     for kind in every {
@@ -124,6 +126,8 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::TestingModuleRemoved
             | ChangeKind::FileNameSetterAdded
             | ChangeKind::FileNameSetterRemoved
+            | ChangeKind::DefaultAccessorAdded
+            | ChangeKind::DefaultAccessorRemoved
             | ChangeKind::IdentifierRebound => {}
         }
     }
@@ -187,6 +191,8 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::TestingModuleRemoved => "TestingModuleRemoved",
         ChangeKind::FileNameSetterAdded => "FileNameSetterAdded",
         ChangeKind::FileNameSetterRemoved => "FileNameSetterRemoved",
+        ChangeKind::DefaultAccessorAdded => "DefaultAccessorAdded",
+        ChangeKind::DefaultAccessorRemoved => "DefaultAccessorRemoved",
         ChangeKind::IdentifierRebound => "IdentifierRebound",
     }
 }
@@ -195,7 +201,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
 fn the_kind_list_covers_the_whole_enum() {
     assert_eq!(
         all_kinds().len(),
-        55,
+        57,
         "a `ChangeKind` variant reached the exhaustive match without joining the list"
     );
 }
@@ -269,6 +275,7 @@ fn only_the_additive_kinds_are_minor() {
         ChangeKind::CredentialSchemeAdded,
         ChangeKind::TestingModuleAdded,
         ChangeKind::FileNameSetterAdded,
+        ChangeKind::DefaultAccessorAdded,
     ];
     for kind in all_kinds() {
         let expected = if MINOR.contains(&kind) {
@@ -309,7 +316,7 @@ fn the_surface_spellings_follow_the_table() {
     assert_eq!(UrlArgSurface::Params.to_string(), "parameters bundle");
     let kinds = [
         (
-            TypeSurface::Struct(BTreeMap::new(), None, BTreeMap::new()),
+            TypeSurface::Struct(BTreeMap::new(), None, BTreeMap::new(), BTreeSet::new()),
             "struct",
         ),
         (

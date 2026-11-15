@@ -208,10 +208,11 @@ fn an_optional_non_nullable_field_rejects_a_present_null() {
         let document = format!(r#"{{"{field}": null}}"#);
         assert_refuses::<OptionalFields>(&document, &format!("`{field}` is not nullable"));
     }
-    // Absence is still `None` (or the schema default), and serialises back to absence.
+    // Absence is still `None`, a defaulted member included, and serialises back to absence.
     let absent: OptionalFields = serde_json::from_str("{}").unwrap();
     assert!(absent.name.is_none() && absent.count.is_none() && absent.choice.is_none());
-    assert_eq!(absent.colour.as_deref(), Some("red"));
+    assert_eq!(absent.colour, None);
+    assert_eq!(absent.colour_or_default(), "red");
     // A present, well-typed value still decodes.
     let present: OptionalFields = serde_json::from_str(
         r#"{"name": "n", "count": 2, "flag": false, "tags": [], "mode": "manual", "nested": {},
@@ -226,14 +227,14 @@ fn an_optional_non_nullable_field_rejects_a_present_null() {
     assert_eq!(untyped.anything, Some(serde_json::Value::Null));
     assert_eq!(
         serde_json::to_value(&untyped).unwrap(),
-        serde_json::json!({"anything": null, "colour": "red"})
+        serde_json::json!({"anything": null})
     );
     // A nullable optional property keeps `null` and absence apart, on decode and on the wire.
     let nullable: OptionalFields = serde_json::from_str(r#"{"maybe": null}"#).unwrap();
     assert_eq!(nullable.maybe, basic_client::Nullable::Null);
     assert_eq!(
         serde_json::to_value(&nullable).unwrap(),
-        serde_json::json!({"maybe": null, "colour": "red"})
+        serde_json::json!({"maybe": null})
     );
     assert_eq!(absent.maybe, basic_client::Nullable::Absent);
 }

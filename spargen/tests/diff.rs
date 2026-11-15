@@ -280,6 +280,35 @@ fn changed_field_type_is_major() {
     assert_eq!(report.bump, Impact::Major);
 }
 
+/// An optional member's applied schema `default` gives its struct a `name_or_default()`
+/// accessor: gaining one is a new inherent method, and losing one breaks its calls. Another
+/// default value keeps the accessor, so it changes no surface.
+#[test]
+fn a_default_accessor_appearing_is_minor_and_disappearing_is_major() {
+    let defaulted = "        id: { type: integer }\n        name: { type: string, default: rex }\n";
+    let other_value =
+        "        id: { type: integer }\n        name: { type: string, default: max }\n";
+    // A required member's default is documented only: no accessor reads it.
+    let required = spec("", "id, name", defaulted, "");
+    let with_accessor = spec("", "id", defaulted, "");
+
+    let added = diff(&base(), &with_accessor);
+    assert_eq!(kinds(&added), vec![ChangeKind::DefaultAccessorAdded]);
+    assert_eq!(added.bump, Impact::Minor);
+
+    let removed = diff(&with_accessor, &base());
+    assert_eq!(kinds(&removed), vec![ChangeKind::DefaultAccessorRemoved]);
+    assert_eq!(removed.bump, Impact::Major);
+
+    let revalued = diff(&with_accessor, &spec("", "id", other_value, ""));
+    assert_eq!(kinds(&revalued), vec![]);
+    assert_eq!(revalued.bump, Impact::Patch);
+
+    let unapplied = diff(&required, &spec("", "id, name", PET_PROPS, ""));
+    assert_eq!(kinds(&unapplied), vec![]);
+    assert_eq!(unapplied.bump, Impact::Patch);
+}
+
 #[test]
 fn overall_bump_is_max_impact_across_mixed_changes() {
     // New spec: adds an optional param (major) AND removes a field (major) AND adds an operation

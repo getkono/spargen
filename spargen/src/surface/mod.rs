@@ -248,11 +248,14 @@ type ParamKey = (String, &'static str);
 /// rather than as standalone entries.
 enum TypeSurface {
     /// A `struct`: fields keyed by generated field name, its typed `additionalProperties` map,
-    /// when it has one, and the wire property name each field binds, keyed by field name.
+    /// when it has one, the wire property name each field binds, keyed by field name, and the
+    /// generated name of each `{field}_or_default` accessor it carries, one per member with an
+    /// applied schema `default`. An accessor returns its field's type, which the field compares.
     Struct(
         BTreeMap<String, MemberSurface>,
         Option<OverflowSurface>,
         Bindings,
+        BTreeSet<String>,
     ),
     /// A string `enum`: the set of variant wire values, for an open enum (`open_narrowing`) the
     /// generated name of the variant holding any other string, and the wire value each listed
@@ -482,6 +485,13 @@ pub enum ChangeKind {
     /// — calls to it break, and where the body has no file part left, so does passing a
     /// `MultipartBody`.
     FileNameSetterRemoved,
+    /// A struct gained a `{field}_or_default` accessor: a member's schema `default` became one
+    /// the accessor returns, or a member with one was added. **Minor** — a new inherent method.
+    DefaultAccessorAdded,
+    /// A struct lost a `{field}_or_default` accessor: a member's schema `default` was removed or
+    /// became one no accessor returns, or the member or its name went. **Major** — calls to it
+    /// break.
+    DefaultAccessorRemoved,
     /// A generated identifier now binds another wire name: a `…Params` field and its setter (bound
     /// by name and location, so a same-named parameter of another location can take it), a
     /// struct field, a string enum variant, or a response-header struct's field (bound by header
@@ -504,7 +514,8 @@ impl ChangeKind {
             | ChangeKind::StreamTwinAdded
             | ChangeKind::CredentialSchemeAdded
             | ChangeKind::TestingModuleAdded
-            | ChangeKind::FileNameSetterAdded => Impact::Minor,
+            | ChangeKind::FileNameSetterAdded
+            | ChangeKind::DefaultAccessorAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::UrlAccessorArgsChanged
@@ -549,6 +560,7 @@ impl ChangeKind {
             | ChangeKind::CredentialSettersChanged
             | ChangeKind::TestingModuleRemoved
             | ChangeKind::FileNameSetterRemoved
+            | ChangeKind::DefaultAccessorRemoved
             | ChangeKind::IdentifierRebound => Impact::Major,
         }
     }
@@ -610,6 +622,8 @@ impl ChangeKind {
             ChangeKind::TestingModuleRemoved => "testing-module-removed",
             ChangeKind::FileNameSetterAdded => "file-name-setter-added",
             ChangeKind::FileNameSetterRemoved => "file-name-setter-removed",
+            ChangeKind::DefaultAccessorAdded => "default-accessor-added",
+            ChangeKind::DefaultAccessorRemoved => "default-accessor-removed",
             ChangeKind::IdentifierRebound => "identifier-rebound",
         }
     }

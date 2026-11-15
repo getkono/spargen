@@ -8308,7 +8308,7 @@ pub mod types {
         pub limit: Option<DeepFilterLimit>,
     }
     impl DeepFilter {
-        ///A `DeepFilter` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `DeepFilter` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(kind: DeepFilterKind) -> Self {
@@ -8496,23 +8496,23 @@ pub mod types {
         }
     }
     pub type RefinedEmptyOnlyIntersection = Vec<RefinedEmptyOnlyIntersectionItem>;
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct ConflictDefaultTarget {
         ///Default: `a`.
         #[serde(
             rename = "x",
-            default = "default_35_x",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
         pub x: Option<ConflictDefaultTargetX>,
     }
     impl ConflictDefaultTarget {
-        ///A `ConflictDefaultTarget` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `ConflictDefaultTarget` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
-            Self { x: self::default_35_x() }
+            Self { x: None }
         }
         ///Set the `x` member.
         #[must_use]
@@ -8520,14 +8520,13 @@ pub mod types {
             self.x = Some(value);
             self
         }
-    }
-    impl std::default::Default for ConflictDefaultTarget {
-        fn default() -> Self {
-            Self::new()
+        ///The `x` member where it is set, else its schema default.
+        ///
+        ///Default: `a`.
+        #[must_use]
+        pub fn x_or_default(&self) -> ConflictDefaultTargetX {
+            self.x.clone().unwrap_or_else(|| "a".to_owned())
         }
-    }
-    fn default_35_x() -> Option<ConflictDefaultTargetX> {
-        Some("a".to_owned())
     }
     pub type ConflictDefaultTargetX = String;
     #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -8542,7 +8541,7 @@ pub mod types {
         pub x: Option<ConflictDefaultXintersection>,
     }
     impl ConflictDefault {
-        ///A `ConflictDefault` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `ConflictDefault` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -8593,7 +8592,7 @@ pub mod types {
         pub x: Option<ConflictDefaultSiblingReferenceIntersectionX>,
     }
     impl ConflictDefaultSibling {
-        ///A `ConflictDefaultSibling` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `ConflictDefaultSibling` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -8635,12 +8634,12 @@ pub mod types {
             )
         }
     }
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct NarrowDefaultBase {
         ///Default: `a`.
         #[serde(
             rename = "valid",
-            default = "default_46_valid",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -8648,7 +8647,7 @@ pub mod types {
         ///Default: `zzz`.
         #[serde(
             rename = "bad",
-            default = "default_46_bad",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -8656,7 +8655,7 @@ pub mod types {
         ///Default: `3`.
         #[serde(
             rename = "ratio",
-            default = "default_46_ratio",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -8664,22 +8663,22 @@ pub mod types {
         ///Default: `2.5`.
         #[serde(
             rename = "fraction",
-            default = "default_46_fraction",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
         pub fraction: Option<NarrowDefaultBaseFraction>,
     }
     impl NarrowDefaultBase {
-        ///A `NarrowDefaultBase` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `NarrowDefaultBase` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
-                valid: self::default_46_valid(),
-                bad: self::default_46_bad(),
-                ratio: self::default_46_ratio(),
-                fraction: self::default_46_fraction(),
+                valid: None,
+                bad: None,
+                ratio: None,
+                fraction: None,
             }
         }
         ///Set the `valid` member.
@@ -8706,23 +8705,34 @@ pub mod types {
             self.fraction = Some(value);
             self
         }
-    }
-    impl std::default::Default for NarrowDefaultBase {
-        fn default() -> Self {
-            Self::new()
+        ///The `valid` member where it is set, else its schema default.
+        ///
+        ///Default: `a`.
+        #[must_use]
+        pub fn valid_or_default(&self) -> NarrowDefaultBaseValid {
+            self.valid.clone().unwrap_or_else(|| "a".to_owned())
         }
-    }
-    fn default_46_valid() -> Option<NarrowDefaultBaseValid> {
-        Some("a".to_owned())
-    }
-    fn default_46_bad() -> Option<NarrowDefaultBaseBad> {
-        Some("zzz".to_owned())
-    }
-    fn default_46_ratio() -> Option<NarrowDefaultBaseRatio> {
-        Some(3.0)
-    }
-    fn default_46_fraction() -> Option<NarrowDefaultBaseFraction> {
-        Some(2.5)
+        ///The `bad` member where it is set, else its schema default.
+        ///
+        ///Default: `zzz`.
+        #[must_use]
+        pub fn bad_or_default(&self) -> NarrowDefaultBaseBad {
+            self.bad.clone().unwrap_or_else(|| "zzz".to_owned())
+        }
+        ///The `ratio` member where it is set, else its schema default.
+        ///
+        ///Default: `3`.
+        #[must_use]
+        pub fn ratio_or_default(&self) -> NarrowDefaultBaseRatio {
+            self.ratio.unwrap_or(3.0)
+        }
+        ///The `fraction` member where it is set, else its schema default.
+        ///
+        ///Default: `2.5`.
+        #[must_use]
+        pub fn fraction_or_default(&self) -> NarrowDefaultBaseFraction {
+            self.fraction.unwrap_or(2.5)
+        }
     }
     pub type NarrowDefaultBaseValid = String;
     pub type NarrowDefaultBaseBad = String;
@@ -8760,7 +8770,7 @@ pub mod types {
         pub fraction: Option<NarrowDefaultEnumFraction>,
     }
     impl NarrowDefaultEnum {
-        ///A `NarrowDefaultEnum` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `NarrowDefaultEnum` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -8886,12 +8896,12 @@ pub mod types {
     }
     pub type NarrowDefaultEnumRatio = i64;
     pub type NarrowDefaultEnumFraction = i64;
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct NarrowDefault {
         ///Default: `a`.
         #[serde(
             rename = "valid",
-            default = "default_56_valid",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -8907,7 +8917,7 @@ pub mod types {
         ///Default: `3`.
         #[serde(
             rename = "ratio",
-            default = "default_56_ratio",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -8922,14 +8932,14 @@ pub mod types {
         pub fraction: Option<NarrowDefaultEnumFraction>,
     }
     impl NarrowDefault {
-        ///A `NarrowDefault` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `NarrowDefault` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
-                valid: self::default_56_valid(),
+                valid: None,
                 bad: None,
-                ratio: self::default_56_ratio(),
+                ratio: None,
                 fraction: None,
             }
         }
@@ -8957,24 +8967,27 @@ pub mod types {
             self.fraction = Some(value);
             self
         }
-    }
-    impl std::default::Default for NarrowDefault {
-        fn default() -> Self {
-            Self::new()
+        ///The `valid` member where it is set, else its schema default.
+        ///
+        ///Default: `a`.
+        #[must_use]
+        pub fn valid_or_default(&self) -> NarrowDefaultEnumValid {
+            self.valid.unwrap_or(NarrowDefaultEnumValid::A)
+        }
+        ///The `ratio` member where it is set, else its schema default.
+        ///
+        ///Default: `3`.
+        #[must_use]
+        pub fn ratio_or_default(&self) -> NarrowDefaultEnumRatio {
+            self.ratio.unwrap_or(3)
         }
     }
-    fn default_56_valid() -> Option<NarrowDefaultEnumValid> {
-        Some(NarrowDefaultEnumValid::A)
-    }
-    fn default_56_ratio() -> Option<NarrowDefaultEnumRatio> {
-        Some(3)
-    }
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct NarrowDefaultSibling {
         ///Default: `a`.
         #[serde(
             rename = "valid",
-            default = "default_57_valid",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -8990,7 +9003,7 @@ pub mod types {
         ///Default: `3`.
         #[serde(
             rename = "ratio",
-            default = "default_57_ratio",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -9005,14 +9018,14 @@ pub mod types {
         pub fraction: Option<NarrowDefaultSiblingConstraintFraction>,
     }
     impl NarrowDefaultSibling {
-        ///A `NarrowDefaultSibling` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `NarrowDefaultSibling` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
-                valid: self::default_57_valid(),
+                valid: None,
                 bad: None,
-                ratio: self::default_57_ratio(),
+                ratio: None,
                 fraction: None,
             }
         }
@@ -9043,17 +9056,20 @@ pub mod types {
             self.fraction = Some(value);
             self
         }
-    }
-    impl std::default::Default for NarrowDefaultSibling {
-        fn default() -> Self {
-            Self::new()
+        ///The `valid` member where it is set, else its schema default.
+        ///
+        ///Default: `a`.
+        #[must_use]
+        pub fn valid_or_default(&self) -> NarrowDefaultSiblingConstraintValid {
+            self.valid.unwrap_or(NarrowDefaultSiblingConstraintValid::A)
         }
-    }
-    fn default_57_valid() -> Option<NarrowDefaultSiblingConstraintValid> {
-        Some(NarrowDefaultSiblingConstraintValid::A)
-    }
-    fn default_57_ratio() -> Option<NarrowDefaultSiblingConstraintRatio> {
-        Some(3)
+        ///The `ratio` member where it is set, else its schema default.
+        ///
+        ///Default: `3`.
+        #[must_use]
+        pub fn ratio_or_default(&self) -> NarrowDefaultSiblingConstraintRatio {
+            self.ratio.unwrap_or(3)
+        }
     }
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum NarrowDefaultSiblingConstraintValid {
@@ -9156,7 +9172,7 @@ pub mod types {
         pub p: Option<MergedDefaultNarrowP>,
     }
     impl MergedDefaultNarrow {
-        ///A `MergedDefaultNarrow` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `MergedDefaultNarrow` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -9170,23 +9186,23 @@ pub mod types {
         }
     }
     pub type MergedDefaultNarrowP = String;
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct MergedDefaultBase {
         ///Default: `hello`.
         #[serde(
             rename = "p",
-            default = "default_65_p",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
         pub p: Option<MergedDefaultBaseP>,
     }
     impl MergedDefaultBase {
-        ///A `MergedDefaultBase` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `MergedDefaultBase` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
-            Self { p: self::default_65_p() }
+            Self { p: None }
         }
         ///Set the `p` member.
         #[must_use]
@@ -9194,33 +9210,32 @@ pub mod types {
             self.p = Some(value);
             self
         }
-    }
-    impl std::default::Default for MergedDefaultBase {
-        fn default() -> Self {
-            Self::new()
+        ///The `p` member where it is set, else its schema default.
+        ///
+        ///Default: `hello`.
+        #[must_use]
+        pub fn p_or_default(&self) -> MergedDefaultBaseP {
+            self.p.clone().unwrap_or_else(|| "hello".to_owned())
         }
     }
-    fn default_65_p() -> Option<MergedDefaultBaseP> {
-        Some("hello".to_owned())
-    }
     pub type MergedDefaultBaseP = String;
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct MergedDefaultOther {
         ///Default: `world`.
         #[serde(
             rename = "p",
-            default = "default_67_p",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
         pub p: Option<MergedDefaultOtherP>,
     }
     impl MergedDefaultOther {
-        ///A `MergedDefaultOther` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `MergedDefaultOther` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
-            Self { p: self::default_67_p() }
+            Self { p: None }
         }
         ///Set the `p` member.
         #[must_use]
@@ -9228,33 +9243,32 @@ pub mod types {
             self.p = Some(value);
             self
         }
-    }
-    impl std::default::Default for MergedDefaultOther {
-        fn default() -> Self {
-            Self::new()
+        ///The `p` member where it is set, else its schema default.
+        ///
+        ///Default: `world`.
+        #[must_use]
+        pub fn p_or_default(&self) -> MergedDefaultOtherP {
+            self.p.clone().unwrap_or_else(|| "world".to_owned())
         }
     }
-    fn default_67_p() -> Option<MergedDefaultOtherP> {
-        Some("world".to_owned())
-    }
     pub type MergedDefaultOtherP = String;
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct MergedDefault {
         ///Default: `hello`.
         #[serde(
             rename = "p",
-            default = "default_69_p",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
         pub p: Option<MergedDefaultNarrowP>,
     }
     impl MergedDefault {
-        ///A `MergedDefault` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `MergedDefault` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
-            Self { p: self::default_69_p() }
+            Self { p: None }
         }
         ///Set the `p` member.
         #[must_use]
@@ -9262,32 +9276,31 @@ pub mod types {
             self.p = Some(value);
             self
         }
-    }
-    impl std::default::Default for MergedDefault {
-        fn default() -> Self {
-            Self::new()
+        ///The `p` member where it is set, else its schema default.
+        ///
+        ///Default: `hello`.
+        #[must_use]
+        pub fn p_or_default(&self) -> MergedDefaultNarrowP {
+            self.p.clone().unwrap_or_else(|| "hello".to_owned())
         }
     }
-    fn default_69_p() -> Option<MergedDefaultNarrowP> {
-        Some("hello".to_owned())
-    }
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct MergedDefaultSibling {
         ///Default: `hello`.
         #[serde(
             rename = "p",
-            default = "default_70_p",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
         pub p: Option<MergedDefaultNarrowP>,
     }
     impl MergedDefaultSibling {
-        ///A `MergedDefaultSibling` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `MergedDefaultSibling` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
-            Self { p: self::default_70_p() }
+            Self { p: None }
         }
         ///Set the `p` member.
         #[must_use]
@@ -9295,32 +9308,31 @@ pub mod types {
             self.p = Some(value);
             self
         }
-    }
-    impl std::default::Default for MergedDefaultSibling {
-        fn default() -> Self {
-            Self::new()
+        ///The `p` member where it is set, else its schema default.
+        ///
+        ///Default: `hello`.
+        #[must_use]
+        pub fn p_or_default(&self) -> MergedDefaultNarrowP {
+            self.p.clone().unwrap_or_else(|| "hello".to_owned())
         }
     }
-    fn default_70_p() -> Option<MergedDefaultNarrowP> {
-        Some("hello".to_owned())
-    }
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct MergedDefaultClash {
         ///Default: `hello`.
         #[serde(
             rename = "p",
-            default = "default_73_p",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
         pub p: Option<MergedDefaultOtherP>,
     }
     impl MergedDefaultClash {
-        ///A `MergedDefaultClash` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `MergedDefaultClash` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
-            Self { p: self::default_73_p() }
+            Self { p: None }
         }
         ///Set the `p` member.
         #[must_use]
@@ -9328,14 +9340,13 @@ pub mod types {
             self.p = Some(value);
             self
         }
-    }
-    impl std::default::Default for MergedDefaultClash {
-        fn default() -> Self {
-            Self::new()
+        ///The `p` member where it is set, else its schema default.
+        ///
+        ///Default: `hello`.
+        #[must_use]
+        pub fn p_or_default(&self) -> MergedDefaultOtherP {
+            self.p.clone().unwrap_or_else(|| "hello".to_owned())
         }
-    }
-    fn default_73_p() -> Option<MergedDefaultOtherP> {
-        Some("hello".to_owned())
     }
     #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct ForbiddenProperty {
@@ -9348,7 +9359,7 @@ pub mod types {
         pub x: Option<ForbiddenPropertyX>,
     }
     impl ForbiddenProperty {
-        ///A `ForbiddenProperty` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `ForbiddenProperty` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -9397,7 +9408,7 @@ pub mod types {
         pub x: super::support::Nullable<NullOnlyPropertyX>,
     }
     impl NullOnlyProperty {
-        ///A `NullOnlyProperty` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `NullOnlyProperty` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -9447,7 +9458,7 @@ pub mod types {
             )
         }
     }
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct OptionalFields {
         #[serde(
             rename = "name",
@@ -9501,7 +9512,7 @@ pub mod types {
         ///Default: `red`.
         #[serde(
             rename = "colour",
-            default = "default_79_colour",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -9521,7 +9532,7 @@ pub mod types {
         pub maybe: super::support::Nullable<OptionalFieldsMaybe>,
     }
     impl OptionalFields {
-        ///A `OptionalFields` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `OptionalFields` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -9533,7 +9544,7 @@ pub mod types {
                 mode: None,
                 nested: None,
                 choice: None,
-                colour: self::default_79_colour(),
+                colour: None,
                 anything: None,
                 maybe: super::support::Nullable::Absent,
             }
@@ -9607,14 +9618,13 @@ pub mod types {
             self.maybe = super::support::Nullable::Null;
             self
         }
-    }
-    impl std::default::Default for OptionalFields {
-        fn default() -> Self {
-            Self::new()
+        ///The `colour` member where it is set, else its schema default.
+        ///
+        ///Default: `red`.
+        #[must_use]
+        pub fn colour_or_default(&self) -> OptionalFieldsColour {
+            self.colour.clone().unwrap_or_else(|| "red".to_owned())
         }
-    }
-    fn default_79_colour() -> Option<OptionalFieldsColour> {
-        Some("red".to_owned())
     }
     pub type OptionalFieldsName = String;
     pub type OptionalFieldsCount = i64;
@@ -10014,7 +10024,7 @@ pub mod types {
     #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct BroadOwner {}
     impl BroadOwner {
-        ///A `BroadOwner` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `BroadOwner` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -10464,7 +10474,7 @@ pub mod types {
         pub mixed_content: Option<MixedContent>,
     }
     impl User {
-        ///A `User` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `User` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(id: UserId, name: UserName) -> Self {
@@ -10635,7 +10645,7 @@ pub mod types {
         pub children: Option<TreeNodeChildren>,
     }
     impl TreeNode {
-        ///A `TreeNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `TreeNode` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(value: TreeNodeValue) -> Self {
@@ -10673,7 +10683,7 @@ pub mod types {
         pub item: Option<Item>,
     }
     impl Category {
-        ///A `Category` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `Category` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(name: CategoryName) -> Self {
@@ -10700,7 +10710,7 @@ pub mod types {
         pub category: Option<Box<Category>>,
     }
     impl Item {
-        ///A `Item` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `Item` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(label: ItemLabel) -> Self {
@@ -10720,7 +10730,7 @@ pub mod types {
         pub additional: BTreeMap<String, Dict>,
     }
     impl Dict {
-        ///A `Dict` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `Dict` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -10747,7 +10757,7 @@ pub mod types {
         pub parent: super::support::Nullable<Box<AliasNode>>,
     }
     impl AliasNode {
-        ///A `AliasNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `AliasNode` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(value: AliasNodeValue) -> Self {
@@ -11383,7 +11393,7 @@ pub mod types {
         pub parent: super::support::Nullable<Box<AliasNode>>,
     }
     impl MaybeAliasNode {
-        ///A `MaybeAliasNode` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `MaybeAliasNode` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(value: AliasNodeValue) -> Self {
@@ -11429,7 +11439,7 @@ pub mod types {
         ///Default: `red`.
         #[serde(
             rename = "color",
-            default = "default_157_color",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -11437,7 +11447,7 @@ pub mod types {
         ///Default: `true`.
         #[serde(
             rename = "enabled",
-            default = "default_157_enabled",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -11445,7 +11455,7 @@ pub mod types {
         ///Default: `1.5`.
         #[serde(
             rename = "ratio",
-            default = "default_157_ratio",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -11464,24 +11474,24 @@ pub mod types {
         ///Default: `auto`.
         #[serde(
             rename = "mode",
-            default = "default_157_mode",
+            default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
         pub mode: Option<Mode>,
     }
     impl Settings {
-        ///A `Settings` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `Settings` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(retries: SettingsRetries) -> Self {
             Self {
-                color: self::default_157_color(),
-                enabled: self::default_157_enabled(),
-                ratio: self::default_157_ratio(),
+                color: None,
+                enabled: None,
+                ratio: None,
                 retries,
                 wide: None,
-                mode: self::default_157_mode(),
+                mode: None,
             }
         }
         ///Set the `color` member.
@@ -11514,24 +11524,93 @@ pub mod types {
             self.mode = Some(value);
             self
         }
-    }
-    fn default_157_color() -> Option<SettingsColor> {
-        Some("red".to_owned())
-    }
-    fn default_157_enabled() -> Option<SettingsEnabled> {
-        Some(true)
-    }
-    fn default_157_ratio() -> Option<SettingsRatio> {
-        Some(1.5)
-    }
-    fn default_157_mode() -> Option<Mode> {
-        Some(Mode::Auto)
+        ///The `color` member where it is set, else its schema default.
+        ///
+        ///Default: `red`.
+        #[must_use]
+        pub fn color_or_default(&self) -> SettingsColor {
+            self.color.clone().unwrap_or_else(|| "red".to_owned())
+        }
+        ///The `enabled` member where it is set, else its schema default.
+        ///
+        ///Default: `true`.
+        #[must_use]
+        pub fn enabled_or_default(&self) -> SettingsEnabled {
+            self.enabled.unwrap_or(true)
+        }
+        ///The `ratio` member where it is set, else its schema default.
+        ///
+        ///Default: `1.5`.
+        #[must_use]
+        pub fn ratio_or_default(&self) -> SettingsRatio {
+            self.ratio.unwrap_or(1.5)
+        }
+        ///The `mode` member where it is set, else its schema default.
+        ///
+        ///Default: `auto`.
+        #[must_use]
+        pub fn mode_or_default(&self) -> Mode {
+            self.mode.unwrap_or(Mode::Auto)
+        }
     }
     pub type SettingsColor = String;
     pub type SettingsEnabled = bool;
     pub type SettingsRatio = f64;
     pub type SettingsRetries = i64;
     pub type SettingsWide = i32;
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+    pub struct DefaultAccessorClash {
+        ///Default: `x`.
+        #[serde(
+            rename = "with_b",
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub with_b: Option<DefaultAccessorClashWithB>,
+        #[serde(
+            rename = "b_or_default",
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub b_or_default: Option<DefaultAccessorClashBOrDefault>,
+    }
+    impl DefaultAccessorClash {
+        ///A `DefaultAccessorClash` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
+        #[allow(clippy::too_many_arguments)]
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                with_b: None,
+                b_or_default: None,
+            }
+        }
+        ///Set the `with_b` member.
+        #[must_use]
+        pub fn with_with_b(mut self, value: DefaultAccessorClashWithB) -> Self {
+            self.with_b = Some(value);
+            self
+        }
+        ///Set the `b_or_default` member.
+        #[must_use]
+        pub fn with_b_or_default(
+            mut self,
+            value: DefaultAccessorClashBOrDefault,
+        ) -> Self {
+            self.b_or_default = Some(value);
+            self
+        }
+        ///The `with_b` member where it is set, else its schema default.
+        ///
+        ///Default: `x`.
+        #[must_use]
+        pub fn with_b_or_default_f2ed1d4f(&self) -> DefaultAccessorClashWithB {
+            self.with_b.clone().unwrap_or_else(|| "x".to_owned())
+        }
+    }
+    pub type DefaultAccessorClashWithB = String;
+    pub type DefaultAccessorClashBOrDefault = String;
     #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
     pub struct Headers {
         #[serde(
@@ -11545,7 +11624,7 @@ pub mod types {
         pub additional: BTreeMap<String, HeadersValue>,
     }
     impl Headers {
-        ///A `Headers` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `Headers` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -11575,7 +11654,7 @@ pub mod types {
         pub additional: BTreeMap<String, TagsValue>,
     }
     impl Tags {
-        ///A `Tags` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `Tags` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -11604,7 +11683,7 @@ pub mod types {
         pub additional_0093371c: BTreeMap<String, BagValue>,
     }
     impl Bag {
-        ///A `Bag` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `Bag` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -11660,7 +11739,7 @@ pub mod types {
         pub owner: Option<AccountOwner>,
     }
     impl Account {
-        ///A `Account` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `Account` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(id: AccountBaseId, label: AccountMember1Label) -> Self {
@@ -11809,7 +11888,7 @@ pub mod types {
         pub note: Option<XmlReceiptNote>,
     }
     impl XmlReceipt {
-        ///A `XmlReceipt` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `XmlReceipt` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(code: XmlReceiptCode) -> Self {
@@ -11840,7 +11919,7 @@ pub mod types {
         pub note: Option<JsonMetaNote>,
     }
     impl JsonMeta {
-        ///A `JsonMeta` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `JsonMeta` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(id: JsonMetaId, sku: JsonMetaSku) -> Self {
@@ -11907,7 +11986,7 @@ pub mod types {
         pub tags: Option<UploadFileBodyTags>,
     }
     impl UploadFileBody {
-        ///A `UploadFileBody` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `UploadFileBody` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(file: UploadFileBodyFile, caption: UploadFileBodyCaption) -> Self {
@@ -12084,7 +12163,7 @@ pub mod types {
         pub thumb: super::support::Nullable<PostNullablePartsBodyThumb>,
     }
     impl PostNullablePartsBody {
-        ///A `PostNullablePartsBody` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `PostNullablePartsBody` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(file: Option<PostNullablePartsBodyFile>) -> Self {
@@ -12173,7 +12252,7 @@ pub mod types {
         pub additional: BTreeMap<String, SubmitFormAdditionalBodyAdditional>,
     }
     impl SubmitFormAdditionalBody {
-        ///A `SubmitFormAdditionalBody` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `SubmitFormAdditionalBody` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(a: SubmitFormAdditionalBodyA) -> Self {
@@ -12207,7 +12286,7 @@ pub mod types {
         pub additional: BTreeMap<String, SubmitNullableFormAdditionalBodyAdditional>,
     }
     impl SubmitNullableFormAdditionalBody {
-        ///A `SubmitNullableFormAdditionalBody` with every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset. `Default` builds the same value.
+        ///A `SubmitNullableFormAdditionalBody` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
@@ -12243,7 +12322,7 @@ pub mod types {
         pub additional: BTreeMap<String, UploadAdditionalBodyAdditional>,
     }
     impl UploadAdditionalBody {
-        ///A `UploadAdditionalBody` holding the required members given, in declaration order, and every optional member as decoding an absent one sets it: its schema `default` where it has one, else unset.
+        ///A `UploadAdditionalBody` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
         #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new(caption: UploadAdditionalBodyCaption) -> Self {

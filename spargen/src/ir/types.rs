@@ -527,6 +527,18 @@ impl Field {
         self.required && !self.read_only
     }
 
+    /// The schema `default` an absent member stands for, when it is [applied]: the value its
+    /// generated `{field}_or_default` accessor returns for an absent member. Decoding and `new`
+    /// leave the member absent either way.
+    ///
+    /// [applied]: FieldDefault::applied
+    pub(crate) fn applied_default(&self) -> Option<&DefaultValue> {
+        if !self.decodes_optional() {
+            return None;
+        }
+        self.default.as_ref()?.applied.as_ref()
+    }
+
     /// Whether `required` is relaxed for the member: it is `required` and [`Self::decodes_optional`]
     /// anyway. `W015` reports each one.
     pub(crate) fn requiredness_relaxed(&self) -> bool {
@@ -586,8 +598,8 @@ impl XmlField {
 /// A field's JSON Schema `default` disposition. Every `default` is given exactly one of three
 /// dispositions — never silently dropped:
 ///
-/// * a representable scalar wired through serde (`applied` is `Some`), which also documents the
-///   value in rustdoc;
+/// * a representable scalar an optional field's generated `{field}_or_default` accessor returns
+///   for an absent member (`applied` is `Some`), which also documents the value in rustdoc;
 /// * a representable scalar on a required (or nullable) field, documented in rustdoc only
 ///   (`applied` is `None`); or
 /// * a non-representable default (object/array/null/heterogeneous or scalar-type mismatch),
@@ -596,8 +608,9 @@ impl XmlField {
 pub(crate) struct FieldDefault {
     /// The rustdoc note line describing the default (e.g. ``Default: `active`.``).
     pub(crate) doc_note: String,
-    /// The scalar to wire through a generated serde default provider, when the default is
-    /// representable *and* the field is a plain optional (non-required, non-nullable) scalar.
+    /// The scalar the field's `{field}_or_default` accessor returns for an absent member, when the
+    /// default is representable *and* the field is a plain optional (non-required, non-nullable)
+    /// scalar.
     pub(crate) applied: Option<DefaultValue>,
     /// The `default` keyword that declared the value, so a disposition decided after the field's
     /// own lowering — an intersection that narrows the field's type to one the value is not a

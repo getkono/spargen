@@ -50,6 +50,12 @@ pub(crate) struct Names {
     /// the overflow field, so a declared property spelled `{field}_null` keeps its name and this
     /// stem takes a pointer-seeded suffix instead, and every `with_` setter stays distinct.
     pub(crate) null_setters: HashMap<(TypeId, String), Ident>,
+    /// The `{field}_or_default` accessor per `(type, wire property name)` of every optional member
+    /// whose schema `default` is [applied](crate::ir::FieldDefault::applied). Allocated in the
+    /// struct's method scope, which holds `new` and every `with_` setter the struct emits, so a
+    /// setter keeps its name and an accessor that would spell one (`with_b_or_default`, of a
+    /// member `with_b`, beside a member `b_or_default`) takes a pointer-seeded suffix instead.
+    pub(crate) default_accessors: HashMap<(TypeId, String), Ident>,
     /// Variant name per `(type, wire variant value)`.
     pub(crate) variants: HashMap<(TypeId, String), Ident>,
     /// The variant holding any unlisted string, per open string enum, and the one holding any
@@ -792,6 +798,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
                         .null_setters
                         .insert(key, scope.alloc(&stem, IdentRole::Field, &provenance));
                 }
+                allocate_default_accessors(id, def, object, &mut names);
             }
             TypeKind::Enum(enumeration) => {
                 let mut scope = Scope::default();
@@ -1264,6 +1271,76 @@ fn allocate_parameters(
         .into_iter()
         .map(|ident| ident.expect("every parameter is either positional or in the bundle"))
         .collect()
+}
+
+/// Allocate the `{field}_or_default` accessor of every member of struct `id` with an
+/// [applied default](crate::ir::Field::applied_default), once its fields, overflow field and
+/// explicit-`null` stems are in `names`. The accessors share the struct's inherent method
+/// namespace with `new` and the `with_` setters codegen's `emit_struct_constructors` emits — one
+/// per member `new` does not take, one per explicit-`null` stem, and one for the overflow map — so
+/// those are reserved first and keep their spellings. One ranked batch, ranked by the field's
+/// spelling, which is unique in the struct, so the outcome does not depend on the order the spec
+/// lists the properties in.
+fn allocate_default_accessors(
+    id: TypeId,
+    def: &crate::ir::TypeDef,
+    object: &crate::ir::Struct,
+    names: &mut Names,
+) {
+    let defaulted: Vec<&crate::ir::Field> = object
+        .fields
+        .iter()
+        .filter(|field| field.applied_default().is_some())
+        .collect();
+    if defaulted.is_empty() {
+        return;
+    }
+    let mut methods = Scope::default();
+    methods.reserve_exact("new");
+    for field in object.fields.iter().filter(|field| !field.constructed()) {
+        let key = (id, field.name.wire.clone());
+        methods.reserve_exact(&format!("with_{}", names.fields[&key].unraw()));
+        if let Some(stem) = names.null_setters.get(&key) {
+            methods.reserve_exact(&format!("with_{}", stem.unraw()));
+        }
+    }
+    if let Some(overflow) = names.struct_overflow.get(&id) {
+        methods.reserve_exact(&format!("with_{}", overflow.unraw()));
+    }
+    let fields: Vec<&Ident> = defaulted
+        .iter()
+        .map(|field| &names.fields[&(id, field.name.wire.clone())])
+        .collect();
+    let stems: Vec<String> = fields
+        .iter()
+        .map(|field| format!("{}_or_default", field.unraw()))
+        .collect();
+    let seeds: Vec<crate::diag::JsonPointer> = defaulted
+        .iter()
+        .map(|field| {
+            def.provenance
+                .pointer
+                .push("properties")
+                .push(&field.name.wire)
+                .push("default")
+        })
+        .collect();
+    let requests: Vec<_> = fields
+        .iter()
+        .zip(&stems)
+        .zip(&seeds)
+        .map(|((field, stem), seed)| RankedRequest {
+            hint: stem.as_str(),
+            provenance: seed,
+            rank: field.as_str(),
+        })
+        .collect();
+    let accessors = methods.alloc_ranked(&requests, IdentRole::Field);
+    for (field, accessor) in defaulted.iter().zip(accessors) {
+        names
+            .default_accessors
+            .insert((id, field.name.wire.clone()), accessor);
+    }
 }
 
 /// Allocate the explicit-`null` setter, `{field}_null`, of every parameter of `operation` that
