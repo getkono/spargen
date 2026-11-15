@@ -119,8 +119,8 @@ fn a_discriminated_union_dispatches_by_tag_and_refuses_a_foreign_one() {
             concat!(
                 r#"}else{map.insert("kind".to_owned(),serde_json::Value::String(tag.to_owned()),);}}"#,
                 r#"ifnon_finite{#[derive(serde::Serialize)]structTagged<'a,T>{#[serde(rename="kind")]tag:&'astr,#[serde(flatten)]inner:&'aT,}"#,
-                r#"returnmatchself{Event::Tick(inner)=>{matchtag.filter(|_|!wrote_tag){Some(tag)=>Tagged{tag,inner}.serialize(serializer),None=>inner.serialize(serializer),}}"#,
-                r#"Event::Stop(inner)=>{matchtag.filter(|_|!wrote_tag){Some(tag)=>Tagged{tag,inner}.serialize(serializer),None=>inner.serialize(serializer),}}};}"#,
+                r#"returnmatchself{Self::Tick(inner)=>{matchtag.filter(|_|!wrote_tag){Some(tag)=>Tagged{tag,inner}.serialize(serializer),None=>inner.serialize(serializer),}}"#,
+                r#"Self::Stop(inner)=>{matchtag.filter(|_|!wrote_tag){Some(tag)=>Tagged{tag,inner}.serialize(serializer),None=>inner.serialize(serializer),}}};}"#,
                 r#"value.serialize(serializer)}}"#,
             ),
         ],

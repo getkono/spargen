@@ -10762,16 +10762,14 @@ pub mod types {
                     inner: &'a T,
                 }
                 return match self {
-                    MixedContent::MixedContentVariant0(inner) => {
-                        inner.serialize(serializer)
-                    }
-                    MixedContent::ContentFile(inner) => {
+                    Self::MixedContentVariant0(inner) => inner.serialize(serializer),
+                    Self::ContentFile(inner) => {
                         match tag.filter(|_| !wrote_tag) {
                             Some(tag) => Tagged { tag, inner }.serialize(serializer),
                             None => inner.serialize(serializer),
                         }
                     }
-                    MixedContent::ContentLink(inner) => {
+                    Self::ContentLink(inner) => {
                         match tag.filter(|_| !wrote_tag) {
                             Some(tag) => Tagged { tag, inner }.serialize(serializer),
                             None => inner.serialize(serializer),
@@ -11375,13 +11373,13 @@ pub mod types {
                     inner: &'a T,
                 }
                 return match self {
-                    Pet::Cat(inner) => {
+                    Self::Cat(inner) => {
                         match tag.filter(|_| !wrote_tag) {
                             Some(tag) => Tagged { tag, inner }.serialize(serializer),
                             None => inner.serialize(serializer),
                         }
                     }
-                    Pet::Dog(inner) => {
+                    Self::Dog(inner) => {
                         match tag.filter(|_| !wrote_tag) {
                             Some(tag) => Tagged { tag, inner }.serialize(serializer),
                             None => inner.serialize(serializer),
@@ -11630,21 +11628,19 @@ pub mod types {
                     inner: &'a T,
                 }
                 return match self {
-                    LooseAnimal::Cat(inner) => {
+                    Self::Cat(inner) => {
                         match tag.filter(|_| !wrote_tag) {
                             Some(tag) => Tagged { tag, inner }.serialize(serializer),
                             None => inner.serialize(serializer),
                         }
                     }
-                    LooseAnimal::Dog(inner) => {
+                    Self::Dog(inner) => {
                         match tag.filter(|_| !wrote_tag) {
                             Some(tag) => Tagged { tag, inner }.serialize(serializer),
                             None => inner.serialize(serializer),
                         }
                     }
-                    LooseAnimal::LooseAnimalVariant2(inner) => {
-                        inner.serialize(serializer)
-                    }
+                    Self::LooseAnimalVariant2(inner) => inner.serialize(serializer),
                 };
             }
             value.serialize(serializer)
@@ -11873,13 +11869,13 @@ pub mod types {
                     inner: &'a T,
                 }
                 return match self {
-                    Channel::Webhook(inner) => {
+                    Self::Webhook(inner) => {
                         match tag.filter(|_| !wrote_tag) {
                             Some(tag) => Tagged { tag, inner }.serialize(serializer),
                             None => inner.serialize(serializer),
                         }
                     }
-                    Channel::Apprise(inner) => {
+                    Self::Apprise(inner) => {
                         match tag.filter(|_| !wrote_tag) {
                             Some(tag) => Tagged { tag, inner }.serialize(serializer),
                             None => inner.serialize(serializer),

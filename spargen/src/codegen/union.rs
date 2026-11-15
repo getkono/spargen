@@ -101,13 +101,15 @@ pub(super) fn emit_union(
             let unknown_non_finite_arm = unknown.map(|unknown| {
                 quote! { #ident::#unknown { .. } => false, }
             });
+            // These arms share a block with the `Tagged` helper below, which shadows a union of
+            // that name, so they name the union as `Self`.
             let direct_arms = union.variants.iter().map(|variant| {
                 let variant_ident = union_variant_ident(names, id, variant);
                 if discriminated_dispatch(variant).tags.is_empty() {
-                    quote! { #ident::#variant_ident(inner) => inner.serialize(serializer), }
+                    quote! { Self::#variant_ident(inner) => inner.serialize(serializer), }
                 } else {
                     quote! {
-                        #ident::#variant_ident(inner) => match tag.filter(|_| !wrote_tag) {
+                        Self::#variant_ident(inner) => match tag.filter(|_| !wrote_tag) {
                             Some(tag) => Tagged { tag, inner }.serialize(serializer),
                             None => inner.serialize(serializer),
                         },
@@ -115,7 +117,7 @@ pub(super) fn emit_union(
                 }
             });
             let unknown_direct_arm = unknown.map(|unknown| {
-                quote! { #ident::#unknown { value, .. } => value.serialize(serializer), }
+                quote! { Self::#unknown { value, .. } => value.serialize(serializer), }
             });
             let wrote_tag_decl = tagged_variant.then(|| {
                 quote! { let wrote_tag = value.get(#tag_field).is_some(); }
