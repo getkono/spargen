@@ -601,13 +601,7 @@ fn emit_overflow(
         .struct_overflow
         .get(&id)
         .expect("overflow field name allocated");
-    let mut declared: Vec<String> = Vec::new();
-    for field in &object.fields {
-        let name = serde_wire(field);
-        if !declared.contains(&name) {
-            declared.push(name);
-        }
-    }
+    let declared = overflow_skipped_keys(object);
     if declared.is_empty() {
         return (
             quote! { #[serde(flatten)] pub #overflow: BTreeMap<String, #ty>, },
@@ -637,6 +631,19 @@ fn emit_overflow(
         }
     };
     (field, serialize)
+}
+
+/// The overflow keys struct `object`'s serde encoding leaves out: each declared member's serde
+/// name, once, in declaration order. Empty when the struct declares no member.
+fn overflow_skipped_keys(object: &crate::ir::Struct) -> Vec<String> {
+    let mut declared: Vec<String> = Vec::new();
+    for field in &object.fields {
+        let name = serde_wire(field);
+        if !declared.contains(&name) {
+            declared.push(name);
+        }
+    }
+    declared
 }
 
 /// The name serde writes and reads struct field `field` under. An `xml.name`/`xml.attribute` hint

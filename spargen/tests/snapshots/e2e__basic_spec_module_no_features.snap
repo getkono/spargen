@@ -21385,7 +21385,14 @@ Response `409`: binary error*/
             support::serialize_form_body(
                     body,
                     FORM_PROPERTIES,
-                    Some((support::FormMode::Text, body.additional.len())),
+                    Some((
+                        support::FormMode::Text,
+                        body
+                            .additional
+                            .keys()
+                            .filter(|key| !matches!(key.as_str(), "a"))
+                            .count(),
+                    )),
                 )
                 .map_err(support::Error::request_construction)?
         };
@@ -21481,7 +21488,18 @@ Response `409`: binary error*/
                     FORM_PROPERTIES,
                     Some((
                         support::FormMode::Text,
-                        body.as_ref().map_or(0, |value| value.additional.len()),
+                        body
+                            .as_ref()
+                            .map_or(
+                                0,
+                                |value| {
+                                    value
+                                        .additional
+                                        .keys()
+                                        .filter(|key| !matches!(key.as_str(), "a"))
+                                        .count()
+                                },
+                            ),
                     )),
                 )
                 .map_err(support::Error::request_construction)?
