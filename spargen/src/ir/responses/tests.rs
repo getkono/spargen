@@ -33,57 +33,75 @@ fn stream_resp(body: Option<u32>) -> Response {
     }
 }
 
-/// A bodied octet response whose key is announced in `Accept`, as lowering records a CBOR key.
-fn announced(key: &str) -> Response {
+/// A bodied response whose chosen key's essence lowering records for `Accept`.
+fn announced(media: super::MediaType, key: &str) -> Response {
     Response {
-        media: Some(super::MediaType::OctetStream),
+        media: Some(media),
         accept: Some(key.to_owned()),
         ..resp(Some(1))
     }
 }
 
-/// `Accept` names the success side's announced keys, once each in document order, only while
-/// every bodied success response announces one; bodyless and error responses do not count.
+/// `Accept` names every bodied success response's chosen key, whatever its media, once each in
+/// document order; bodyless and error responses do not count, and a bodied success with no
+/// recorded key leaves the header unset rather than refuse that response.
 #[test]
-fn accept_names_the_announced_success_keys_only_when_every_bodied_success_announces_one() {
+fn accept_names_every_bodied_success_key_once_in_document_order() {
+    use super::MediaType::{EventStream, Json, OctetStream, Text};
     let responses =
         |by_status: Vec<(StatusSpec, Response)>, default| Responses { by_status, default };
+    let json = "application/json";
+    let sse = "text/event-stream";
     let cbor = "application/cbor";
     let cose = "application/cose+cbor";
     assert_eq!(
-        responses(vec![(StatusSpec::Exact(200), announced(cbor))], None).accept(),
-        Some(cbor.to_owned())
+        responses(vec![(StatusSpec::Exact(200), announced(Json, json))], None).accept(),
+        Some(json.to_owned())
+    );
+    assert_eq!(
+        responses(
+            vec![(
+                StatusSpec::Exact(200),
+                Response {
+                    stream: Some(super::Framing::Sse),
+                    ..announced(EventStream, sse)
+                }
+            )],
+            None,
+        )
+        .accept(),
+        Some(sse.to_owned())
     );
     assert_eq!(
         responses(
             vec![
-                (StatusSpec::Exact(200), announced(cose)),
-                (StatusSpec::Exact(201), announced(cbor)),
-                (StatusSpec::Exact(202), announced(cose)),
+                (StatusSpec::Exact(200), announced(OctetStream, cose)),
+                (StatusSpec::Exact(201), announced(OctetStream, cbor)),
+                (StatusSpec::Exact(202), announced(OctetStream, cose)),
                 (StatusSpec::Exact(204), resp(None)),
-                (StatusSpec::Exact(404), resp(Some(2))),
+                (StatusSpec::Exact(404), announced(Json, json)),
             ],
-            Some(resp(Some(3))),
+            Some(announced(Text, "text/plain")),
         )
         .accept(),
         Some(format!("{cose}, {cbor}"))
     );
-    // A JSON success beside the CBOR one would be refused by `Accept: application/cbor`.
+    // A JSON success beside a CBOR one asks for both, in document order.
     assert_eq!(
         responses(
             vec![
-                (StatusSpec::Exact(200), announced(cbor)),
-                (StatusSpec::Exact(201), resp(Some(2))),
+                (StatusSpec::Exact(200), announced(Json, json)),
+                (StatusSpec::Exact(201), announced(OctetStream, cbor)),
             ],
             None,
         )
         .accept(),
-        None
+        Some(format!("{json}, {cbor}"))
     );
     // `default` is the success source only when no 2xx is declared.
     assert_eq!(
-        responses(Vec::new(), Some(announced(cbor))).accept(),
-        Some(cbor.to_owned())
+        responses(Vec::new(), Some(announced(Json, json))).accept(),
+        Some(json.to_owned())
     );
     assert_eq!(
         responses(vec![(StatusSpec::Exact(204), resp(None))], None).accept(),
@@ -92,8 +110,20 @@ fn accept_names_the_announced_success_keys_only_when_every_bodied_success_announ
     assert_eq!(
         responses(
             vec![
-                (StatusSpec::Exact(200), resp(Some(1))),
-                (StatusSpec::Exact(409), announced(cbor)),
+                (StatusSpec::Exact(204), resp(None)),
+                (StatusSpec::Exact(409), announced(Json, json)),
+            ],
+            None,
+        )
+        .accept(),
+        None
+    );
+    // A bodied success with no recorded key: the header would refuse it, so none is sent.
+    assert_eq!(
+        responses(
+            vec![
+                (StatusSpec::Exact(200), announced(Json, json)),
+                (StatusSpec::Exact(201), resp(Some(2))),
             ],
             None,
         )
