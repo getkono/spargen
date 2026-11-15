@@ -382,7 +382,8 @@ pub(crate) const SERVERS_MODULE_NAMES: &[&str] = &["Default", "Into", "String"];
 /// takes, `ClientConfig` and `TransportConfig` what `Client::with_config`'s closure configures,
 /// `HttpBody` is the body of every request and
 /// response an `HttpBackend` handles, `MaybeSend` and `MaybeSync` bound the body `HttpBody::wrap`
-/// adopts, and the taxonomy's payload types are matched on.
+/// adopts, the taxonomy's payload types are matched on, and `UnknownValue` and `UnknownPayload` are
+/// what an open string enum's and an open discriminated union's `Unknown` variant holds.
 /// Anything short of that leaves a generated signature a caller can call but cannot write down.
 /// `ApiErrorBody` is the bound `Error::api_body` needs, implemented by the uniform-body error enum,
 /// the single-body newtype, and the uninhabited shape (an enum whose bodies are different generated
@@ -447,6 +448,8 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "TotalTimeout",
     "TransportConfig",
     "TransportError",
+    "UnknownPayload",
+    "UnknownValue",
     "UnknownVariant",
     "exponential_backoff",
     "full_jitter",

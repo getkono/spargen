@@ -60,6 +60,10 @@ pub(crate) fn runtime_files() -> &'static [SupportFile] {
             contents: include_str!("runtime/nullable.rs"),
         },
         SupportFile {
+            name: "open.rs",
+            contents: include_str!("runtime/open.rs"),
+        },
+        SupportFile {
             name: "parameter.rs",
             contents: include_str!("runtime/parameter.rs"),
         },

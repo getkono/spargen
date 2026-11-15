@@ -60,6 +60,9 @@ mod header;
 mod middleware;
 // The tri-state of an optional, nullable member; it needs nothing beyond `serde`.
 mod nullable;
+// The catch-alls of an open string enum and an open discriminated union; they need nothing beyond
+// `serde` and `serde_json`.
+mod open;
 mod paginate;
 mod parameter;
 mod request;
@@ -112,6 +115,7 @@ pub use error::{
 pub use header::{parse_header, require_header, HeaderError, HeaderShape};
 pub use middleware::{Middleware, MiddlewareBackend, Next};
 pub use nullable::Nullable;
+pub use open::{deserialize_open, parse_open, OpenEnum, OpenUnion, UnknownPayload, UnknownValue};
 pub use paginate::{next_link, LinkPaginator};
 pub use parameter::{
     cookie_pair, encode, holds_non_finite, path_segment, serialize_deep_object,
