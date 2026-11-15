@@ -66,8 +66,8 @@ fn open_narrowing_opens_exactly_the_positions_it_applies_to() {
         "without the option no set is open:\n{closed}"
     );
 
-    // Exactly the positions it applies to open: the `200`, `403`, `404`, and `409` bodies, and the
-    // `424`/`425` `kind`, whose union narrows to one branch. The `{enum: [a, b, c]}` members of
+    // Exactly the positions it applies to open: the `200`, `403`, `404`, and `409` bodies, the
+    // `424`/`425` `kind`, whose union narrows to one branch, and the `430` body's `detail`. The `{enum: [a, b, c]}` members of
     // `424` and `425` open in place too, as intermediates no field uses, which the output does not
     // carry (#924). The union members of `422`, `423`, `426`, and `427`, which keep two branches,
     // are met first in either order (#678), so those members meet them into closed branch sets as
@@ -77,7 +77,7 @@ fn open_narrowing_opens_exactly_the_positions_it_applies_to() {
     let (_, _, open) = generate_narrowing(true);
     assert_eq!(
         open.matches("pub fn as_str(&self) -> &str").count(),
-        6,
+        7,
         "{open}"
     );
 }

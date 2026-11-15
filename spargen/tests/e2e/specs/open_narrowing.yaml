@@ -165,6 +165,14 @@ paths:
                       - { type: string, format: uuid }
                       - { enum: ["00000000-0000-0000-0000-000000000001"] }
                       - { type: string }
+        "430":
+          description: an optional, defaulted member whose narrowing opens, read through its accessor
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties: { detail: { enum: [a, b], default: a } }
 components:
   schemas:
     Problem:
