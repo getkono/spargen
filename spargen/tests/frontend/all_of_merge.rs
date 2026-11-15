@@ -904,3 +904,195 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
         assert_eq!(reported(&without).len(), count, "{without:#?}");
     }
 }
+
+/// The `allOf` whose second member closes the merge: `Base` contributes `id`, which the member
+/// with `additionalProperties: false` does not declare. `closing` is that member's keywords.
+fn closed_merge_spec(closing: &str) -> String {
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths: {{}}
+components:
+  schemas:
+    Base: {{ type: object, required: [id], properties: {{ id: {{ type: string }} }} }}
+    S:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - {closing}
+"##
+    )
+}
+
+/// The pointer and message of each `W011` a report carries about `additionalProperties: false`
+/// closing a merge.
+fn closed_merge_warnings(report: &Report) -> Vec<(String, String)> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|d| {
+            d.code == Code::DeclarationHasNoEffect
+                && d.message.contains("`unevaluatedProperties: false`")
+        })
+        .map(|d| (d.pointer.as_str().to_owned(), d.message.clone()))
+        .collect()
+}
+
+/// #1431: an `allOf` member's `additionalProperties: false` is read as closing the *merged*
+/// object to the fields every member declares, which departs from JSON Schema 2020-12, where the
+/// keyword sees only its own schema's `properties` and so also forbids `id`, which `Base`
+/// requires. Generation is unchanged — the closed struct `{id, x}` — and the departure is
+/// reported at the member's `additionalProperties`, naming `id` and the keyword that states the
+/// closed merge.
+// W011 case: closed-all-of-merge
+#[test]
+fn w011_an_all_of_member_closing_the_merge_is_reported() {
+    let spec = closed_merge_spec(
+        "{ type: object, properties: { x: { type: string } }, additionalProperties: false }",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let warnings = closed_merge_warnings(&report);
+    assert_eq!(warnings.len(), 1, "{report:#?}");
+    let (pointer, message) = &warnings[0];
+    assert_eq!(
+        pointer, "/components/schemas/S/allOf/1/additionalProperties",
+        "{report:#?}"
+    );
+    assert!(message.contains("`id`"), "{message}");
+    assert!(!message.contains("`x`"), "{message}");
+    assert!(message.contains("JSON Schema"), "{message}");
+
+    let types = types_module(&code);
+    assert_eq!(declared_fields(&types, "S"), ["id", "x"], "{types}");
+    assert!(
+        struct_attributes(&code, "S")
+            .iter()
+            .any(|attribute| attribute.contains("deny_unknown_fields")),
+        "{types}"
+    );
+}
+
+/// The same departure in the two other spellings of the merge: a member that only requires a
+/// property another member declares, and the composing schema's own keywords beside its `allOf`.
+#[test]
+fn w011_a_closing_required_only_member_and_closing_siblings_are_reported() {
+    let required_only = closed_merge_spec("{ required: [id], additionalProperties: false }");
+    let report = generate(&required_only);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let warnings = closed_merge_warnings(&report);
+    assert_eq!(warnings.len(), 1, "{report:#?}");
+    assert_eq!(
+        warnings[0].0, "/components/schemas/S/allOf/1/additionalProperties",
+        "{report:#?}"
+    );
+    assert!(warnings[0].1.contains("`id`"), "{}", warnings[0].1);
+
+    let siblings = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Base: { type: object, required: [id], properties: { id: { type: string } } }
+    S:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+      type: object
+      properties: { x: { type: string } }
+      additionalProperties: false
+"##;
+    let report = generate(siblings);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let warnings = closed_merge_warnings(&report);
+    assert_eq!(warnings.len(), 1, "{report:#?}");
+    assert_eq!(
+        warnings[0].0, "/components/schemas/S/additionalProperties",
+        "{report:#?}"
+    );
+}
+
+/// No other member contributes a property the closing member does not declare itself, so JSON
+/// Schema reads the composition as spargen does: a single closing member, a closing member that
+/// declares every property, and an open composition report no such `W011`.
+#[test]
+fn a_closed_merge_that_agrees_with_json_schema_is_not_reported() {
+    let single = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    S:
+      allOf:
+        - { type: object, properties: { x: { type: string } }, additionalProperties: false }
+"##;
+    let covering = closed_merge_spec(
+        "{ type: object, properties: { id: { type: string }, x: { type: string } }, \
+         additionalProperties: false }",
+    );
+    let open = closed_merge_spec("{ type: object, properties: { x: { type: string } } }");
+    for spec in [single.to_owned(), covering, open] {
+        let report = generate(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            closed_merge_warnings(&report).is_empty(),
+            "{spec}\n{report:#?}"
+        );
+    }
+}
+
+/// The same departure where a `$ref` meets its sibling keywords rather than an `allOf` member:
+/// the siblings closing the intersection beside a target that declares `id`, and a closed target
+/// beside siblings that declare `w`. Each is reported at the closing keyword, naming the property
+/// the other side declares, and the closed struct is still generated.
+#[test]
+fn w011_a_ref_met_with_closing_siblings_or_a_closed_target_is_reported() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Base: { type: object, required: [id], properties: { id: { type: string } } }
+    Closed:
+      type: object
+      properties: { v: { type: string } }
+      additionalProperties: false
+    RefSib:
+      $ref: '#/components/schemas/Base'
+      type: object
+      properties: { x: { type: string } }
+      additionalProperties: false
+    OnClosed:
+      $ref: '#/components/schemas/Closed'
+      properties: { w: { type: string } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let warnings = closed_merge_warnings(&report);
+    assert_eq!(warnings.len(), 2, "{report:#?}");
+    let at = |pointer: &str| {
+        warnings
+            .iter()
+            .find(|(at, _)| at == pointer)
+            .map(|(_, message)| message.as_str())
+            .unwrap_or_else(|| panic!("no W011 at {pointer}: {report:#?}"))
+    };
+    let siblings = at("/components/schemas/RefSib/additionalProperties");
+    assert!(siblings.contains("`id`"), "{siblings}");
+    assert!(!siblings.contains("`x`"), "{siblings}");
+    assert!(siblings.contains("`$ref`"), "{siblings}");
+    let target = at("/components/schemas/Closed/additionalProperties");
+    assert!(target.contains("`w`"), "{target}");
+    assert!(!target.contains("`v`"), "{target}");
+
+    let types = types_module(&code);
+    assert_eq!(declared_fields(&types, "RefSib"), ["id", "x"], "{types}");
+    assert!(
+        struct_attributes(&code, "RefSib")
+            .iter()
+            .any(|attribute| attribute.contains("deny_unknown_fields")),
+        "{types}"
+    );
+}

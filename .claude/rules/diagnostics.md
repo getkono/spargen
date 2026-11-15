@@ -16,7 +16,7 @@ paths:
   three; a code `frontend/` cannot reach is owned by the suite `OWNED_ELSEWHERE` names.
 - A case added under an existing code goes into that code's `explain` body (the one case list; the
   matrix defers to `spargen explain`) with a fixture. For a code in `ENUMERATED_CASES`
-  (`diag/code/tests.rs`), each emission site carries a marker naming its explain case, and each
+  (`diag/code/tests/cases.rs`), each emission site carries a marker naming its explain case, and each
   case a fixture carrying the same `// E### case: <tag>` marker and asserting its message.
 - Every frontend run is held to the oracles in `spargen/tests/oracles/`, and `generate` to
   `check`'s diagnostics.
