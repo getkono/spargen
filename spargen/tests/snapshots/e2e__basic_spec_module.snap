@@ -11305,7 +11305,7 @@ pub mod types {
                 additional: BTreeMap::new(),
             }
         }
-        /// Set the members no property declares, replacing any set before.
+        ///Set the members no property declares, replacing any set before.
         #[must_use]
         pub fn with_additional(mut self, value: BTreeMap<String, Dict>) -> Self {
             self.additional = value;
@@ -12199,7 +12199,7 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub host: Option<HeadersHost>,
-        #[serde(flatten)]
+        #[serde(flatten, serialize_with = "Headers::serialize_overflow")]
         pub additional: BTreeMap<String, HeadersValue>,
     }
     impl Headers {
@@ -12218,11 +12218,27 @@ pub mod types {
             self.host = Some(value);
             self
         }
-        /// Set the members no property declares, replacing any set before.
+        ///Set the members no property declares, replacing any set before. An entry whose key is a declared member's name is not sent.
         #[must_use]
         pub fn with_additional(mut self, value: BTreeMap<String, HeadersValue>) -> Self {
             self.additional = value;
             self
+        }
+    }
+    impl Headers {
+        /// The overflow map's `serialize_with`: every entry but one whose key is a declared
+        /// member's name, which only the member itself is written under.
+        fn serialize_overflow<S>(
+            overflow: &BTreeMap<String, HeadersValue>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer
+                .collect_map(
+                    overflow.iter().filter(|(key, _)| !matches!(key.as_str(), "host")),
+                )
         }
     }
     pub type HeadersHost = String;
@@ -12241,7 +12257,7 @@ pub mod types {
                 additional: BTreeMap::new(),
             }
         }
-        /// Set the members no property declares, replacing any set before.
+        ///Set the members no property declares, replacing any set before.
         #[must_use]
         pub fn with_additional(mut self, value: BTreeMap<String, TagsValue>) -> Self {
             self.additional = value;
@@ -12258,7 +12274,7 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub additional: Option<BagAdditional>,
-        #[serde(flatten)]
+        #[serde(flatten, serialize_with = "Bag::serialize_overflow")]
         pub additional_0093371c: BTreeMap<String, BagValue>,
     }
     impl Bag {
@@ -12277,7 +12293,7 @@ pub mod types {
             self.additional = Some(value);
             self
         }
-        /// Set the members no property declares, replacing any set before.
+        ///Set the members no property declares, replacing any set before. An entry whose key is a declared member's name is not sent.
         #[must_use]
         pub fn with_additional_0093371c(
             mut self,
@@ -12285,6 +12301,24 @@ pub mod types {
         ) -> Self {
             self.additional_0093371c = value;
             self
+        }
+    }
+    impl Bag {
+        /// The overflow map's `serialize_with`: every entry but one whose key is a declared
+        /// member's name, which only the member itself is written under.
+        fn serialize_overflow<S>(
+            overflow: &BTreeMap<String, BagValue>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer
+                .collect_map(
+                    overflow
+                        .iter()
+                        .filter(|(key, _)| !matches!(key.as_str(), "additional")),
+                )
         }
     }
     pub type BagAdditional = String;
@@ -12830,7 +12864,10 @@ pub mod types {
     pub struct SubmitFormAdditionalBody {
         #[serde(rename = "a")]
         pub a: SubmitFormAdditionalBodyA,
-        #[serde(flatten)]
+        #[serde(
+            flatten,
+            serialize_with = "SubmitFormAdditionalBody::serialize_overflow"
+        )]
         pub additional: BTreeMap<String, SubmitFormAdditionalBodyAdditional>,
     }
     impl SubmitFormAdditionalBody {
@@ -12843,7 +12880,7 @@ pub mod types {
                 additional: BTreeMap::new(),
             }
         }
-        /// Set the members no property declares, replacing any set before.
+        ///Set the members no property declares, replacing any set before. An entry whose key is a declared member's name is not sent.
         #[must_use]
         pub fn with_additional(
             mut self,
@@ -12851,6 +12888,22 @@ pub mod types {
         ) -> Self {
             self.additional = value;
             self
+        }
+    }
+    impl SubmitFormAdditionalBody {
+        /// The overflow map's `serialize_with`: every entry but one whose key is a declared
+        /// member's name, which only the member itself is written under.
+        fn serialize_overflow<S>(
+            overflow: &BTreeMap<String, SubmitFormAdditionalBodyAdditional>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer
+                .collect_map(
+                    overflow.iter().filter(|(key, _)| !matches!(key.as_str(), "a")),
+                )
         }
     }
     pub type SubmitNullableFormAdditionalBodyA = String;
@@ -12864,7 +12917,10 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub a: Option<SubmitNullableFormAdditionalBodyA>,
-        #[serde(flatten)]
+        #[serde(
+            flatten,
+            serialize_with = "SubmitNullableFormAdditionalBody::serialize_overflow"
+        )]
         pub additional: BTreeMap<String, SubmitNullableFormAdditionalBodyAdditional>,
     }
     impl SubmitNullableFormAdditionalBody {
@@ -12883,7 +12939,7 @@ pub mod types {
             self.a = Some(value);
             self
         }
-        /// Set the members no property declares, replacing any set before.
+        ///Set the members no property declares, replacing any set before. An entry whose key is a declared member's name is not sent.
         #[must_use]
         pub fn with_additional(
             mut self,
@@ -12893,6 +12949,22 @@ pub mod types {
             self
         }
     }
+    impl SubmitNullableFormAdditionalBody {
+        /// The overflow map's `serialize_with`: every entry but one whose key is a declared
+        /// member's name, which only the member itself is written under.
+        fn serialize_overflow<S>(
+            overflow: &BTreeMap<String, SubmitNullableFormAdditionalBodyAdditional>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer
+                .collect_map(
+                    overflow.iter().filter(|(key, _)| !matches!(key.as_str(), "a")),
+                )
+        }
+    }
     pub type UploadAdditionalBodyCaption = String;
     pub type UploadAdditionalBodyAdditionalItem = i64;
     pub type UploadAdditionalBodyAdditional = Vec<UploadAdditionalBodyAdditionalItem>;
@@ -12900,7 +12972,7 @@ pub mod types {
     pub struct UploadAdditionalBody {
         #[serde(rename = "caption")]
         pub caption: UploadAdditionalBodyCaption,
-        #[serde(flatten)]
+        #[serde(flatten, serialize_with = "UploadAdditionalBody::serialize_overflow")]
         pub additional: BTreeMap<String, UploadAdditionalBodyAdditional>,
     }
     impl UploadAdditionalBody {
@@ -12913,7 +12985,7 @@ pub mod types {
                 additional: BTreeMap::new(),
             }
         }
-        /// Set the members no property declares, replacing any set before.
+        ///Set the members no property declares, replacing any set before. An entry whose key is a declared member's name is not sent.
         #[must_use]
         pub fn with_additional(
             mut self,
@@ -12921,6 +12993,22 @@ pub mod types {
         ) -> Self {
             self.additional = value;
             self
+        }
+    }
+    impl UploadAdditionalBody {
+        /// The overflow map's `serialize_with`: every entry but one whose key is a declared
+        /// member's name, which only the member itself is written under.
+        fn serialize_overflow<S>(
+            overflow: &BTreeMap<String, UploadAdditionalBodyAdditional>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer
+                .collect_map(
+                    overflow.iter().filter(|(key, _)| !matches!(key.as_str(), "caption")),
+                )
         }
     }
     pub type HeaderXTraceIds = Vec<Mode>;
