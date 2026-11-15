@@ -1565,10 +1565,8 @@ fn unsigned_values_are_decimal_on_the_wire() {
         br#"{"count":18446744073709551615}"#,
     ));
     let client = unsigned_client::BlockingClient::new(&base).unwrap();
-    let params = unsigned_client::GetCounterParams::from(unsigned_client::GetCounterParamsRequired {
-        x_page: u16::MAX,
-    })
-    .limit(u32::MAX);
+    let required = unsigned_client::GetCounterParamsRequired { x_page: u16::MAX };
+    let params = unsigned_client::GetCounterParams::from(required).limit(u32::MAX);
     let response = client
         .get_counter(u64::MAX, params)
         .expect("the call round-trips");
