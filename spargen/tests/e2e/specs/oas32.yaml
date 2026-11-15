@@ -87,6 +87,24 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Record"
+  # A form-urlencoded `in: querystring` parameter whose Encoding Objects shape the query string as
+  # they would a form body: `tags` joined by `,` rather than repeated, `at` sent as JSON.
+  /records/filtered:
+    get:
+      operationId: filterRecords
+      parameters:
+        - name: filter
+          in: querystring
+          required: true
+          content:
+            application/x-www-form-urlencoded:
+              schema:
+                $ref: "#/components/schemas/RecordFilter"
+              encoding:
+                tags: { style: form, explode: false }
+                at: { contentType: application/json }
+      responses:
+        "204": { description: No Content }
   /events:
     get:
       operationId: streamEvents
@@ -171,6 +189,15 @@ components:
     Query:
       type: object
       properties:
+        term: { type: string }
+    RecordFilter:
+      type: object
+      properties:
+        tags: { type: array, items: { type: string } }
+        at:
+          type: object
+          properties:
+            x: { type: string }
         term: { type: string }
     SseEnvelope:
       type: object
