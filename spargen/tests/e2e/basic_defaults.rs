@@ -714,6 +714,21 @@ fn an_omitted_required_nullable_xml_attribute_decodes_as_none() {
 }
 
 #[test]
+fn a_null_required_xml_attribute_is_omitted_and_decodes_back_to_none() {
+    // OAS 3.2 §Handling `null` Values: "For attributes, omit the attribute". An empty `count=""`
+    // is no `null` a reader can recover, and no number at all.
+    let receipt = basic_client::types::XmlReceipt {
+        code: "OK".to_owned(),
+        count: None,
+        note: None,
+    };
+    let xml = quick_xml::se::to_string(&receipt).unwrap();
+    assert_eq!(xml, "<xml-receipt><ReceiptCode>OK</ReceiptCode></xml-receipt>");
+    let decoded: basic_client::types::XmlReceipt = quick_xml::de::from_str(&xml).unwrap();
+    assert_eq!(decoded, receipt);
+}
+
+#[test]
 fn json_only_schema_with_xml_metadata_keeps_original_json_names() {
     // regression guard: `JsonMeta` carries `xml.attribute`/`xml.name` hints but is used
     // only by a JSON operation, so the format-agnostic serde rename is SUPPRESSED. JSON must use the
