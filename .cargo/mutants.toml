@@ -65,6 +65,12 @@ exclude_re = [
   # next parameter, so the canonical form and every fault are unchanged. Anchored on line and
   # column like the entries above: the loop head's own `at += 1` is tested and stays in the run.
   '^spargen/src/oas31/media\.rs:312:30: replace \+= with \*= in media_type_with_parameters$',
+  # `spargen/src/codegen/body.rs`, `merged_file_parts`'s `into.overflow |= parts.overflow` with
+  # `|=` replaced by `&=`: a body type's `overflow` reads only the type and whether its encoding
+  # has an `additional` mode, which lowering sets exactly when the type has a typed overflow
+  # (`oas31/lower/encoding.rs`), so every operation sending one type agrees on it, and the two
+  # operators give the same value. Anchored on line and column like the entries above.
+  '^spargen/src/codegen/body\.rs:239:23: replace \|= with &= in merged_file_parts$',
   # The build-script environment readers: `spargen/src/cache.rs`, `cache_dir` (`OUT_DIR`), and
   # `spargen/src/runtime_contract/integration.rs`, `under_build_script` (`OUT_DIR` and
   # `CARGO_CFG_TARGET_ARCH`), `build_script_manifest` and `manifest_from_env`

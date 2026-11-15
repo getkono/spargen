@@ -1016,3 +1016,6 @@ impl Arg {
         &self.forward
     }
 }
+
+#[cfg(test)]
+mod tests;

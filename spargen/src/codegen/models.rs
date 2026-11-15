@@ -1260,3 +1260,7 @@ mod tests {
         }
     }
 }
+
+/// The emitted model of each definition shape, read from what an inline spec generates.
+#[cfg(test)]
+mod emitted_tests;

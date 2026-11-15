@@ -224,6 +224,52 @@ fn item_attrs(item: &mut syn::Item) -> Option<&mut Vec<syn::Attribute>> {
     })
 }
 
+/// What the emitters' in-module tests share: the module an inline spec generates, read as
+/// whitespace-free text, and the slice of it one item spans.
+#[cfg(test)]
+pub(super) mod test_harness {
+    /// The module `spec` generates under the [`crate::Spec`] `configure` returns, with every run of
+    /// whitespace removed so an assertion reads the tokens rather than `prettyplease`'s line
+    /// breaking.
+    pub(crate) fn generated_with(
+        spec: &str,
+        configure: impl FnOnce(crate::Spec) -> crate::Spec,
+    ) -> String {
+        let directory = tempfile::tempdir().unwrap();
+        let path =
+            camino::Utf8PathBuf::from_path_buf(directory.path().join("openapi.yaml")).unwrap();
+        std::fs::write(&path, spec).unwrap();
+        let preview = crate::__private::preview(&configure(crate::Spec::new(path)));
+        let contents = preview
+            .contents
+            .unwrap_or_else(|| panic!("the spec generates: {:?}", preview.report.diagnostics));
+        contents.split_whitespace().collect()
+    }
+
+    /// [`generated_with`] under every knob's default.
+    pub(crate) fn generated(spec: &str) -> String {
+        generated_with(spec, |spec| spec)
+    }
+
+    /// The text of `generated` from the first `start` to the first `end` after it, `end` excluded.
+    pub(crate) fn between<'g>(generated: &'g str, start: &str, end: &str) -> &'g str {
+        let from = generated
+            .find(start)
+            .unwrap_or_else(|| panic!("no `{start}` in {generated}"));
+        let to = generated[from..]
+            .find(end)
+            .unwrap_or_else(|| panic!("no `{end}` after `{start}`"));
+        &generated[from..from + to]
+    }
+
+    /// Assert that `text` contains every one of `fragments`, naming the first it lacks.
+    pub(crate) fn assert_contains_all(text: &str, fragments: &[&str]) {
+        for fragment in fragments {
+            assert!(text.contains(fragment), "`{fragment}` missing from {text}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{render, CODEGEN_FAILURE};
