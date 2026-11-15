@@ -12,6 +12,9 @@ use super::Schema;
 pub(crate) struct Document {
     /// Whether the declared OpenAPI feature version is 3.2.x.
     pub(crate) is_oas32: bool,
+    /// The dialect `jsonSchemaDialect` names, the default of every Schema Object no `$schema`
+    /// overrides.
+    pub(crate) json_schema_dialect: SchemaDialect,
     /// `info`.
     pub(crate) info: Info,
     /// `servers`.
@@ -26,6 +29,17 @@ pub(crate) struct Document {
     pub(crate) tags: Vec<Tag>,
     /// Provenance of the document root.
     pub(crate) provenance: Provenance,
+}
+
+/// The JSON Schema dialect a Schema Object is read under: the document's `jsonSchemaDialect`, or
+/// the `$schema` of the nearest schema enclosing it that declares one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SchemaDialect {
+    /// The OAS Schema Object dialect: JSON Schema 2020-12 with the OAS vocabulary.
+    Oas,
+    /// The plain JSON Schema 2020-12 dialect, which defines no OAS vocabulary, so `discriminator`
+    /// and `xml` are unknown keywords under it, read as annotations.
+    JsonSchema202012,
 }
 
 /// Either an inline item or a `$ref` to one. Resolution is performed by the
