@@ -45,7 +45,8 @@ fn neither_switch_reports_anything_of_its_own() {
             ),
         )
     });
-    let configurations: [(&str, fn(Spec) -> Spec); 3] = [
+    type Configure = fn(Spec) -> Spec;
+    let configurations: [(&str, Configure); 3] = [
         ("default", |spec| spec),
         ("open_narrowing", |spec| {
             spec.with_open_narrowing(spargen::Narrowing::Open)
