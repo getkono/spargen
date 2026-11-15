@@ -36,7 +36,7 @@ paths:
     // A form-urlencoded whole query string is rendered by the form body's serializer, property by
     // property through its resolved Encoding Objects.
     assert!(
-        flat.contains("support::serialize_form_body( value, QUERYSTRING_PROPERTIES, None, )"),
+        flat.contains("support::serialize_form_body( form_value, QUERYSTRING_PROPERTIES, None, )"),
         "{code}"
     );
     assert!(

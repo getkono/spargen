@@ -160,8 +160,9 @@ fn an_optional_bundle_is_read_through_its_option() {
 }
 
 /// A whole-query value: a required JSON one is the raw query's initializer, an optional JSON one
-/// is set as the one opaque raw query when given, and a form-encoded one is one `name=value` pair
-/// per member, leaving the raw query unset; each URL is built with the raw query beside the
+/// is set as the one opaque raw query when given, and a form-encoded one is rendered by the form
+/// body's serializer through its resolved Encoding Objects into one fragment, leaving the raw
+/// query unset; each URL is built with the raw query beside the
 /// fragments.
 #[test]
 fn a_whole_query_value_renders_by_its_codec() {
@@ -185,7 +186,12 @@ fn a_whole_query_value_renders_by_its_codec() {
         preparer(&generated, "list_records"),
         &[&format!(
             "{}{build_url}",
-            r#"letraw_query:Option<String>=None;ifletSome(value)=params.as_ref().and_then(|params|params.filter.as_ref()){query.extend(support::serialize_form("",value,true,support::PercentEncoding::Form,).map_err(support::Error::request_construction)?,);}"#,
+            concat!(
+                r#"letraw_query:Option<String>=None;ifletSome(value)=params.as_ref().and_then(|params|params.filter.as_ref()){{letform_value=value;letform_query={"#,
+                r#"constQUERYSTRING_PROPERTIES:&[support::FormProperty]=&[support::FormProperty{name:"term",mode:support::FormMode::Text,},];"#,
+                r#"support::serialize_form_body(form_value,QUERYSTRING_PROPERTIES,None,).map_err(support::Error::request_construction)?};"#,
+                r#"if!form_query.is_empty(){query.push(form_query);}}}"#,
+            ),
         )],
     );
 }

@@ -271,9 +271,13 @@ pub(super) fn json_querystring_tokens(value: TokenStream) -> TokenStream {
 
 /// Emit serialization of an optional `in: querystring` value, or a required one that is not JSON
 /// (a required JSON value initializes the raw query directly).
+///
+/// A form-urlencoded value is rendered by the form body's serializer through the parameter's
+/// resolved Encoding Objects, and adds its text as one query fragment unless it renders none.
 pub(super) fn querystring_param_tokens(
     param: &crate::ir::Parameter,
     value: TokenStream,
+    names: &Names,
     query_binding: &crate::name::Ident,
     raw_query_binding: &crate::name::Ident,
 ) -> TokenStream {
@@ -282,13 +286,29 @@ pub(super) fn querystring_param_tokens(
             let encoded = json_querystring_tokens(value);
             quote! { #raw_query_binding = Some(#encoded); }
         }
-        crate::ir::ParamStyle::Content(MediaType::FormUrlEncoded) => form_fragments_tokens(
-            query_binding,
-            "",
-            value,
-            true,
-            &query_encoding_tokens(false),
-        ),
+        crate::ir::ParamStyle::Content(MediaType::FormUrlEncoded) => {
+            let encoding = param
+                .form_encoding
+                .as_ref()
+                .expect("a form-urlencoded querystring carries its encoding (check_invariants)");
+            let serialize = super::body::form_serialization_tokens(
+                &quote! { form_value },
+                param.ty,
+                encoding,
+                names,
+                &quote! { QUERYSTRING_PROPERTIES },
+            );
+            // A block of its own, so its locals shadow no binding of the method.
+            quote! {
+                {
+                    let form_value = #value;
+                    let form_query = #serialize;
+                    if !form_query.is_empty() {
+                        #query_binding.push(form_query);
+                    }
+                }
+            }
+        }
         _ => quote! {},
     }
 }
