@@ -26,9 +26,10 @@ revision = "5162af98d3147432c14680df789e8e12d4891e6b"
 upstream_path = "openapi.yaml"
 sha256 = "74cbcf73838f4cd7e209b2d3f2e9ddc9fa155f21a44360b6fac7646a6d4f5f8b"
 license = "MIT"
-# `POST /realtime/calls` documents its 201 with `application/sdp` as the only content entry, and
-# spargen has no codec for an unregistered media type.
-expect = "reject:E009"
+# `/components/schemas/CompoundFilter` writes JSON Schema 2019-09's `$recursiveAnchor`, and a
+# `$recursiveRef` member under it, which need dynamic schema-scope evaluation (#1446). Behind it,
+# `POST /realtime/calls`'s `application/sdp`-only 201 (`E009`) is not reached.
+expect = "reject:E006"
 
 [[case]]
 id = "ollama"
