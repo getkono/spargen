@@ -406,9 +406,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///   other definition's member, and no other body, response or parameter.
     ///
     /// A multipart body struct that a serde codec also carries is one Rust type for both, and its
-    /// members take the serde answer: the part is then sent as text. A union variant beside a
-    /// variant that is, or would become, a `String` keeps its bytes, since retyping it would leave
-    /// two variants no value tells apart.
+    /// members take the serde answer: the part is then sent as text. A `oneOf` variant retyped
+    /// beside one that is, or becomes, a `String` would leave two variants no value tells apart, so
+    /// the two are then merged as lowering merges any such branches (#1511).
     ///
     /// A definition no raw position holds is retyped in place, keeping its name; one that a raw
     /// position holds too keeps its bytes, and the serde positions take a `String` copy of it.
@@ -458,6 +458,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         // Every serde position holding raw bytes, grouped by the definition it holds.
         let mut serde_slots: BTreeMap<TypeId, Vec<SerdeSlot>> = BTreeMap::new();
+        let mut retyped_unions: Vec<TypeId> = Vec::new();
         let mut hold = |target: TypeId, slot: SerdeSlot| {
             serde_slots.entry(target).or_default().push(slot);
         };
@@ -493,28 +494,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                 }
                 TypeKind::Union(union) => {
-                    // A variant beside another that is, or would become, a plain `String` keeps its
-                    // bytes: the two would be variants no value tells apart, a union lowering
-                    // already merges or reports, and that this pass cannot re-dispatch.
-                    let stringly = |ty: Ty| {
-                        raw(&self.graph, ty.id)
-                            || matches!(
-                                self.graph.get(ty.id).map(|definition| &definition.kind),
-                                Some(TypeKind::Primitive(Prim::String))
-                            )
-                    };
+                    // A variant beside another that is, or becomes, a plain `String` is merged
+                    // with it once the slots are retyped ([`Self::merge_retyped_unions`]).
                     for (index, variant) in union.variants.iter().enumerate() {
-                        if !raw(&self.graph, variant.ty.id) {
-                            continue;
-                        }
-                        let collides = union
-                            .variants
-                            .iter()
-                            .enumerate()
-                            .any(|(other, sibling)| other != index && stringly(sibling.ty));
-                        if collides {
-                            raw_uses.insert(variant.ty.id);
-                        } else {
+                        if raw(&self.graph, variant.ty.id) {
+                            retyped_unions.push(owner);
                             hold(variant.ty.id, SerdeSlot::Variant { owner, index });
                         }
                     }
@@ -632,6 +616,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 )
                 .emit(self.diags);
         }
+        self.merge_retyped_unions(retyped_unions, operations);
     }
 
     /// The kind of the definition `id` names, for rewriting a member in place.
