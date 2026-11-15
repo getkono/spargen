@@ -10,7 +10,7 @@ use crate::diag::Provenance;
 use crate::ir::{AdditionalProps, Docs, Field, FieldDefault, Struct, Ty, TypeKind};
 use crate::name::hint_segment;
 use crate::oas31::{JsonType, Resolver, Schema, SchemaOr};
-use crate::source::is_remote_ref;
+use crate::source::{is_remote_ref, schema_component_name};
 
 use super::all_of::real_union;
 use super::meet::{carries_key, drop_applied_default_if_required, merge_field_default, NoMeet};
@@ -515,7 +515,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
         out: &mut Vec<Contribution>,
     ) -> Option<()> {
-        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+        if let Some(name) = schema_component_name(reference) {
             // A `$ref` to a component still being lowered is a direct recursive allOf member
             // whose fields are not yet known — irreconcilable (distinct from a member with
             // recursive *fields*, which lowers fine). Refused before `ensure_component` is asked,
@@ -524,12 +524,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // words. Whether the target is still being lowered here can depend on the order the
             // document declares the two in, so the refusal is recorded for the next pass to
             // lower this body first (`record_open_member`).
-            if let Some(target) = self.open_component_root(name) {
+            if let Some(target) = self.open_component_root(&name) {
                 self.record_open_member(target);
                 return self
                     .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_COMPONENT_MEMBER);
             }
-            let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
+            let ty = self.ensure_component(&name, Some(reference), &schema.provenance)?;
             self.record_xml_merger(ty.id);
             let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             // The pre-check above sees root components only. A name the root does not declare
@@ -1081,9 +1081,9 @@ impl LowerCtx<'_, '_> {
                 // refuses ([`LowerCtx::gather_ref_target`]); its body is not expanded here. Nor
                 // is one whose body is already being expanded as a union member, which reserves
                 // nothing: the gather lowers it through its reservation, where a recursion stops.
-                let name = reference.strip_prefix("#/components/schemas/")?;
-                if self.open_component_root(name).is_some()
-                    || self.union_member_stack.iter().any(|open| open == name)
+                let name = schema_component_name(reference)?;
+                if self.open_component_root(&name).is_some()
+                    || self.union_member_stack.iter().any(|open| *open == name)
                 {
                     return None;
                 }

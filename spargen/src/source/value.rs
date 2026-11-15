@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::diag::{JsonPointer, Span};
 
 /// A JSON/YAML number, held as one of three concrete kinds. Both parsers classify an integer
@@ -226,6 +228,41 @@ pub(crate) fn canonical_pointer(pointer: &JsonPointer) -> Option<JsonPointer> {
         })
 }
 
+/// The name a `#/components/schemas/<name>` reference is looked up by in a document's schema
+/// component map, followed by whatever further pointer the reference walks into that component
+/// (`Pet/properties/a`), or `None` for a reference without that prefix.
+///
+/// The leading token is decoded as [`canonical_pointer`] decodes it whenever the result is a
+/// Components Object key (`^[a-zA-Z0-9._-]+$`), so `Pe%74` is `Pet`, the name the bundle's
+/// `(file, pointer)` identity for the reference already reads. A key is its own decoded and
+/// escaped spelling, so the result decodes to itself again wherever it is spelled back into a
+/// reference. Any other token is kept as written: it decodes to no key (a malformed escape, or a
+/// `%2F` or `~1` that would read as a `/`), so it misses every component map either way, and only a
+/// raw `/` ever separates the name from a further pointer. What follows the name is kept as
+/// written, for the resolver to decode.
+pub(crate) fn schema_component_name(reference: &str) -> Option<Cow<'_, str>> {
+    let rest = reference.strip_prefix("#/components/schemas/")?;
+    let (token, tail) = match rest.split_once('/') {
+        Some((token, tail)) => (token, Some(tail)),
+        None => (rest, None),
+    };
+    let decoded = decode_fragment_token(token)
+        .filter(|decoded| decoded != token && is_component_key(decoded));
+    Some(match (decoded, tail) {
+        (None, _) => Cow::Borrowed(rest),
+        (Some(decoded), None) => Cow::Owned(decoded),
+        (Some(decoded), Some(tail)) => Cow::Owned(format!("{decoded}/{tail}")),
+    })
+}
+
+/// Whether `name` is a Components Object key: a non-empty run of `[a-zA-Z0-9._-]`.
+fn is_component_key(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
 /// Decode one reference token of a `$ref` fragment.
 ///
 /// A `$ref` carries its pointer in a URI fragment, so characters that are not legal there are
@@ -287,5 +324,46 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'a'..=b'f' => Some(byte - b'a' + 10),
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::schema_component_name;
+
+    /// Each spelling of a `#/components/schemas/<name>` reference against the name its component
+    /// map is keyed by: the leading token decoded when that leaves a component key, kept as
+    /// written when it does not, and any further pointer kept as written.
+    #[test]
+    fn a_schema_component_name_is_its_decoded_leading_token() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("#/components/schemas/Pet", Some("Pet")),
+            ("#/components/schemas/Pe%74", Some("Pet")),
+            ("#/components/schemas/%50et", Some("Pet")),
+            ("#/components/schemas/a.b-c_1", Some("a.b-c_1")),
+            (
+                "#/components/schemas/Pe%74/properties/a",
+                Some("Pet/properties/a"),
+            ),
+            (
+                "#/components/schemas/Pet/properties/big%20cat",
+                Some("Pet/properties/big%20cat"),
+            ),
+            // Each decodes to no component key, so it is kept as written.
+            ("#/components/schemas/Pe%7", Some("Pe%7")),
+            ("#/components/schemas/a%2Fb", Some("a%2Fb")),
+            ("#/components/schemas/a~1b", Some("a~1b")),
+            ("#/components/schemas/big%20cat", Some("big%20cat")),
+            ("#/components/schemas/", Some("")),
+            ("#/components/parameters/Pet", None),
+            ("./lib.yaml#/components/schemas/Pet", None),
+        ];
+        for (reference, expected) in cases {
+            assert_eq!(
+                schema_component_name(reference).as_deref(),
+                *expected,
+                "{reference}"
+            );
+        }
     }
 }

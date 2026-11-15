@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
-use crate::source::{rewrite_refs_absolute, InputBundle, SpannedValue};
+use crate::source::{rewrite_refs_absolute, schema_component_name, InputBundle, SpannedValue};
 
 use super::{deserialize::parse_schema, Document, Schema};
 
@@ -136,9 +136,8 @@ impl<'doc> Resolver<'doc> {
     /// document declares, which lowering reads as that root component wherever the reference is
     /// written.
     pub(super) fn declares_root_schema(&self, reference: &str) -> bool {
-        reference
-            .strip_prefix("#/components/schemas/")
-            .is_some_and(|name| self.document.components.schemas.contains_key(name))
+        schema_component_name(reference)
+            .is_some_and(|name| self.document.components.schemas.contains_key(&*name))
     }
 
     /// The file a reference or schema at `at` is written in: an unspanned provenance sits in the
@@ -202,8 +201,9 @@ impl<'doc> Resolver<'doc> {
         // types and recursion are shared. Every other JSON Pointer (an alias component, local
         // relative files included) is parsed from its source node with that node's own provenance.
         if from == self.bundle.root_id() {
-            if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                if let Some(super::RefOr::Item(schema)) = self.document.components.schemas.get(name)
+            if let Some(name) = schema_component_name(reference) {
+                if let Some(super::RefOr::Item(schema)) =
+                    self.document.components.schemas.get(&*name)
                 {
                     return Ok(Resolved {
                         schema: Cow::Borrowed(schema),

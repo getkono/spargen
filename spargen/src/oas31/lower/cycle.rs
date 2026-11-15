@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::diag::Provenance;
 use crate::ir::{Ty, TypeId};
 use crate::oas31::{Document, Schema, SchemaOr};
-use crate::source::SpannedValue;
+use crate::source::{schema_component_name, SpannedValue};
 
 use super::{LowerCtx, Reservation};
 
@@ -106,9 +106,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(own) = self.reservation_at(at) else {
             return false;
         };
-        reference
-            .strip_prefix("#/components/schemas/")
-            .and_then(|name| self.open_component_root(name))
+        schema_component_name(reference)
+            .and_then(|name| self.open_component_root(&name))
             .is_some_and(|id| id == own)
     }
 }

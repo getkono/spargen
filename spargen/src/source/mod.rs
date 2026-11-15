@@ -40,7 +40,9 @@ pub(crate) use bundle::{FileLookupError, InputBundle};
 pub(crate) use bundle::{local_identity, working_dir};
 pub(crate) use lock::LOCK_FILE_NAME;
 pub(crate) use parse::{parse_json, parse_yaml};
-pub(crate) use value::{canonical_pointer, Node, Number, SpannedKey, SpannedMap, SpannedValue};
+pub(crate) use value::{
+    canonical_pointer, schema_component_name, Node, Number, SpannedKey, SpannedMap, SpannedValue,
+};
 
 // Remote-ref helpers for `oas31`: `is_remote_ref` routes remote `$ref`s in `oas31::lower`,
 // `rewrite_refs_absolute` serves `oas31::resolve`'s hermetic fragment resolution, and

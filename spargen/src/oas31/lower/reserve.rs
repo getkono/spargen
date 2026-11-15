@@ -5,7 +5,7 @@ use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{Ty, TypeId, TypeKind};
 use crate::oas31::deserialize::warn_ref_default_dropped;
 use crate::oas31::{RefOr, Schema, SchemaOr};
-use crate::source::is_remote_ref;
+use crate::source::{is_remote_ref, schema_component_name};
 
 use super::cycle::{Opening, Via};
 use super::defaults::default_display_for;
@@ -32,8 +32,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         at: &Provenance,
         hint: &str,
     ) -> Option<Ty> {
-        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-            self.ensure_component(name, Some(reference), at)
+        if let Some(name) = schema_component_name(reference) {
+            self.ensure_component(&name, Some(reference), at)
         } else if is_remote_ref(reference) {
             self.ensure_remote(reference, at)
         } else {
@@ -46,8 +46,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// That map is such a schema's identity — [`Self::ensure_resolved`] routes a target there back
     /// to [`Self::ensure_component`] — so every question asked by resolved `(file, pointer)` asks
-    /// this first. The name is the pointer token verbatim, never unescaped, as the component map's
-    /// own lookup by a reference's stripped fragment is. A deeper pointer (`Tree/properties/x`) or
+    /// this first. The name is the pointer token verbatim: the pointer is canonical, and a
+    /// component key is its own escaped spelling, so the token is the decoded name a reference's
+    /// [`schema_component_name`] looks the map up by. A deeper pointer (`Tree/properties/x`) or
     /// an empty token is no component: structural validation admits only `^[a-zA-Z0-9._-]+$` as a
     /// root component key, so neither could be declared, and the filter says so without relying on
     /// it.
@@ -115,7 +116,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // construct that named it: a silently-dropped `$ref` takes its request body, response, or
         // parameter with it, which is exactly the silent degradation the taxonomy forbids.
         let Some(component) = self.document.components.schemas.get(name) else {
-            let reference = format!("#/components/schemas/{name}");
+            // The reference as the site wrote it, so a miss quotes the spelling the author can
+            // find; one that names this component under another spelling (`Fo%6F` for `Foo`) is
+            // the same target to the resolver. `None` asks by name, with no site spelling.
+            let reference = reference
+                .filter(|reference| schema_component_name(reference).as_deref() == Some(name))
+                .map_or_else(|| format!("#/components/schemas/{name}"), str::to_owned);
             // The name missed the ROOT document's component map — but a `$ref` written inside a
             // referenced sub-file spells that file's own components exactly the same way, and a
             // JSON Pointer fragment addresses the document it appears in. `Resolver::resolve`
@@ -407,9 +413,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         reference: Option<&str>,
         at: &crate::diag::Provenance,
     ) {
-        if reference.and_then(|reference| reference.strip_prefix("#/components/schemas/"))
-            != Some(name)
-        {
+        if reference.and_then(schema_component_name).as_deref() != Some(name) {
             return;
         }
         let file = self.resolver.written_in(at);
@@ -557,8 +561,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for _ in 0..MAX_SCHEMA_DEPTH {
             if let Some(entry) = self.open_reservation_at_target(&reference, &at) {
                 for (reference, at) in &passed {
-                    if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                        self.warn_if_root_shadows_the_referring_file(name, Some(reference), at);
+                    if let Some(name) = schema_component_name(reference) {
+                        self.warn_if_root_shadows_the_referring_file(&name, Some(reference), at);
                     }
                 }
                 return Some(entry);
@@ -581,7 +585,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         reference: &str,
         at: &Provenance,
     ) -> Option<(TypeId, bool)> {
-        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+        if let Some(name) = schema_component_name(reference) {
             // A root component the root document declares: `ensure_component`'s own key, and its
             // own precedence — root map first, and only a name the root does **not** declare is
             // handed to `ensure_resolved` against the referring file.
@@ -593,7 +597,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // reference string two ways in one document: the direct `{$ref: T}` spelling read the
             // root's component and raised `W011`, while the alias spelling silently read the
             // sub-file's and raised nothing at all.
-            if self.document.components.schemas.contains_key(name) {
+            if self.document.components.schemas.contains_key(&*name) {
                 // `None` when it is not currently open is the right answer and not a fall-through:
                 // a finished or not-yet-started root component is exactly the case the ordinary
                 // `ensure_component` path handles, and the case in which it must, because that is
@@ -601,13 +605,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 //
                 // Reading it here is also answering instead of `ensure_component`'s back-edge arm,
                 // which is where a read of the provisional nullability is otherwise recorded.
-                let entry = self.read_open_reservation(Reservation::Component(name.to_owned()));
+                let entry =
+                    self.read_open_reservation(Reservation::Component(name.clone().into_owned()));
                 if entry.is_some() {
                     // Answering here is answering *instead of* `ensure_component`, which is where
                     // the shadowing is acknowledged. Say it on the way past, or a reference the
                     // root wins silently retargets a sub-file's own declaration — supported as the
                     // matrix describes, but unreported, which the matrix also promises against.
-                    self.warn_if_root_shadows_the_referring_file(name, Some(reference), at);
+                    self.warn_if_root_shadows_the_referring_file(&name, Some(reference), at);
                 }
                 return entry;
             }
