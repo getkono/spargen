@@ -324,6 +324,32 @@ pub(crate) struct ValidationKeywords {
     /// `unevaluated*`), `dependentSchemas`, `dependentRequired`, `minContains`, `maxContains`, or
     /// an OpenAPI 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum`.
     pub(crate) other: bool,
+    /// The validation keywords of JSON Schema drafts before 2020-12 that 2020-12 replaced, in
+    /// [`Pre2020Keyword::ALL`] order. Each is reported as `W001` with its replacement named,
+    /// apart from the keywords [`Self::states_no_2020_12_keyword`] covers.
+    pub(crate) pre_2020_12: Vec<Pre2020Keyword>,
+}
+
+/// A validation keyword of the JSON Schema drafts before 2020-12 that 2020-12 replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pre2020Keyword {
+    /// `additionalItems`, now `items` beside `prefixItems`.
+    AdditionalItems,
+    /// `dependencies`, now `dependentRequired` and `dependentSchemas`.
+    Dependencies,
+}
+
+impl Pre2020Keyword {
+    /// Every keyword, in the order the audit reports them.
+    pub(crate) const ALL: [Self; 2] = [Self::AdditionalItems, Self::Dependencies];
+
+    /// The keyword as written.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AdditionalItems => "additionalItems",
+            Self::Dependencies => "dependencies",
+        }
+    }
 }
 
 impl ValidationKeywords {
@@ -334,9 +360,15 @@ impl ValidationKeywords {
     /// *said*: a media alternative carrying `maxLength: 10` is not interchangeable with one that
     /// says nothing, even though both decode to the same Rust type. Proving two entries decode
     /// identically therefore requires this on top of the shape check.
+    pub(crate) fn constrains_nothing(&self) -> bool {
+        self.states_no_2020_12_keyword() && self.pre_2020_12.is_empty()
+    }
+
+    /// Whether no validation keyword of JSON Schema 2020-12 (or OpenAPI 3.0's boolean bound) is
+    /// present: [`Self::constrains_nothing`] apart from [`Self::pre_2020_12`].
     ///
     /// Destructured exhaustively so a new keyword fails to compile rather than silently passing.
-    pub(crate) fn constrains_nothing(&self) -> bool {
+    pub(crate) fn states_no_2020_12_keyword(&self) -> bool {
         let ValidationKeywords {
             pattern,
             minimum,
@@ -352,6 +384,8 @@ impl ValidationKeywords {
             min_properties,
             max_properties,
             other,
+            // Reported on its own; `constrains_nothing` counts it.
+            pre_2020_12: _,
         } = self;
         pattern.is_none()
             && minimum.is_none()

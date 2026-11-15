@@ -124,6 +124,21 @@ fn parse_schema_or(
             .message("$dynamicRef and $dynamicAnchor require dynamic schema scope evaluation")
             .emit(diags);
     }
+    // Draft 2019-09's spelling of the same mechanism. Read as an unknown keyword, it would leave
+    // the schema untyped, a `serde_json::Value` where its author meant a recursive type.
+    if map.get("$recursiveRef").is_some() || map.get("$recursiveAnchor").is_some() {
+        Diagnostic::error(Code::DynamicRefRejected, provenance(pointer, value))
+            .message(
+                "`$recursiveRef` and `$recursiveAnchor` are JSON Schema 2019-09 keywords, which \
+                 2020-12 replaced with `$dynamicRef`/`$dynamicAnchor`, and require dynamic schema \
+                 scope evaluation",
+            )
+            .remedy(
+                "replace `$recursiveRef` with a JSON Pointer `$ref` to the recursive schema \
+                 (such as `$ref: '#/components/schemas/Node'`), and drop `$recursiveAnchor`",
+            )
+            .emit(diags);
+    }
     if map.get("$id").is_some() || map.get("$anchor").is_some() {
         // E004 case: resource-scope
         Diagnostic::error(Code::UnresolvedRef, provenance(pointer, value))
@@ -382,7 +397,34 @@ fn parse_validation_children(
     for (name, schema) in parse_schema_map(map, "dependentSchemas", pointer, diags) {
         children.push((format!("dependentSchemas/{name}"), schema));
     }
+    // The pre-2020-12 keywords are unknown here, so a value of an unexpected shape is theirs to
+    // carry rather than `E011`: only a value that is a schema is parsed as one. `dependencies`
+    // maps a property to a schema or, read as `dependentRequired` now is, to a list of names.
+    if let Some(value) = map
+        .get("additionalItems")
+        .filter(|value| is_schema_shaped(value))
+    {
+        if let Some(schema) = parse_schema_or(value, &pointer.push("additionalItems"), diags) {
+            children.push(("additionalItems".to_owned(), schema));
+        }
+    }
+    if let Some(entries) = map.get("dependencies").and_then(SpannedValue::as_object) {
+        let pointer = pointer.push("dependencies");
+        for (key, value) in entries.iter() {
+            if !is_schema_shaped(value) {
+                continue;
+            }
+            if let Some(schema) = parse_schema_or(value, &pointer.push(&key.name), diags) {
+                children.push((format!("dependencies/{}", key.name), schema));
+            }
+        }
+    }
     children
+}
+
+/// Whether `value` has a schema's JSON shape: an object or a boolean.
+fn is_schema_shaped(value: &SpannedValue) -> bool {
+    value.as_bool().is_some() || value.as_object().is_some()
 }
 
 /// A keyword whose value maps names to schemas (`properties`, `patternProperties`, `$defs`,

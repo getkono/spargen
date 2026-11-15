@@ -22,6 +22,12 @@ pub(super) const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                 reserved_wording: None,
             },
             Case {
+                tag: "pre-2020-keyword",
+                stated_as: "a validation keyword of a JSON Schema draft before 2020-12 that \
+                                2020-12 replaced",
+                reserved_wording: None,
+            },
+            Case {
                 tag: "oas30-nullable",
                 stated_as: "OpenAPI 3.0's `nullable: true` written in a 3.1 or 3.2 document",
                 reserved_wording: None,
