@@ -879,7 +879,7 @@ fn cbor_and_cbor_suffixed_bodies_are_byte_bodies_announced_by_their_own_name() {
     // #900: CBOR has no codec here, and needs none: its bodies are handed over byte for byte. So
     // `application/cbor` and any `+cbor` suffix lower exactly as `application/octet-stream` does,
     // except that the key itself, not `application/octet-stream`, goes on the wire as the request
-    // `Content-Type` and the response `Accept`.
+    // `Content-Type` and `Accept`, as every chosen key goes on the wire as `Accept` (#1401).
     let operation = |path: &str, id: &str, media: &str| {
         format!(
             r##"
@@ -909,7 +909,10 @@ fn cbor_and_cbor_suffixed_bodies_are_byte_bodies_announced_by_their_own_name() {
     assert!(report.diagnostics().is_empty(), "{report:#?}");
 
     let octets = method_source(&code, "send_octets");
-    assert!(!octets.contains("ACCEPT"), "{octets}");
+    assert!(
+        octets.contains("reqwest::header::ACCEPT, \"application/octet-stream\""),
+        "{octets}"
+    );
     // The signature with each `types::` alias spelled as what it aliases, since every operation's
     // body aliases are named for itself.
     let signature = |method: &str| {
