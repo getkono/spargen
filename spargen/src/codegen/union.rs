@@ -4,8 +4,8 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::ir::{
-    DisjointFeature, JsonCategory, Ty, TypeGraph, TypeKind, Union, UnionMode, UnionStrategy,
-    UnionVariant, VariantDispatch,
+    AdditionalProps, DisjointFeature, JsonCategory, Ty, TypeGraph, TypeKind, Union, UnionMode,
+    UnionStrategy, UnionVariant, VariantDispatch,
 };
 use crate::name::Names;
 
@@ -248,8 +248,12 @@ pub(super) fn emit_union(
                     let variant_ident = union_variant_ident(names, id, variant);
                     let ty = boxed_ty_tokens(variant.ty, names, false);
                     let unknown = open_member_unknown_test(types, names, variant.ty);
-                    let guard =
-                        trial_guard_tokens(untagged_category(types, variant.ty), variant.ty);
+                    let guard = trial_guard(
+                        types,
+                        untagged_category(types, variant.ty),
+                        variant.ty,
+                        *mode,
+                    );
                     Some(trial_attempt_tokens(
                         ident,
                         variant_ident,
@@ -505,7 +509,7 @@ pub(super) fn emit_union(
                 let variant_ident = union_variant_ident(names, id, variant);
                 let ty = boxed_ty_tokens(variant.ty, names, false);
                 let unknown = open_member_unknown_test(types, names, variant.ty);
-                let guard = trial_guard_tokens(category, variant.ty);
+                let guard = trial_guard(types, category, variant.ty, *mode);
                 trial_attempt_tokens(
                     ident,
                     variant_ident,
@@ -529,10 +533,11 @@ pub(super) fn emit_union(
                 .any(|variant| open_member_unknown_test(types, names, variant.ty).is_some());
             // A value an open member decodes only as its `Unknown` is held to the same rule on
             // serialize as on decode: it counts only when no variant matches outright. A variant
-            // is tried on the written value under the same category guard as on decode.
+            // is tried on the written value under the same guard as on decode, so under `anyOf`
+            // only where it declares every member the written value holds.
             let validations = union.variants.iter().map(|variant| {
                 let ty = boxed_ty_tokens(variant.ty, names, false);
-                let guard = trial_guard_tokens(trial_dispatch(variant).1, variant.ty);
+                let guard = trial_guard(types, trial_dispatch(variant).1, variant.ty, *mode);
                 match open_member_unknown_test(types, names, variant.ty) {
                     Some(unknown) => {
                         let (pattern, attempt) = guarded_decode_tokens(&ty, guard.as_ref());
@@ -556,18 +561,18 @@ pub(super) fn emit_union(
                     }
                 }
             });
-            let expected = match mode {
-                UnionMode::OneOf => "exactly one",
-                UnionMode::AnyOf => "at least one",
+            let (expected, keeping) = match mode {
+                UnionMode::OneOf => ("exactly one", ""),
+                UnionMode::AnyOf => ("at least one", " that declares every member it holds"),
             };
             let de_valid = trial_match_rule_tokens(*mode);
             let ser_valid = de_valid.clone();
             let de_error = format!(
-                "data must match {expected} typed variant of union {}",
+                "data must match {expected} typed variant of union {}{keeping}",
                 ident.as_str()
             );
             let ser_error = format!(
-                "serialized value must match {expected} typed variant of union {}",
+                "serialized value must match {expected} typed variant of union {}{keeping}",
                 ident.as_str()
             );
             let fallback_decl = fallback_member.then(unknown_fallback_decl_tokens);
@@ -807,6 +812,58 @@ fn trial_guard_tokens(category: Option<JsonCategory>, ty: Ty) -> Option<TokenStr
     })
 }
 
+/// The test a buffered `value` passes before a trial under `mode` tries a variant of type `ty`
+/// whose values all serialize as `category`: its category guard ([`trial_guard_tokens`]) and,
+/// under `anyOf`, its member guard ([`declared_members_tokens`]). `None` where it has neither.
+fn trial_guard(
+    types: &TypeGraph,
+    category: Option<JsonCategory>,
+    ty: Ty,
+    mode: UnionMode,
+) -> Option<TokenStream> {
+    let category = trial_guard_tokens(category, ty);
+    let members = match mode {
+        UnionMode::OneOf => None,
+        UnionMode::AnyOf => declared_members_tokens(types, ty),
+    };
+    match (category, members) {
+        (Some(category), Some(members)) => Some(quote! { (#category && #members) }),
+        (category, members) => category.or(members),
+    }
+}
+
+/// For an `anyOf` variant of type `ty` that is an object struct ignoring unknown properties, the
+/// test that a buffered `value` holds no member the struct does not declare; `None` for any other
+/// type. The struct would decode such a payload by dropping those members, so the trial would
+/// select a variant that loses part of what it read whenever that variant ranks more specific
+/// than one that keeps it, and write back less than it read (#1404). A struct refusing unknown
+/// properties already fails to decode one, a typed overflow map keeps it, and a declared member
+/// is kept whether or not it is `readOnly`, which only a request leaves out. A `null` or other
+/// non-object value holds no member, so passes.
+fn declared_members_tokens(types: &TypeGraph, ty: Ty) -> Option<TokenStream> {
+    let TypeKind::Struct(object) = &types.get(ty.id)?.kind else {
+        return None;
+    };
+    if !matches!(object.additional, AdditionalProps::Allow) {
+        return None;
+    }
+    let declared: Vec<&str> = object
+        .fields
+        .iter()
+        .map(|field| field.name.wire.as_str())
+        .collect();
+    let declares_all = if declared.is_empty() {
+        quote! { members.is_empty() }
+    } else {
+        quote! {
+            members
+                .keys()
+                .all(|key| matches!(key.as_str(), #(#declared)|*))
+        }
+    };
+    Some(quote! { value.as_object().is_none_or(|members| #declares_all) })
+}
+
 /// The `if let` pattern and scrutinee that decode `value` as `ty` into `inner`, only when `guard`
 /// ([`trial_guard_tokens`]) holds where there is one.
 fn guarded_decode_tokens(
@@ -827,8 +884,10 @@ fn guarded_decode_tokens(
 /// match, and keep it when its priority beats the one selected so far (the earlier variant wins a
 /// tie). The emitted block expects `value`, `match_count`, and `selected: Option<(u32, Self)>` in
 /// scope. `Trial` tries every variant through it, and `Discriminated` its untagged variants, so
-/// the two strategies share one selection rule. `guard` ([`trial_guard_tokens`]) is the category
-/// test the payload must pass before the variant is tried at all.
+/// the two strategies share one selection rule. `guard` ([`trial_guard`]) is the test the payload
+/// must pass before the variant is tried at all: its JSON category and, under `anyOf`, that it
+/// holds no member the variant would drop, so a more specific variant that would drop one is never
+/// selected over one that keeps it, and a payload every variant would drop part of fails.
 ///
 /// `unknown` is [`open_member_unknown_test`] for a variant that is itself an open union: a value
 /// it decodes only as its `Unknown` is not counted as a match but kept, the first such one, in

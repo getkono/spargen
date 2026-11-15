@@ -10040,12 +10040,12 @@ pub mod types {
                 selected
                     .map(|(_, value)| value)
                     .ok_or_else(|| serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyString",
+                        "data must match at least one typed variant of union AnyString that declares every member it holds",
                     ))
             } else {
                 Err(
                     serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyString",
+                        "data must match at least one typed variant of union AnyString that declares every member it holds",
                     ),
                 )
             }
@@ -10081,7 +10081,7 @@ pub mod types {
             } else {
                 Err(
                     serde::ser::Error::custom(
-                        "serialized value must match at least one typed variant of union AnyString",
+                        "serialized value must match at least one typed variant of union AnyString that declares every member it holds",
                     ),
                 )
             }
@@ -10131,12 +10131,12 @@ pub mod types {
                 selected
                     .map(|(_, value)| value)
                     .ok_or_else(|| serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyNumber",
+                        "data must match at least one typed variant of union AnyNumber that declares every member it holds",
                     ))
             } else {
                 Err(
                     serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyNumber",
+                        "data must match at least one typed variant of union AnyNumber that declares every member it holds",
                     ),
                 )
             }
@@ -10173,7 +10173,7 @@ pub mod types {
             } else {
                 Err(
                     serde::ser::Error::custom(
-                        "serialized value must match at least one typed variant of union AnyNumber",
+                        "serialized value must match at least one typed variant of union AnyNumber that declares every member it holds",
                     ),
                 )
             }
@@ -10311,8 +10311,8 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Some(Ok(inner)) = value
-                .is_object()
+            if let Some(Ok(inner)) = (value.is_object()
+                && value.as_object().is_none_or(|members| members.is_empty()))
                 .then(|| serde_json::from_value::<Box<BroadOwner>>(value.clone()))
             {
                 match_count += 1;
@@ -10324,8 +10324,12 @@ pub mod types {
                     selected = Some((1000u32, AnyOwner::BroadOwner(inner)));
                 }
             }
-            if let Some(Ok(inner)) = value
-                .is_object()
+            if let Some(Ok(inner)) = (value.is_object()
+                && value
+                    .as_object()
+                    .is_none_or(|members| {
+                        members.keys().all(|key| matches!(key.as_str(), "id"))
+                    }))
                 .then(|| serde_json::from_value::<Box<DetailedOwner>>(value.clone()))
             {
                 match_count += 1;
@@ -10341,12 +10345,12 @@ pub mod types {
                 selected
                     .map(|(_, value)| value)
                     .ok_or_else(|| serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyOwner",
+                        "data must match at least one typed variant of union AnyOwner that declares every member it holds",
                     ))
             } else {
                 Err(
                     serde::de::Error::custom(
-                        "data must match at least one typed variant of union AnyOwner",
+                        "data must match at least one typed variant of union AnyOwner that declares every member it holds",
                     ),
                 )
             }
@@ -10366,12 +10370,18 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if value.is_object()
+            if (value.is_object()
+                && value.as_object().is_none_or(|members| members.is_empty()))
                 && serde_json::from_value::<Box<BroadOwner>>(value.clone()).is_ok()
             {
                 match_count += 1;
             }
-            if value.is_object()
+            if (value.is_object()
+                && value
+                    .as_object()
+                    .is_none_or(|members| {
+                        members.keys().all(|key| matches!(key.as_str(), "id"))
+                    }))
                 && serde_json::from_value::<Box<DetailedOwner>>(value.clone()).is_ok()
             {
                 match_count += 1;
@@ -10381,7 +10391,7 @@ pub mod types {
             } else {
                 Err(
                     serde::ser::Error::custom(
-                        "serialized value must match at least one typed variant of union AnyOwner",
+                        "serialized value must match at least one typed variant of union AnyOwner that declares every member it holds",
                     ),
                 )
             }
@@ -11233,8 +11243,14 @@ pub mod types {
                 return {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    if let Some(Ok(inner)) = value
-                        .is_object()
+                    if let Some(Ok(inner)) = (value.is_object()
+                        && value
+                            .as_object()
+                            .is_none_or(|members| {
+                                members
+                                    .keys()
+                                    .all(|key| matches!(key.as_str(), "petType" | "fins"))
+                            }))
                         .then(|| serde_json::from_value::<
                             Box<LooseAnimalVariant2>,
                         >(value.clone()))
@@ -11277,8 +11293,14 @@ pub mod types {
                 _ => {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    if let Some(Ok(inner)) = value
-                        .is_object()
+                    if let Some(Ok(inner)) = (value.is_object()
+                        && value
+                            .as_object()
+                            .is_none_or(|members| {
+                                members
+                                    .keys()
+                                    .all(|key| matches!(key.as_str(), "petType" | "fins"))
+                            }))
                         .then(|| serde_json::from_value::<
                             Box<LooseAnimalVariant2>,
                         >(value.clone()))
