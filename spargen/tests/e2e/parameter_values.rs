@@ -229,11 +229,11 @@ fn a_non_finite_number_in_a_json_parameter_or_body_is_refused() {
         ));
         // Nested: the second element of the array body.
         assert!(matches!(
-            parameter_error(unreachable().post_ratios(&vec![Ratio { ratio: 1.0 }, ratio.clone()])),
+            parameter_error(unreachable().post_ratios(vec![Ratio { ratio: 1.0 }, ratio.clone()])),
             ParameterError::NonFiniteNumber
         ));
         assert!(matches!(
-            parameter_error(unreachable().upload(&UploadBody { meta: ratio })),
+            parameter_error(unreachable().upload(UploadBody { meta: ratio })),
             ParameterError::NonFiniteNumber
         ));
     }
@@ -247,7 +247,7 @@ fn a_non_finite_number_inside_a_union_is_refused() {
     for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let circle = Shape::Circle(Box::new(Circle { kind: "circle".to_owned(), radius: number }));
         assert!(matches!(
-            parameter_error(unreachable().post_shape(PostShapeParams::default(), &circle)),
+            parameter_error(unreachable().post_shape(PostShapeParams::default(), circle.clone())),
             ParameterError::NonFiniteNumber
         ));
         let square = Shape::Square(Box::new(Square { kind: "square".to_owned(), side: 1.0 }));
@@ -255,7 +255,7 @@ fn a_non_finite_number_inside_a_union_is_refused() {
             parameter_error(
                 unreachable().post_shape(
                     PostShapeParams::default().size(Size::Ratio(Box::new(Ratio { ratio: number }))),
-                    &square,
+                    square.clone(),
                 )
             ),
             ParameterError::NonFiniteNumber
@@ -270,7 +270,7 @@ fn a_finite_number_inside_a_union_reaches_the_wire() {
         .unwrap()
         .post_shape(
             PostShapeParams::default().size(Size::Ratio(Box::new(Ratio { ratio: 2.5 }))),
-            &Shape::Circle(Box::new(Circle { kind: "circle".to_owned(), radius: 0.5 })),
+            Shape::Circle(Box::new(Circle { kind: "circle".to_owned(), radius: 0.5 })),
         )
         .expect("the call round-trips");
     let request = server.join().unwrap();
@@ -293,7 +293,7 @@ fn a_finite_number_in_a_json_parameter_or_body_reaches_the_wire() {
         .search(Some(SearchParams::default().q(Ratio { ratio: 0.25 })))
         .expect("the call round-trips");
     client
-        .post_ratios(&vec![Ratio { ratio: 2.0 }])
+        .post_ratios(vec![Ratio { ratio: 2.0 }])
         .expect("the call round-trips");
     let requests = server.join().unwrap();
     assert_eq!(requests[0].line(), "GET /filters?filter=0.5 HTTP/1.1");

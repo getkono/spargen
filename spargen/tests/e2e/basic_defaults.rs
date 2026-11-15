@@ -57,15 +57,15 @@ fn an_absent_defaulted_member_decodes_as_absent_and_its_accessor_reads_the_defau
 }
 
 #[test]
-fn new_leaves_a_defaulted_member_unset_so_it_is_not_sent() {
-    use basic_client::types::{MergedDefault, Settings};
-    let settings = Settings::new(3);
+fn construction_leaves_a_defaulted_member_unset_so_it_is_not_sent() {
+    use basic_client::types::{MergedDefault, Settings, SettingsRequired};
+    let settings = Settings::from(SettingsRequired { retries: 3 });
     assert_eq!(settings.color, None);
     assert_eq!(settings.enabled, None);
     assert_eq!(serde_json::to_string(&settings).unwrap(), r#"{"retries":3}"#);
     // Setting one member sends that member alone, never the defaults beside it.
     assert_eq!(
-        serde_json::to_string(&Settings::new(3).with_color("blue".to_owned())).unwrap(),
+        serde_json::to_string(&settings.with_color("blue")).unwrap(),
         r#"{"color":"blue","retries":3}"#
     );
     // A struct with no required member derives `Default`, which is `new()`: every member unset.

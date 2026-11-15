@@ -529,7 +529,7 @@ fn client(mock: &testing::MockBackend) -> direction_client::Client {
 
 /// A pet with every member set, `readOnly` and `writeOnly` ones included.
 fn pet(id: i64) -> types::Pet {
-    types::Pet::new("rex".to_owned())
+    types::Pet::from(types::PetRequired { name: "rex".to_owned() })
         .with_id(id)
         .with_password("hunter2".to_owned())
         .with_owner(types::Owner::new().with_id(3).with_secret("s3cret".to_owned()))
@@ -568,7 +568,7 @@ fn an_array_reply_keeps_the_rule_for_every_member() {
 
 #[test]
 fn an_xml_reply_carries_read_only_members_and_drops_write_only_ones() {
-    let tag = types::Tag::new("blue".to_owned()).with_id(5).with_secret("s".to_owned());
+    let tag = types::Tag::from(types::TagRequired { label: "blue".to_owned() }).with_id(5).with_secret("s".to_owned());
     let mock = testing::MockBackend::new().on_get_tag(move |_| testing::get_tag::Reply::status_200(&tag));
     let read = block_on(client(&mock).get_tag()).unwrap().into_inner();
     assert_eq!(read.id, Some(5), "{read:?}");
@@ -582,7 +582,7 @@ fn a_request_body_keeps_the_request_direction() {
         let sent: types::Pet = call.json().unwrap();
         testing::create_pet::Reply::status_201(&sent.with_id(11).with_checked("yes".to_owned()))
     });
-    let created = block_on(client(&mock).create_pet(&pet(99))).unwrap().into_inner();
+    let created = block_on(client(&mock).create_pet(pet(99))).unwrap().into_inner();
     assert_eq!(created.id, Some(11), "{created:?}");
     assert_eq!(created.password, None, "{created:?}");
 
@@ -703,7 +703,7 @@ fn the_request_body_is_recorded_and_decodes_as_json() {
         let sent: types::Pet = call.json().unwrap();
         testing::create_pet::Reply::status_201(&sent)
     });
-    let created = block_on(client(&mock).create_pet(&pet(3, "Tom"))).unwrap();
+    let created = block_on(client(&mock).create_pet(pet(3, "Tom"))).unwrap();
     assert_eq!(created.into_inner(), pet(3, "Tom"));
     let calls = mock.calls(ops::CREATE_PET);
     assert_eq!(calls[0].json::<types::Pet>().unwrap(), pet(3, "Tom"));

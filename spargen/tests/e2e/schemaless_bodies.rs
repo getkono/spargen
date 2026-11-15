@@ -106,7 +106,7 @@ fn any_json_value_is_sent_as_json_under_its_media() {
     let mock = testing::MockBackend::new()
         .on_post_json(|_| testing::post_json::Reply::from_reply(no_content()));
     let patch = serde_json::json!({ "name": "rex", "tags": null });
-    block_on(client(&mock).post_json(&patch)).unwrap();
+    block_on(client(&mock).post_json(patch.clone())).unwrap();
     let (body, content_type) = sent(&mock, ops::POST_JSON);
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap(), patch);
     assert_eq!(content_type.as_deref(), Some("application/merge-patch+json"));

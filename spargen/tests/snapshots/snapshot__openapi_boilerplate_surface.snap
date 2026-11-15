@@ -12,7 +12,7 @@ operations (9):
   list_pets_request
   show_pet_by_id
   show_pet_by_id_request
-types (19):
+types (21):
   BlockingClient
   Client
   CreatePetsError
@@ -25,10 +25,12 @@ types (19):
   types::Error
   types::ErrorCode
   types::ErrorMessage
+  types::ErrorRequired
   types::HeaderxNext
   types::Limit
   types::Pet
   types::PetId
   types::PetId5e361c21
   types::PetName
+  types::PetRequired
   types::PetTag

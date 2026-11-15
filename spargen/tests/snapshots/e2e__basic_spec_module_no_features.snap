@@ -8670,13 +8670,22 @@ pub mod types {
         )]
         pub limit: Option<DeepFilterLimit>,
     }
-    impl DeepFilter {
-        ///A `DeepFilter` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(kind: DeepFilterKind) -> Self {
-            Self { kind, limit: None }
+    ///The required members of `DeepFilter`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct DeepFilterRequired {
+        ///The `kind` member.
+        pub kind: DeepFilterKind,
+    }
+    impl std::convert::From<DeepFilterRequired> for DeepFilter {
+        ///A `DeepFilter` holding the members `DeepFilterRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: DeepFilterRequired) -> Self {
+            Self {
+                kind: required.kind,
+                limit: None,
+            }
         }
+    }
+    impl DeepFilter {
         ///Set the `limit` member.
         #[must_use]
         pub fn with_limit(mut self, value: DeepFilterLimit) -> Self {
@@ -8747,25 +8756,32 @@ pub mod types {
         #[serde(rename = "empty_only")]
         pub empty_only: RefinedEmptyOnlyIntersection,
     }
-    impl Refined {
-        ///A `Refined` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(
-            run_id: RefinedMember1RunId,
-            status: RefinedMember1Status,
-            marker: Option<RefinedMarkerIntersection>,
-            labels: RefinedLabelsIntersection,
-            steps: RefinedStepsIntersection,
-            empty_only: RefinedEmptyOnlyIntersection,
-        ) -> Self {
+    ///The required members of `Refined`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct RefinedRequired {
+        ///The `run_id` member.
+        pub run_id: RefinedMember1RunId,
+        ///The `status` member.
+        pub status: RefinedMember1Status,
+        ///The `marker` member.
+        pub marker: Option<RefinedMarkerIntersection>,
+        ///The `labels` member.
+        pub labels: RefinedLabelsIntersection,
+        ///The `steps` member.
+        pub steps: RefinedStepsIntersection,
+        ///The `empty_only` member.
+        pub empty_only: RefinedEmptyOnlyIntersection,
+    }
+    impl std::convert::From<RefinedRequired> for Refined {
+        ///A `Refined` holding the members `RefinedRequired` holds.
+        fn from(required: RefinedRequired) -> Self {
             Self {
-                run_id,
-                status,
-                marker,
-                labels,
-                steps,
-                empty_only,
+                run_id: required.run_id,
+                status: required.status,
+                marker: required.marker,
+                labels: required.labels,
+                steps: required.steps,
+                empty_only: required.empty_only,
             }
         }
     }
@@ -8823,12 +8839,17 @@ pub mod types {
         #[serde(rename = "name")]
         pub name: RefinedMember1StepsItemName,
     }
-    impl RefinedStepsIntersectionItem {
-        ///A `RefinedStepsIntersectionItem` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(name: RefinedMember1StepsItemName) -> Self {
-            Self { name }
+    ///The required members of `RefinedStepsIntersectionItem`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct RefinedStepsIntersectionItemRequired {
+        ///The `name` member.
+        pub name: RefinedMember1StepsItemName,
+    }
+    impl std::convert::From<RefinedStepsIntersectionItemRequired>
+    for RefinedStepsIntersectionItem {
+        ///A `RefinedStepsIntersectionItem` holding the members `RefinedStepsIntersectionItemRequired` holds.
+        fn from(required: RefinedStepsIntersectionItemRequired) -> Self {
+            Self { name: required.name }
         }
     }
     pub type RefinedStepsIntersection = Vec<RefinedStepsIntersectionItem>;
@@ -8872,15 +8893,17 @@ pub mod types {
     }
     impl ConflictDefaultTarget {
         ///A `ConflictDefaultTarget` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self { x: None }
         }
         ///Set the `x` member.
         #[must_use]
-        pub fn with_x(mut self, value: ConflictDefaultTargetX) -> Self {
-            self.x = Some(value);
+        pub fn with_x(
+            mut self,
+            value: impl std::convert::Into<ConflictDefaultTargetX>,
+        ) -> Self {
+            self.x = Some(value.into());
             self
         }
         ///The `x` member where it is set, else its schema default.
@@ -8905,7 +8928,6 @@ pub mod types {
     }
     impl ConflictDefault {
         ///A `ConflictDefault` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self { x: None }
@@ -8956,7 +8978,6 @@ pub mod types {
     }
     impl ConflictDefaultSibling {
         ///A `ConflictDefaultSibling` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self { x: None }
@@ -9034,7 +9055,6 @@ pub mod types {
     }
     impl NarrowDefaultBase {
         ///A `NarrowDefaultBase` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -9046,14 +9066,20 @@ pub mod types {
         }
         ///Set the `valid` member.
         #[must_use]
-        pub fn with_valid(mut self, value: NarrowDefaultBaseValid) -> Self {
-            self.valid = Some(value);
+        pub fn with_valid(
+            mut self,
+            value: impl std::convert::Into<NarrowDefaultBaseValid>,
+        ) -> Self {
+            self.valid = Some(value.into());
             self
         }
         ///Set the `bad` member.
         #[must_use]
-        pub fn with_bad(mut self, value: NarrowDefaultBaseBad) -> Self {
-            self.bad = Some(value);
+        pub fn with_bad(
+            mut self,
+            value: impl std::convert::Into<NarrowDefaultBaseBad>,
+        ) -> Self {
+            self.bad = Some(value.into());
             self
         }
         ///Set the `ratio` member.
@@ -9134,7 +9160,6 @@ pub mod types {
     }
     impl NarrowDefaultEnum {
         ///A `NarrowDefaultEnum` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -9146,14 +9171,20 @@ pub mod types {
         }
         ///Set the `valid` member.
         #[must_use]
-        pub fn with_valid(mut self, value: NarrowDefaultEnumValid) -> Self {
-            self.valid = Some(value);
+        pub fn with_valid(
+            mut self,
+            value: impl std::convert::Into<NarrowDefaultEnumValid>,
+        ) -> Self {
+            self.valid = Some(value.into());
             self
         }
         ///Set the `bad` member.
         #[must_use]
-        pub fn with_bad(mut self, value: NarrowDefaultEnumBad) -> Self {
-            self.bad = Some(value);
+        pub fn with_bad(
+            mut self,
+            value: impl std::convert::Into<NarrowDefaultEnumBad>,
+        ) -> Self {
+            self.bad = Some(value.into());
             self
         }
         ///Set the `ratio` member.
@@ -9296,7 +9327,6 @@ pub mod types {
     }
     impl NarrowDefault {
         ///A `NarrowDefault` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -9308,14 +9338,20 @@ pub mod types {
         }
         ///Set the `valid` member.
         #[must_use]
-        pub fn with_valid(mut self, value: NarrowDefaultEnumValid) -> Self {
-            self.valid = Some(value);
+        pub fn with_valid(
+            mut self,
+            value: impl std::convert::Into<NarrowDefaultEnumValid>,
+        ) -> Self {
+            self.valid = Some(value.into());
             self
         }
         ///Set the `bad` member.
         #[must_use]
-        pub fn with_bad(mut self, value: NarrowDefaultEnumBad) -> Self {
-            self.bad = Some(value);
+        pub fn with_bad(
+            mut self,
+            value: impl std::convert::Into<NarrowDefaultEnumBad>,
+        ) -> Self {
+            self.bad = Some(value.into());
             self
         }
         ///Set the `ratio` member.
@@ -9382,7 +9418,6 @@ pub mod types {
     }
     impl NarrowDefaultSibling {
         ///A `NarrowDefaultSibling` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -9394,14 +9429,20 @@ pub mod types {
         }
         ///Set the `valid` member.
         #[must_use]
-        pub fn with_valid(mut self, value: NarrowDefaultSiblingConstraintValid) -> Self {
-            self.valid = Some(value);
+        pub fn with_valid(
+            mut self,
+            value: impl std::convert::Into<NarrowDefaultSiblingConstraintValid>,
+        ) -> Self {
+            self.valid = Some(value.into());
             self
         }
         ///Set the `bad` member.
         #[must_use]
-        pub fn with_bad(mut self, value: NarrowDefaultSiblingConstraintBad) -> Self {
-            self.bad = Some(value);
+        pub fn with_bad(
+            mut self,
+            value: impl std::convert::Into<NarrowDefaultSiblingConstraintBad>,
+        ) -> Self {
+            self.bad = Some(value.into());
             self
         }
         ///Set the `ratio` member.
@@ -9536,15 +9577,17 @@ pub mod types {
     }
     impl MergedDefaultNarrow {
         ///A `MergedDefaultNarrow` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self { p: None }
         }
         ///Set the `p` member.
         #[must_use]
-        pub fn with_p(mut self, value: MergedDefaultNarrowP) -> Self {
-            self.p = Some(value);
+        pub fn with_p(
+            mut self,
+            value: impl std::convert::Into<MergedDefaultNarrowP>,
+        ) -> Self {
+            self.p = Some(value.into());
             self
         }
     }
@@ -9562,15 +9605,17 @@ pub mod types {
     }
     impl MergedDefaultBase {
         ///A `MergedDefaultBase` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self { p: None }
         }
         ///Set the `p` member.
         #[must_use]
-        pub fn with_p(mut self, value: MergedDefaultBaseP) -> Self {
-            self.p = Some(value);
+        pub fn with_p(
+            mut self,
+            value: impl std::convert::Into<MergedDefaultBaseP>,
+        ) -> Self {
+            self.p = Some(value.into());
             self
         }
         ///The `p` member where it is set, else its schema default.
@@ -9595,15 +9640,17 @@ pub mod types {
     }
     impl MergedDefaultOther {
         ///A `MergedDefaultOther` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self { p: None }
         }
         ///Set the `p` member.
         #[must_use]
-        pub fn with_p(mut self, value: MergedDefaultOtherP) -> Self {
-            self.p = Some(value);
+        pub fn with_p(
+            mut self,
+            value: impl std::convert::Into<MergedDefaultOtherP>,
+        ) -> Self {
+            self.p = Some(value.into());
             self
         }
         ///The `p` member where it is set, else its schema default.
@@ -9628,15 +9675,17 @@ pub mod types {
     }
     impl MergedDefault {
         ///A `MergedDefault` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self { p: None }
         }
         ///Set the `p` member.
         #[must_use]
-        pub fn with_p(mut self, value: MergedDefaultNarrowP) -> Self {
-            self.p = Some(value);
+        pub fn with_p(
+            mut self,
+            value: impl std::convert::Into<MergedDefaultNarrowP>,
+        ) -> Self {
+            self.p = Some(value.into());
             self
         }
         ///The `p` member where it is set, else its schema default.
@@ -9660,15 +9709,17 @@ pub mod types {
     }
     impl MergedDefaultSibling {
         ///A `MergedDefaultSibling` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self { p: None }
         }
         ///Set the `p` member.
         #[must_use]
-        pub fn with_p(mut self, value: MergedDefaultNarrowP) -> Self {
-            self.p = Some(value);
+        pub fn with_p(
+            mut self,
+            value: impl std::convert::Into<MergedDefaultNarrowP>,
+        ) -> Self {
+            self.p = Some(value.into());
             self
         }
         ///The `p` member where it is set, else its schema default.
@@ -9692,15 +9743,17 @@ pub mod types {
     }
     impl MergedDefaultClash {
         ///A `MergedDefaultClash` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self { p: None }
         }
         ///Set the `p` member.
         #[must_use]
-        pub fn with_p(mut self, value: MergedDefaultOtherP) -> Self {
-            self.p = Some(value);
+        pub fn with_p(
+            mut self,
+            value: impl std::convert::Into<MergedDefaultOtherP>,
+        ) -> Self {
+            self.p = Some(value.into());
             self
         }
         ///The `p` member where it is set, else its schema default.
@@ -9723,7 +9776,6 @@ pub mod types {
     }
     impl ForbiddenProperty {
         ///A `ForbiddenProperty` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self { x: None }
@@ -9772,7 +9824,6 @@ pub mod types {
     }
     impl NullOnlyProperty {
         ///A `NullOnlyProperty` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -9896,7 +9947,6 @@ pub mod types {
     }
     impl OptionalFields {
         ///A `OptionalFields` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -9914,8 +9964,11 @@ pub mod types {
         }
         ///Set the `name` member.
         #[must_use]
-        pub fn with_name(mut self, value: OptionalFieldsName) -> Self {
-            self.name = Some(value);
+        pub fn with_name(
+            mut self,
+            value: impl std::convert::Into<OptionalFieldsName>,
+        ) -> Self {
+            self.name = Some(value.into());
             self
         }
         ///Set the `count` member.
@@ -9926,44 +9979,62 @@ pub mod types {
         }
         ///Set the `flag` member.
         #[must_use]
-        pub fn with_flag(mut self, value: OptionalFieldsFlag) -> Self {
-            self.flag = Some(value);
+        pub fn with_flag(
+            mut self,
+            value: impl std::convert::Into<OptionalFieldsFlag>,
+        ) -> Self {
+            self.flag = Some(value.into());
             self
         }
         ///Set the `tags` member.
         #[must_use]
-        pub fn with_tags(mut self, value: OptionalFieldsTags) -> Self {
-            self.tags = Some(value);
+        pub fn with_tags(
+            mut self,
+            value: impl std::convert::Into<OptionalFieldsTags>,
+        ) -> Self {
+            self.tags = Some(value.into());
             self
         }
         ///Set the `mode` member.
         #[must_use]
-        pub fn with_mode(mut self, value: Mode) -> Self {
-            self.mode = Some(value);
+        pub fn with_mode(mut self, value: impl std::convert::Into<Mode>) -> Self {
+            self.mode = Some(value.into());
             self
         }
         ///Set the `nested` member.
         #[must_use]
-        pub fn with_nested(mut self, value: ForbiddenProperty) -> Self {
-            self.nested = Some(value);
+        pub fn with_nested(
+            mut self,
+            value: impl std::convert::Into<ForbiddenProperty>,
+        ) -> Self {
+            self.nested = Some(value.into());
             self
         }
         ///Set the `choice` member.
         #[must_use]
-        pub fn with_choice(mut self, value: OptionalFieldsChoice) -> Self {
-            self.choice = Some(value);
+        pub fn with_choice(
+            mut self,
+            value: impl std::convert::Into<OptionalFieldsChoice>,
+        ) -> Self {
+            self.choice = Some(value.into());
             self
         }
         ///Set the `colour` member.
         #[must_use]
-        pub fn with_colour(mut self, value: OptionalFieldsColour) -> Self {
-            self.colour = Some(value);
+        pub fn with_colour(
+            mut self,
+            value: impl std::convert::Into<OptionalFieldsColour>,
+        ) -> Self {
+            self.colour = Some(value.into());
             self
         }
         ///Set the `anything` member.
         #[must_use]
-        pub fn with_anything(mut self, value: OptionalFieldsAnything) -> Self {
-            self.anything = Some(value);
+        pub fn with_anything(
+            mut self,
+            value: impl std::convert::Into<OptionalFieldsAnything>,
+        ) -> Self {
+            self.anything = Some(value.into());
             self
         }
         ///Set the `maybe` member: a value, or `Nullable::Null` for an explicit `null`.
@@ -10406,7 +10477,6 @@ pub mod types {
     pub struct BroadOwner {}
     impl BroadOwner {
         ///A `BroadOwner` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {}
@@ -10417,12 +10487,16 @@ pub mod types {
         #[serde(rename = "id")]
         pub id: DetailedOwnerId,
     }
-    impl DetailedOwner {
-        ///A `DetailedOwner` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(id: DetailedOwnerId) -> Self {
-            Self { id }
+    ///The required members of `DetailedOwner`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct DetailedOwnerRequired {
+        ///The `id` member.
+        pub id: DetailedOwnerId,
+    }
+    impl std::convert::From<DetailedOwnerRequired> for DetailedOwner {
+        ///A `DetailedOwner` holding the members `DetailedOwnerRequired` holds.
+        fn from(required: DetailedOwnerRequired) -> Self {
+            Self { id: required.id }
         }
     }
     pub type DetailedOwnerId = i64;
@@ -10538,12 +10612,21 @@ pub mod types {
         #[serde(rename = "content")]
         pub content: ContentFileContent,
     }
-    impl ContentFile {
-        ///A `ContentFile` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(r#type: ContentFileType, content: ContentFileContent) -> Self {
-            Self { r#type, content }
+    ///The required members of `ContentFile`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ContentFileRequired {
+        ///The `type` member.
+        pub r#type: ContentFileType,
+        ///The `content` member.
+        pub content: ContentFileContent,
+    }
+    impl std::convert::From<ContentFileRequired> for ContentFile {
+        ///A `ContentFile` holding the members `ContentFileRequired` holds.
+        fn from(required: ContentFileRequired) -> Self {
+            Self {
+                r#type: required.r#type,
+                content: required.content,
+            }
         }
     }
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -10584,12 +10667,21 @@ pub mod types {
         #[serde(rename = "target")]
         pub target: ContentLinkTarget,
     }
-    impl ContentLink {
-        ///A `ContentLink` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(r#type: ContentLinkType, target: ContentLinkTarget) -> Self {
-            Self { r#type, target }
+    ///The required members of `ContentLink`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ContentLinkRequired {
+        ///The `type` member.
+        pub r#type: ContentLinkType,
+        ///The `target` member.
+        pub target: ContentLinkTarget,
+    }
+    impl std::convert::From<ContentLinkRequired> for ContentLink {
+        ///A `ContentLink` holding the members `ContentLinkRequired` holds.
+        fn from(required: ContentLinkRequired) -> Self {
+            Self {
+                r#type: required.r#type,
+                target: required.target,
+            }
         }
     }
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -10879,16 +10971,22 @@ pub mod types {
         )]
         pub mixed_content: Option<MixedContent>,
     }
-    impl User {
-        ///A `User` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(id: UserId, name: UserName) -> Self {
+    ///The required members of `User`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct UserRequired {
+        ///The `id` member.
+        pub id: UserId,
+        ///The `name` member.
+        pub name: UserName,
+    }
+    impl std::convert::From<UserRequired> for User {
+        ///A `User` holding the members `UserRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: UserRequired) -> Self {
             Self {
-                id,
+                id: required.id,
                 external_id: None,
                 created_at: None,
-                name,
+                name: required.name,
                 tree: None,
                 category: None,
                 dict: None,
@@ -10906,40 +11004,54 @@ pub mod types {
                 mixed_content: None,
             }
         }
+    }
+    impl User {
         ///Set the `external_id` member.
         #[must_use]
-        pub fn with_external_id(mut self, value: UserExternalId) -> Self {
-            self.external_id = Some(value);
+        pub fn with_external_id(
+            mut self,
+            value: impl std::convert::Into<UserExternalId>,
+        ) -> Self {
+            self.external_id = Some(value.into());
             self
         }
         ///Set the `created_at` member.
         #[must_use]
-        pub fn with_created_at(mut self, value: UserCreatedAt) -> Self {
-            self.created_at = Some(value);
+        pub fn with_created_at(
+            mut self,
+            value: impl std::convert::Into<UserCreatedAt>,
+        ) -> Self {
+            self.created_at = Some(value.into());
             self
         }
         ///Set the `tree` member.
         #[must_use]
-        pub fn with_tree(mut self, value: TreeNode) -> Self {
-            self.tree = Some(value);
+        pub fn with_tree(mut self, value: impl std::convert::Into<TreeNode>) -> Self {
+            self.tree = Some(value.into());
             self
         }
         ///Set the `category` member.
         #[must_use]
-        pub fn with_category(mut self, value: Category) -> Self {
-            self.category = Some(value);
+        pub fn with_category(
+            mut self,
+            value: impl std::convert::Into<Category>,
+        ) -> Self {
+            self.category = Some(value.into());
             self
         }
         ///Set the `dict` member.
         #[must_use]
-        pub fn with_dict(mut self, value: Dict) -> Self {
-            self.dict = Some(value);
+        pub fn with_dict(mut self, value: impl std::convert::Into<Dict>) -> Self {
+            self.dict = Some(value.into());
             self
         }
         ///Set the `alias_node` member.
         #[must_use]
-        pub fn with_alias_node(mut self, value: AliasNode) -> Self {
-            self.alias_node = Some(value);
+        pub fn with_alias_node(
+            mut self,
+            value: impl std::convert::Into<AliasNode>,
+        ) -> Self {
+            self.alias_node = Some(value.into());
             self
         }
         ///Set the `priority` member: a value, or `Nullable::Null` for an explicit `null`.
@@ -10959,20 +11071,26 @@ pub mod types {
         }
         ///Set the `pet` member.
         #[must_use]
-        pub fn with_pet(mut self, value: Pet) -> Self {
-            self.pet = Some(value);
+        pub fn with_pet(mut self, value: impl std::convert::Into<Pet>) -> Self {
+            self.pet = Some(value.into());
             self
         }
         ///Set the `animal` member.
         #[must_use]
-        pub fn with_animal(mut self, value: LooseAnimal) -> Self {
-            self.animal = Some(value);
+        pub fn with_animal(
+            mut self,
+            value: impl std::convert::Into<LooseAnimal>,
+        ) -> Self {
+            self.animal = Some(value.into());
             self
         }
         ///Set the `alias` member.
         #[must_use]
-        pub fn with_alias(mut self, value: StringOrList) -> Self {
-            self.alias = Some(value);
+        pub fn with_alias(
+            mut self,
+            value: impl std::convert::Into<StringOrList>,
+        ) -> Self {
+            self.alias = Some(value.into());
             self
         }
         ///Set the `notes` member: a value, or `Nullable::Null` for an explicit `null`.
@@ -10992,38 +11110,53 @@ pub mod types {
         }
         ///Set the `refined` member.
         #[must_use]
-        pub fn with_refined(mut self, value: Refined) -> Self {
-            self.refined = Some(value);
+        pub fn with_refined(mut self, value: impl std::convert::Into<Refined>) -> Self {
+            self.refined = Some(value.into());
             self
         }
         ///Set the `any_string` member.
         #[must_use]
-        pub fn with_any_string(mut self, value: AnyString) -> Self {
-            self.any_string = Some(value);
+        pub fn with_any_string(
+            mut self,
+            value: impl std::convert::Into<AnyString>,
+        ) -> Self {
+            self.any_string = Some(value.into());
             self
         }
         ///Set the `any_number` member.
         #[must_use]
-        pub fn with_any_number(mut self, value: AnyNumber) -> Self {
-            self.any_number = Some(value);
+        pub fn with_any_number(
+            mut self,
+            value: impl std::convert::Into<AnyNumber>,
+        ) -> Self {
+            self.any_number = Some(value.into());
             self
         }
         ///Set the `one_overlap` member.
         #[must_use]
-        pub fn with_one_overlap(mut self, value: OneOverlap) -> Self {
-            self.one_overlap = Some(value);
+        pub fn with_one_overlap(
+            mut self,
+            value: impl std::convert::Into<OneOverlap>,
+        ) -> Self {
+            self.one_overlap = Some(value.into());
             self
         }
         ///Set the `any_owner` member.
         #[must_use]
-        pub fn with_any_owner(mut self, value: AnyOwner) -> Self {
-            self.any_owner = Some(value);
+        pub fn with_any_owner(
+            mut self,
+            value: impl std::convert::Into<AnyOwner>,
+        ) -> Self {
+            self.any_owner = Some(value.into());
             self
         }
         ///Set the `mixed_content` member.
         #[must_use]
-        pub fn with_mixed_content(mut self, value: MixedContent) -> Self {
-            self.mixed_content = Some(value);
+        pub fn with_mixed_content(
+            mut self,
+            value: impl std::convert::Into<MixedContent>,
+        ) -> Self {
+            self.mixed_content = Some(value.into());
             self
         }
     }
@@ -11050,27 +11183,39 @@ pub mod types {
         )]
         pub children: Option<TreeNodeChildren>,
     }
-    impl TreeNode {
-        ///A `TreeNode` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(value: TreeNodeValue) -> Self {
+    ///The required members of `TreeNode`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct TreeNodeRequired {
+        ///The `value` member.
+        pub value: TreeNodeValue,
+    }
+    impl std::convert::From<TreeNodeRequired> for TreeNode {
+        ///A `TreeNode` holding the members `TreeNodeRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: TreeNodeRequired) -> Self {
             Self {
-                value,
+                value: required.value,
                 parent: None,
                 children: None,
             }
         }
+    }
+    impl TreeNode {
         ///Set the `parent` member.
         #[must_use]
-        pub fn with_parent(mut self, value: Box<TreeNode>) -> Self {
-            self.parent = Some(value);
+        pub fn with_parent(
+            mut self,
+            value: impl std::convert::Into<Box<TreeNode>>,
+        ) -> Self {
+            self.parent = Some(value.into());
             self
         }
         ///Set the `children` member.
         #[must_use]
-        pub fn with_children(mut self, value: TreeNodeChildren) -> Self {
-            self.children = Some(value);
+        pub fn with_children(
+            mut self,
+            value: impl std::convert::Into<TreeNodeChildren>,
+        ) -> Self {
+            self.children = Some(value.into());
             self
         }
     }
@@ -11088,17 +11233,26 @@ pub mod types {
         )]
         pub item: Option<Item>,
     }
-    impl Category {
-        ///A `Category` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(name: CategoryName) -> Self {
-            Self { name, item: None }
+    ///The required members of `Category`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct CategoryRequired {
+        ///The `name` member.
+        pub name: CategoryName,
+    }
+    impl std::convert::From<CategoryRequired> for Category {
+        ///A `Category` holding the members `CategoryRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: CategoryRequired) -> Self {
+            Self {
+                name: required.name,
+                item: None,
+            }
         }
+    }
+    impl Category {
         ///Set the `item` member.
         #[must_use]
-        pub fn with_item(mut self, value: Item) -> Self {
-            self.item = Some(value);
+        pub fn with_item(mut self, value: impl std::convert::Into<Item>) -> Self {
+            self.item = Some(value.into());
             self
         }
     }
@@ -11115,17 +11269,29 @@ pub mod types {
         )]
         pub category: Option<Box<Category>>,
     }
-    impl Item {
-        ///A `Item` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(label: ItemLabel) -> Self {
-            Self { label, category: None }
+    ///The required members of `Item`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ItemRequired {
+        ///The `label` member.
+        pub label: ItemLabel,
+    }
+    impl std::convert::From<ItemRequired> for Item {
+        ///A `Item` holding the members `ItemRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: ItemRequired) -> Self {
+            Self {
+                label: required.label,
+                category: None,
+            }
         }
+    }
+    impl Item {
         ///Set the `category` member.
         #[must_use]
-        pub fn with_category(mut self, value: Box<Category>) -> Self {
-            self.category = Some(value);
+        pub fn with_category(
+            mut self,
+            value: impl std::convert::Into<Box<Category>>,
+        ) -> Self {
+            self.category = Some(value.into());
             self
         }
     }
@@ -11137,7 +11303,6 @@ pub mod types {
     }
     impl Dict {
         ///A `Dict` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -11162,16 +11327,22 @@ pub mod types {
         )]
         pub parent: super::support::Nullable<Box<AliasNode>>,
     }
-    impl AliasNode {
-        ///A `AliasNode` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(value: AliasNodeValue) -> Self {
+    ///The required members of `AliasNode`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct AliasNodeRequired {
+        ///The `value` member.
+        pub value: AliasNodeValue,
+    }
+    impl std::convert::From<AliasNodeRequired> for AliasNode {
+        ///A `AliasNode` holding the members `AliasNodeRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: AliasNodeRequired) -> Self {
             Self {
-                value,
+                value: required.value,
                 parent: super::support::Nullable::Absent,
             }
         }
+    }
+    impl AliasNode {
         ///Set the `parent` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_parent(
@@ -11348,12 +11519,21 @@ pub mod types {
         #[serde(rename = "name")]
         pub name: CatName,
     }
-    impl Cat {
-        ///A `Cat` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(pet_type: CatPetType, name: CatName) -> Self {
-            Self { pet_type, name }
+    ///The required members of `Cat`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct CatRequired {
+        ///The `petType` member.
+        pub pet_type: CatPetType,
+        ///The `name` member.
+        pub name: CatName,
+    }
+    impl std::convert::From<CatRequired> for Cat {
+        ///A `Cat` holding the members `CatRequired` holds.
+        fn from(required: CatRequired) -> Self {
+            Self {
+                pet_type: required.pet_type,
+                name: required.name,
+            }
         }
     }
     pub type CatPetType = String;
@@ -11363,12 +11543,16 @@ pub mod types {
         #[serde(rename = "bark")]
         pub bark: DogBark,
     }
-    impl Dog {
-        ///A `Dog` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(bark: DogBark) -> Self {
-            Self { bark }
+    ///The required members of `Dog`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct DogRequired {
+        ///The `bark` member.
+        pub bark: DogBark,
+    }
+    impl std::convert::From<DogRequired> for Dog {
+        ///A `Dog` holding the members `DogRequired` holds.
+        fn from(required: DogRequired) -> Self {
+            Self { bark: required.bark }
         }
     }
     pub type DogBark = bool;
@@ -11583,15 +11767,21 @@ pub mod types {
         #[serde(rename = "fins")]
         pub fins: LooseAnimalVariant2Fins,
     }
-    impl LooseAnimalVariant2 {
-        ///A `LooseAnimalVariant2` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(
-            pet_type: LooseAnimalVariant2PetType,
-            fins: LooseAnimalVariant2Fins,
-        ) -> Self {
-            Self { pet_type, fins }
+    ///The required members of `LooseAnimalVariant2`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct LooseAnimalVariant2Required {
+        ///The `petType` member.
+        pub pet_type: LooseAnimalVariant2PetType,
+        ///The `fins` member.
+        pub fins: LooseAnimalVariant2Fins,
+    }
+    impl std::convert::From<LooseAnimalVariant2Required> for LooseAnimalVariant2 {
+        ///A `LooseAnimalVariant2` holding the members `LooseAnimalVariant2Required` holds.
+        fn from(required: LooseAnimalVariant2Required) -> Self {
+            Self {
+                pet_type: required.pet_type,
+                fins: required.fins,
+            }
         }
     }
     #[derive(Debug, Clone, PartialEq)]
@@ -11798,12 +11988,16 @@ pub mod types {
         #[serde(rename = "url")]
         pub url: ChannelWebhookUrl,
     }
-    impl ChannelWebhook {
-        ///A `ChannelWebhook` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(url: ChannelWebhookUrl) -> Self {
-            Self { url }
+    ///The required members of `ChannelWebhook`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ChannelWebhookRequired {
+        ///The `url` member.
+        pub url: ChannelWebhookUrl,
+    }
+    impl std::convert::From<ChannelWebhookRequired> for ChannelWebhook {
+        ///A `ChannelWebhook` holding the members `ChannelWebhookRequired` holds.
+        fn from(required: ChannelWebhookRequired) -> Self {
+            Self { url: required.url }
         }
     }
     pub type ChannelAppriseUrl = String;
@@ -11812,12 +12006,16 @@ pub mod types {
         #[serde(rename = "url")]
         pub url: ChannelAppriseUrl,
     }
-    impl ChannelApprise {
-        ///A `ChannelApprise` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(url: ChannelAppriseUrl) -> Self {
-            Self { url }
+    ///The required members of `ChannelApprise`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ChannelAppriseRequired {
+        ///The `url` member.
+        pub url: ChannelAppriseUrl,
+    }
+    impl std::convert::From<ChannelAppriseRequired> for ChannelApprise {
+        ///A `ChannelApprise` holding the members `ChannelAppriseRequired` holds.
+        fn from(required: ChannelAppriseRequired) -> Self {
+            Self { url: required.url }
         }
     }
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11831,16 +12029,22 @@ pub mod types {
         )]
         pub parent: super::support::Nullable<Box<AliasNode>>,
     }
-    impl MaybeAliasNode {
-        ///A `MaybeAliasNode` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(value: AliasNodeValue) -> Self {
+    ///The required members of `MaybeAliasNode`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct MaybeAliasNodeRequired {
+        ///The `value` member.
+        pub value: AliasNodeValue,
+    }
+    impl std::convert::From<MaybeAliasNodeRequired> for MaybeAliasNode {
+        ///A `MaybeAliasNode` holding the members `MaybeAliasNodeRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: MaybeAliasNodeRequired) -> Self {
             Self {
-                value,
+                value: required.value,
                 parent: super::support::Nullable::Absent,
             }
         }
+    }
+    impl MaybeAliasNode {
         ///Set the `parent` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_parent(
@@ -11864,12 +12068,21 @@ pub mod types {
         #[serde(rename = "history")]
         pub history: TicketHistory,
     }
-    impl Ticket {
-        ///A `Ticket` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(priority: Option<Priority>, history: TicketHistory) -> Self {
-            Self { priority, history }
+    ///The required members of `Ticket`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct TicketRequired {
+        ///The `priority` member.
+        pub priority: Option<Priority>,
+        ///The `history` member.
+        pub history: TicketHistory,
+    }
+    impl std::convert::From<TicketRequired> for Ticket {
+        ///A `Ticket` holding the members `TicketRequired` holds.
+        fn from(required: TicketRequired) -> Self {
+            Self {
+                priority: required.priority,
+                history: required.history,
+            }
         }
     }
     pub type TicketHistory = Vec<Option<Priority>>;
@@ -11919,30 +12132,43 @@ pub mod types {
         )]
         pub mode: Option<Mode>,
     }
-    impl Settings {
-        ///A `Settings` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(retries: SettingsRetries) -> Self {
+    ///The required members of `Settings`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct SettingsRequired {
+        ///The `retries` member.
+        ///Default: `3`.
+        pub retries: SettingsRetries,
+    }
+    impl std::convert::From<SettingsRequired> for Settings {
+        ///A `Settings` holding the members `SettingsRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: SettingsRequired) -> Self {
             Self {
                 color: None,
                 enabled: None,
                 ratio: None,
-                retries,
+                retries: required.retries,
                 wide: None,
                 mode: None,
             }
         }
+    }
+    impl Settings {
         ///Set the `color` member.
         #[must_use]
-        pub fn with_color(mut self, value: SettingsColor) -> Self {
-            self.color = Some(value);
+        pub fn with_color(
+            mut self,
+            value: impl std::convert::Into<SettingsColor>,
+        ) -> Self {
+            self.color = Some(value.into());
             self
         }
         ///Set the `enabled` member.
         #[must_use]
-        pub fn with_enabled(mut self, value: SettingsEnabled) -> Self {
-            self.enabled = Some(value);
+        pub fn with_enabled(
+            mut self,
+            value: impl std::convert::Into<SettingsEnabled>,
+        ) -> Self {
+            self.enabled = Some(value.into());
             self
         }
         ///Set the `ratio` member.
@@ -11959,8 +12185,8 @@ pub mod types {
         }
         ///Set the `mode` member.
         #[must_use]
-        pub fn with_mode(mut self, value: Mode) -> Self {
-            self.mode = Some(value);
+        pub fn with_mode(mut self, value: impl std::convert::Into<Mode>) -> Self {
+            self.mode = Some(value.into());
             self
         }
         ///The `color` member where it is set, else its schema default.
@@ -12017,7 +12243,6 @@ pub mod types {
     }
     impl DefaultAccessorClash {
         ///A `DefaultAccessorClash` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -12027,17 +12252,20 @@ pub mod types {
         }
         ///Set the `with_b` member.
         #[must_use]
-        pub fn with_with_b(mut self, value: DefaultAccessorClashWithB) -> Self {
-            self.with_b = Some(value);
+        pub fn with_with_b(
+            mut self,
+            value: impl std::convert::Into<DefaultAccessorClashWithB>,
+        ) -> Self {
+            self.with_b = Some(value.into());
             self
         }
         ///Set the `b_or_default` member.
         #[must_use]
         pub fn with_b_or_default(
             mut self,
-            value: DefaultAccessorClashBOrDefault,
+            value: impl std::convert::Into<DefaultAccessorClashBOrDefault>,
         ) -> Self {
-            self.b_or_default = Some(value);
+            self.b_or_default = Some(value.into());
             self
         }
         ///The `with_b` member where it is set, else its schema default.
@@ -12064,7 +12292,6 @@ pub mod types {
     }
     impl Headers {
         ///A `Headers` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -12074,8 +12301,8 @@ pub mod types {
         }
         ///Set the `host` member.
         #[must_use]
-        pub fn with_host(mut self, value: HeadersHost) -> Self {
-            self.host = Some(value);
+        pub fn with_host(mut self, value: impl std::convert::Into<HeadersHost>) -> Self {
+            self.host = Some(value.into());
             self
         }
         ///Set the members no property declares, replacing any set before. An entry whose key is a declared member's name is not sent.
@@ -12110,7 +12337,6 @@ pub mod types {
     }
     impl Tags {
         ///A `Tags` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -12139,7 +12365,6 @@ pub mod types {
     }
     impl Bag {
         ///A `Bag` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -12149,8 +12374,11 @@ pub mod types {
         }
         ///Set the `additional` member.
         #[must_use]
-        pub fn with_additional(mut self, value: BagAdditional) -> Self {
-            self.additional = Some(value);
+        pub fn with_additional(
+            mut self,
+            value: impl std::convert::Into<BagAdditional>,
+        ) -> Self {
+            self.additional = Some(value.into());
             self
         }
         ///Set the members no property declares, replacing any set before. An entry whose key is a declared member's name is not sent.
@@ -12188,12 +12416,16 @@ pub mod types {
         #[serde(rename = "id")]
         pub id: AccountBaseId,
     }
-    impl AccountBase {
-        ///A `AccountBase` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(id: AccountBaseId) -> Self {
-            Self { id }
+    ///The required members of `AccountBase`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct AccountBaseRequired {
+        ///The `id` member.
+        pub id: AccountBaseId,
+    }
+    impl std::convert::From<AccountBaseRequired> for AccountBase {
+        ///A `AccountBase` holding the members `AccountBaseRequired` holds.
+        fn from(required: AccountBaseRequired) -> Self {
+            Self { id: required.id }
         }
     }
     pub type AccountBaseId = String;
@@ -12211,17 +12443,32 @@ pub mod types {
         )]
         pub owner: Option<AccountOwner>,
     }
-    impl Account {
-        ///A `Account` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(id: AccountBaseId, label: AccountMember1Label) -> Self {
-            Self { id, label, owner: None }
+    ///The required members of `Account`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct AccountRequired {
+        ///The `id` member.
+        pub id: AccountBaseId,
+        ///The `label` member.
+        pub label: AccountMember1Label,
+    }
+    impl std::convert::From<AccountRequired> for Account {
+        ///A `Account` holding the members `AccountRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: AccountRequired) -> Self {
+            Self {
+                id: required.id,
+                label: required.label,
+                owner: None,
+            }
         }
+    }
+    impl Account {
         ///Set the `owner` member.
         #[must_use]
-        pub fn with_owner(mut self, value: AccountOwner) -> Self {
-            self.owner = Some(value);
+        pub fn with_owner(
+            mut self,
+            value: impl std::convert::Into<AccountOwner>,
+        ) -> Self {
+            self.owner = Some(value.into());
             self
         }
     }
@@ -12232,12 +12479,16 @@ pub mod types {
         #[serde(rename = "ok")]
         pub ok: MultiOkOk,
     }
-    impl MultiOk {
-        ///A `MultiOk` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(ok: MultiOkOk) -> Self {
-            Self { ok }
+    ///The required members of `MultiOk`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct MultiOkRequired {
+        ///The `ok` member.
+        pub ok: MultiOkOk,
+    }
+    impl std::convert::From<MultiOkRequired> for MultiOk {
+        ///A `MultiOk` holding the members `MultiOkRequired` holds.
+        fn from(required: MultiOkRequired) -> Self {
+            Self { ok: required.ok }
         }
     }
     pub type MultiOkOk = String;
@@ -12246,12 +12497,16 @@ pub mod types {
         #[serde(rename = "id")]
         pub id: MultiCreatedId,
     }
-    impl MultiCreated {
-        ///A `MultiCreated` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(id: MultiCreatedId) -> Self {
-            Self { id }
+    ///The required members of `MultiCreated`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct MultiCreatedRequired {
+        ///The `id` member.
+        pub id: MultiCreatedId,
+    }
+    impl std::convert::From<MultiCreatedRequired> for MultiCreated {
+        ///A `MultiCreated` holding the members `MultiCreatedRequired` holds.
+        fn from(required: MultiCreatedRequired) -> Self {
+            Self { id: required.id }
         }
     }
     pub type MultiCreatedId = i64;
@@ -12260,12 +12515,16 @@ pub mod types {
         #[serde(rename = "reason")]
         pub reason: NotFoundErrorReason,
     }
-    impl NotFoundError {
-        ///A `NotFoundError` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(reason: NotFoundErrorReason) -> Self {
-            Self { reason }
+    ///The required members of `NotFoundError`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct NotFoundErrorRequired {
+        ///The `reason` member.
+        pub reason: NotFoundErrorReason,
+    }
+    impl std::convert::From<NotFoundErrorRequired> for NotFoundError {
+        ///A `NotFoundError` holding the members `NotFoundErrorRequired` holds.
+        fn from(required: NotFoundErrorRequired) -> Self {
+            Self { reason: required.reason }
         }
     }
     pub type NotFoundErrorReason = String;
@@ -12274,12 +12533,16 @@ pub mod types {
         #[serde(rename = "detail")]
         pub detail: ConflictErrorDetail,
     }
-    impl ConflictError {
-        ///A `ConflictError` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(detail: ConflictErrorDetail) -> Self {
-            Self { detail }
+    ///The required members of `ConflictError`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ConflictErrorRequired {
+        ///The `detail` member.
+        pub detail: ConflictErrorDetail,
+    }
+    impl std::convert::From<ConflictErrorRequired> for ConflictError {
+        ///A `ConflictError` holding the members `ConflictErrorRequired` holds.
+        fn from(required: ConflictErrorRequired) -> Self {
+            Self { detail: required.detail }
         }
     }
     pub type ConflictErrorDetail = String;
@@ -12290,12 +12553,21 @@ pub mod types {
         #[serde(rename = "detail")]
         pub detail: ProblemDetail,
     }
-    impl Problem {
-        ///A `Problem` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(title: ProblemTitle, detail: ProblemDetail) -> Self {
-            Self { title, detail }
+    ///The required members of `Problem`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ProblemRequired {
+        ///The `title` member.
+        pub title: ProblemTitle,
+        ///The `detail` member.
+        pub detail: ProblemDetail,
+    }
+    impl std::convert::From<ProblemRequired> for Problem {
+        ///A `Problem` holding the members `ProblemRequired` holds.
+        fn from(required: ProblemRequired) -> Self {
+            Self {
+                title: required.title,
+                detail: required.detail,
+            }
         }
     }
     pub type ProblemTitle = String;
@@ -12305,12 +12577,16 @@ pub mod types {
         #[serde(rename = "title")]
         pub title: MaybeProblemTitle,
     }
-    impl MaybeProblem {
-        ///A `MaybeProblem` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(title: MaybeProblemTitle) -> Self {
-            Self { title }
+    ///The required members of `MaybeProblem`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct MaybeProblemRequired {
+        ///The `title` member.
+        pub title: MaybeProblemTitle,
+    }
+    impl std::convert::From<MaybeProblemRequired> for MaybeProblem {
+        ///A `MaybeProblem` holding the members `MaybeProblemRequired` holds.
+        fn from(required: MaybeProblemRequired) -> Self {
+            Self { title: required.title }
         }
     }
     pub type MaybeProblemTitle = String;
@@ -12320,12 +12596,16 @@ pub mod types {
         #[serde(rename = "delta")]
         pub delta: ChatChunkDelta,
     }
-    impl ChatChunk {
-        ///A `ChatChunk` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(delta: ChatChunkDelta) -> Self {
-            Self { delta }
+    ///The required members of `ChatChunk`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ChatChunkRequired {
+        ///The `delta` member.
+        pub delta: ChatChunkDelta,
+    }
+    impl std::convert::From<ChatChunkRequired> for ChatChunk {
+        ///A `ChatChunk` holding the members `ChatChunkRequired` holds.
+        fn from(required: ChatChunkRequired) -> Self {
+            Self { delta: required.delta }
         }
     }
     pub type ChatChunkDelta = String;
@@ -12337,12 +12617,21 @@ pub mod types {
         #[serde(rename = "sku")]
         pub sku: XmlOrderSku,
     }
-    impl XmlOrder {
-        ///A `XmlOrder` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(id: XmlOrderId, sku: XmlOrderSku) -> Self {
-            Self { id, sku }
+    ///The required members of `XmlOrder`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct XmlOrderRequired {
+        ///The `id` member.
+        pub id: XmlOrderId,
+        ///The `sku` member.
+        pub sku: XmlOrderSku,
+    }
+    impl std::convert::From<XmlOrderRequired> for XmlOrder {
+        ///A `XmlOrder` holding the members `XmlOrderRequired` holds.
+        fn from(required: XmlOrderRequired) -> Self {
+            Self {
+                id: required.id,
+                sku: required.sku,
+            }
         }
     }
     pub type XmlOrderId = i64;
@@ -12362,17 +12651,32 @@ pub mod types {
         )]
         pub note: Option<XmlReceiptNote>,
     }
-    impl XmlReceipt {
-        ///A `XmlReceipt` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(code: XmlReceiptCode, count: Option<XmlReceiptCount>) -> Self {
-            Self { code, count, note: None }
+    ///The required members of `XmlReceipt`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct XmlReceiptRequired {
+        ///The `code` member.
+        pub code: XmlReceiptCode,
+        ///The `count` member.
+        pub count: Option<XmlReceiptCount>,
+    }
+    impl std::convert::From<XmlReceiptRequired> for XmlReceipt {
+        ///A `XmlReceipt` holding the members `XmlReceiptRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: XmlReceiptRequired) -> Self {
+            Self {
+                code: required.code,
+                count: required.count,
+                note: None,
+            }
         }
+    }
+    impl XmlReceipt {
         ///Set the `note` member.
         #[must_use]
-        pub fn with_note(mut self, value: XmlReceiptNote) -> Self {
-            self.note = Some(value);
+        pub fn with_note(
+            mut self,
+            value: impl std::convert::Into<XmlReceiptNote>,
+        ) -> Self {
+            self.note = Some(value.into());
             self
         }
     }
@@ -12394,17 +12698,32 @@ pub mod types {
         )]
         pub note: Option<JsonMetaNote>,
     }
-    impl JsonMeta {
-        ///A `JsonMeta` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(id: JsonMetaId, sku: JsonMetaSku) -> Self {
-            Self { id, sku, note: None }
+    ///The required members of `JsonMeta`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct JsonMetaRequired {
+        ///The `id` member.
+        pub id: JsonMetaId,
+        ///The `sku` member.
+        pub sku: JsonMetaSku,
+    }
+    impl std::convert::From<JsonMetaRequired> for JsonMeta {
+        ///A `JsonMeta` holding the members `JsonMetaRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: JsonMetaRequired) -> Self {
+            Self {
+                id: required.id,
+                sku: required.sku,
+                note: None,
+            }
         }
+    }
+    impl JsonMeta {
         ///Set the `note` member.
         #[must_use]
-        pub fn with_note(mut self, value: JsonMetaNote) -> Self {
-            self.note = Some(value);
+        pub fn with_note(
+            mut self,
+            value: impl std::convert::Into<JsonMetaNote>,
+        ) -> Self {
+            self.note = Some(value.into());
             self
         }
     }
@@ -12461,18 +12780,26 @@ pub mod types {
         )]
         pub tags: Option<UploadFileBodyTags>,
     }
-    impl UploadFileBody {
-        ///A `UploadFileBody` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(file: UploadFileBodyFile, caption: UploadFileBodyCaption) -> Self {
+    ///The required members of `UploadFileBody`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct UploadFileBodyRequired {
+        ///The `file` member.
+        pub file: UploadFileBodyFile,
+        ///The `caption` member.
+        pub caption: UploadFileBodyCaption,
+    }
+    impl std::convert::From<UploadFileBodyRequired> for UploadFileBody {
+        ///A `UploadFileBody` holding the members `UploadFileBodyRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: UploadFileBodyRequired) -> Self {
             Self {
-                file,
-                caption,
+                file: required.file,
+                caption: required.caption,
                 count: None,
                 tags: None,
             }
         }
+    }
+    impl UploadFileBody {
         ///Set the `count` member.
         #[must_use]
         pub fn with_count(mut self, value: UploadFileBodyCount) -> Self {
@@ -12481,8 +12808,11 @@ pub mod types {
         }
         ///Set the `tags` member.
         #[must_use]
-        pub fn with_tags(mut self, value: UploadFileBodyTags) -> Self {
-            self.tags = Some(value);
+        pub fn with_tags(
+            mut self,
+            value: impl std::convert::Into<UploadFileBodyTags>,
+        ) -> Self {
+            self.tags = Some(value.into());
             self
         }
     }
@@ -12567,15 +12897,21 @@ pub mod types {
         #[serde(rename = "previous", deserialize_with = "decode_required")]
         pub previous: Option<PostNullableBytesBodyPrevious>,
     }
-    impl PostNullableBytesBody {
-        ///A `PostNullableBytesBody` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(
-            digest: Option<PostNullableBytesBodyDigest>,
-            previous: Option<PostNullableBytesBodyPrevious>,
-        ) -> Self {
-            Self { digest, previous }
+    ///The required members of `PostNullableBytesBody`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct PostNullableBytesBodyRequired {
+        ///The `digest` member.
+        pub digest: Option<PostNullableBytesBodyDigest>,
+        ///The `previous` member.
+        pub previous: Option<PostNullableBytesBodyPrevious>,
+    }
+    impl std::convert::From<PostNullableBytesBodyRequired> for PostNullableBytesBody {
+        ///A `PostNullableBytesBody` holding the members `PostNullableBytesBodyRequired` holds.
+        fn from(required: PostNullableBytesBodyRequired) -> Self {
+            Self {
+                digest: required.digest,
+                previous: required.previous,
+            }
         }
     }
     #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -12617,12 +12953,16 @@ pub mod types {
         #[serde(rename = "digest", deserialize_with = "decode_required")]
         pub digest: Option<ResponseBodyDigest>,
     }
-    impl ResponseBody8899a140 {
-        ///A `ResponseBody8899a140` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(digest: Option<ResponseBodyDigest>) -> Self {
-            Self { digest }
+    ///The required members of `ResponseBody8899a140`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ResponseBody8899a140Required {
+        ///The `digest` member.
+        pub digest: Option<ResponseBodyDigest>,
+    }
+    impl std::convert::From<ResponseBody8899a140Required> for ResponseBody8899a140 {
+        ///A `ResponseBody8899a140` holding the members `ResponseBody8899a140Required` holds.
+        fn from(required: ResponseBody8899a140Required) -> Self {
+            Self { digest: required.digest }
         }
     }
     pub type PostNullablePartsBodyFile = bytes::Bytes;
@@ -12638,16 +12978,22 @@ pub mod types {
         )]
         pub thumb: super::support::Nullable<PostNullablePartsBodyThumb>,
     }
-    impl PostNullablePartsBody {
-        ///A `PostNullablePartsBody` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(file: Option<PostNullablePartsBodyFile>) -> Self {
+    ///The required members of `PostNullablePartsBody`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct PostNullablePartsBodyRequired {
+        ///The `file` member.
+        pub file: Option<PostNullablePartsBodyFile>,
+    }
+    impl std::convert::From<PostNullablePartsBodyRequired> for PostNullablePartsBody {
+        ///A `PostNullablePartsBody` holding the members `PostNullablePartsBodyRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: PostNullablePartsBodyRequired) -> Self {
             Self {
-                file,
+                file: required.file,
                 thumb: super::support::Nullable::Absent,
             }
         }
+    }
+    impl PostNullablePartsBody {
         ///Set the `thumb` member: a value, or `Nullable::Null` for an explicit `null`.
         #[must_use]
         pub fn with_thumb(
@@ -12706,16 +13052,24 @@ pub mod types {
         #[serde(rename = "blob")]
         pub blob: DeepFilter,
     }
-    impl SubmitFormBody {
-        ///A `SubmitFormBody` holding every member given, in declaration order.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(
-            name: SubmitFormBodyName,
-            tags: SubmitFormBodyTags,
-            blob: DeepFilter,
-        ) -> Self {
-            Self { name, tags, blob }
+    ///The required members of `SubmitFormBody`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct SubmitFormBodyRequired {
+        ///The `name` member.
+        pub name: SubmitFormBodyName,
+        ///The `tags` member.
+        pub tags: SubmitFormBodyTags,
+        ///The `blob` member.
+        pub blob: DeepFilter,
+    }
+    impl std::convert::From<SubmitFormBodyRequired> for SubmitFormBody {
+        ///A `SubmitFormBody` holding the members `SubmitFormBodyRequired` holds.
+        fn from(required: SubmitFormBodyRequired) -> Self {
+            Self {
+                name: required.name,
+                tags: required.tags,
+                blob: required.blob,
+            }
         }
     }
     pub type SubmitFormAdditionalBodyA = String;
@@ -12730,16 +13084,23 @@ pub mod types {
         )]
         pub additional: BTreeMap<String, SubmitFormAdditionalBodyAdditional>,
     }
-    impl SubmitFormAdditionalBody {
-        ///A `SubmitFormAdditionalBody` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(a: SubmitFormAdditionalBodyA) -> Self {
+    ///The required members of `SubmitFormAdditionalBody`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct SubmitFormAdditionalBodyRequired {
+        ///The `a` member.
+        pub a: SubmitFormAdditionalBodyA,
+    }
+    impl std::convert::From<SubmitFormAdditionalBodyRequired>
+    for SubmitFormAdditionalBody {
+        ///A `SubmitFormAdditionalBody` holding the members `SubmitFormAdditionalBodyRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: SubmitFormAdditionalBodyRequired) -> Self {
             Self {
-                a,
+                a: required.a,
                 additional: BTreeMap::new(),
             }
         }
+    }
+    impl SubmitFormAdditionalBody {
         ///Set the members no property declares, replacing any set before. An entry whose key is a declared member's name is not sent.
         #[must_use]
         pub fn with_additional(
@@ -12785,7 +13146,6 @@ pub mod types {
     }
     impl SubmitNullableFormAdditionalBody {
         ///A `SubmitNullableFormAdditionalBody` with every optional member unset, a member with a schema `default` included. `Default` builds the same value.
-        #[allow(clippy::too_many_arguments)]
         #[must_use]
         pub fn new() -> Self {
             Self {
@@ -12795,8 +13155,11 @@ pub mod types {
         }
         ///Set the `a` member.
         #[must_use]
-        pub fn with_a(mut self, value: SubmitNullableFormAdditionalBodyA) -> Self {
-            self.a = Some(value);
+        pub fn with_a(
+            mut self,
+            value: impl std::convert::Into<SubmitNullableFormAdditionalBodyA>,
+        ) -> Self {
+            self.a = Some(value.into());
             self
         }
         ///Set the members no property declares, replacing any set before. An entry whose key is a declared member's name is not sent.
@@ -12835,16 +13198,22 @@ pub mod types {
         #[serde(flatten, serialize_with = "UploadAdditionalBody::serialize_overflow")]
         pub additional: BTreeMap<String, UploadAdditionalBodyAdditional>,
     }
-    impl UploadAdditionalBody {
-        ///A `UploadAdditionalBody` holding the required members given, in declaration order, and every optional member unset, a member with a schema `default` included.
-        #[allow(clippy::too_many_arguments)]
-        #[must_use]
-        pub fn new(caption: UploadAdditionalBodyCaption) -> Self {
+    ///The required members of `UploadAdditionalBody`, which converts from this with every other member unset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct UploadAdditionalBodyRequired {
+        ///The `caption` member.
+        pub caption: UploadAdditionalBodyCaption,
+    }
+    impl std::convert::From<UploadAdditionalBodyRequired> for UploadAdditionalBody {
+        ///A `UploadAdditionalBody` holding the members `UploadAdditionalBodyRequired` holds, and every optional member unset, a member with a schema `default` included.
+        fn from(required: UploadAdditionalBodyRequired) -> Self {
             Self {
-                caption,
+                caption: required.caption,
                 additional: BTreeMap::new(),
             }
         }
+    }
+    impl UploadAdditionalBody {
         ///Set the members no property declares, replacing any set before. An entry whose key is a declared member's name is not sent.
         #[must_use]
         pub fn with_additional(
@@ -13239,21 +13608,32 @@ pub struct ReadFileParams {
     #[serde(rename = "path")]
     pub path: types::Path,
 }
+///The required parameters of `ReadFileParams`, which converts from this with every optional one unset.
 #[allow(
     dead_code,
     deprecated,
-    clippy::wrong_self_convention,
     missing_docs,
     unreachable_pub,
     clippy::pedantic,
     clippy::nursery
 )]
-impl ReadFileParams {
-    ///The parameters with every required one given, in declaration order (`path`), and every optional one unset.
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(path: impl Into<types::Path>) -> Self {
-        Self { path: path.into() }
+#[derive(Debug, Clone)]
+pub struct ReadFileParamsRequired {
+    ///The `path` parameter.
+    pub path: types::Path,
+}
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
+impl std::convert::From<ReadFileParamsRequired> for ReadFileParams {
+    ///The parameters with every required one taken from `ReadFileParamsRequired` and every optional one unset.
+    fn from(required: ReadFileParamsRequired) -> Self {
+        Self { path: required.path }
     }
 }
 #[allow(
@@ -13277,6 +13657,46 @@ pub struct BindingCollisionsParams {
     #[serde(rename = "optional", skip_serializing_if = "Option::is_none")]
     pub optional: Option<types::Optional>,
 }
+///The required parameters of `BindingCollisionsParams`, which converts from this with every optional one unset.
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
+#[derive(Debug, Clone)]
+pub struct BindingCollisionsParamsRequired {
+    ///The `query` parameter.
+    pub query: types::Query,
+    ///The `url` parameter.
+    pub url: types::Url,
+    ///The `request` parameter.
+    pub request: types::Request,
+    ///The `cookies` parameter.
+    pub cookies: types::Cookies,
+}
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
+impl std::convert::From<BindingCollisionsParamsRequired> for BindingCollisionsParams {
+    ///The parameters with every required one taken from `BindingCollisionsParamsRequired` and every optional one unset.
+    fn from(required: BindingCollisionsParamsRequired) -> Self {
+        Self {
+            query: required.query,
+            url: required.url,
+            request: required.request,
+            cookies: required.cookies,
+            optional: None,
+        }
+    }
+}
 #[allow(
     dead_code,
     deprecated,
@@ -13287,27 +13707,10 @@ pub struct BindingCollisionsParams {
     clippy::nursery
 )]
 impl BindingCollisionsParams {
-    ///The parameters with every required one given, in declaration order (`query`, `url`, `request`, `cookies`), and every optional one unset.
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        query: impl Into<types::Query>,
-        url: impl Into<types::Url>,
-        request: impl Into<types::Request>,
-        cookies: impl Into<types::Cookies>,
-    ) -> Self {
-        Self {
-            query: query.into(),
-            url: url.into(),
-            request: request.into(),
-            cookies: cookies.into(),
-            optional: None,
-        }
-    }
     ///Set the `optional` parameter.
     #[must_use]
-    pub fn optional(mut self, value: types::Optional) -> Self {
-        self.optional = Some(value);
+    pub fn optional(mut self, value: impl Into<types::Optional>) -> Self {
+        self.optional = Some(value.into());
         self
     }
 }
@@ -13328,6 +13731,41 @@ pub struct SignatureBindingCollisionsParams {
     #[serde(rename = "optional", skip_serializing_if = "Option::is_none")]
     pub optional: Option<types::Optional5db2f3f3>,
 }
+///The required parameters of `SignatureBindingCollisionsParams`, which converts from this with every optional one unset.
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
+#[derive(Debug, Clone)]
+pub struct SignatureBindingCollisionsParamsRequired {
+    ///The `body` parameter.
+    pub body: types::Body,
+    ///The `params` parameter.
+    pub params: types::Params,
+}
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
+impl std::convert::From<SignatureBindingCollisionsParamsRequired>
+for SignatureBindingCollisionsParams {
+    ///The parameters with every required one taken from `SignatureBindingCollisionsParamsRequired` and every optional one unset.
+    fn from(required: SignatureBindingCollisionsParamsRequired) -> Self {
+        Self {
+            body: required.body,
+            params: required.params,
+            optional: None,
+        }
+    }
+}
 #[allow(
     dead_code,
     deprecated,
@@ -13338,20 +13776,10 @@ pub struct SignatureBindingCollisionsParams {
     clippy::nursery
 )]
 impl SignatureBindingCollisionsParams {
-    ///The parameters with every required one given, in declaration order (`body`, `params`), and every optional one unset.
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(body: impl Into<types::Body>, params: impl Into<types::Params>) -> Self {
-        Self {
-            body: body.into(),
-            params: params.into(),
-            optional: None,
-        }
-    }
     ///Set the `optional` parameter.
     #[must_use]
-    pub fn optional(mut self, value: types::Optional5db2f3f3) -> Self {
-        self.optional = Some(value);
+    pub fn optional(mut self, value: impl Into<types::Optional5db2f3f3>) -> Self {
+        self.optional = Some(value.into());
         self
     }
 }
@@ -13376,6 +13804,42 @@ pub struct SerializeParamsParams {
     #[serde(rename = "session", skip_serializing_if = "Option::is_none")]
     pub session: Option<types::Session>,
 }
+///The required parameters of `SerializeParamsParams`, which converts from this with every optional one unset.
+#[allow(
+    dead_code,
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    clippy::pedantic,
+    clippy::nursery
+)]
+#[derive(Debug, Clone)]
+pub struct SerializeParamsParamsRequired {
+    ///The `workflow_id` parameter.
+    pub workflow_id: types::WorkflowId,
+    ///The `X-Flags` parameter.
+    pub x_flags: types::XFlags,
+}
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
+impl std::convert::From<SerializeParamsParamsRequired> for SerializeParamsParams {
+    ///The parameters with every required one taken from `SerializeParamsParamsRequired` and every optional one unset.
+    fn from(required: SerializeParamsParamsRequired) -> Self {
+        Self {
+            workflow_id: required.workflow_id,
+            x_flags: required.x_flags,
+            labels: None,
+            compact: None,
+            session: None,
+        }
+    }
+}
 #[allow(
     dead_code,
     deprecated,
@@ -13386,34 +13850,22 @@ pub struct SerializeParamsParams {
     clippy::nursery
 )]
 impl SerializeParamsParams {
-    ///The parameters with every required one given, in declaration order (`workflow_id`, `X-Flags`), and every optional one unset.
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(workflow_id: types::WorkflowId, x_flags: types::XFlags) -> Self {
-        Self {
-            workflow_id,
-            x_flags,
-            labels: None,
-            compact: None,
-            session: None,
-        }
-    }
     ///Set the `labels` parameter.
     #[must_use]
-    pub fn labels(mut self, value: types::Labels) -> Self {
-        self.labels = Some(value);
+    pub fn labels(mut self, value: impl Into<types::Labels>) -> Self {
+        self.labels = Some(value.into());
         self
     }
     ///Set the `compact` parameter.
     #[must_use]
-    pub fn compact(mut self, value: types::Compact) -> Self {
-        self.compact = Some(value);
+    pub fn compact(mut self, value: impl Into<types::Compact>) -> Self {
+        self.compact = Some(value.into());
         self
     }
     ///Set the `session` parameter.
     #[must_use]
-    pub fn session(mut self, value: types::Session) -> Self {
-        self.session = Some(value);
+    pub fn session(mut self, value: impl Into<types::Session>) -> Self {
+        self.session = Some(value.into());
         self
     }
 }
@@ -13459,8 +13911,8 @@ impl GetUserParams {
     }
     ///Set the `type` parameter.
     #[must_use]
-    pub fn r#type(mut self, value: types::Type) -> Self {
-        self.r#type = Some(value);
+    pub fn r#type(mut self, value: impl Into<types::Type>) -> Self {
+        self.r#type = Some(value.into());
         self
     }
 }
@@ -13489,8 +13941,8 @@ pub struct GetBlobParams {
 impl GetBlobParams {
     ///Set the `cursor` parameter.
     #[must_use]
-    pub fn cursor(mut self, value: types::Cursor84222325) -> Self {
-        self.cursor = Some(value);
+    pub fn cursor(mut self, value: impl Into<types::Cursor84222325>) -> Self {
+        self.cursor = Some(value.into());
         self
     }
 }
@@ -13519,8 +13971,8 @@ pub struct PostNullableBytesParams {
 impl PostNullableBytesParams {
     ///Set the `cursor` parameter.
     #[must_use]
-    pub fn cursor(mut self, value: types::Cursor842223252) -> Self {
-        self.cursor = Some(value);
+    pub fn cursor(mut self, value: impl Into<types::Cursor842223252>) -> Self {
+        self.cursor = Some(value.into());
         self
     }
 }
@@ -13555,26 +14007,26 @@ pub struct SerializeStylesParams {
 impl SerializeStylesParams {
     ///Set the `space` parameter.
     #[must_use]
-    pub fn space(mut self, value: types::Space) -> Self {
-        self.space = Some(value);
+    pub fn space(mut self, value: impl Into<types::Space>) -> Self {
+        self.space = Some(value.into());
         self
     }
     ///Set the `pipe` parameter.
     #[must_use]
-    pub fn pipe(mut self, value: types::Pipe) -> Self {
-        self.pipe = Some(value);
+    pub fn pipe(mut self, value: impl Into<types::Pipe>) -> Self {
+        self.pipe = Some(value.into());
         self
     }
     ///Set the `deep` parameter.
     #[must_use]
-    pub fn deep(mut self, value: types::DeepFilter) -> Self {
-        self.deep = Some(value);
+    pub fn deep(mut self, value: impl Into<types::DeepFilter>) -> Self {
+        self.deep = Some(value.into());
         self
     }
     ///Set the `reserved` parameter.
     #[must_use]
-    pub fn reserved(mut self, value: types::Reserved) -> Self {
-        self.reserved = Some(value);
+    pub fn reserved(mut self, value: impl Into<types::Reserved>) -> Self {
+        self.reserved = Some(value.into());
         self
     }
 }
@@ -13593,23 +14045,37 @@ pub struct SerializeContentParamsParams {
     #[serde(rename = "X-Json")]
     pub x_json: types::DeepFilter,
 }
+///The required parameters of `SerializeContentParamsParams`, which converts from this with every optional one unset.
 #[allow(
     dead_code,
     deprecated,
-    clippy::wrong_self_convention,
     missing_docs,
     unreachable_pub,
     clippy::pedantic,
     clippy::nursery
 )]
-impl SerializeContentParamsParams {
-    ///The parameters with every required one given, in declaration order (`X-Text`, `X-Json`), and every optional one unset.
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(x_text: impl Into<types::XText>, x_json: types::DeepFilter) -> Self {
+#[derive(Debug, Clone)]
+pub struct SerializeContentParamsParamsRequired {
+    ///The `X-Text` parameter.
+    pub x_text: types::XText,
+    ///The `X-Json` parameter.
+    pub x_json: types::DeepFilter,
+}
+#[allow(
+    deprecated,
+    missing_docs,
+    unreachable_pub,
+    dead_code,
+    clippy::pedantic,
+    clippy::nursery
+)]
+impl std::convert::From<SerializeContentParamsParamsRequired>
+for SerializeContentParamsParams {
+    ///The parameters with every required one taken from `SerializeContentParamsParamsRequired` and every optional one unset.
+    fn from(required: SerializeContentParamsParamsRequired) -> Self {
         Self {
-            x_text: x_text.into(),
-            x_json,
+            x_text: required.x_text,
+            x_json: required.x_json,
         }
     }
 }
@@ -13640,14 +14106,14 @@ pub struct GetTracedParams {
 impl GetTracedParams {
     ///Set the `X-Trace-Id` parameter.
     #[must_use]
-    pub fn x_trace_id(mut self, value: types::XTraceId) -> Self {
-        self.x_trace_id = Some(value);
+    pub fn x_trace_id(mut self, value: impl Into<types::XTraceId>) -> Self {
+        self.x_trace_id = Some(value.into());
         self
     }
     ///Set the `session` parameter.
     #[must_use]
-    pub fn session(mut self, value: types::Session977138f7) -> Self {
-        self.session = Some(value);
+    pub fn session(mut self, value: impl Into<types::Session977138f7>) -> Self {
+        self.session = Some(value.into());
         self
     }
 }
@@ -16283,11 +16749,12 @@ impl Client {
     #[inline]
     async fn prepare_read_file(
         &self,
-        params: ReadFileParams,
+        params: impl Into<ReadFileParams>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let params: ReadFileParams = params.into();
         let mut path = "/files".to_owned();
         let mut query: Vec<String> = Vec::new();
         query
@@ -16313,7 +16780,7 @@ impl Client {
     #[inline]
     pub async fn read_file(
         &self,
-        params: ReadFileParams,
+        params: impl Into<ReadFileParams>,
     ) -> Result<support::ResponseValue<()>, support::Error<ReadFileError>> {
         let (request, replay) = self
             .prepare_read_file(params)
@@ -16328,7 +16795,7 @@ impl Client {
     #[inline]
     pub async fn read_file_request(
         &self,
-        params: ReadFileParams,
+        params: impl Into<ReadFileParams>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -16360,8 +16827,9 @@ impl Client {
     #[inline]
     pub fn read_file_url(
         &self,
-        params: ReadFileParams,
+        params: impl Into<ReadFileParams>,
     ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
+        let params: ReadFileParams = params.into();
         let mut path = "/files".to_owned();
         let mut query: Vec<String> = Vec::new();
         query
@@ -16382,11 +16850,12 @@ impl Client {
     #[inline]
     async fn prepare_binding_collisions(
         &self,
-        params: BindingCollisionsParams,
+        params: impl Into<BindingCollisionsParams>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let params: BindingCollisionsParams = params.into();
         let mut path = "/binding-collisions".to_owned();
         let mut query: Vec<String> = Vec::new();
         query
@@ -16462,7 +16931,7 @@ impl Client {
     #[inline]
     pub async fn binding_collisions(
         &self,
-        params: BindingCollisionsParams,
+        params: impl Into<BindingCollisionsParams>,
     ) -> Result<support::ResponseValue<()>, support::Error<BindingCollisionsError>> {
         let (request, replay) = self
             .prepare_binding_collisions(params)
@@ -16477,7 +16946,7 @@ impl Client {
     #[inline]
     pub async fn binding_collisions_request(
         &self,
-        params: BindingCollisionsParams,
+        params: impl Into<BindingCollisionsParams>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -16516,8 +16985,9 @@ impl Client {
     #[inline]
     pub fn binding_collisions_url(
         &self,
-        params: BindingCollisionsParams,
+        params: impl Into<BindingCollisionsParams>,
     ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
+        let params: BindingCollisionsParams = params.into();
         let mut path = "/binding-collisions".to_owned();
         let mut query: Vec<String> = Vec::new();
         query
@@ -16560,12 +17030,14 @@ impl Client {
     #[inline]
     async fn prepare_signature_binding_collisions(
         &self,
-        params: SignatureBindingCollisionsParams,
-        body: &types::CollisionPayload,
+        params: impl Into<SignatureBindingCollisionsParams>,
+        body: impl Into<types::CollisionPayload>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let params: SignatureBindingCollisionsParams = params.into();
+        let body: &types::CollisionPayload = &body.into();
         let mut path = "/signature-binding-collisions".to_owned();
         let mut query: Vec<String> = Vec::new();
         query
@@ -16618,8 +17090,8 @@ impl Client {
     #[inline]
     pub async fn signature_binding_collisions(
         &self,
-        params: SignatureBindingCollisionsParams,
-        body: &types::CollisionPayload,
+        params: impl Into<SignatureBindingCollisionsParams>,
+        body: impl Into<types::CollisionPayload>,
     ) -> Result<
         support::ResponseValue<()>,
         support::Error<SignatureBindingCollisionsError>,
@@ -16637,8 +17109,8 @@ impl Client {
     #[inline]
     pub async fn signature_binding_collisions_request(
         &self,
-        params: SignatureBindingCollisionsParams,
-        body: &types::CollisionPayload,
+        params: impl Into<SignatureBindingCollisionsParams>,
+        body: impl Into<types::CollisionPayload>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -16682,8 +17154,9 @@ impl Client {
     #[inline]
     pub fn signature_binding_collisions_url(
         &self,
-        params: SignatureBindingCollisionsParams,
+        params: impl Into<SignatureBindingCollisionsParams>,
     ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
+        let params: SignatureBindingCollisionsParams = params.into();
         let mut path = "/signature-binding-collisions".to_owned();
         let mut query: Vec<String> = Vec::new();
         query
@@ -16727,11 +17200,12 @@ impl Client {
     async fn prepare_serialize_params(
         &self,
         ids: types::Ids,
-        params: SerializeParamsParams,
+        params: impl Into<SerializeParamsParams>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let params: SerializeParamsParams = params.into();
         let mut path = "/params/{ids}".to_owned();
         path = path
             .replace(
@@ -16829,7 +17303,7 @@ impl Client {
     pub async fn serialize_params(
         &self,
         ids: types::Ids,
-        params: SerializeParamsParams,
+        params: impl Into<SerializeParamsParams>,
     ) -> Result<support::ResponseValue<()>, support::Error<SerializeParamsError>> {
         let (request, replay) = self
             .prepare_serialize_params(ids, params)
@@ -16845,7 +17319,7 @@ impl Client {
     pub async fn serialize_params_request(
         &self,
         ids: types::Ids,
-        params: SerializeParamsParams,
+        params: impl Into<SerializeParamsParams>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -16883,8 +17357,9 @@ impl Client {
     pub fn serialize_params_url(
         &self,
         ids: types::Ids,
-        params: SerializeParamsParams,
+        params: impl Into<SerializeParamsParams>,
     ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
+        let params: SerializeParamsParams = params.into();
         let mut path = "/params/{ids}".to_owned();
         path = path
             .replace(
@@ -19067,12 +19542,13 @@ Response `409`: Conflict*/
     async fn prepare_post_nullable_bytes(
         &self,
         params: impl Into<Option<PostNullableBytesParams>>,
-        body: &types::PostNullableBytesBody,
+        body: impl Into<types::PostNullableBytesBody>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
         let params: Option<PostNullableBytesParams> = params.into();
+        let body: &types::PostNullableBytesBody = &body.into();
         let mut path = "/nullable-bytes".to_owned();
         let mut query: Vec<String> = Vec::new();
         if let Some(value) = params.as_ref().and_then(|params| params.cursor.as_ref()) {
@@ -19107,7 +19583,7 @@ Response `409`: Conflict*/
     pub async fn post_nullable_bytes(
         &self,
         params: impl Into<Option<PostNullableBytesParams>>,
-        body: &types::PostNullableBytesBody,
+        body: impl Into<types::PostNullableBytesBody>,
     ) -> Result<
         support::ResponseValue<types::ResponseBody8899a140>,
         support::Error<PostNullableBytesError>,
@@ -19126,7 +19602,7 @@ Response `409`: Conflict*/
     pub async fn post_nullable_bytes_request(
         &self,
         params: impl Into<Option<PostNullableBytesParams>>,
-        body: &types::PostNullableBytesBody,
+        body: impl Into<types::PostNullableBytesBody>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -20361,11 +20837,12 @@ Response `409`: binary error*/
     #[inline]
     async fn prepare_submit_order(
         &self,
-        body: &types::XmlOrder,
+        body: impl Into<types::XmlOrder>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let body: &types::XmlOrder = &body.into();
         let mut path = "/xml/order".to_owned();
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
@@ -20386,7 +20863,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn submit_order(
         &self,
-        body: &types::XmlOrder,
+        body: impl Into<types::XmlOrder>,
     ) -> Result<
         support::ResponseValue<types::XmlReceipt>,
         support::Error<SubmitOrderError>,
@@ -20404,7 +20881,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn submit_order_request(
         &self,
-        body: &types::XmlOrder,
+        body: impl Into<types::XmlOrder>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -20454,12 +20931,13 @@ Response `409`: binary error*/
     async fn prepare_patch_merge_document(
         &self,
         id: impl Into<types::Id3e6bacfe>,
-        body: &types::JsonMeta,
+        body: impl Into<types::JsonMeta>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
         let id: types::Id3e6bacfe = id.into();
+        let body: &types::JsonMeta = &body.into();
         let mut path = "/merge-patch/{id}".to_owned();
         path = path
             .replace(
@@ -20494,7 +20972,7 @@ Response `409`: binary error*/
     pub async fn patch_merge_document(
         &self,
         id: impl Into<types::Id3e6bacfe>,
-        body: &types::JsonMeta,
+        body: impl Into<types::JsonMeta>,
     ) -> Result<support::ResponseValue<()>, support::Error<PatchMergeDocumentError>> {
         let (request, replay) = self
             .prepare_patch_merge_document(id, body)
@@ -20510,7 +20988,7 @@ Response `409`: binary error*/
     pub async fn patch_merge_document_request(
         &self,
         id: impl Into<types::Id3e6bacfe>,
-        body: &types::JsonMeta,
+        body: impl Into<types::JsonMeta>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -20575,11 +21053,12 @@ Response `409`: binary error*/
     #[inline]
     async fn prepare_submit_legacy_order(
         &self,
-        body: &types::XmlOrder,
+        body: impl Into<types::XmlOrder>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let body: &types::XmlOrder = &body.into();
         let mut path = "/xml/legacy-order".to_owned();
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
@@ -20597,7 +21076,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn submit_legacy_order(
         &self,
-        body: &types::XmlOrder,
+        body: impl Into<types::XmlOrder>,
     ) -> Result<support::ResponseValue<()>, support::Error<SubmitLegacyOrderError>> {
         let (request, replay) = self
             .prepare_submit_legacy_order(body)
@@ -20612,7 +21091,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn submit_legacy_order_request(
         &self,
-        body: &types::XmlOrder,
+        body: impl Into<types::XmlOrder>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -20662,11 +21141,12 @@ Response `409`: binary error*/
     #[inline]
     async fn prepare_post_json_meta(
         &self,
-        body: &types::JsonMeta,
+        body: impl Into<types::JsonMeta>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let body: &types::JsonMeta = &body.into();
         let mut path = "/json/meta".to_owned();
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
@@ -20688,7 +21168,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn post_json_meta(
         &self,
-        body: &types::JsonMeta,
+        body: impl Into<types::JsonMeta>,
     ) -> Result<
         support::ResponseValue<types::JsonMeta>,
         support::Error<PostJsonMetaError>,
@@ -20706,7 +21186,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn post_json_meta_request(
         &self,
-        body: &types::JsonMeta,
+        body: impl Into<types::JsonMeta>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -21461,12 +21941,13 @@ Response `409`: binary error*/
         &self,
         text: impl Into<types::Text>,
         json: types::DeepFilter,
-        params: SerializeContentParamsParams,
+        params: impl Into<SerializeContentParamsParams>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
         let text: types::Text = text.into();
+        let params: SerializeContentParamsParams = params.into();
         let mut path = "/content-params/{text}/{json}".to_owned();
         path = path
             .replace(
@@ -21528,7 +22009,7 @@ Response `409`: binary error*/
         &self,
         text: impl Into<types::Text>,
         json: types::DeepFilter,
-        params: SerializeContentParamsParams,
+        params: impl Into<SerializeContentParamsParams>,
     ) -> Result<
         support::ResponseValue<()>,
         support::Error<SerializeContentParamsError>,
@@ -21548,7 +22029,7 @@ Response `409`: binary error*/
         &self,
         text: impl Into<types::Text>,
         json: types::DeepFilter,
-        params: SerializeContentParamsParams,
+        params: impl Into<SerializeContentParamsParams>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -21634,11 +22115,12 @@ Response `409`: binary error*/
     #[inline]
     async fn prepare_submit_form(
         &self,
-        body: &types::SubmitFormBody,
+        body: impl Into<types::SubmitFormBody>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let body: &types::SubmitFormBody = &body.into();
         let mut path = "/forms".to_owned();
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
@@ -21679,7 +22161,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn submit_form(
         &self,
-        body: &types::SubmitFormBody,
+        body: impl Into<types::SubmitFormBody>,
     ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormError>> {
         let (request, replay) = self
             .prepare_submit_form(body)
@@ -21694,7 +22176,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn submit_form_request(
         &self,
-        body: &types::SubmitFormBody,
+        body: impl Into<types::SubmitFormBody>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -21739,11 +22221,12 @@ Response `409`: binary error*/
     #[inline]
     async fn prepare_submit_form_additional(
         &self,
-        body: &types::SubmitFormAdditionalBody,
+        body: impl Into<types::SubmitFormAdditionalBody>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let body: &types::SubmitFormAdditionalBody = &body.into();
         let mut path = "/forms/additional".to_owned();
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
@@ -21783,7 +22266,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn submit_form_additional(
         &self,
-        body: &types::SubmitFormAdditionalBody,
+        body: impl Into<types::SubmitFormAdditionalBody>,
     ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormAdditionalError>> {
         let (request, replay) = self
             .prepare_submit_form_additional(body)
@@ -21798,7 +22281,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn submit_form_additional_request(
         &self,
-        body: &types::SubmitFormAdditionalBody,
+        body: impl Into<types::SubmitFormAdditionalBody>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -21972,11 +22455,12 @@ Response `409`: binary error*/
     #[inline]
     async fn prepare_upload_additional(
         &self,
-        body: &types::UploadAdditionalBody,
+        body: impl Into<types::UploadAdditionalBody>,
     ) -> Result<
         (http::Request<support::HttpBody>, Option<support::Replay>),
         support::Error<std::convert::Infallible>,
     > {
+        let body: &types::UploadAdditionalBody = &body.into();
         let mut path = "/upload/additional".to_owned();
         let mut query: Vec<String> = Vec::new();
         let url = support::build_url_on(&self.core, None, &path, &query)
@@ -22008,7 +22492,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn upload_additional(
         &self,
-        body: &types::UploadAdditionalBody,
+        body: impl Into<types::UploadAdditionalBody>,
     ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
         let (request, replay) = self
             .prepare_upload_additional(body)
@@ -22023,7 +22507,7 @@ Response `409`: binary error*/
     #[inline]
     pub async fn upload_additional_request(
         &self,
-        body: &types::UploadAdditionalBody,
+        body: impl Into<types::UploadAdditionalBody>,
     ) -> Result<
         http::Request<support::HttpBody>,
         support::Error<std::convert::Infallible>,
@@ -23414,7 +23898,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn read_file(
             &self,
-            params: ReadFileParams,
+            params: impl Into<ReadFileParams>,
         ) -> Result<support::ResponseValue<()>, support::Error<ReadFileError>> {
             self.runtime.block_on(self.inner.read_file(params))
         }
@@ -23422,7 +23906,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn read_file_request(
             &self,
-            params: ReadFileParams,
+            params: impl Into<ReadFileParams>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -23441,7 +23925,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn read_file_url(
             &self,
-            params: ReadFileParams,
+            params: impl Into<ReadFileParams>,
         ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.read_file_url(params)
         }
@@ -23449,7 +23933,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn binding_collisions(
             &self,
-            params: BindingCollisionsParams,
+            params: impl Into<BindingCollisionsParams>,
         ) -> Result<support::ResponseValue<()>, support::Error<BindingCollisionsError>> {
             self.runtime.block_on(self.inner.binding_collisions(params))
         }
@@ -23457,7 +23941,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn binding_collisions_request(
             &self,
-            params: BindingCollisionsParams,
+            params: impl Into<BindingCollisionsParams>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -23476,7 +23960,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn binding_collisions_url(
             &self,
-            params: BindingCollisionsParams,
+            params: impl Into<BindingCollisionsParams>,
         ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.binding_collisions_url(params)
         }
@@ -23484,8 +23968,8 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn signature_binding_collisions(
             &self,
-            params: SignatureBindingCollisionsParams,
-            body: &types::CollisionPayload,
+            params: impl Into<SignatureBindingCollisionsParams>,
+            body: impl Into<types::CollisionPayload>,
         ) -> Result<
             support::ResponseValue<()>,
             support::Error<SignatureBindingCollisionsError>,
@@ -23496,8 +23980,8 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn signature_binding_collisions_request(
             &self,
-            params: SignatureBindingCollisionsParams,
-            body: &types::CollisionPayload,
+            params: impl Into<SignatureBindingCollisionsParams>,
+            body: impl Into<types::CollisionPayload>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -23521,7 +24005,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         #[inline]
         pub fn signature_binding_collisions_url(
             &self,
-            params: SignatureBindingCollisionsParams,
+            params: impl Into<SignatureBindingCollisionsParams>,
         ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.signature_binding_collisions_url(params)
         }
@@ -23530,7 +24014,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         pub fn serialize_params(
             &self,
             ids: types::Ids,
-            params: SerializeParamsParams,
+            params: impl Into<SerializeParamsParams>,
         ) -> Result<support::ResponseValue<()>, support::Error<SerializeParamsError>> {
             self.runtime.block_on(self.inner.serialize_params(ids, params))
         }
@@ -23539,7 +24023,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         pub fn serialize_params_request(
             &self,
             ids: types::Ids,
-            params: SerializeParamsParams,
+            params: impl Into<SerializeParamsParams>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -23559,7 +24043,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         pub fn serialize_params_url(
             &self,
             ids: types::Ids,
-            params: SerializeParamsParams,
+            params: impl Into<SerializeParamsParams>,
         ) -> Result<url::Url, support::Error<std::convert::Infallible>> {
             self.inner.serialize_params_url(ids, params)
         }
@@ -24264,7 +24748,7 @@ Response `409`: Conflict*/
         pub fn post_nullable_bytes(
             &self,
             params: impl Into<Option<PostNullableBytesParams>>,
-            body: &types::PostNullableBytesBody,
+            body: impl Into<types::PostNullableBytesBody>,
         ) -> Result<
             support::ResponseValue<types::ResponseBody8899a140>,
             support::Error<PostNullableBytesError>,
@@ -24276,7 +24760,7 @@ Response `409`: Conflict*/
         pub fn post_nullable_bytes_request(
             &self,
             params: impl Into<Option<PostNullableBytesParams>>,
-            body: &types::PostNullableBytesBody,
+            body: impl Into<types::PostNullableBytesBody>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -24657,7 +25141,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_order(
             &self,
-            body: &types::XmlOrder,
+            body: impl Into<types::XmlOrder>,
         ) -> Result<
             support::ResponseValue<types::XmlReceipt>,
             support::Error<SubmitOrderError>,
@@ -24668,7 +25152,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_order_request(
             &self,
-            body: &types::XmlOrder,
+            body: impl Into<types::XmlOrder>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -24698,7 +25182,7 @@ Response `409`: binary error*/
         pub fn patch_merge_document(
             &self,
             id: impl Into<types::Id3e6bacfe>,
-            body: &types::JsonMeta,
+            body: impl Into<types::JsonMeta>,
         ) -> Result<
             support::ResponseValue<()>,
             support::Error<PatchMergeDocumentError>,
@@ -24710,7 +25194,7 @@ Response `409`: binary error*/
         pub fn patch_merge_document_request(
             &self,
             id: impl Into<types::Id3e6bacfe>,
-            body: &types::JsonMeta,
+            body: impl Into<types::JsonMeta>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -24740,7 +25224,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_legacy_order(
             &self,
-            body: &types::XmlOrder,
+            body: impl Into<types::XmlOrder>,
         ) -> Result<support::ResponseValue<()>, support::Error<SubmitLegacyOrderError>> {
             self.runtime.block_on(self.inner.submit_legacy_order(body))
         }
@@ -24748,7 +25232,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_legacy_order_request(
             &self,
-            body: &types::XmlOrder,
+            body: impl Into<types::XmlOrder>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -24774,7 +25258,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn post_json_meta(
             &self,
-            body: &types::JsonMeta,
+            body: impl Into<types::JsonMeta>,
         ) -> Result<
             support::ResponseValue<types::JsonMeta>,
             support::Error<PostJsonMetaError>,
@@ -24785,7 +25269,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn post_json_meta_request(
             &self,
-            body: &types::JsonMeta,
+            body: impl Into<types::JsonMeta>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -25010,7 +25494,7 @@ Response `409`: binary error*/
             &self,
             text: impl Into<types::Text>,
             json: types::DeepFilter,
-            params: SerializeContentParamsParams,
+            params: impl Into<SerializeContentParamsParams>,
         ) -> Result<
             support::ResponseValue<()>,
             support::Error<SerializeContentParamsError>,
@@ -25024,7 +25508,7 @@ Response `409`: binary error*/
             &self,
             text: impl Into<types::Text>,
             json: types::DeepFilter,
-            params: SerializeContentParamsParams,
+            params: impl Into<SerializeContentParamsParams>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -25058,7 +25542,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_form(
             &self,
-            body: &types::SubmitFormBody,
+            body: impl Into<types::SubmitFormBody>,
         ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormError>> {
             self.runtime.block_on(self.inner.submit_form(body))
         }
@@ -25066,7 +25550,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_form_request(
             &self,
-            body: &types::SubmitFormBody,
+            body: impl Into<types::SubmitFormBody>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -25092,7 +25576,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_form_additional(
             &self,
-            body: &types::SubmitFormAdditionalBody,
+            body: impl Into<types::SubmitFormAdditionalBody>,
         ) -> Result<
             support::ResponseValue<()>,
             support::Error<SubmitFormAdditionalError>,
@@ -25103,7 +25587,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn submit_form_additional_request(
             &self,
-            body: &types::SubmitFormAdditionalBody,
+            body: impl Into<types::SubmitFormAdditionalBody>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,
@@ -25174,7 +25658,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn upload_additional(
             &self,
-            body: &types::UploadAdditionalBody,
+            body: impl Into<types::UploadAdditionalBody>,
         ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
             self.runtime.block_on(self.inner.upload_additional(body))
         }
@@ -25182,7 +25666,7 @@ Response `409`: binary error*/
         #[inline]
         pub fn upload_additional_request(
             &self,
-            body: &types::UploadAdditionalBody,
+            body: impl Into<types::UploadAdditionalBody>,
         ) -> Result<
             http::Request<support::HttpBody>,
             support::Error<std::convert::Infallible>,

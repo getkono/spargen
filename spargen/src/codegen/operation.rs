@@ -755,18 +755,28 @@ pub(super) fn takes_into_string(api: &Api, ty: Ty) -> bool {
 /// Whether a request-body argument or a setter's value of type `ty` is emitted as `impl Into<T>`
 /// rather than `T`, so a `…Required` struct literal, a `&str` or a model passes straight in.
 ///
-/// Every type but two. A nullable one is an `Option<T>` position, where `Into` would leave a bare
-/// `None` uninferable. And a numeric primitive: an integer or float literal takes its type from
+/// Every type but three. A nullable one is an `Option<T>` position, where `Into` would leave a bare
+/// `None` uninferable. A numeric primitive: an integer or float literal takes its type from
 /// the position, which `impl Into<u8>` or `impl Into<f32>` no longer gives, so `5` would fall back
-/// to `i32` and stop compiling.
+/// to `i32` and stop compiling. And an uninhabited type: no value converts
+/// into it, and the `.into()` that would is an unreachable expression rustc warns of.
 pub(super) fn takes_into(types: &crate::ir::TypeGraph, ty: Ty) -> bool {
     use crate::ir::Prim;
     !ty.nullable
         && !matches!(
             types.get(ty.id).map(|definition| &definition.kind),
-            Some(TypeKind::Primitive(
-                Prim::I32 | Prim::I64 | Prim::U8 | Prim::U16 | Prim::U32 | Prim::U64 | Prim::F64
-            ))
+            Some(
+                TypeKind::Never
+                    | TypeKind::Primitive(
+                        Prim::I32
+                            | Prim::I64
+                            | Prim::U8
+                            | Prim::U16
+                            | Prim::U32
+                            | Prim::U64
+                            | Prim::F64
+                    )
+            )
         )
 }
 

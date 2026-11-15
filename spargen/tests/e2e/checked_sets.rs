@@ -76,8 +76,8 @@ fn checked_sets_round_trip_and_refuse_an_unlisted_value() {
 
 mod common;
 
-use levels_client::types::{Level, Setting, SettingOn, SettingTier};
-use levels_client::PutLevelParams;
+use levels_client::types::{Level, Setting, SettingOn, SettingRequired, SettingTier};
+use levels_client::PutLevelParamsRequired;
 
 #[test]
 fn a_listed_value_converts_and_an_unlisted_one_does_not() {
@@ -131,14 +131,14 @@ fn an_open_response_set_decodes_an_unlisted_value_and_a_closed_one_refuses_it() 
         ),
     ]);
     let client = levels_client::BlockingClient::new(&base).unwrap();
-    let setting = Setting::new(Level::V1, SettingOn::TRUE);
+    let setting = Setting::from(SettingRequired { level: Level::V1, on: SettingOn::TRUE });
     let reply = client
-        .put_level(PutLevelParams::new(Level::V_MINUS_1), &setting)
+        .put_level(PutLevelParamsRequired { min: Level::V_MINUS_1 }, setting.clone())
         .expect("an open set decodes an unlisted value")
         .into_inner();
     assert_eq!(reply.code.get(), 7);
     assert_eq!(reply.setting.level, Level::V3);
-    assert!(client.put_level(PutLevelParams::new(Level::V3), &setting).is_err());
+    assert!(client.put_level(PutLevelParamsRequired { min: Level::V3 }, setting).is_err());
 
     let requests = server.join().unwrap();
     assert!(requests[0].line().contains("?min=-1 "), "{}", requests[0].line());

@@ -229,9 +229,7 @@ fn the_params_struct_bundles_every_parameter_but_a_path_one() {
                 r#"#[serde(rename="X-Req")]pubx_req:types::XReq,"#,
             ),
             r#"#[serde(rename="cj",skip_serializing_if="Option::is_none")]pubcj:Option<types::Query>,}"#,
-            concat!(
-                r#"///Therequiredparametersof`GetThingParams`,whichconvertsfromthiswitheveryoptionaloneunset."#,
-            ),
+            r#"///Therequiredparametersof`GetThingParams`,whichconvertsfromthiswitheveryoptionaloneunset."#,
             concat!(
                 r#"#[derive(Debug,Clone)]pubstructGetThingParamsRequired{///The`q`parameter.pubq:types::Q,"#,
                 r#"///The`X-Req`parameter.pubx_req:types::XReq,}"#,

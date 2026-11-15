@@ -80,7 +80,7 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
         .since(at)
         .on(day);
     let response = client
-        .create_event(Some(params), &event)
+        .create_event(Some(params), event.clone())
         .expect("create_event round-trips");
 
     let request = server.join().unwrap();
@@ -217,7 +217,7 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
 
     let params = dates_client::CreateEventParams::default().since(at).on(day);
     let response = client
-        .create_event(Some(params), &event)
+        .create_event(Some(params), event.clone())
         .expect("create_event round-trips");
 
     let request = server.join().unwrap();
@@ -270,7 +270,7 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
 
     let params = dates_client::CreateEventParams::default().since(at).on(day);
     let response = client
-        .create_event(Some(params), &event)
+        .create_event(Some(params), event.clone())
         .expect("create_event round-trips");
 
     let request = server.join().unwrap();
@@ -448,7 +448,7 @@ fn json_members_are_base64_strings_in_both_directions() {
         token: Some(types::TorrentSourceToken(bytes::Bytes::from_static(&[0xfb, 0xff]))),
         label: Some("raw text".to_owned()),
     };
-    let response = client.add_torrent(&source).expect("add_torrent round-trips");
+    let response = client.add_torrent(source.clone()).expect("add_torrent round-trips");
 
     let request = server.join().unwrap();
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
@@ -495,7 +495,7 @@ fn a_member_that_is_not_base64_text_is_a_decode_error() {
         token: None,
         label: None,
     };
-    assert!(client.add_torrent(&source).is_err());
+    assert!(client.add_torrent(source).is_err());
     server.join().unwrap();
 }
 
@@ -833,7 +833,7 @@ fn each_url_accessor_names_the_url_its_operation_sends_to() {
     assert_eq!(client.inner().stream_file_url("a b/c").unwrap(), stream);
 
     client
-        .stream_file("a b/c", urls_client::StreamFileParams::new("trace"))
+        .stream_file("a b/c", urls_client::StreamFileParamsRequired { x_trace: "trace".to_owned() })
         .unwrap();
     // `login` documents only `302`, so the server's `204` is an undocumented status: the request
     // line is what is compared, not the outcome.
@@ -862,10 +862,10 @@ fn a_url_accessor_leaves_off_the_query_api_key_its_request_sends() {
         .with_key(urls_client::SecretString::from("s3cret"));
 
     let url = client
-        .search_url(urls_client::SearchParams::new("a b"))
+        .search_url(urls_client::SearchParamsRequired { q: "a b".to_owned() })
         .unwrap();
     assert_eq!(url.as_str(), format!("{base}/v1/search?q=a%20b"));
-    client.search(urls_client::SearchParams::new("a b")).unwrap();
+    client.search(urls_client::SearchParamsRequired { q: "a b".to_owned() }).unwrap();
     let seen = server.join().unwrap();
     assert_eq!(seen, vec!["GET /api/v1/search?q=a%20b&api_key=s3cret HTTP/1.1".to_owned()]);
 }
@@ -946,7 +946,7 @@ fn rfc6570_multipart_parts_are_not_percent_encoded() {
         paths: vec!["a/b".into(), "c".into()],
         names: vec!["ada".into(), "grace".into()],
     };
-    client.upload(&body).expect("upload round-trips");
+    client.upload(body).expect("upload round-trips");
 
     let request = server.join().unwrap().text();
 
@@ -1279,13 +1279,13 @@ fn a_patch_clears_one_member_and_leaves_another_off() {
     assert_eq!(clear, PetPatch::new().with_nickname(Nullable::Null));
     assert_eq!(clear.nickname, Nullable::Null);
     assert_eq!(clear.age, Nullable::Absent);
-    let cleared = client.patch_pet(&clear).expect("the clearing patch round-trips");
+    let cleared = client.patch_pet(clear.clone()).expect("the clearing patch round-trips");
     let decoded = cleared.into_inner();
     assert_eq!(decoded.nickname, Nullable::Null);
     assert_eq!(decoded.age, Nullable::Absent);
 
     let set = PetPatch::default().with_nickname("Rex".to_owned()).with_age(3);
-    let renamed = client.patch_pet(&set).expect("the setting patch round-trips");
+    let renamed = client.patch_pet(set.clone()).expect("the setting patch round-trips");
     let decoded = renamed.into_inner();
     assert_eq!(decoded.nickname, Nullable::Value("Rex".to_owned()));
     assert_eq!(decoded.age, Nullable::Null);
@@ -1565,7 +1565,10 @@ fn unsigned_values_are_decimal_on_the_wire() {
         br#"{"count":18446744073709551615}"#,
     ));
     let client = unsigned_client::BlockingClient::new(&base).unwrap();
-    let params = unsigned_client::GetCounterParams::new(u16::MAX).limit(u32::MAX);
+    let params = unsigned_client::GetCounterParams::from(unsigned_client::GetCounterParamsRequired {
+        x_page: u16::MAX,
+    })
+    .limit(u32::MAX);
     let response = client
         .get_counter(u64::MAX, params)
         .expect("the call round-trips");

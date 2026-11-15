@@ -72,7 +72,7 @@ components:
 
 mod common;
 
-use users_client::types::User;
+use users_client::types::{User, UserRequired};
 
 #[test]
 fn a_request_omits_the_read_only_member_and_a_response_omits_the_write_only_one() {
@@ -86,15 +86,19 @@ fn a_request_omits_the_read_only_member_and_a_response_omits_the_write_only_one(
     ]);
     let client = users_client::BlockingClient::new(&base).unwrap();
 
-    // `new` takes the `writeOnly` member and not the `readOnly` one; setting that one anyway
-    // sends nothing.
-    let user = User::new("ada".to_owned(), "secret".to_owned()).with_id(99);
+    // `UserRequired` holds the `writeOnly` member and not the `readOnly` one; setting that one
+    // anyway sends nothing.
+    let user = User::from(UserRequired {
+        name: "ada".to_owned(),
+        password: "secret".to_owned(),
+    })
+    .with_id(99);
     assert_eq!(user.password.as_deref(), Some("secret"));
-    let created = client.create_user(&user).expect("the create round-trips").into_inner();
+    let created = client.create_user(user.clone()).expect("the create round-trips").into_inner();
     assert_eq!(created.id, Some(7));
     assert_eq!(created.name, "ada");
     assert_eq!(created.password, None);
-    client.upload(&user).expect("the upload round-trips");
+    client.upload(user).expect("the upload round-trips");
 
     let requests = server.join().unwrap();
     let json = String::from_utf8_lossy(&requests[0].body).into_owned();
