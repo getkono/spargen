@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use crate::diag::{Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance};
 use crate::source::{schema_component_name, SpannedValue};
 
+use super::schema::Pre2020Keyword;
 use super::{
     Document, EncodingObject, HeaderObject, MediaTypeObject, ParameterObject, PathItem, RefOr,
     Reference, RequestBodyObject, Resolver, ResponseObject, Schema, SchemaOr,
@@ -378,11 +379,34 @@ impl Audit<'_, '_> {
             reject_oas32_schema_fields(schema, self.diags);
         }
         let diags = &mut *self.diags;
-        if !schema.validation.constrains_nothing() {
+        if !schema.validation.states_no_2020_12_keyword() {
             // W001 case: validation-keyword
             Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
                 .message("validation-only schema keywords are not enforced at runtime")
                 .remedy("keep producer-side validation for these constraints")
+                .emit(diags);
+        }
+        for &keyword in &schema.validation.pre_2020_12 {
+            let (message, remedy) = match keyword {
+                Pre2020Keyword::AdditionalItems => (
+                    "`additionalItems` is a JSON Schema keyword older than 2020-12, which \
+                     replaced it with `items` beside `prefixItems`: the constraint it states is \
+                     not enforced",
+                    "write the tuple as `prefixItems` and the rest as `items`, and keep \
+                     producer-side validation for the constraint",
+                ),
+                Pre2020Keyword::Dependencies => (
+                    "`dependencies` is a JSON Schema keyword older than 2020-12, which split it \
+                     into `dependentRequired` and `dependentSchemas`: the constraint it states \
+                     is not enforced",
+                    "write a list of property names as `dependentRequired` and a schema as \
+                     `dependentSchemas`, and keep producer-side validation for the constraint",
+                ),
+            };
+            // W001 case: pre-2020-keyword
+            Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+                .message(message)
+                .remedy(remedy)
                 .emit(diags);
         }
         if schema.oas30_nullable {

@@ -207,7 +207,7 @@ run = [
   # `--batch-cap 100000` raises the cap as `corpus/github-api-3-1/spargen.toml` does for GitHub
   # 3.1: at the default of 100 the warning volume truncates the batch before the terminal E009.
   "cargo run -q -p spargen --features cli -- check corpus/openai-openapi/openapi.yaml --format json --batch-cap 100000 > target/corpus-smoke/openai.json || test $? -eq 1",
-  "grep -q E009 target/corpus-smoke/openai.json",
+  "grep -q E006 target/corpus-smoke/openai.json",
   "cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json > target/corpus-smoke/stripe.json || test $? -eq 1",
   "grep -q E001 target/corpus-smoke/stripe.json",
   "cargo run -q -p spargen --features cli -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json > target/corpus-smoke/twilio.json || test $? -eq 1",

@@ -227,8 +227,9 @@ fn meilisearch_rejects() {
 
 #[test]
 fn openai_openapi_rejects() {
-    // Manifest expectation: `reject:E009` — `POST /realtime/calls` documents its 201 with
-    // `application/sdp` as the only content entry, a media type with no codec.
+    // Manifest expectation: `reject:E006` — `/components/schemas/CompoundFilter` writes JSON
+    // Schema 2019-09's `$recursiveAnchor`/`$recursiveRef`, which need dynamic schema-scope
+    // evaluation.
     let (report, _) = generate_corpus("openai-openapi/openapi.yaml", false);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     insta::assert_snapshot!("openai_openapi", summary(&report));
