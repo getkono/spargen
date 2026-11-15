@@ -324,7 +324,8 @@ fn split_outside(text: &str, delim: u8, respect_angles: bool) -> Vec<&str> {
 }
 
 /// Parse a single `Link` entry into its URI-reference plus whether its `rel` names `next`. Returns
-/// `None` if no `<…>` URI is present.
+/// `None` if no `<…>` URI is present. Only the first `rel` parameter counts: RFC 8288 §3.3 has
+/// parsers ignore every later one.
 fn parse_link_entry(entry: &str) -> Option<(String, bool)> {
     let entry = entry.trim();
     let open = entry.find('<')?;
@@ -333,7 +334,6 @@ fn parse_link_entry(entry: &str) -> Option<(String, bool)> {
     if uri.is_empty() {
         return None;
     }
-    let mut is_next = false;
     for param in split_outside(&entry[close + 1..], b';', false) {
         let param = param.trim();
         let Some(eq) = param.find('=') else {
@@ -347,14 +347,12 @@ fn parse_link_entry(entry: &str) -> Option<(String, bool)> {
             value = &value[1..value.len() - 1];
         }
         // `rel` is a space-separated list of relation types; relation types are case-insensitive.
-        if value
+        let is_next = value
             .split_whitespace()
-            .any(|rel| rel.eq_ignore_ascii_case("next"))
-        {
-            is_next = true;
-        }
+            .any(|rel| rel.eq_ignore_ascii_case("next"));
+        return Some((uri, is_next));
     }
-    Some((uri, is_next))
+    Some((uri, false))
 }
 
 #[cfg(test)]

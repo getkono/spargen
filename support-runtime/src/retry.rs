@@ -323,11 +323,30 @@ impl HttpBackend for RetryBackend {
 /// feed to its own async timer; the runtime never sleeps on it.
 ///
 /// `attempt` is 0-based, so attempt 0 waits `base`, attempt 1 waits `2 * base`, and so on. Overflow
-/// (a large `attempt` or `base`) saturates to `max` rather than panicking.
+/// (a large `attempt` or `base`) saturates to `max` rather than panicking, so every nonzero `base`
+/// reaches `max` once `base * 2^attempt` does.
 pub fn exponential_backoff(attempt: u32, base: Duration, max: Duration) -> Duration {
-    // `2^attempt` saturates at `u32::MAX`; a `base * factor` overflow then falls back to `max`.
-    let factor = 2u32.saturating_pow(attempt);
-    base.checked_mul(factor).unwrap_or(max).min(max)
+    const NANOS_PER_SEC: u128 = 1_000_000_000;
+    if base.is_zero() {
+        return Duration::ZERO;
+    }
+    // Work in 128-bit nanoseconds: `2^attempt` past bit 127, or a product past `u128::MAX`, is
+    // beyond any `Duration` and so beyond `max`.
+    let product = 1u128
+        .checked_shl(attempt)
+        .and_then(|factor| base.as_nanos().checked_mul(factor))
+        .filter(|nanos| *nanos < max.as_nanos());
+    match product {
+        // Below `max`, so its whole seconds fit in `u64` as `max`'s do.
+        Some(nanos) => match (
+            u64::try_from(nanos / NANOS_PER_SEC),
+            u32::try_from(nanos % NANOS_PER_SEC),
+        ) {
+            (Ok(secs), Ok(subsec)) => Duration::new(secs, subsec),
+            _ => max,
+        },
+        None => max,
+    }
 }
 
 /// Full jitter: `backoff` scaled by `unit`, a uniformly random draw from `[0, 1)` the caller
