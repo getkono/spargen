@@ -349,6 +349,10 @@ fn lower_pass(
     // which read and report on the emitted definitions only.
     ctx.elide_unreachable(&operations);
 
+    // Every use of every definition is known now, so a `format: binary` value a serde codec
+    // carries can take the `String` its wire holds, and keep its bytes where they are the wire.
+    ctx.retype_serde_binary(&mut operations);
+
     // An intersection narrows a field's type after its `default` was checked against the type the
     // declaring member gave it, so the applied defaults are checked again against the final graph.
     retype_field_defaults(&mut ctx.graph, &ctx.meet_locations, ctx.diags);

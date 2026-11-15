@@ -314,7 +314,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// bytes cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose
     /// declared type is not JSON, on multipart (the part's header) and on form-urlencoded (the
     /// field's serialization syntax) alike. A binary property on form-urlencoded is refused
-    /// (`E009`) whether or not a `contentType` made it binary.
+    /// (`E009`) whether or not a `contentType` made it binary, except a `format: binary` string,
+    /// which there is the text it holds.
     fn encoding_media_mode(
         &mut self,
         declared: Option<&EncodingObject>,
@@ -324,8 +325,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         at: &Provenance,
     ) -> Option<EncodingMode> {
         let explicit = declared.and_then(|encoding| encoding.content_type.as_deref());
+        // A form field is serialized as text, and `format: binary` there is an annotation: the
+        // field is the `String` the wire holds (`retype_serde_binary`, #1417), so with no
+        // `contentType` declaring it binary it defaults to text, not to the octets a form has no
+        // representation of.
+        let annotated_text = media == MediaType::FormUrlEncoded
+            && explicit.is_none()
+            && matches!(
+                self.kind_of(field_ty.id),
+                Some(TypeKind::Bytes(crate::ir::BytesEncoding::Raw))
+            );
         let content_type = match explicit {
             Some(list) => self.declared_content_type(list, declared, media, name, at)?,
+            None if annotated_text => "text/plain".to_owned(),
             None => self.default_content_type(field_ty),
         };
         // The declared `contentType` is a wire *header*; how the value is rendered into bytes is

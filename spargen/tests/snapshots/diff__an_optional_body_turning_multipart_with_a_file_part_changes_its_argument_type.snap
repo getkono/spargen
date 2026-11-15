@@ -3,5 +3,6 @@ source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
 major|request-body-type-changed|GET /pets|request body type `ListPetsBody` -> `MultipartBody<ListPetsBody>`
+major|field-type-changed|ListPetsBody.photo|field type `String` -> `Bytes`
 minor|file-name-setter-added|GET /pets|file name setter `photo_file_name` added
 bump=major

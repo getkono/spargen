@@ -280,6 +280,9 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
             // A base64 schema is a nominal newtype over `bytes::Bytes`, whose serde form is the
             // base64 string; its public `.0` field is the bytes.
             Emission::Base64 => TypeSurface::Newtype("Bytes".to_owned()),
+            // A base64url newtype has the same `.0`, but reads and writes another alphabet, so a
+            // change between the two is reported as the change of wire form it is.
+            Emission::Base64Url => TypeSurface::Newtype("Bytes as base64url".to_owned()),
             Emission::BoolAlias | Emission::Alias => {
                 aliases.insert(name);
                 continue;
@@ -447,7 +450,8 @@ pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names, settings: Settings) -> 
         | Emission::Union(_)
         | Emission::Newtype
         | Emission::Never
-        | Emission::Base64 => nominal_name(ty, names),
+        | Emission::Base64
+        | Emission::Base64Url => nominal_name(ty, names),
         // A boolean set listing both values is its `bool` alias.
         Emission::BoolAlias => "bool".to_owned(),
         Emission::Alias => match &def.kind {
@@ -462,7 +466,9 @@ pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names, settings: Settings) -> 
             | TypeKind::Enum(_)
             | TypeKind::Union(_)
             | TypeKind::Never
-            | TypeKind::Bytes(crate::ir::BytesEncoding::Base64)
+            | TypeKind::Bytes(
+                crate::ir::BytesEncoding::Base64 | crate::ir::BytesEncoding::Base64Url,
+            )
             | TypeKind::Reserved => unreachable!("`TypeGraph::emission` never aliases {def:?}"),
         },
     };

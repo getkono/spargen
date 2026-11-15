@@ -28,8 +28,9 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 /// 4. Every variant of a union that is not elided carries a [`super::VariantDispatch`] of its
 ///    union's [`super::UnionStrategy`] arm ([`super::UnionStrategy::admits`]).
 /// 5. No whole non-streaming body — a request body, or a response body that is not a stream — is
-///    of a [`BytesEncoding::Base64`] definition: the emitter sends and decodes a whole `bytes` body
-///    raw, as `bytes::Bytes`, which the base64 newtype is not.
+///    of a [`BytesEncoding::Base64`] or [`BytesEncoding::Base64Url`] definition: the emitter
+///    sends and decodes a whole `bytes` body raw, as `bytes::Bytes`, which the base64 newtype is
+///    not.
 /// 6. Every request body has a type: the emitter gives an operation a body argument, and sends a
 ///    body, only for a typed one, so an untyped body would be dropped from the request.
 /// 7. A discriminated union's `defaultMapping` position ([`UnionStrategy::Discriminated`]'s
@@ -339,11 +340,12 @@ fn check_raw_body(
     label: &str,
     provenance: &crate::diag::Provenance,
 ) {
-    if api
-        .types
-        .get(ty.id)
-        .is_some_and(|def| matches!(def.kind, TypeKind::Bytes(BytesEncoding::Base64)))
-    {
+    if api.types.get(ty.id).is_some_and(|def| {
+        matches!(
+            def.kind,
+            TypeKind::Bytes(BytesEncoding::Base64 | BytesEncoding::Base64Url)
+        )
+    }) {
         Diagnostic::error(Code::InvalidInput, provenance.clone())
             .message(format!(
                 "{INVARIANT_FAILURE}: `{label}` is a whole body of a base64 bytes type, which the \

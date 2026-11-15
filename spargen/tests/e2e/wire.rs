@@ -296,7 +296,7 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
 "##;
 
 /// A `contentEncoding: base64` value: a component, an array item, a nullable member and a union
-/// variant inside a JSON body, and a multipart part.
+/// variant inside a JSON body, and a multipart part; and base64url and `format: binary` members.
 const BASE64_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: Base64, version: 1.0.0 }
@@ -375,6 +375,8 @@ components:
         pieces: { type: array, items: { $ref: '#/components/schemas/Metainfo' } }
         note: { type: [string, 'null'], contentEncoding: base64 }
         either: { oneOf: [{ $ref: '#/components/schemas/Metainfo' }, { type: integer }] }
+        token: { type: string, contentEncoding: base64url }
+        label: { type: string, format: binary }
     Upload:
       type: object
       required: [file]
@@ -407,8 +409,8 @@ fn base64_content_reaches_the_wire_as_base64_text() {
         "a base64 component must be the base64 newtype: {generated}"
     );
     assert!(
-        generated.contains("pub use base64::{deserialize_base64, serialize_base64};"),
-        "the base64 codec must be embedded for a spec that uses it"
+        generated.contains("fn serialize_base64url"),
+        "the base64 codecs must be embedded for a spec that uses them"
     );
 
     write_fixture_test(&out, "base64", BASE64_WIRE_TEST);
@@ -431,7 +433,7 @@ fn json_members_are_base64_strings_in_both_directions() {
     let (base, server) = common::serve_once(
         "application/json",
         "200 OK",
-        br#"{"data":"ZDQ6aW5mb2U=","pieces":["AAE=","/w"],"note":null,"either":"aGk="}"#,
+        br#"{"data":"ZDQ6aW5mb2U=","pieces":["AAE=","/w"],"note":null,"either":"aGk=","token":"-_8","label":"hi"}"#,
     );
     let client = base64_client::BlockingClient::new(&base).unwrap();
 
@@ -443,6 +445,8 @@ fn json_members_are_base64_strings_in_both_directions() {
         ]),
         note: Some(bytes::Bytes::from_static(b"hi").into()),
         either: None,
+        token: Some(types::TorrentSourceToken(bytes::Bytes::from_static(&[0xfb, 0xff]))),
+        label: Some("raw text".to_owned()),
     };
     let response = client.add_torrent(&source).expect("add_torrent round-trips");
 
@@ -450,8 +454,9 @@ fn json_members_are_base64_strings_in_both_directions() {
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(
         body,
-        serde_json::json!({ "data": "ZDQ6aW5mb2U=", "pieces": ["AAE=", "/w=="], "note": "aGk=" }),
-        "base64 members must serialize as padded standard base64 strings"
+        serde_json::json!({ "data": "ZDQ6aW5mb2U=", "pieces": ["AAE=", "/w=="], "note": "aGk=",
+            "token": "-_8=", "label": "raw text" }),
+        "base64 and base64url members are padded text; a `format: binary` one is its string"
     );
 
     let decoded = response.into_inner();
@@ -465,6 +470,8 @@ fn json_members_are_base64_strings_in_both_directions() {
         .collect();
     assert_eq!(pieces, [&[0u8, 1][..], &[0xff][..]], "an unpadded item decodes too");
     assert!(decoded.note.is_none());
+    assert_eq!(&decoded.token.as_ref().unwrap()[..], &[0xfb, 0xff], "unpadded base64url decodes");
+    assert_eq!(decoded.label.as_deref(), Some("hi"));
     // The union's base64 variant decodes the string, and writes the same text back.
     assert_eq!(
         serde_json::to_value(decoded.either.as_ref().unwrap()).unwrap(),
@@ -485,6 +492,8 @@ fn a_member_that_is_not_base64_text_is_a_decode_error() {
         pieces: None,
         note: None,
         either: None,
+        token: None,
+        label: None,
     };
     assert!(client.add_torrent(&source).is_err());
     server.join().unwrap();

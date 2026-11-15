@@ -48,6 +48,7 @@ mod all_of_union_spellings;
 mod audit_reach;
 mod bodies_alternatives;
 mod bodies_binary;
+mod bodies_binary_serde;
 mod bodies_media_keys;
 mod bodies_streaming;
 mod bodies_unsupported;

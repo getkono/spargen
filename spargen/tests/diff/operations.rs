@@ -323,10 +323,12 @@ fn photo_body(media: &str, required: bool) -> String {
 }
 
 #[test]
-fn a_body_turning_multipart_with_a_file_part_adds_its_file_name_setter_and_is_minor() {
+fn a_body_turning_multipart_with_a_file_part_adds_its_file_name_setter_and_retypes_the_part() {
     // Issue #1385: the binary `photo` becomes a file part, whose `filename` a caller sets with
     // `photo_file_name` on the `MultipartBody` the method now takes. A required body is
-    // `impl AsMultipartBody<T>`, which the `&T` every caller passes still satisfies.
+    // `impl AsMultipartBody<T>`, which the `&T` every caller passes still satisfies. The member
+    // itself changes type: in the JSON body `format: binary` is the `String` the wire holds, and in
+    // the multipart part it is the bytes (#1417).
     let old = full(
         &pets_get("listPets", &photo_body("application/json", true), PET_REF),
         PET_SCHEMA,
@@ -342,16 +344,20 @@ fn a_body_turning_multipart_with_a_file_part_adds_its_file_name_setter_and_is_mi
     let report = diff(&old, &new);
     assert_eq!(
         kinds(&report),
-        vec![ChangeKind::FileNameSetterAdded],
+        vec![
+            ChangeKind::FieldTypeChanged,
+            ChangeKind::FileNameSetterAdded
+        ],
         "{:?}",
         report.changes
     );
-    assert_eq!(report.changes[0].location, "GET /pets");
+    assert_eq!(report.changes[0].detail, "field type `String` -> `Bytes`");
+    assert_eq!(report.changes[1].location, "GET /pets");
     assert_eq!(
-        report.changes[0].detail,
+        report.changes[1].detail,
         "file name setter `photo_file_name` added"
     );
-    assert_eq!(report.bump, Impact::Minor);
+    assert_eq!(report.bump, Impact::Major);
 }
 
 #[test]
@@ -371,7 +377,10 @@ fn a_body_losing_its_file_part_removes_its_file_name_setter_and_is_major() {
     let report = diff(&old, &new);
     assert_eq!(
         kinds(&report),
-        vec![ChangeKind::FileNameSetterRemoved],
+        vec![
+            ChangeKind::FileNameSetterRemoved,
+            ChangeKind::FieldTypeChanged
+        ],
         "{:?}",
         report.changes
     );
@@ -399,6 +408,7 @@ fn an_optional_body_turning_multipart_with_a_file_part_changes_its_argument_type
         kinds(&report),
         vec![
             ChangeKind::RequestBodyTypeChanged,
+            ChangeKind::FieldTypeChanged,
             ChangeKind::FileNameSetterAdded
         ],
         "{:?}",

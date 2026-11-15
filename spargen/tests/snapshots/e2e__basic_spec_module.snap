@@ -8452,28 +8452,62 @@ mod support {
         }
     }
     mod base64 {
-        //! The base64 text form of binary content carried inside a structured body:
-        //! `contentEncoding: base64`.
+        //! The base64 text forms of binary content carried inside a structured body:
+        //! `contentEncoding: base64` and `contentEncoding: base64url`.
         //!
         //! JSON Schema 2020-12 — the dialect OpenAPI 3.1 and 3.2 use — says a string with
         //! `contentEncoding: base64` holds binary content encoded with RFC 4648's base64: the standard
-        //! alphabet (`A`–`Z`, `a`–`z`, `0`–`9`, `+`, `/`), padded with `=`. `bytes::Bytes`' own `serde`
-        //! implementation writes a byte sequence, which JSON spells as an array of numbers, so a generated
-        //! model never relies on it for such a value. Each schema with the keyword is emitted as a newtype
-        //! over `bytes::Bytes` whose `Serialize` and `Deserialize` are [`serialize_base64`] and
-        //! [`deserialize_base64`], so the value is that text wherever it sits: a field, an array item, a map
-        //! value, a union variant or a tuple position, in JSON, XML or a form body alike.
+        //! alphabet (`A`–`Z`, `a`–`z`, `0`–`9`, `+`, `/`), padded with `=`. `base64url` is RFC 4648 §5's
+        //! URL- and filename-safe variant, the same encoding with `-` and `_` in place of `+` and `/`.
+        //! `bytes::Bytes`' own `serde` implementation writes a byte sequence, which JSON spells as an array
+        //! of numbers, so a generated model never relies on it for such a value. Each schema with the
+        //! keyword is emitted as a newtype over `bytes::Bytes` whose `Serialize` and `Deserialize` are
+        //! [`serialize_base64`] and [`deserialize_base64`], or [`serialize_base64url`] and
+        //! [`deserialize_base64url`], so the value is that text wherever it sits: a field, an array item, a
+        //! map value, a union variant or a tuple position, in JSON, XML or a form body alike.
         //!
-        //! Encoding always writes the padded standard alphabet. Decoding takes the same alphabet with or
-        //! without its trailing padding, and refuses anything else: another alphabet's characters
-        //! (base64url's `-` and `_`), whitespace or line breaks, padding before the end, a length no
-        //! encoding produces, or a final quantum whose bits past its last whole byte are not zero.
+        //! Encoding always writes the padded text of its alphabet, since RFC 4648 §3.2 asks for the padding
+        //! unless the referring specification says otherwise, and OpenAPI does not. Decoding takes the same
+        //! alphabet with or without its trailing padding, and refuses anything else: the other alphabet's
+        //! characters, whitespace or line breaks, padding before the end, a length no encoding produces, or
+        //! a final quantum whose bits past its last whole byte are not zero.
         use std::fmt;
         use bytes::Bytes;
         use serde::de::{Deserializer, Unexpected, Visitor};
         use serde::ser::Serializer;
-        /// The RFC 4648 standard alphabet, indexed by sextet value.
-        const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        /// One of the two RFC 4648 alphabets a `contentEncoding` names.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Alphabet {
+            /// `base64`, RFC 4648 §4.
+            Standard,
+            /// `base64url`, RFC 4648 §5.
+            UrlSafe,
+        }
+        impl Alphabet {
+            /// The alphabet's characters, indexed by sextet value.
+            fn characters(self) -> &'static [u8; 64] {
+                match self {
+                    Alphabet::Standard => {
+                        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+                    }
+                    Alphabet::UrlSafe => {
+                        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+                    }
+                }
+            }
+            /// The sextet value of one character of this alphabet, or `None` for any other byte.
+            fn sextet(self, character: u8) -> Option<u32> {
+                let value = match (character, self) {
+                    (b'A'..=b'Z', _) => character - b'A',
+                    (b'a'..=b'z', _) => character - b'a' + 26,
+                    (b'0'..=b'9', _) => character - b'0' + 52,
+                    (b'+', Alphabet::Standard) | (b'-', Alphabet::UrlSafe) => 62,
+                    (b'/', Alphabet::Standard) | (b'_', Alphabet::UrlSafe) => 63,
+                    _ => return None,
+                };
+                Some(u32::from(value))
+            }
+        }
         /// Writes `bytes` as its padded standard base64 text.
         pub fn serialize_base64<S>(
             bytes: &[u8],
@@ -8482,33 +8516,61 @@ mod support {
         where
             S: Serializer,
         {
-            serializer.serialize_str(&encode(bytes))
+            serializer.serialize_str(&encode(bytes, Alphabet::Standard))
         }
         /// Reads a padded or unpadded standard base64 string into the bytes it encodes.
         pub fn deserialize_base64<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
         where
             D: Deserializer<'de>,
         {
-            deserializer.deserialize_str(Base64Visitor)
+            deserializer.deserialize_str(Base64Visitor(Alphabet::Standard))
         }
-        /// Accepts a string and decodes it; any other value is refused as not base64 text.
-        struct Base64Visitor;
+        /// Writes `bytes` as its padded base64url text.
+        pub fn serialize_base64url<S>(
+            bytes: &[u8],
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            serializer.serialize_str(&encode(bytes, Alphabet::UrlSafe))
+        }
+        /// Reads a padded or unpadded base64url string into the bytes it encodes.
+        pub fn deserialize_base64url<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_str(Base64Visitor(Alphabet::UrlSafe))
+        }
+        /// Accepts a string and decodes it in its alphabet; any other value is refused as not that text.
+        struct Base64Visitor(Alphabet);
         impl Visitor<'_> for Base64Visitor {
             type Value = Bytes;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a base64 string (RFC 4648, standard alphabet)")
+                formatter
+                    .write_str(
+                        match self.0 {
+                            Alphabet::Standard => {
+                                "a base64 string (RFC 4648, standard alphabet)"
+                            }
+                            Alphabet::UrlSafe => {
+                                "a base64url string (RFC 4648, URL-safe alphabet)"
+                            }
+                        },
+                    )
             }
             fn visit_str<E>(self, value: &str) -> Result<Bytes, E>
             where
                 E: serde::de::Error,
             {
-                decode(value)
+                decode(value, self.0)
                     .map(Bytes::from)
                     .ok_or_else(|| E::invalid_value(Unexpected::Str(value), &self))
             }
         }
-        /// `bytes` as padded standard base64.
-        fn encode(bytes: &[u8]) -> String {
+        /// `bytes` as padded base64 text in `alphabet`.
+        fn encode(bytes: &[u8], alphabet: Alphabet) -> String {
+            let characters = alphabet.characters();
             let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
             for chunk in bytes.chunks(3) {
                 let group = chunk
@@ -8523,7 +8585,7 @@ mod support {
                 for sextet in 0..4 {
                     if sextet <= chunk.len() {
                         let value = (group >> (18 - 6 * sextet)) & 0x3f;
-                        out.push(char::from(ALPHABET[value as usize]));
+                        out.push(char::from(characters[value as usize]));
                     } else {
                         out.push('=');
                     }
@@ -8531,21 +8593,9 @@ mod support {
             }
             out
         }
-        /// The sextet value of one standard-alphabet character, or `None` for any other byte.
-        fn sextet(character: u8) -> Option<u32> {
-            let value = match character {
-                b'A'..=b'Z' => character - b'A',
-                b'a'..=b'z' => character - b'a' + 26,
-                b'0'..=b'9' => character - b'0' + 52,
-                b'+' => 62,
-                b'/' => 63,
-                _ => return None,
-            };
-            Some(u32::from(value))
-        }
-        /// The bytes `text` encodes, or `None` when it is not standard base64. Trailing padding is
-        /// optional, but where present it must complete the final quantum exactly.
-        fn decode(text: &str) -> Option<Vec<u8>> {
+        /// The bytes `text` encodes, or `None` when it is not base64 text in `alphabet`. Trailing padding
+        /// is optional, but where present it must complete the final quantum exactly.
+        fn decode(text: &str, alphabet: Alphabet) -> Option<Vec<u8>> {
             let text = text.as_bytes();
             let unpadded = text
                 .iter()
@@ -8562,7 +8612,7 @@ mod support {
             for chunk in data.chunks(4) {
                 let mut group = 0u32;
                 for (index, character) in chunk.iter().enumerate() {
-                    group |= sextet(*character)? << (18 - 6 * index);
+                    group |= alphabet.sextet(*character)? << (18 - 6 * index);
                 }
                 let carried = 24 - 8 * (chunk.len() - 1);
                 if group & ((1 << carried) - 1) != 0 {
@@ -8760,7 +8810,9 @@ mod support {
     };
     pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml};
     pub use datetime::{Date, DateParseError, DateTime};
-    pub use base64::{deserialize_base64, serialize_base64};
+    pub use base64::{
+        deserialize_base64, deserialize_base64url, serialize_base64, serialize_base64url,
+    };
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
     pub use blocking::{BlockingRuntime, NestedRuntime};
 }

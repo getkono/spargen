@@ -180,6 +180,7 @@ impl TypeGraph {
             TypeKind::Union(union) => Emission::Union(union),
             TypeKind::Never => Emission::Never,
             TypeKind::Bytes(BytesEncoding::Base64) => Emission::Base64,
+            TypeKind::Bytes(BytesEncoding::Base64Url) => Emission::Base64Url,
             TypeKind::Reserved => unreachable!(
                 "a reservation reached emission; `check_invariants` should have rejected it"
             ),
@@ -351,11 +352,13 @@ impl TypeGraph {
             }
             // Each `Never` is its own empty `pub enum`, but neither decodes a value.
             (TypeKind::Never, TypeKind::Never) => structural,
-            // Each base64 definition is its own newtype, but all decode the same strings. Raw and
-            // base64 bytes differ on the wire, so they never match.
-            (TypeKind::Bytes(BytesEncoding::Base64), TypeKind::Bytes(BytesEncoding::Base64)) => {
-                structural
-            }
+            // Each base64 definition is its own newtype, but all of one alphabet decode the same
+            // strings. Raw, base64 and base64url bytes differ on the wire, so they never match.
+            (TypeKind::Bytes(BytesEncoding::Base64), TypeKind::Bytes(BytesEncoding::Base64))
+            | (
+                TypeKind::Bytes(BytesEncoding::Base64Url),
+                TypeKind::Bytes(BytesEncoding::Base64Url),
+            ) => structural,
             (TypeKind::Bytes(BytesEncoding::Raw), TypeKind::Bytes(BytesEncoding::Raw))
             | (TypeKind::Null, TypeKind::Null)
             | (TypeKind::Any, TypeKind::Any) => true,
@@ -426,6 +429,9 @@ pub(crate) enum Emission<'a> {
     /// `pub struct X(pub bytes::Bytes);` of a `contentEncoding: base64` schema, which serde
     /// writes and reads as a base64 string rather than `bytes::Bytes`' own sequence of numbers.
     Base64,
+    /// The same newtype of a `contentEncoding: base64url` schema, written and read as base64url
+    /// text.
+    Base64Url,
     /// `pub type X = …;` naming the type the definition lowered to.
     Alias,
 }

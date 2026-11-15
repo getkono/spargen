@@ -294,7 +294,10 @@ paths:
         "{code}"
     );
     assert!(
-        code.contains("pub use base64::{deserialize_base64, serialize_base64};"),
+        code.contains(
+            "pub use base64::{ deserialize_base64, deserialize_base64url, serialize_base64, \
+             serialize_base64url, };"
+        ),
         "{code}"
     );
 }

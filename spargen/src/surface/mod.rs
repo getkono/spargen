@@ -269,7 +269,8 @@ enum TypeSurface {
     Union(BTreeMap<String, String>),
     /// An array or tuple that closes an alias cycle, or a `contentEncoding: base64` schema (`T` is
     /// `Bytes`), emitted as `pub struct X(pub T);` (#648): the canonical rendering of the wrapped
-    /// `T`, which is the type of the public `.0` field.
+    /// `T`, which is the type of the public `.0` field. A `contentEncoding: base64url` schema wraps
+    /// `Bytes` too, and renders as `Bytes as base64url`, so a change of alphabet is a change.
     Newtype(String),
     /// An uninhabited schema (`false`, or one whose constraints admit nothing), emitted as an empty
     /// `pub enum X {}`: it has no structure, but it is a public type a use site names.

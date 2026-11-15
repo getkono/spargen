@@ -379,18 +379,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.lower_type_array(schema, hint, &non_null_types);
         }
 
-        // A binary payload — `contentEncoding: base64` or `format: binary` (the OpenAPI file/upload
-        // marker) — lowers to `bytes::Bytes` rather than a `String`, so a multipart file part
-        // carries bytes and a byte body is not misdecoded as UTF-8. `contentEncoding: base64` also
-        // fixes how a serde-encoded body spells the value, a base64 string, so it wins over
-        // `format: binary` beside it (#1230). A `"null"` in the type array
-        // (`type: [string, 'null']`) makes it nullable exactly as the `oneOf [.., null]` spelling
-        // is, so both spellings reach the raw-body gates, and a JSON member becomes an `Option`,
-        // rather than the `null` being dropped here.
-        let encoding = if schema.content_encoding.as_deref() == Some("base64") {
-            Some(BytesEncoding::Base64)
-        } else {
-            (schema.format.as_deref() == Some("binary")).then_some(BytesEncoding::Raw)
+        // A binary payload — `contentEncoding: base64`/`base64url` or `format: binary` (the
+        // OpenAPI file/upload marker) — lowers to `bytes::Bytes` rather than a `String`, so a
+        // multipart file part carries bytes and a byte body is not misdecoded as UTF-8.
+        // `contentEncoding` also fixes how a serde-encoded body spells the value, base64 or
+        // base64url text, so it wins over `format: binary` beside it (#1230, #1417). Raw bytes are
+        // the wire only in a whole body and a multipart part; everywhere a serde codec carries
+        // them, `retype_serde_binary` makes them the `String` the wire holds once every use is
+        // known. A `"null"` in the type array (`type: [string, 'null']`) makes it nullable
+        // exactly as the `oneOf [.., null]` spelling is, so both spellings reach the raw-body
+        // gates, and a JSON member becomes an `Option`, rather than the `null` being dropped here.
+        let encoding = match schema.content_encoding.as_deref() {
+            Some("base64") => Some(BytesEncoding::Base64),
+            Some("base64url") => Some(BytesEncoding::Base64Url),
+            _ => (schema.format.as_deref() == Some("binary")).then_some(BytesEncoding::Raw),
         };
         if let Some(encoding) = encoding {
             let mut ty = self.insert_schema_type(schema, hint, TypeKind::Bytes(encoding));

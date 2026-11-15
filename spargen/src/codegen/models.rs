@@ -334,7 +334,8 @@ fn emit_type_def(
             }
         }
         Emission::Union(union) => emit_union(id, ident, union, types, names, docs, deprecated),
-        Emission::Base64 => emit_base64_newtype(ident, docs, deprecated),
+        Emission::Base64 => emit_base64_newtype(ident, docs, deprecated, Base64Codec::Standard),
+        Emission::Base64Url => emit_base64_newtype(ident, docs, deprecated, Base64Codec::UrlSafe),
         // An array or tuple that reaches itself again through aliases alone cannot be an alias:
         // rustc expands an alias eagerly, so `pub type Node = Vec<Node>;` is a cycle (`E0391`). A
         // transparent newtype is nominal, which stops the expansion, and keeps the same wire form.
@@ -491,15 +492,36 @@ fn emit_checked_newtype(
     }
 }
 
-/// Emit a `contentEncoding: base64` schema: a newtype over `bytes::Bytes` whose serde form is the
-/// base64 string the embedded runtime's codec writes and reads (#1230), so the value is that text
-/// wherever a serde-encoded body carries it. It `Deref`s to the bytes and converts with `From` in
-/// both directions; a multipart part and a raw body take the bytes themselves.
+/// Which of the embedded runtime's base64 codecs a newtype's serde impls call.
+#[derive(Debug, Clone, Copy)]
+enum Base64Codec {
+    /// `contentEncoding: base64`, RFC 4648 §4.
+    Standard,
+    /// `contentEncoding: base64url`, RFC 4648 §5.
+    UrlSafe,
+}
+
+/// Emit a `contentEncoding: base64` or `base64url` schema: a newtype over `bytes::Bytes` whose
+/// serde form is the text the embedded runtime's `codec` writes and reads (#1230, #1417), so the
+/// value is that text wherever a serde-encoded body carries it. It `Deref`s to the bytes and
+/// converts with `From` in both directions; a multipart part and a raw body take the bytes
+/// themselves.
 fn emit_base64_newtype(
     ident: &crate::name::Ident,
     docs: TokenStream,
     deprecated: Option<TokenStream>,
+    codec: Base64Codec,
 ) -> TokenStream {
+    let (serialize, deserialize) = match codec {
+        Base64Codec::Standard => (
+            format_ident!("serialize_base64"),
+            format_ident!("deserialize_base64"),
+        ),
+        Base64Codec::UrlSafe => (
+            format_ident!("serialize_base64url"),
+            format_ident!("deserialize_base64url"),
+        ),
+    };
     quote! {
         #docs
         #deprecated
@@ -531,7 +553,7 @@ fn emit_base64_newtype(
             where
                 S: serde::Serializer,
             {
-                super::support::serialize_base64(&self.0, serializer)
+                super::support::#serialize(&self.0, serializer)
             }
         }
 
@@ -540,7 +562,7 @@ fn emit_base64_newtype(
             where
                 D: serde::Deserializer<'de>,
             {
-                super::support::deserialize_base64(deserializer).map(#ident)
+                super::support::#deserialize(deserializer).map(#ident)
             }
         }
     }
@@ -1018,7 +1040,7 @@ fn type_kind_tokens(kind: &TypeKind, names: &Names, options: &CodegenOptions) ->
         | TypeKind::Enum(_)
         | TypeKind::Never
         | TypeKind::Union(_)
-        | TypeKind::Bytes(BytesEncoding::Base64) => {
+        | TypeKind::Bytes(BytesEncoding::Base64 | BytesEncoding::Base64Url) => {
             unreachable!("named definitions emitted separately")
         }
     }
