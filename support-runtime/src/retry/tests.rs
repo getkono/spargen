@@ -364,6 +364,25 @@ fn exponential_backoff_doubles_and_clamps() {
     assert_eq!(exponential_backoff(1000, base, max), max);
 }
 
+/// A base so small that `base * (2^32 - 1)` is still below `max` reaches `max` all the same once
+/// `base * 2^attempt` passes it, rather than plateauing where a 32-bit factor saturates (#1445).
+#[test]
+fn exponential_backoff_reaches_max_for_a_tiny_base() {
+    let base = Duration::from_nanos(100);
+    let max = Duration::from_secs(3600);
+    assert_eq!(exponential_backoff(40, base, max), max);
+    assert_eq!(exponential_backoff(u32::MAX, base, max), max);
+    // Past the 32-bit factor, a product below `max` is still exact.
+    assert_eq!(
+        exponential_backoff(32, Duration::from_nanos(1), max),
+        Duration::from_nanos(1 << 32)
+    );
+    assert_eq!(
+        exponential_backoff(200, Duration::ZERO, max),
+        Duration::ZERO
+    );
+}
+
 /// Full jitter scales the backoff by the caller's unit draw: zero at `0.0`, the whole backoff at
 /// `1.0`, and proportionally between.
 #[test]
@@ -754,6 +773,14 @@ proptest::proptest! {
             .filter(|product| *product < max);
         if let Some(product) = exact {
             proptest::prop_assert_eq!(wait, product);
+        }
+        // Once `base * 2^attempt` reaches `max`, the wait is `max` itself (#1445). With
+        // `attempt < 64` the shifted 64-bit base fits in 128 bits; from 64 on, any nonzero base
+        // already exceeds every 64-bit ceiling.
+        let reaches_max = base_nanos != 0
+            && (attempt >= 64 || u128::from(base_nanos) << attempt >= u128::from(max_nanos));
+        if reaches_max {
+            proptest::prop_assert_eq!(wait, max);
         }
     }
 }
