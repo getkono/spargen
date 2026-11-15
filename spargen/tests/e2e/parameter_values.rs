@@ -128,10 +128,14 @@ components:
         side: { type: number }
     Size:
       oneOf:
-        - $ref: "#/components/schemas/Amount"
-        - $ref: "#/components/schemas/Label"
-    Amount: { type: number }
-    Label: { type: string }
+        - $ref: "#/components/schemas/Ratio"
+        - $ref: "#/components/schemas/Weighted"
+    Weighted:
+      type: object
+      required: [ratio, weight]
+      properties:
+        ratio: { type: number }
+        weight: { type: number }
     Ratio:
       type: object
       required: [ratio]
@@ -250,7 +254,7 @@ fn a_non_finite_number_inside_a_union_is_refused() {
         assert!(matches!(
             parameter_error(
                 unreachable().post_shape(
-                    PostShapeParams::default().size(Size::Amount(Box::new(number))),
+                    PostShapeParams::default().size(Size::Ratio(Box::new(Ratio { ratio: number }))),
                     &square,
                 )
             ),
@@ -265,12 +269,12 @@ fn a_finite_number_inside_a_union_reaches_the_wire() {
     BlockingClient::new(&base)
         .unwrap()
         .post_shape(
-            PostShapeParams::default().size(Size::Amount(Box::new(2.5))),
+            PostShapeParams::default().size(Size::Ratio(Box::new(Ratio { ratio: 2.5 }))),
             &Shape::Circle(Box::new(Circle { kind: "circle".to_owned(), radius: 0.5 })),
         )
         .expect("the call round-trips");
     let request = server.join().unwrap();
-    assert_eq!(request.line(), "POST /shapes?size=2.5 HTTP/1.1");
+    assert_eq!(request.line(), "POST /shapes?ratio=2.5 HTTP/1.1");
     assert!(
         request.text().ends_with(r#"{"kind":"circle","radius":0.5}"#),
         "{}",

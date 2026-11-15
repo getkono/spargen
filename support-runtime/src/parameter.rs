@@ -198,6 +198,14 @@ fn to_json<T: Serialize>(value: &T) -> Result<Value, ParameterError> {
     Ok(serde_json::to_value(value)?)
 }
 
+/// Whether `value` holds an `f64` or `f32` NaN or infinity anywhere. A generated union's
+/// `Serialize` asks before it goes through `serde_json::Value`, which would turn the number into
+/// `null`: where it is `true`, the union serializes its variant straight into the outer
+/// serializer, so the check [`to_json_string`] and [`to_json_vec`] make reaches the number.
+pub fn holds_non_finite<T: Serialize + ?Sized>(value: &T) -> bool {
+    matches!(value.serialize(FiniteCheck), Err(FiniteError::NonFinite))
+}
+
 /// Refuse `value` as `ParameterError::NonFiniteNumber` where it holds an `f64` or `f32` NaN or
 /// infinity anywhere. A failure of its own `Serialize` implementation passes here, and the real
 /// serialization reports it.

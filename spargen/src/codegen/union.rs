@@ -76,11 +76,18 @@ pub(super) fn emit_union(
                     Some(tag) => quote! { Some(#tag) },
                     None => quote! { None },
                 };
+                // `serde_json::Value` holds a NaN or infinity as `null`: a variant holding one is
+                // written straight into the outer serializer, so `to_json_*`'s check sees it.
                 quote! {
-                    #ident::#variant_ident(inner) => (
-                        serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
-                        #tag,
-                    ),
+                    #ident::#variant_ident(inner) => {
+                        if super::support::holds_non_finite(inner) {
+                            return serde::Serialize::serialize(inner, serializer);
+                        }
+                        (
+                            serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
+                            #tag,
+                        )
+                    }
                 }
             });
             // An open union writes an unknown payload back as it arrived, its own tag kept; the
@@ -521,8 +528,12 @@ pub(super) fn emit_union(
             });
             let ser_arms = union.variants.iter().map(|variant| {
                 let variant_ident = union_variant_ident(names, id, variant);
+                // As for a discriminated union: a NaN or infinity reaches the outer serializer.
                 quote! {
                     #ident::#variant_ident(inner) => {
+                        if super::support::holds_non_finite(inner) {
+                            return serde::Serialize::serialize(inner, serializer);
+                        }
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                     }
                 }

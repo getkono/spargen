@@ -4049,6 +4049,13 @@ mod support {
             check_finite(value)?;
             Ok(serde_json::to_value(value)?)
         }
+        /// Whether `value` holds an `f64` or `f32` NaN or infinity anywhere. A generated union's
+        /// `Serialize` asks before it goes through `serde_json::Value`, which would turn the number into
+        /// `null`: where it is `true`, the union serializes its variant straight into the outer
+        /// serializer, so the check [`to_json_string`] and [`to_json_vec`] make reaches the number.
+        pub fn holds_non_finite<T: Serialize + ?Sized>(value: &T) -> bool {
+            matches!(value.serialize(FiniteCheck), Err(FiniteError::NonFinite))
+        }
         /// Refuse `value` as `ParameterError::NonFiniteNumber` where it holds an `f64` or `f32` NaN or
         /// infinity anywhere. A failure of its own `Serialize` implementation passes here, and the real
         /// serialization reports it.
@@ -8802,11 +8809,11 @@ mod support {
     pub use nullable::Nullable;
     pub use header::{parse_header, require_header, HeaderError, HeaderShape};
     pub use parameter::{
-        cookie_pair, encode, path_segment, serialize_deep_object, serialize_delimited,
-        serialize_form, serialize_form_body, serialize_label, serialize_matrix,
-        serialize_multipart_values, serialize_simple, to_json_string, to_json_vec,
-        CookieValue, Delimiter, FormMode, FormProperty, FormStyle, ParameterError,
-        PercentEncoding,
+        cookie_pair, encode, holds_non_finite, path_segment, serialize_deep_object,
+        serialize_delimited, serialize_form, serialize_form_body, serialize_label,
+        serialize_matrix, serialize_multipart_values, serialize_simple, to_json_string,
+        to_json_vec, CookieValue, Delimiter, FormMode, FormProperty, FormStyle,
+        ParameterError, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
     pub use request::{
@@ -10369,9 +10376,15 @@ pub mod types {
         {
             let value = match self {
                 AnyString::AnyStringVariant0(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
                 AnyString::StringLiteral(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
             };
@@ -10460,9 +10473,15 @@ pub mod types {
         {
             let value = match self {
                 AnyNumber::AnyNumberVariant0(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
                 AnyNumber::AnyNumberVariant1(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
             };
@@ -10555,9 +10574,15 @@ pub mod types {
         {
             let value = match self {
                 OneOverlap::OneOverlapVariant0(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
                 OneOverlap::StringLiteral(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
             };
@@ -10674,9 +10699,15 @@ pub mod types {
         {
             let value = match self {
                 AnyOwner::BroadOwner(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
                 AnyOwner::DetailedOwner(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                 }
             };
@@ -10856,18 +10887,27 @@ pub mod types {
         {
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 MixedContent::MixedContentVariant0(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         None,
                     )
                 }
                 MixedContent::ContentFile(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("file"),
                     )
                 }
                 MixedContent::ContentLink(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("symlink"),
@@ -11449,12 +11489,18 @@ pub mod types {
         {
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 Pet::Cat(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("cat"),
                     )
                 }
                 Pet::Dog(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("dog"),
@@ -11649,18 +11695,27 @@ pub mod types {
         {
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 LooseAnimal::Cat(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("Cat"),
                     )
                 }
                 LooseAnimal::Dog(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("Dog"),
                     )
                 }
                 LooseAnimal::LooseAnimalVariant2(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         None,
@@ -11885,12 +11940,18 @@ pub mod types {
         {
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 Channel::Webhook(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("webhook"),
                     )
                 }
                 Channel::Apprise(inner) => {
+                    if super::support::holds_non_finite(inner) {
+                        return serde::Serialize::serialize(inner, serializer);
+                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("apprise"),

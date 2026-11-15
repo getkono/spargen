@@ -1409,6 +1409,35 @@ fn the_json_encoders_report_a_failing_serialize() {
     ));
 }
 
+/// `holds_non_finite` finds a NaN or an infinity at the top level and nested in a struct member,
+/// and answers `false` for a finite value and for one whose own `Serialize` fails.
+#[test]
+fn holds_non_finite_finds_a_nested_non_finite_number() {
+    #[derive(Serialize)]
+    struct Holder {
+        inner: Vec<Option<f32>>,
+    }
+    struct Failing;
+    impl Serialize for Failing {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("refused"))
+        }
+    }
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(holds_non_finite(&number), "{number}");
+        assert!(
+            holds_non_finite(&Holder {
+                inner: vec![None, Some(number as f32)],
+            }),
+            "{number}"
+        );
+    }
+    assert!(!holds_non_finite(&Holder {
+        inner: vec![Some(1.5), None],
+    }));
+    assert!(!holds_non_finite(&Failing));
+}
+
 proptest::proptest! {
     /// Every finite `f64` still serializes, to the text `serde_json` writes for it.
     #[test]
