@@ -109,11 +109,14 @@ components:
       oneOf:
         - $ref: "#/components/schemas/Circle"
         - $ref: "#/components/schemas/Square"
+        - $ref: "#/components/schemas/Triangle"
       discriminator:
         propertyName: kind
         mapping:
           circle: "#/components/schemas/Circle"
           square: "#/components/schemas/Square"
+          triangle: "#/components/schemas/Triangle"
+        defaultMapping: "#/components/schemas/Triangle"
     Circle:
       type: object
       required: [kind, radius]
@@ -125,6 +128,11 @@ components:
       required: [kind, side]
       properties:
         kind: { type: string }
+        side: { type: number }
+    Triangle:
+      type: object
+      required: [side]
+      properties:
         side: { type: number }
     Size:
       oneOf:
@@ -154,7 +162,7 @@ components:
 
 mod common;
 
-use param_values_client::types::{Circle, Ratio, Shape, Size, Square, UploadBody};
+use param_values_client::types::{Circle, Ratio, Shape, Size, Square, Triangle, UploadBody};
 use param_values_client::{
     BlockingClient, Error, GetFilteredParams, GetScoreParams, ParameterError, PostShapeParams,
     SearchParams,
@@ -258,6 +266,32 @@ fn a_non_finite_number_inside_a_union_is_refused() {
                     &square,
                 )
             ),
+            ParameterError::NonFiniteNumber
+        ));
+    }
+}
+
+/// A discriminated union holding a non-finite number keeps its tag rules (#1516): a held tag
+/// that would not select the variant is refused, never written out, and a variant that holds no
+/// tag still has its own written, as for a finite number.
+#[test]
+fn a_union_holding_a_non_finite_number_keeps_its_tag_rules() {
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let foreign = Shape::Circle(Box::new(Circle { kind: "square".to_owned(), radius: number }));
+        let error = serde_json::to_string(&foreign).expect_err("a foreign tag is refused");
+        assert!(
+            error.to_string().contains("does not select variant Shape::Circle"),
+            "{error}"
+        );
+        assert!(unreachable().post_shape(PostShapeParams::default(), &foreign).is_err());
+
+        let triangle = Shape::Triangle(Box::new(Triangle { side: number }));
+        assert_eq!(
+            serde_json::to_value(&triangle).unwrap(),
+            serde_json::json!({ "kind": "triangle", "side": null })
+        );
+        assert!(matches!(
+            parameter_error(unreachable().post_shape(PostShapeParams::default(), &triangle)),
             ParameterError::NonFiniteNumber
         ));
     }
