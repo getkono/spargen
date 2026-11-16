@@ -165,8 +165,9 @@ mod support {
         /// the scheme is called. Every failure below is therefore an error of that call, raised as a
         /// request-construction error before anything is sent — never a 401 from the server:
         ///
-        /// - no alternative of the operation's requirement has every scheme registered:
-        ///   [`super::RequestError::MissingCredential`];
+        /// - no non-empty alternative of the operation's requirement has every scheme registered, and
+        ///   either the requirement lists no empty `{}` alternative or a credential is registered for
+        ///   some scheme of its non-empty alternatives: [`super::RequestError::MissingCredential`];
         /// - the selected alternative has a credential of a variant its scheme cannot carry:
         ///   [`super::RequestError::CredentialMismatch`];
         /// - the selected alternative's `http basic` scheme has a [`Credential::Basic`] whose username
@@ -370,11 +371,23 @@ mod support {
             }
         }
         /// Attach credentials for an operation's security requirement. `requirements` is an OR
-        /// of alternatives, each an AND of schemes; the first alternative whose schemes all have a
-        /// registered credential wins, deterministically. An empty alternative (`{}` in the spec) marks
-        /// security optional and always satisfies. If no alternative is satisfiable the request fails
-        /// before it is sent — [`RequestError::MissingCredential`], never a silent 401 — and a registered
-        /// token provider that fails does too, as [`RequestError::CredentialProvider`].
+        /// of alternatives, each an AND of schemes; the first non-empty alternative whose schemes all have
+        /// a registered credential wins, deterministically, in declared order. A `mutualTLS` scheme is
+        /// satisfied by the transport, so an alternative made only of `mutualTLS` schemes is always
+        /// satisfied and competes in that order like any other.
+        ///
+        /// An empty alternative (`{}` in the spec) marks security optional, not preferred: wherever it is
+        /// listed, it applies only when no non-empty alternative is satisfied, and then sends the request
+        /// anonymously only if no credential is registered under any scheme of the non-empty
+        /// alternatives. An alternative with some of its schemes registered and others not shows the
+        /// caller meant to authenticate, so it fails as below rather than going out anonymously. An
+        /// alternative made only of `mutualTLS` schemes attaches nothing, as `{}` does, so between the
+        /// two the wire shows the first listed.
+        ///
+        /// If no alternative applies the request fails before it is sent —
+        /// [`RequestError::MissingCredential`], naming each non-empty alternative's missing schemes,
+        /// never a silent 401 — and a registered token provider that fails does too, as
+        /// [`RequestError::CredentialProvider`].
         ///
         /// **Selection is on registration, not on success, and there is no fall-through.** Once an
         /// alternative is chosen, a failure while attaching it — a token provider that errors, or a
@@ -612,8 +625,9 @@ mod support {
             response.map(HttpBody::from)
         }
         /// The security alternative [`attach_auth`] attaches: `None` for an operation with no
-        /// requirement, and otherwise the first alternative with no scheme missing, or the
-        /// [`RequestError::MissingCredential`] that reports each alternative's missing schemes.
+        /// requirement, or for one whose `{}` alternative applies; otherwise the first non-empty
+        /// alternative with no scheme missing, or the [`RequestError::MissingCredential`] that reports
+        /// each non-empty alternative's missing schemes.
         fn select<'r>(
             core: &ClientCore,
             requirements: &[&'r [AuthScheme]],
@@ -621,29 +635,40 @@ mod support {
             if requirements.is_empty() {
                 return Ok(None);
             }
+            let credentialed = || {
+                requirements.iter().filter(|alternative| !alternative.is_empty())
+            };
             let is_missing = |scheme: &AuthScheme| {
                 matches!(resolve(core, scheme), Resolution::Missing)
             };
-            let Some(chosen) = requirements
-                .iter()
-                .find(|alternative| !alternative.iter().any(is_missing)) else {
-                let alternatives = requirements
-                    .iter()
-                    .map(|alternative| {
-                        alternative
-                            .iter()
-                            .filter(|scheme| is_missing(scheme))
-                            .map(|scheme| scheme.name)
-                            .collect()
-                    })
-                    .collect();
-                return Err(
-                    Error::RequestConstruction(RequestError::MissingCredential {
-                        alternatives,
-                    }),
-                );
-            };
-            Ok(Some(*chosen))
+            if let Some(chosen) = credentialed()
+                .find(|alternative| !alternative.iter().any(is_missing))
+            {
+                return Ok(Some(*chosen));
+            }
+            let optional = requirements.iter().any(|alternative| alternative.is_empty());
+            let registered_any = credentialed()
+                .flat_map(|alternative| alternative.iter())
+                .any(|scheme| {
+                    matches!(resolve(core, scheme), Resolution::Registered(_))
+                });
+            if optional && !registered_any {
+                return Ok(None);
+            }
+            let alternatives = credentialed()
+                .map(|alternative| {
+                    alternative
+                        .iter()
+                        .filter(|scheme| is_missing(scheme))
+                        .map(|scheme| scheme.name)
+                        .collect()
+                })
+                .collect();
+            Err(
+                Error::RequestConstruction(RequestError::MissingCredential {
+                    alternatives,
+                }),
+            )
         }
         /// How one scheme of a security alternative is satisfied, if at all.
         enum Resolution<'a> {
@@ -1295,9 +1320,9 @@ mod support {
             /// Unregister the credential for a named security scheme, returning it if one was registered.
             ///
             /// This is how a caller reaches a later security alternative: an operation attaches the first
-            /// alternative whose schemes all have a registered credential, so removing a scheme of an
-            /// earlier one lets the next call pass over it. Removing a scheme that was never registered is
-            /// a no-op returning `None`.
+            /// non-empty alternative whose schemes all have a registered credential, so removing a scheme
+            /// of an earlier one lets the next call pass over it. Removing a scheme that was never
+            /// registered is a no-op returning `None`.
             pub fn remove_credential(&mut self, scheme: &str) -> Option<Credential> {
                 self.credentials.remove(scheme)
             }
@@ -2856,10 +2881,13 @@ mod support {
         #[non_exhaustive]
         pub enum RequestError {
             /// The operation carries a security requirement and no registered credential satisfies any of
-            /// its alternatives. Raised before anything is sent. The payload is the whole cause, so
+            /// its non-empty alternatives, and either it lists no empty `{}` alternative or a credential is
+            /// registered for one of its schemes (a partial registration, which `{}` does not absorb).
+            /// Raised before anything is sent. The payload is the whole cause, so
             /// `source()` is `None`.
             MissingCredential {
-                /// One entry per alternative of the requirement, in declaration order: that alternative's
+                /// One entry per non-empty alternative of the requirement (an empty `{}` alternative has
+                /// nothing to report), in declaration order: that alternative's
                 /// `securitySchemes` keys that have no registered credential, in declaration order.
                 /// `mutualTLS` keys never appear (the transport satisfies them).
                 ///
@@ -17245,7 +17273,7 @@ impl Client {
     }
     ///Register a static `token` for the security scheme `bearer`, sent as `Authorization: Bearer <token>`, replacing any credential registered for it.
     ///
-    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_bearer` is how a caller reaches a later alternative.
+    ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_bearer` is how a caller reaches a later alternative.
     ///
     ///# Scheme
     ///
@@ -17285,7 +17313,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `bearer`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `bearer`.
+    ///Unregister the credential for the security scheme `bearer`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `bearer`.
     #[must_use]
     pub fn without_bearer(mut self) -> Self {
         self.core.remove_credential("bearer");
@@ -17293,7 +17321,7 @@ impl Client {
     }
     ///Register a static `token` for the security scheme `apiKey`, an `apiKey` sent as the header `X-Api-Key`, replacing any credential registered for it.
     ///
-    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_api_key` is how a caller reaches a later alternative.
+    ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_api_key` is how a caller reaches a later alternative.
     ///
     ///# Scheme
     ///
@@ -17333,7 +17361,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `apiKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `apiKey`.
+    ///Unregister the credential for the security scheme `apiKey`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `apiKey`.
     #[must_use]
     pub fn without_api_key(mut self) -> Self {
         self.core.remove_credential("apiKey");
@@ -17341,7 +17369,7 @@ impl Client {
     }
     ///Register a static `token` for the security scheme `tenant`, an `apiKey` sent as the header `X-Tenant`, replacing any credential registered for it.
     ///
-    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_tenant` is how a caller reaches a later alternative.
+    ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_tenant` is how a caller reaches a later alternative.
     ///
     ///# Scheme
     ///
@@ -17381,7 +17409,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `tenant`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `tenant`.
+    ///Unregister the credential for the security scheme `tenant`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `tenant`.
     #[must_use]
     pub fn without_tenant(mut self) -> Self {
         self.core.remove_credential("tenant");
@@ -17389,7 +17417,7 @@ impl Client {
     }
     ///Register `username` and `password` for the `http basic` security scheme `basic`, sent as `Authorization: Basic <base64>`, replacing any credential registered for it.
     ///
-    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_basic` is how a caller reaches a later alternative.
+    ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_basic` is how a caller reaches a later alternative.
     ///
     ///# Scheme
     ///
@@ -17410,7 +17438,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `basic`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `basic`.
+    ///Unregister the credential for the security scheme `basic`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `basic`.
     #[must_use]
     pub fn without_basic(mut self) -> Self {
         self.core.remove_credential("basic");
@@ -17418,7 +17446,7 @@ impl Client {
     }
     ///Register a static `token` for the security scheme `queryKey`, an `apiKey` sent as the query parameter `api_key`, replacing any credential registered for it.
     ///
-    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_query_key` is how a caller reaches a later alternative.
+    ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_query_key` is how a caller reaches a later alternative.
     ///
     ///# Scheme
     ///
@@ -17458,7 +17486,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `queryKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `queryKey`.
+    ///Unregister the credential for the security scheme `queryKey`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `queryKey`.
     #[must_use]
     pub fn without_query_key(mut self) -> Self {
         self.core.remove_credential("queryKey");
@@ -17466,7 +17494,7 @@ impl Client {
     }
     ///Register a static `token` for the security scheme `cookieKey`, an `apiKey` sent as the cookie `session`, replacing any credential registered for it.
     ///
-    ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_cookie_key` is how a caller reaches a later alternative.
+    ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_cookie_key` is how a caller reaches a later alternative.
     ///
     ///# Scheme
     ///
@@ -17506,7 +17534,7 @@ impl Client {
             );
         self
     }
-    ///Unregister the credential for the security scheme `cookieKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `cookieKey`.
+    ///Unregister the credential for the security scheme `cookieKey`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `cookieKey`.
     #[must_use]
     pub fn without_cookie_key(mut self) -> Self {
         self.core.remove_credential("cookieKey");
@@ -24415,7 +24443,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         }
         ///Register a static `token` for the security scheme `bearer`, sent as `Authorization: Bearer <token>`, replacing any credential registered for it.
         ///
-        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_bearer` is how a caller reaches a later alternative.
+        ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_bearer` is how a caller reaches a later alternative.
         ///
         ///# Scheme
         ///
@@ -24453,7 +24481,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
                 .with_bearer_refreshable(token, is_rejection, on_rejected);
             self
         }
-        ///Unregister the credential for the security scheme `bearer`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `bearer`.
+        ///Unregister the credential for the security scheme `bearer`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `bearer`.
         #[must_use]
         pub fn without_bearer(mut self) -> Self {
             self.inner = self.inner.without_bearer();
@@ -24461,7 +24489,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         }
         ///Register a static `token` for the security scheme `apiKey`, an `apiKey` sent as the header `X-Api-Key`, replacing any credential registered for it.
         ///
-        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_api_key` is how a caller reaches a later alternative.
+        ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_api_key` is how a caller reaches a later alternative.
         ///
         ///# Scheme
         ///
@@ -24502,7 +24530,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
                 .with_api_key_refreshable(token, is_rejection, on_rejected);
             self
         }
-        ///Unregister the credential for the security scheme `apiKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `apiKey`.
+        ///Unregister the credential for the security scheme `apiKey`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `apiKey`.
         #[must_use]
         pub fn without_api_key(mut self) -> Self {
             self.inner = self.inner.without_api_key();
@@ -24510,7 +24538,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         }
         ///Register a static `token` for the security scheme `tenant`, an `apiKey` sent as the header `X-Tenant`, replacing any credential registered for it.
         ///
-        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_tenant` is how a caller reaches a later alternative.
+        ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_tenant` is how a caller reaches a later alternative.
         ///
         ///# Scheme
         ///
@@ -24548,7 +24576,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
                 .with_tenant_refreshable(token, is_rejection, on_rejected);
             self
         }
-        ///Unregister the credential for the security scheme `tenant`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `tenant`.
+        ///Unregister the credential for the security scheme `tenant`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `tenant`.
         #[must_use]
         pub fn without_tenant(mut self) -> Self {
             self.inner = self.inner.without_tenant();
@@ -24556,7 +24584,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         }
         ///Register `username` and `password` for the `http basic` security scheme `basic`, sent as `Authorization: Basic <base64>`, replacing any credential registered for it.
         ///
-        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_basic` is how a caller reaches a later alternative.
+        ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_basic` is how a caller reaches a later alternative.
         ///
         ///# Scheme
         ///
@@ -24570,7 +24598,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
             self.inner = self.inner.with_basic(username, password);
             self
         }
-        ///Unregister the credential for the security scheme `basic`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `basic`.
+        ///Unregister the credential for the security scheme `basic`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `basic`.
         #[must_use]
         pub fn without_basic(mut self) -> Self {
             self.inner = self.inner.without_basic();
@@ -24578,7 +24606,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         }
         ///Register a static `token` for the security scheme `queryKey`, an `apiKey` sent as the query parameter `api_key`, replacing any credential registered for it.
         ///
-        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_query_key` is how a caller reaches a later alternative.
+        ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_query_key` is how a caller reaches a later alternative.
         ///
         ///# Scheme
         ///
@@ -24619,7 +24647,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
                 .with_query_key_refreshable(token, is_rejection, on_rejected);
             self
         }
-        ///Unregister the credential for the security scheme `queryKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `queryKey`.
+        ///Unregister the credential for the security scheme `queryKey`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `queryKey`.
         #[must_use]
         pub fn without_query_key(mut self) -> Self {
             self.inner = self.inner.without_query_key();
@@ -24627,7 +24655,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
         }
         ///Register a static `token` for the security scheme `cookieKey`, an `apiKey` sent as the cookie `session`, replacing any credential registered for it.
         ///
-        ///An operation attaches the first alternative of its `security` whose schemes all have a credential registered, and fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_cookie_key` is how a caller reaches a later alternative.
+        ///An operation attaches the first non-empty alternative of its `security` whose schemes all have a credential registered. Where none has, an empty alternative (`{}`) sends the call anonymously, but only when the operation lists one and no scheme of its other alternatives has a credential registered; otherwise the call fails before anything is sent, as `Error::RequestConstruction` with `RequestError::MissingCredential`. It never falls through past the alternative it chose: a credential that fails to attach fails the call, and `without_cookie_key` is how a caller reaches a later alternative.
         ///
         ///# Scheme
         ///
@@ -24668,7 +24696,7 @@ Must NOT be called from inside another async runtime — tokio's `block_on` pani
                 .with_cookie_key_refreshable(token, is_rejection, on_rejected);
             self
         }
-        ///Unregister the credential for the security scheme `cookieKey`; one never registered is left as it is. Operations pick the first `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `cookieKey`.
+        ///Unregister the credential for the security scheme `cookieKey`; one never registered is left as it is. Operations pick the first non-empty `security` alternative whose schemes are all registered and never fall through past it when attaching fails, so this is how a caller reaches a later alternative: the client this returns no longer selects one listing `cookieKey`.
         #[must_use]
         pub fn without_cookie_key(mut self) -> Self {
             self.inner = self.inner.without_cookie_key();

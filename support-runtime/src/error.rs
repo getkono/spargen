@@ -670,10 +670,13 @@ impl std::error::Error for MessageError {}
 #[non_exhaustive]
 pub enum RequestError {
     /// The operation carries a security requirement and no registered credential satisfies any of
-    /// its alternatives. Raised before anything is sent. The payload is the whole cause, so
+    /// its non-empty alternatives, and either it lists no empty `{}` alternative or a credential is
+    /// registered for one of its schemes (a partial registration, which `{}` does not absorb).
+    /// Raised before anything is sent. The payload is the whole cause, so
     /// `source()` is `None`.
     MissingCredential {
-        /// One entry per alternative of the requirement, in declaration order: that alternative's
+        /// One entry per non-empty alternative of the requirement (an empty `{}` alternative has
+        /// nothing to report), in declaration order: that alternative's
         /// `securitySchemes` keys that have no registered credential, in declaration order.
         /// `mutualTLS` keys never appear (the transport satisfies them).
         ///
