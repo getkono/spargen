@@ -173,6 +173,30 @@ paths:
                 allOf:
                   - $ref: "#/components/schemas/Problem"
                   - properties: { detail: { enum: [a, b], default: a } }
+        "431":
+          description: a union whose first variant holds a union of its own, told apart by `e`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [v]
+                    properties:
+                      v:
+                        oneOf:
+                          - type: object
+                            required: [e]
+                            properties: { e: { enum: [p] } }
+                          - type: object
+                            required: [f]
+                            properties: { f: { type: integer } }
+                  - type: object
+                    required: [v]
+                    properties:
+                      v:
+                        type: object
+                        required: [e]
+                        properties: { e: { enum: [q] } }
 components:
   schemas:
     Problem:

@@ -9,7 +9,7 @@ use super::*;
 /// `type` with a `const`, spelled as an `allOf` member (`404`) and as `$ref` siblings (`409`).
 /// Beside them: a union of narrowed problems (`400`), a narrowing inside a component (`410`), a
 /// set narrowed against a `uuid` string in either member order (`428`, `429`), unions meeting a
-/// set in either order (`422` to `427`), and a request body.
+/// set in either order (`422` to `427`), a union nesting a union (`431`), and a request body.
 const OPEN_ENUMS_SPEC: &str = include_str!("specs/open_enums.yaml");
 
 #[test]
@@ -177,6 +177,30 @@ fn a_union_tells_its_variants_apart_by_the_values_they_list() {
     );
     // Written back, a listed value is checked against the same rule and passes.
     serde_json::to_value(&b).expect("a listed value matches exactly one variant");
+}
+
+#[test]
+fn a_nested_union_keeps_the_enclosing_closed_reading() {
+    // `431`'s first variant holds a union of its own. Decoded inside the outer union's closed
+    // pass, that inner union must not try its variants open: `q`, which only the second variant
+    // lists, would then match the first one too, and the pair would refuse a listed value.
+    let q = decode(PostProblemsError::Status431, r#"{"v":{"e":"q"}}"#)
+        .expect("the variant listing `q` decodes it");
+    let p = decode(PostProblemsError::Status431, r#"{"v":{"e":"p"}}"#)
+        .expect("the variant listing `p` decodes it");
+    let (q_variant, p_variant) = (format!("{q:?}"), format!("{p:?}"));
+    assert_ne!(
+        q_variant.split('(').next(),
+        p_variant.split('(').next(),
+        "{q_variant} / {p_variant}"
+    );
+    serde_json::to_value(&q).expect("a listed value matches exactly one variant");
+    serde_json::to_value(&p).expect("a listed value matches exactly one variant");
+    // A value neither lists, both variants would hold open, so neither matches alone.
+    assert_refused(
+        decode(PostProblemsError::Status431, r#"{"v":{"e":"z"}}"#),
+        "431: a value no variant lists",
+    );
 }
 
 #[test]
