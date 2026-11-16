@@ -120,7 +120,7 @@ pub enum UnionTags {
     /// An unlisted tag value is a decode failure.
     #[default]
     Closed,
-    /// An unlisted tag value decodes into the union's `Unknown { tag, value }` variant.
+    /// An unlisted tag value decodes into the union's `Unknown(UnknownPayload<Self>)` variant.
     Open,
 }
 switch!(UnionTags, off = Closed, on = Open);
