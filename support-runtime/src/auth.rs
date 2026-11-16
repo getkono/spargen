@@ -16,9 +16,14 @@ use secrecy::zeroize::Zeroizing;
 pub use secrecy::{ExposeSecret, SecretString};
 
 /// A failure from an async token provider.
+///
+/// `Display` is the message alone; a cause given to [`AuthError::with_source`] is this error's
+/// `source()`, so a reporter walking the chain prints each level once. `Debug` prints the cause's
+/// `Debug` too, so a provider keeps the token itself out of the errors it builds.
 #[derive(Debug)]
 pub struct AuthError {
     message: String,
+    source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
 }
 
 impl AuthError {
@@ -26,6 +31,20 @@ impl AuthError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Build an authentication-provider failure from a message and the error that caused it,
+    /// such as the transport error of a failed token-endpoint call. The cause is this error's
+    /// `source()`; the message is all `Display` prints.
+    pub fn with_source(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            source: Some(Box::new(source)),
         }
     }
 }
@@ -36,7 +55,13 @@ impl std::fmt::Display for AuthError {
     }
 }
 
-impl std::error::Error for AuthError {}
+impl std::error::Error for AuthError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
+    }
+}
 
 /// The future returned by a [`TokenProvider`]. `Send` off `wasm32` and not on it, as the `wasm`
 /// module explains.
