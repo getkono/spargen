@@ -255,7 +255,7 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                 if let Some(unknown) = names.open_variants.get(&id) {
                     variants.insert(
                         unknown.as_str().to_owned(),
-                        "{ tag: String, value: serde_json::Value }".to_owned(),
+                        "UnknownPayload<Self>".to_owned(),
                     );
                 }
                 TypeSurface::Union(variants)

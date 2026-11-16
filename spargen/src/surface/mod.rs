@@ -262,8 +262,8 @@ enum TypeSurface {
         BTreeSet<String>,
         Option<String>,
     ),
-    /// A string `enum`: the set of variant wire values, for an open enum (`open_narrowing`) the
-    /// generated name of the variant holding any other string, and the wire value each listed
+    /// A string `enum`: the set of variant wire values, for an open enum (every one unless
+    /// `closed_enums` is set) the generated name of the variant holding any other string, and the wire value each listed
     /// variant binds, keyed by variant name.
     Enum(BTreeSet<String>, Option<String>, Bindings),
     /// An integer or boolean set's checked newtype (#1327): the scalar it holds (what `get`

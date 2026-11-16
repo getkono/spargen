@@ -25,7 +25,8 @@ pub use support::{
     RequestOptions, ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome,
     RetryPolicy, RetryWait, SchemeCarrier, SecretString, TimeoutKind, TokenFuture,
     TokenProvider, TokenRefresher, TotalTimeout, TransportConfig, TransportError,
-    UnknownVariant, exponential_backoff, full_jitter, next_link, token_provider,
+    UnknownPayload, UnknownValue, UnknownVariant, exponential_backoff, full_jitter,
+    next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -3858,6 +3859,216 @@ mod support {
                 D: Deserializer<'de>,
             {
                 T::deserialize(deserializer).map(Nullable::Value)
+            }
+        }
+    }
+    mod open {
+        //! The catch-alls of a generated open string enum and an open discriminated union: the value or
+        //! payload the description does not list, held where only decoding (or, for an enum, `FromStr`)
+        //! builds one.
+        //!
+        //! An open string enum declares one unit variant per listed value and an `Unknown(UnknownValue<Self>)`
+        //! variant. Its `FromStr` and `Deserialize` both read through [`parse_open`], which asks the enum's
+        //! own [`OpenEnum::listed`] first, so `Unknown` never holds a value a unit variant names. An
+        //! [`UnknownValue`] is typed by the enum it belongs to, and the enum's [`OpenEnum`] impl is the
+        //! one the generator emits (a second impl for the same type does not compile), so a value built
+        //! for one enum cannot be moved into another.
+        //!
+        //! An open discriminated union's `Unknown(UnknownPayload<Self>)` is built the same way, by
+        //! [`UnknownPayload::from_payload`], which reads the tag from the payload and refuses one the
+        //! union's [`OpenUnion::lists_tag`] names.
+        //!
+        //! A union with no discriminator tells its variants apart by what each refuses, and an open enum
+        //! anywhere inside a variant refuses no string. So a generated union tries its variants inside an
+        //! [`EnumScope`] that decodes every open enum closed first, and only where none matches tries them
+        //! again as decoded anywhere else: a value every variant lists decodes as it would with every enum
+        //! closed, and an unlisted one is kept only where exactly the variants that matching rule needs
+        //! take it.
+        use std::cell::Cell;
+        use std::fmt;
+        use std::hash::{Hash, Hasher};
+        use std::marker::PhantomData;
+        /// A generated open string enum: its listed values, and its catch-all.
+        pub trait OpenEnum: Sized {
+            /// The unit variant that lists `value`, matched byte for byte, or `None`.
+            fn listed(value: &str) -> Option<Self>;
+            /// The catch-all variant holding `value`.
+            fn unknown(value: UnknownValue<Self>) -> Self;
+        }
+        /// A string an open enum `E` does not list, as decoded or parsed. Built only by `parse_open`
+        /// and `deserialize_open`, each of which first gives every listed value its own variant.
+        pub struct UnknownValue<E> {
+            value: String,
+            enumeration: PhantomData<fn() -> E>,
+        }
+        impl<E> UnknownValue<E> {
+            /// The value, exactly as it arrived.
+            pub fn as_str(&self) -> &str {
+                &self.value
+            }
+            /// The value, exactly as it arrived, owned.
+            pub fn into_string(self) -> String {
+                self.value
+            }
+        }
+        impl<E> Clone for UnknownValue<E> {
+            fn clone(&self) -> Self {
+                Self {
+                    value: self.value.clone(),
+                    enumeration: PhantomData,
+                }
+            }
+        }
+        impl<E> PartialEq for UnknownValue<E> {
+            fn eq(&self, other: &Self) -> bool {
+                self.value == other.value
+            }
+        }
+        impl<E> Eq for UnknownValue<E> {}
+        impl<E> Hash for UnknownValue<E> {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                self.value.hash(state);
+            }
+        }
+        impl<E> fmt::Debug for UnknownValue<E> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_tuple("UnknownValue").field(&self.value).finish()
+            }
+        }
+        impl<E> fmt::Display for UnknownValue<E> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.value)
+            }
+        }
+        /// `value` as the open enum `E`: the variant that lists it, else `E`'s catch-all holding it.
+        pub fn parse_open<E: OpenEnum>(value: &str) -> E {
+            E::listed(value)
+                .unwrap_or_else(|| {
+                    E::unknown(UnknownValue {
+                        value: value.to_owned(),
+                        enumeration: PhantomData,
+                    })
+                })
+        }
+        /// Decode a string as the open enum `E`, as [`parse_open`] reads it, except inside a closed
+        /// [`EnumScope`], where a value `E` does not list fails. Anything but a string fails.
+        pub fn deserialize_open<'de, D, E>(deserializer: D) -> Result<E, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+            E: OpenEnum,
+        {
+            let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+            if let Some(listed) = E::listed(&value) {
+                return Ok(listed);
+            }
+            if CLOSED.with(Cell::get) {
+                return Err(
+                    serde::de::Error::custom(
+                        format_args!("{value:?} is not a listed value"),
+                    ),
+                );
+            }
+            Ok(
+                E::unknown(UnknownValue {
+                    value,
+                    enumeration: PhantomData,
+                }),
+            )
+        }
+        std::thread_local! {
+            #[doc =
+            " Whether [`deserialize_open`] refuses a value its enum does not list, as [`EnumScope`] set"]
+            #[doc = " it on this thread."] static CLOSED : Cell < bool > = const {
+            Cell::new(false) };
+        }
+        /// How [`deserialize_open`] reads an unlisted value on this thread while the scope lives: refused
+        /// where `closed`, kept in `Unknown` otherwise. Dropping it restores the enclosing scope's reading.
+        pub struct EnumScope {
+            enclosing: bool,
+        }
+        impl EnumScope {
+            /// Decode every open enum closed, or open, until the scope is dropped.
+            pub fn enter(closed: bool) -> Self {
+                Self {
+                    enclosing: CLOSED.with(|cell| cell.replace(closed)),
+                }
+            }
+            /// The readings a union trial tries its variants under, in order: closed, then open, or only
+            /// closed where an enclosing scope already reads closed. A union decoded inside another's
+            /// closed pass so keeps that reading, and the enclosing pass matches a variant only through
+            /// listed values.
+            pub fn passes() -> &'static [bool] {
+                if CLOSED.with(Cell::get) { &[true] } else { &[true, false] }
+            }
+        }
+        impl Drop for EnumScope {
+            fn drop(&mut self) {
+                CLOSED.with(|cell| cell.set(self.enclosing));
+            }
+        }
+        /// A generated open discriminated union: the property its tag rides in, and the tags it lists.
+        pub trait OpenUnion: Sized {
+            /// The name of the property carrying the tag.
+            const TAG_FIELD: &'static str;
+            /// Whether `tag` selects one of the union's listed variants.
+            fn lists_tag(tag: &str) -> bool;
+        }
+        /// A payload of the open union `U` whose tag `U` does not list, as it arrived. Built only by
+        /// [`UnknownPayload::from_payload`].
+        pub struct UnknownPayload<U> {
+            tag: String,
+            value: serde_json::Value,
+            union: PhantomData<fn() -> U>,
+        }
+        impl<U: OpenUnion> UnknownPayload<U> {
+            /// `value` as `U`'s catch-all: `None` where it is not an object, its tag property is missing
+            /// or not a string, or `U` lists the tag.
+            pub fn from_payload(value: serde_json::Value) -> Option<Self> {
+                let tag = value.get(U::TAG_FIELD)?.as_str()?.to_owned();
+                if U::lists_tag(&tag) {
+                    return None;
+                }
+                Some(Self {
+                    tag,
+                    value,
+                    union: PhantomData,
+                })
+            }
+        }
+        impl<U> UnknownPayload<U> {
+            /// The tag the payload carries.
+            pub fn tag(&self) -> &str {
+                &self.tag
+            }
+            /// The whole payload, as it arrived.
+            pub fn value(&self) -> &serde_json::Value {
+                &self.value
+            }
+            /// The whole payload, as it arrived, owned.
+            pub fn into_value(self) -> serde_json::Value {
+                self.value
+            }
+        }
+        impl<U> Clone for UnknownPayload<U> {
+            fn clone(&self) -> Self {
+                Self {
+                    tag: self.tag.clone(),
+                    value: self.value.clone(),
+                    union: PhantomData,
+                }
+            }
+        }
+        impl<U> PartialEq for UnknownPayload<U> {
+            fn eq(&self, other: &Self) -> bool {
+                self.tag == other.tag && self.value == other.value
+            }
+        }
+        impl<U> fmt::Debug for UnknownPayload<U> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct("UnknownPayload")
+                    .field("tag", &self.tag)
+                    .field("value", &self.value)
+                    .finish()
             }
         }
     }
@@ -8833,6 +9044,10 @@ mod support {
     };
     pub use middleware::{Middleware, MiddlewareBackend, Next};
     pub use nullable::Nullable;
+    pub use open::{
+        deserialize_open, parse_open, EnumScope, OpenEnum, OpenUnion, UnknownPayload,
+        UnknownValue,
+    };
     pub use header::{parse_header, require_header, HeaderError, HeaderShape};
     pub use parameter::{
         cookie_pair, encode, holds_non_finite, path_segment, serialize_deep_object,
@@ -9033,25 +9248,38 @@ pub mod types {
     }
     pub type RefinedMember0LabelsItem = String;
     pub type RefinedMember1RunId = i64;
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum RefinedMember1Status {
-        #[serde(rename = "queued")]
         Queued,
-        #[serde(rename = "complete")]
         Complete,
+        ///A value the description does not list here. Only decoding and `FromStr` build one, and only for a string no other variant names.
+        Unknown(super::support::UnknownValue<RefinedMember1Status>),
     }
     impl RefinedMember1Status {
-        /// Every variant, in the order the description lists its values.
+        /// Every listed variant, in the order the description lists its values.
         pub const ALL: &'static [Self] = &[
             RefinedMember1Status::Queued,
             RefinedMember1Status::Complete,
         ];
         /// The wire value.
-        pub const fn as_str(self) -> &'static str {
+        pub fn as_str(&self) -> &str {
             match self {
                 RefinedMember1Status::Queued => "queued",
                 RefinedMember1Status::Complete => "complete",
+                RefinedMember1Status::Unknown(value) => value.as_str(),
             }
+        }
+    }
+    impl super::support::OpenEnum for RefinedMember1Status {
+        fn listed(value: &str) -> Option<Self> {
+            match value {
+                "queued" => Some(RefinedMember1Status::Queued),
+                "complete" => Some(RefinedMember1Status::Complete),
+                _ => None,
+            }
+        }
+        fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+            RefinedMember1Status::Unknown(value)
         }
     }
     impl std::fmt::Display for RefinedMember1Status {
@@ -9060,21 +9288,27 @@ pub mod types {
         }
     }
     impl std::str::FromStr for RefinedMember1Status {
-        type Err = super::support::UnknownVariant;
-        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
-            match value {
-                "queued" => Ok(RefinedMember1Status::Queued),
-                "complete" => Ok(RefinedMember1Status::Complete),
-                _ => {
-                    Err(
-                        super::support::UnknownVariant::new(
-                            "RefinedMember1Status",
-                            value,
-                        ),
-                    )
-                }
-            }
+        type Err = std::convert::Infallible;
+        /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+        /// any other string is `Unknown`.
+        fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+            Ok(super::support::parse_open(value))
+        }
+    }
+    impl serde::Serialize for RefinedMember1Status {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str(self.as_str())
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for RefinedMember1Status {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_open(deserializer)
         }
     }
     pub type RefinedMember1StepsItemName = String;
@@ -9446,25 +9680,38 @@ pub mod types {
             self
         }
     }
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum NarrowDefaultEnumValid {
-        #[serde(rename = "a")]
         A,
-        #[serde(rename = "b")]
         B,
+        ///A value the description does not list here. Only decoding and `FromStr` build one, and only for a string no other variant names.
+        Unknown(super::support::UnknownValue<NarrowDefaultEnumValid>),
     }
     impl NarrowDefaultEnumValid {
-        /// Every variant, in the order the description lists its values.
+        /// Every listed variant, in the order the description lists its values.
         pub const ALL: &'static [Self] = &[
             NarrowDefaultEnumValid::A,
             NarrowDefaultEnumValid::B,
         ];
         /// The wire value.
-        pub const fn as_str(self) -> &'static str {
+        pub fn as_str(&self) -> &str {
             match self {
                 NarrowDefaultEnumValid::A => "a",
                 NarrowDefaultEnumValid::B => "b",
+                NarrowDefaultEnumValid::Unknown(value) => value.as_str(),
             }
+        }
+    }
+    impl super::support::OpenEnum for NarrowDefaultEnumValid {
+        fn listed(value: &str) -> Option<Self> {
+            match value {
+                "a" => Some(NarrowDefaultEnumValid::A),
+                "b" => Some(NarrowDefaultEnumValid::B),
+                _ => None,
+            }
+        }
+        fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+            NarrowDefaultEnumValid::Unknown(value)
         }
     }
     impl std::fmt::Display for NarrowDefaultEnumValid {
@@ -9473,42 +9720,61 @@ pub mod types {
         }
     }
     impl std::str::FromStr for NarrowDefaultEnumValid {
-        type Err = super::support::UnknownVariant;
-        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
-            match value {
-                "a" => Ok(NarrowDefaultEnumValid::A),
-                "b" => Ok(NarrowDefaultEnumValid::B),
-                _ => {
-                    Err(
-                        super::support::UnknownVariant::new(
-                            "NarrowDefaultEnumValid",
-                            value,
-                        ),
-                    )
-                }
-            }
+        type Err = std::convert::Infallible;
+        /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+        /// any other string is `Unknown`.
+        fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+            Ok(super::support::parse_open(value))
         }
     }
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    impl serde::Serialize for NarrowDefaultEnumValid {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str(self.as_str())
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for NarrowDefaultEnumValid {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_open(deserializer)
+        }
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum NarrowDefaultEnumBad {
-        #[serde(rename = "a")]
         A,
-        #[serde(rename = "b")]
         B,
+        ///A value the description does not list here. Only decoding and `FromStr` build one, and only for a string no other variant names.
+        Unknown(super::support::UnknownValue<NarrowDefaultEnumBad>),
     }
     impl NarrowDefaultEnumBad {
-        /// Every variant, in the order the description lists its values.
+        /// Every listed variant, in the order the description lists its values.
         pub const ALL: &'static [Self] = &[
             NarrowDefaultEnumBad::A,
             NarrowDefaultEnumBad::B,
         ];
         /// The wire value.
-        pub const fn as_str(self) -> &'static str {
+        pub fn as_str(&self) -> &str {
             match self {
                 NarrowDefaultEnumBad::A => "a",
                 NarrowDefaultEnumBad::B => "b",
+                NarrowDefaultEnumBad::Unknown(value) => value.as_str(),
             }
+        }
+    }
+    impl super::support::OpenEnum for NarrowDefaultEnumBad {
+        fn listed(value: &str) -> Option<Self> {
+            match value {
+                "a" => Some(NarrowDefaultEnumBad::A),
+                "b" => Some(NarrowDefaultEnumBad::B),
+                _ => None,
+            }
+        }
+        fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+            NarrowDefaultEnumBad::Unknown(value)
         }
     }
     impl std::fmt::Display for NarrowDefaultEnumBad {
@@ -9517,21 +9783,27 @@ pub mod types {
         }
     }
     impl std::str::FromStr for NarrowDefaultEnumBad {
-        type Err = super::support::UnknownVariant;
-        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
-            match value {
-                "a" => Ok(NarrowDefaultEnumBad::A),
-                "b" => Ok(NarrowDefaultEnumBad::B),
-                _ => {
-                    Err(
-                        super::support::UnknownVariant::new(
-                            "NarrowDefaultEnumBad",
-                            value,
-                        ),
-                    )
-                }
-            }
+        type Err = std::convert::Infallible;
+        /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+        /// any other string is `Unknown`.
+        fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+            Ok(super::support::parse_open(value))
+        }
+    }
+    impl serde::Serialize for NarrowDefaultEnumBad {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str(self.as_str())
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for NarrowDefaultEnumBad {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_open(deserializer)
         }
     }
     pub type NarrowDefaultEnumRatio = i64;
@@ -9617,7 +9889,7 @@ pub mod types {
         ///Default: `a`.
         #[must_use]
         pub fn valid_or_default(&self) -> NarrowDefaultEnumValid {
-            self.valid.unwrap_or(NarrowDefaultEnumValid::A)
+            self.valid.clone().unwrap_or(NarrowDefaultEnumValid::A)
         }
         ///The `ratio` member where it is set, else its schema default.
         ///
@@ -9711,7 +9983,7 @@ pub mod types {
         ///Default: `a`.
         #[must_use]
         pub fn valid_or_default(&self) -> NarrowDefaultSiblingConstraintValid {
-            self.valid.unwrap_or(NarrowDefaultSiblingConstraintValid::A)
+            self.valid.clone().unwrap_or(NarrowDefaultSiblingConstraintValid::A)
         }
         ///The `ratio` member where it is set, else its schema default.
         ///
@@ -9721,25 +9993,38 @@ pub mod types {
             self.ratio.unwrap_or(3)
         }
     }
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum NarrowDefaultSiblingConstraintValid {
-        #[serde(rename = "a")]
         A,
-        #[serde(rename = "b")]
         B,
+        ///A value the description does not list here. Only decoding and `FromStr` build one, and only for a string no other variant names.
+        Unknown(super::support::UnknownValue<NarrowDefaultSiblingConstraintValid>),
     }
     impl NarrowDefaultSiblingConstraintValid {
-        /// Every variant, in the order the description lists its values.
+        /// Every listed variant, in the order the description lists its values.
         pub const ALL: &'static [Self] = &[
             NarrowDefaultSiblingConstraintValid::A,
             NarrowDefaultSiblingConstraintValid::B,
         ];
         /// The wire value.
-        pub const fn as_str(self) -> &'static str {
+        pub fn as_str(&self) -> &str {
             match self {
                 NarrowDefaultSiblingConstraintValid::A => "a",
                 NarrowDefaultSiblingConstraintValid::B => "b",
+                NarrowDefaultSiblingConstraintValid::Unknown(value) => value.as_str(),
             }
+        }
+    }
+    impl super::support::OpenEnum for NarrowDefaultSiblingConstraintValid {
+        fn listed(value: &str) -> Option<Self> {
+            match value {
+                "a" => Some(NarrowDefaultSiblingConstraintValid::A),
+                "b" => Some(NarrowDefaultSiblingConstraintValid::B),
+                _ => None,
+            }
+        }
+        fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+            NarrowDefaultSiblingConstraintValid::Unknown(value)
         }
     }
     impl std::fmt::Display for NarrowDefaultSiblingConstraintValid {
@@ -9748,42 +10033,61 @@ pub mod types {
         }
     }
     impl std::str::FromStr for NarrowDefaultSiblingConstraintValid {
-        type Err = super::support::UnknownVariant;
-        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
-            match value {
-                "a" => Ok(NarrowDefaultSiblingConstraintValid::A),
-                "b" => Ok(NarrowDefaultSiblingConstraintValid::B),
-                _ => {
-                    Err(
-                        super::support::UnknownVariant::new(
-                            "NarrowDefaultSiblingConstraintValid",
-                            value,
-                        ),
-                    )
-                }
-            }
+        type Err = std::convert::Infallible;
+        /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+        /// any other string is `Unknown`.
+        fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+            Ok(super::support::parse_open(value))
         }
     }
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    impl serde::Serialize for NarrowDefaultSiblingConstraintValid {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str(self.as_str())
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for NarrowDefaultSiblingConstraintValid {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_open(deserializer)
+        }
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum NarrowDefaultSiblingConstraintBad {
-        #[serde(rename = "a")]
         A,
-        #[serde(rename = "b")]
         B,
+        ///A value the description does not list here. Only decoding and `FromStr` build one, and only for a string no other variant names.
+        Unknown(super::support::UnknownValue<NarrowDefaultSiblingConstraintBad>),
     }
     impl NarrowDefaultSiblingConstraintBad {
-        /// Every variant, in the order the description lists its values.
+        /// Every listed variant, in the order the description lists its values.
         pub const ALL: &'static [Self] = &[
             NarrowDefaultSiblingConstraintBad::A,
             NarrowDefaultSiblingConstraintBad::B,
         ];
         /// The wire value.
-        pub const fn as_str(self) -> &'static str {
+        pub fn as_str(&self) -> &str {
             match self {
                 NarrowDefaultSiblingConstraintBad::A => "a",
                 NarrowDefaultSiblingConstraintBad::B => "b",
+                NarrowDefaultSiblingConstraintBad::Unknown(value) => value.as_str(),
             }
+        }
+    }
+    impl super::support::OpenEnum for NarrowDefaultSiblingConstraintBad {
+        fn listed(value: &str) -> Option<Self> {
+            match value {
+                "a" => Some(NarrowDefaultSiblingConstraintBad::A),
+                "b" => Some(NarrowDefaultSiblingConstraintBad::B),
+                _ => None,
+            }
+        }
+        fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+            NarrowDefaultSiblingConstraintBad::Unknown(value)
         }
     }
     impl std::fmt::Display for NarrowDefaultSiblingConstraintBad {
@@ -9792,21 +10096,27 @@ pub mod types {
         }
     }
     impl std::str::FromStr for NarrowDefaultSiblingConstraintBad {
-        type Err = super::support::UnknownVariant;
-        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
-            match value {
-                "a" => Ok(NarrowDefaultSiblingConstraintBad::A),
-                "b" => Ok(NarrowDefaultSiblingConstraintBad::B),
-                _ => {
-                    Err(
-                        super::support::UnknownVariant::new(
-                            "NarrowDefaultSiblingConstraintBad",
-                            value,
-                        ),
-                    )
-                }
-            }
+        type Err = std::convert::Infallible;
+        /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+        /// any other string is `Unknown`.
+        fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+            Ok(super::support::parse_open(value))
+        }
+    }
+    impl serde::Serialize for NarrowDefaultSiblingConstraintBad {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str(self.as_str())
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for NarrowDefaultSiblingConstraintBad {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_open(deserializer)
         }
     }
     pub type NarrowDefaultSiblingConstraintRatio = i64;
@@ -10312,22 +10622,35 @@ pub mod types {
     pub type OptionalFieldsTagsItem = String;
     pub type OptionalFieldsTags = Vec<OptionalFieldsTagsItem>;
     ///Default: `auto`.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum Mode {
-        #[serde(rename = "auto")]
         Auto,
-        #[serde(rename = "manual")]
         Manual,
+        ///A value the description does not list here. Only decoding and `FromStr` build one, and only for a string no other variant names.
+        Unknown(super::support::UnknownValue<Mode>),
     }
     impl Mode {
-        /// Every variant, in the order the description lists its values.
+        /// Every listed variant, in the order the description lists its values.
         pub const ALL: &'static [Self] = &[Mode::Auto, Mode::Manual];
         /// The wire value.
-        pub const fn as_str(self) -> &'static str {
+        pub fn as_str(&self) -> &str {
             match self {
                 Mode::Auto => "auto",
                 Mode::Manual => "manual",
+                Mode::Unknown(value) => value.as_str(),
             }
+        }
+    }
+    impl super::support::OpenEnum for Mode {
+        fn listed(value: &str) -> Option<Self> {
+            match value {
+                "auto" => Some(Mode::Auto),
+                "manual" => Some(Mode::Manual),
+                _ => None,
+            }
+        }
+        fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+            Mode::Unknown(value)
         }
     }
     impl std::fmt::Display for Mode {
@@ -10336,14 +10659,27 @@ pub mod types {
         }
     }
     impl std::str::FromStr for Mode {
-        type Err = super::support::UnknownVariant;
-        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
-            match value {
-                "auto" => Ok(Mode::Auto),
-                "manual" => Ok(Mode::Manual),
-                _ => Err(super::support::UnknownVariant::new("Mode", value)),
-            }
+        type Err = std::convert::Infallible;
+        /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+        /// any other string is `Unknown`.
+        fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+            Ok(super::support::parse_open(value))
+        }
+    }
+    impl serde::Serialize for Mode {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str(self.as_str())
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for Mode {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_open(deserializer)
         }
     }
     pub type OptionalFieldsChoiceVariant0 = String;
@@ -10394,19 +10730,32 @@ pub mod types {
     pub type OptionalFieldsColour = String;
     pub type OptionalFieldsAnything = serde_json::Value;
     pub type OptionalFieldsMaybe = String;
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum StringLiteral {
-        #[serde(rename = "special")]
         Special,
+        ///A value the description does not list here. Only decoding and `FromStr` build one, and only for a string no other variant names.
+        Unknown(super::support::UnknownValue<StringLiteral>),
     }
     impl StringLiteral {
-        /// Every variant, in the order the description lists its values.
+        /// Every listed variant, in the order the description lists its values.
         pub const ALL: &'static [Self] = &[StringLiteral::Special];
         /// The wire value.
-        pub const fn as_str(self) -> &'static str {
+        pub fn as_str(&self) -> &str {
             match self {
                 StringLiteral::Special => "special",
+                StringLiteral::Unknown(value) => value.as_str(),
             }
+        }
+    }
+    impl super::support::OpenEnum for StringLiteral {
+        fn listed(value: &str) -> Option<Self> {
+            match value {
+                "special" => Some(StringLiteral::Special),
+                _ => None,
+            }
+        }
+        fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+            StringLiteral::Unknown(value)
         }
     }
     impl std::fmt::Display for StringLiteral {
@@ -10415,13 +10764,27 @@ pub mod types {
         }
     }
     impl std::str::FromStr for StringLiteral {
-        type Err = super::support::UnknownVariant;
-        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
-            match value {
-                "special" => Ok(StringLiteral::Special),
-                _ => Err(super::support::UnknownVariant::new("StringLiteral", value)),
-            }
+        type Err = std::convert::Infallible;
+        /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+        /// any other string is `Unknown`.
+        fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+            Ok(super::support::parse_open(value))
+        }
+    }
+    impl serde::Serialize for StringLiteral {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str(self.as_str())
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for StringLiteral {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_open(deserializer)
         }
     }
     #[derive(Debug, Clone, PartialEq)]
@@ -10437,30 +10800,45 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Some(Ok(inner)) = value
-                .is_string()
-                .then(|| serde_json::from_value::<Box<AnyStringVariant0>>(value.clone()))
-            {
-                match_count += 1;
-                let replace = match &selected {
-                    Some((selected_priority, _)) => 500u32 > *selected_priority,
-                    None => true,
-                };
-                if replace {
-                    selected = Some((500u32, AnyString::AnyStringVariant0(inner)));
+            for &closed in super::support::EnumScope::passes() {
+                {
+                    let _scope = super::support::EnumScope::enter(closed);
+                    if let Some(Ok(inner)) = value
+                        .is_string()
+                        .then(|| serde_json::from_value::<
+                            Box<AnyStringVariant0>,
+                        >(value.clone()))
+                    {
+                        match_count += 1;
+                        let replace = match &selected {
+                            Some((selected_priority, _)) => 500u32 > *selected_priority,
+                            None => true,
+                        };
+                        if replace {
+                            selected = Some((
+                                500u32,
+                                AnyString::AnyStringVariant0(inner),
+                            ));
+                        }
+                    }
+                    if let Some(Ok(inner)) = value
+                        .is_string()
+                        .then(|| serde_json::from_value::<
+                            Box<StringLiteral>,
+                        >(value.clone()))
+                    {
+                        match_count += 1;
+                        let replace = match &selected {
+                            Some((selected_priority, _)) => 1999u32 > *selected_priority,
+                            None => true,
+                        };
+                        if replace {
+                            selected = Some((1999u32, AnyString::StringLiteral(inner)));
+                        }
+                    }
                 }
-            }
-            if let Some(Ok(inner)) = value
-                .is_string()
-                .then(|| serde_json::from_value::<Box<StringLiteral>>(value.clone()))
-            {
-                match_count += 1;
-                let replace = match &selected {
-                    Some((selected_priority, _)) => 1999u32 > *selected_priority,
-                    None => true,
-                };
-                if replace {
-                    selected = Some((1999u32, AnyString::StringLiteral(inner)));
+                if match_count > 0 {
+                    break;
                 }
             }
             if match_count >= 1 {
@@ -10498,16 +10876,27 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if value.is_string()
-                && serde_json::from_value::<Box<AnyStringVariant0>>(value.clone())
-                    .is_ok()
-            {
-                match_count += 1;
-            }
-            if value.is_string()
-                && serde_json::from_value::<Box<StringLiteral>>(value.clone()).is_ok()
-            {
-                match_count += 1;
+            for &closed in super::support::EnumScope::passes() {
+                {
+                    let _scope = super::support::EnumScope::enter(closed);
+                    if value.is_string()
+                        && serde_json::from_value::<
+                            Box<AnyStringVariant0>,
+                        >(value.clone())
+                            .is_ok()
+                    {
+                        match_count += 1;
+                    }
+                    if value.is_string()
+                        && serde_json::from_value::<Box<StringLiteral>>(value.clone())
+                            .is_ok()
+                    {
+                        match_count += 1;
+                    }
+                }
+                if match_count > 0 {
+                    break;
+                }
             }
             if match_count >= 1 {
                 value.serialize(serializer)
@@ -10534,30 +10923,48 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Some(Ok(inner)) = value
-                .is_number()
-                .then(|| serde_json::from_value::<Box<AnyNumberVariant0>>(value.clone()))
-            {
-                match_count += 1;
-                let replace = match &selected {
-                    Some((selected_priority, _)) => 500u32 > *selected_priority,
-                    None => true,
-                };
-                if replace {
-                    selected = Some((500u32, AnyNumber::AnyNumberVariant0(inner)));
+            for &closed in super::support::EnumScope::passes() {
+                {
+                    let _scope = super::support::EnumScope::enter(closed);
+                    if let Some(Ok(inner)) = value
+                        .is_number()
+                        .then(|| serde_json::from_value::<
+                            Box<AnyNumberVariant0>,
+                        >(value.clone()))
+                    {
+                        match_count += 1;
+                        let replace = match &selected {
+                            Some((selected_priority, _)) => 500u32 > *selected_priority,
+                            None => true,
+                        };
+                        if replace {
+                            selected = Some((
+                                500u32,
+                                AnyNumber::AnyNumberVariant0(inner),
+                            ));
+                        }
+                    }
+                    if let Some(Ok(inner)) = value
+                        .is_number()
+                        .then(|| serde_json::from_value::<
+                            Box<AnyNumberVariant1>,
+                        >(value.clone()))
+                    {
+                        match_count += 1;
+                        let replace = match &selected {
+                            Some((selected_priority, _)) => 650u32 > *selected_priority,
+                            None => true,
+                        };
+                        if replace {
+                            selected = Some((
+                                650u32,
+                                AnyNumber::AnyNumberVariant1(inner),
+                            ));
+                        }
+                    }
                 }
-            }
-            if let Some(Ok(inner)) = value
-                .is_number()
-                .then(|| serde_json::from_value::<Box<AnyNumberVariant1>>(value.clone()))
-            {
-                match_count += 1;
-                let replace = match &selected {
-                    Some((selected_priority, _)) => 650u32 > *selected_priority,
-                    None => true,
-                };
-                if replace {
-                    selected = Some((650u32, AnyNumber::AnyNumberVariant1(inner)));
+                if match_count > 0 {
+                    break;
                 }
             }
             if match_count >= 1 {
@@ -10595,17 +11002,29 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if value.is_number()
-                && serde_json::from_value::<Box<AnyNumberVariant0>>(value.clone())
-                    .is_ok()
-            {
-                match_count += 1;
-            }
-            if value.is_number()
-                && serde_json::from_value::<Box<AnyNumberVariant1>>(value.clone())
-                    .is_ok()
-            {
-                match_count += 1;
+            for &closed in super::support::EnumScope::passes() {
+                {
+                    let _scope = super::support::EnumScope::enter(closed);
+                    if value.is_number()
+                        && serde_json::from_value::<
+                            Box<AnyNumberVariant0>,
+                        >(value.clone())
+                            .is_ok()
+                    {
+                        match_count += 1;
+                    }
+                    if value.is_number()
+                        && serde_json::from_value::<
+                            Box<AnyNumberVariant1>,
+                        >(value.clone())
+                            .is_ok()
+                    {
+                        match_count += 1;
+                    }
+                }
+                if match_count > 0 {
+                    break;
+                }
             }
             if match_count >= 1 {
                 value.serialize(serializer)
@@ -10633,32 +11052,45 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Some(Ok(inner)) = value
-                .is_string()
-                .then(|| serde_json::from_value::<
-                    Box<OneOverlapVariant0>,
-                >(value.clone()))
-            {
-                match_count += 1;
-                let replace = match &selected {
-                    Some((selected_priority, _)) => 500u32 > *selected_priority,
-                    None => true,
-                };
-                if replace {
-                    selected = Some((500u32, OneOverlap::OneOverlapVariant0(inner)));
+            for &closed in super::support::EnumScope::passes() {
+                {
+                    let _scope = super::support::EnumScope::enter(closed);
+                    if let Some(Ok(inner)) = value
+                        .is_string()
+                        .then(|| serde_json::from_value::<
+                            Box<OneOverlapVariant0>,
+                        >(value.clone()))
+                    {
+                        match_count += 1;
+                        let replace = match &selected {
+                            Some((selected_priority, _)) => 500u32 > *selected_priority,
+                            None => true,
+                        };
+                        if replace {
+                            selected = Some((
+                                500u32,
+                                OneOverlap::OneOverlapVariant0(inner),
+                            ));
+                        }
+                    }
+                    if let Some(Ok(inner)) = value
+                        .is_string()
+                        .then(|| serde_json::from_value::<
+                            Box<StringLiteral>,
+                        >(value.clone()))
+                    {
+                        match_count += 1;
+                        let replace = match &selected {
+                            Some((selected_priority, _)) => 1999u32 > *selected_priority,
+                            None => true,
+                        };
+                        if replace {
+                            selected = Some((1999u32, OneOverlap::StringLiteral(inner)));
+                        }
+                    }
                 }
-            }
-            if let Some(Ok(inner)) = value
-                .is_string()
-                .then(|| serde_json::from_value::<Box<StringLiteral>>(value.clone()))
-            {
-                match_count += 1;
-                let replace = match &selected {
-                    Some((selected_priority, _)) => 1999u32 > *selected_priority,
-                    None => true,
-                };
-                if replace {
-                    selected = Some((1999u32, OneOverlap::StringLiteral(inner)));
+                if match_count > 0 {
+                    break;
                 }
             }
             if match_count == 1 {
@@ -10696,16 +11128,27 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if value.is_string()
-                && serde_json::from_value::<Box<OneOverlapVariant0>>(value.clone())
-                    .is_ok()
-            {
-                match_count += 1;
-            }
-            if value.is_string()
-                && serde_json::from_value::<Box<StringLiteral>>(value.clone()).is_ok()
-            {
-                match_count += 1;
+            for &closed in super::support::EnumScope::passes() {
+                {
+                    let _scope = super::support::EnumScope::enter(closed);
+                    if value.is_string()
+                        && serde_json::from_value::<
+                            Box<OneOverlapVariant0>,
+                        >(value.clone())
+                            .is_ok()
+                    {
+                        match_count += 1;
+                    }
+                    if value.is_string()
+                        && serde_json::from_value::<Box<StringLiteral>>(value.clone())
+                            .is_ok()
+                    {
+                        match_count += 1;
+                    }
+                }
+                if match_count > 0 {
+                    break;
+                }
             }
             if match_count == 1 {
                 value.serialize(serializer)
@@ -10759,34 +11202,46 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            if let Some(Ok(inner)) = (value.is_object()
-                && value.as_object().is_none_or(|members| members.is_empty()))
-                .then(|| serde_json::from_value::<Box<BroadOwner>>(value.clone()))
-            {
-                match_count += 1;
-                let replace = match &selected {
-                    Some((selected_priority, _)) => 1000u32 > *selected_priority,
-                    None => true,
-                };
-                if replace {
-                    selected = Some((1000u32, AnyOwner::BroadOwner(inner)));
+            for &closed in super::support::EnumScope::passes() {
+                {
+                    let _scope = super::support::EnumScope::enter(closed);
+                    if let Some(Ok(inner)) = (value.is_object()
+                        && value.as_object().is_none_or(|members| members.is_empty()))
+                        .then(|| serde_json::from_value::<
+                            Box<BroadOwner>,
+                        >(value.clone()))
+                    {
+                        match_count += 1;
+                        let replace = match &selected {
+                            Some((selected_priority, _)) => 1000u32 > *selected_priority,
+                            None => true,
+                        };
+                        if replace {
+                            selected = Some((1000u32, AnyOwner::BroadOwner(inner)));
+                        }
+                    }
+                    if let Some(Ok(inner)) = (value.is_object()
+                        && value
+                            .as_object()
+                            .is_none_or(|members| {
+                                members.keys().all(|key| matches!(key.as_str(), "id"))
+                            }))
+                        .then(|| serde_json::from_value::<
+                            Box<DetailedOwner>,
+                        >(value.clone()))
+                    {
+                        match_count += 1;
+                        let replace = match &selected {
+                            Some((selected_priority, _)) => 1021u32 > *selected_priority,
+                            None => true,
+                        };
+                        if replace {
+                            selected = Some((1021u32, AnyOwner::DetailedOwner(inner)));
+                        }
+                    }
                 }
-            }
-            if let Some(Ok(inner)) = (value.is_object()
-                && value
-                    .as_object()
-                    .is_none_or(|members| {
-                        members.keys().all(|key| matches!(key.as_str(), "id"))
-                    }))
-                .then(|| serde_json::from_value::<Box<DetailedOwner>>(value.clone()))
-            {
-                match_count += 1;
-                let replace = match &selected {
-                    Some((selected_priority, _)) => 1021u32 > *selected_priority,
-                    None => true,
-                };
-                if replace {
-                    selected = Some((1021u32, AnyOwner::DetailedOwner(inner)));
+                if match_count > 0 {
+                    break;
                 }
             }
             if match_count >= 1 {
@@ -10824,21 +11279,31 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            if (value.is_object()
-                && value.as_object().is_none_or(|members| members.is_empty()))
-                && serde_json::from_value::<Box<BroadOwner>>(value.clone()).is_ok()
-            {
-                match_count += 1;
-            }
-            if (value.is_object()
-                && value
-                    .as_object()
-                    .is_none_or(|members| {
-                        members.keys().all(|key| matches!(key.as_str(), "id"))
-                    }))
-                && serde_json::from_value::<Box<DetailedOwner>>(value.clone()).is_ok()
-            {
-                match_count += 1;
+            for &closed in super::support::EnumScope::passes() {
+                {
+                    let _scope = super::support::EnumScope::enter(closed);
+                    if (value.is_object()
+                        && value.as_object().is_none_or(|members| members.is_empty()))
+                        && serde_json::from_value::<Box<BroadOwner>>(value.clone())
+                            .is_ok()
+                    {
+                        match_count += 1;
+                    }
+                    if (value.is_object()
+                        && value
+                            .as_object()
+                            .is_none_or(|members| {
+                                members.keys().all(|key| matches!(key.as_str(), "id"))
+                            }))
+                        && serde_json::from_value::<Box<DetailedOwner>>(value.clone())
+                            .is_ok()
+                    {
+                        match_count += 1;
+                    }
+                }
+                if match_count > 0 {
+                    break;
+                }
             }
             if match_count >= 1 {
                 value.serialize(serializer)
@@ -10875,19 +11340,32 @@ pub mod types {
             }
         }
     }
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum ContentFileType {
-        #[serde(rename = "file")]
         File,
+        ///A value the description does not list here. Only decoding and `FromStr` build one, and only for a string no other variant names.
+        Unknown(super::support::UnknownValue<ContentFileType>),
     }
     impl ContentFileType {
-        /// Every variant, in the order the description lists its values.
+        /// Every listed variant, in the order the description lists its values.
         pub const ALL: &'static [Self] = &[ContentFileType::File];
         /// The wire value.
-        pub const fn as_str(self) -> &'static str {
+        pub fn as_str(&self) -> &str {
             match self {
                 ContentFileType::File => "file",
+                ContentFileType::Unknown(value) => value.as_str(),
             }
+        }
+    }
+    impl super::support::OpenEnum for ContentFileType {
+        fn listed(value: &str) -> Option<Self> {
+            match value {
+                "file" => Some(ContentFileType::File),
+                _ => None,
+            }
+        }
+        fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+            ContentFileType::Unknown(value)
         }
     }
     impl std::fmt::Display for ContentFileType {
@@ -10896,13 +11374,27 @@ pub mod types {
         }
     }
     impl std::str::FromStr for ContentFileType {
-        type Err = super::support::UnknownVariant;
-        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
-            match value {
-                "file" => Ok(ContentFileType::File),
-                _ => Err(super::support::UnknownVariant::new("ContentFileType", value)),
-            }
+        type Err = std::convert::Infallible;
+        /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+        /// any other string is `Unknown`.
+        fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+            Ok(super::support::parse_open(value))
+        }
+    }
+    impl serde::Serialize for ContentFileType {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str(self.as_str())
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for ContentFileType {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_open(deserializer)
         }
     }
     pub type ContentFileContent = String;
@@ -10930,19 +11422,32 @@ pub mod types {
             }
         }
     }
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum ContentLinkType {
-        #[serde(rename = "symlink")]
         Symlink,
+        ///A value the description does not list here. Only decoding and `FromStr` build one, and only for a string no other variant names.
+        Unknown(super::support::UnknownValue<ContentLinkType>),
     }
     impl ContentLinkType {
-        /// Every variant, in the order the description lists its values.
+        /// Every listed variant, in the order the description lists its values.
         pub const ALL: &'static [Self] = &[ContentLinkType::Symlink];
         /// The wire value.
-        pub const fn as_str(self) -> &'static str {
+        pub fn as_str(&self) -> &str {
             match self {
                 ContentLinkType::Symlink => "symlink",
+                ContentLinkType::Unknown(value) => value.as_str(),
             }
+        }
+    }
+    impl super::support::OpenEnum for ContentLinkType {
+        fn listed(value: &str) -> Option<Self> {
+            match value {
+                "symlink" => Some(ContentLinkType::Symlink),
+                _ => None,
+            }
+        }
+        fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+            ContentLinkType::Unknown(value)
         }
     }
     impl std::fmt::Display for ContentLinkType {
@@ -10951,13 +11456,27 @@ pub mod types {
         }
     }
     impl std::str::FromStr for ContentLinkType {
-        type Err = super::support::UnknownVariant;
-        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
-            match value {
-                "symlink" => Ok(ContentLinkType::Symlink),
-                _ => Err(super::support::UnknownVariant::new("ContentLinkType", value)),
-            }
+        type Err = std::convert::Infallible;
+        /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+        /// any other string is `Unknown`.
+        fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+            Ok(super::support::parse_open(value))
+        }
+    }
+    impl serde::Serialize for ContentLinkType {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str(self.as_str())
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for ContentLinkType {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_open(deserializer)
         }
     }
     pub type ContentLinkTarget = String;
@@ -11606,29 +12125,42 @@ pub mod types {
         }
     }
     pub type AliasNodeValue = String;
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum Priority {
-        #[serde(rename = "low")]
         Low,
-        #[serde(rename = "medium")]
         Medium,
-        #[serde(rename = "high")]
         High,
+        ///A value the description does not list here. Only decoding and `FromStr` build one, and only for a string no other variant names.
+        Unknown(super::support::UnknownValue<Priority>),
     }
     impl Priority {
-        /// Every variant, in the order the description lists its values.
+        /// Every listed variant, in the order the description lists its values.
         pub const ALL: &'static [Self] = &[
             Priority::Low,
             Priority::Medium,
             Priority::High,
         ];
         /// The wire value.
-        pub const fn as_str(self) -> &'static str {
+        pub fn as_str(&self) -> &str {
             match self {
                 Priority::Low => "low",
                 Priority::Medium => "medium",
                 Priority::High => "high",
+                Priority::Unknown(value) => value.as_str(),
             }
+        }
+    }
+    impl super::support::OpenEnum for Priority {
+        fn listed(value: &str) -> Option<Self> {
+            match value {
+                "low" => Some(Priority::Low),
+                "medium" => Some(Priority::Medium),
+                "high" => Some(Priority::High),
+                _ => None,
+            }
+        }
+        fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+            Priority::Unknown(value)
         }
     }
     impl std::fmt::Display for Priority {
@@ -11637,15 +12169,27 @@ pub mod types {
         }
     }
     impl std::str::FromStr for Priority {
-        type Err = super::support::UnknownVariant;
-        /// Parse a wire value: exactly one of the listed values, matched byte for byte.
-        fn from_str(value: &str) -> Result<Self, super::support::UnknownVariant> {
-            match value {
-                "low" => Ok(Priority::Low),
-                "medium" => Ok(Priority::Medium),
-                "high" => Ok(Priority::High),
-                _ => Err(super::support::UnknownVariant::new("Priority", value)),
-            }
+        type Err = std::convert::Infallible;
+        /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+        /// any other string is `Unknown`.
+        fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+            Ok(super::support::parse_open(value))
+        }
+    }
+    impl serde::Serialize for Priority {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str(self.as_str())
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for Priority {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_open(deserializer)
         }
     }
     #[derive(Debug, Clone, PartialEq)]
@@ -11822,28 +12366,36 @@ pub mod types {
                 return {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    if let Some(Ok(inner)) = (value.is_object()
-                        && value
-                            .as_object()
-                            .is_none_or(|members| {
-                                members
-                                    .keys()
-                                    .all(|key| matches!(key.as_str(), "petType" | "fins"))
-                            }))
-                        .then(|| serde_json::from_value::<
-                            Box<LooseAnimalVariant2>,
-                        >(value.clone()))
-                    {
-                        match_count += 1;
-                        let replace = match &selected {
-                            Some((selected_priority, _)) => 1042u32 > *selected_priority,
-                            None => true,
-                        };
-                        if replace {
-                            selected = Some((
-                                1042u32,
-                                LooseAnimal::LooseAnimalVariant2(inner),
-                            ));
+                    for &closed in super::support::EnumScope::passes() {
+                        {
+                            let _scope = super::support::EnumScope::enter(closed);
+                            if let Some(Ok(inner)) = (value.is_object()
+                                && value
+                                    .as_object()
+                                    .is_none_or(|members| {
+                                        members
+                                            .keys()
+                                            .all(|key| matches!(key.as_str(), "petType" | "fins"))
+                                    }))
+                                .then(|| serde_json::from_value::<
+                                    Box<LooseAnimalVariant2>,
+                                >(value.clone()))
+                            {
+                                match_count += 1;
+                                let replace = match &selected {
+                                    Some((selected_priority, _)) => 1042u32 > *selected_priority,
+                                    None => true,
+                                };
+                                if replace {
+                                    selected = Some((
+                                        1042u32,
+                                        LooseAnimal::LooseAnimalVariant2(inner),
+                                    ));
+                                }
+                            }
+                        }
+                        if match_count > 0 {
+                            break;
                         }
                     }
                     match selected {
@@ -11872,28 +12424,36 @@ pub mod types {
                 _ => {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    if let Some(Ok(inner)) = (value.is_object()
-                        && value
-                            .as_object()
-                            .is_none_or(|members| {
-                                members
-                                    .keys()
-                                    .all(|key| matches!(key.as_str(), "petType" | "fins"))
-                            }))
-                        .then(|| serde_json::from_value::<
-                            Box<LooseAnimalVariant2>,
-                        >(value.clone()))
-                    {
-                        match_count += 1;
-                        let replace = match &selected {
-                            Some((selected_priority, _)) => 1042u32 > *selected_priority,
-                            None => true,
-                        };
-                        if replace {
-                            selected = Some((
-                                1042u32,
-                                LooseAnimal::LooseAnimalVariant2(inner),
-                            ));
+                    for &closed in super::support::EnumScope::passes() {
+                        {
+                            let _scope = super::support::EnumScope::enter(closed);
+                            if let Some(Ok(inner)) = (value.is_object()
+                                && value
+                                    .as_object()
+                                    .is_none_or(|members| {
+                                        members
+                                            .keys()
+                                            .all(|key| matches!(key.as_str(), "petType" | "fins"))
+                                    }))
+                                .then(|| serde_json::from_value::<
+                                    Box<LooseAnimalVariant2>,
+                                >(value.clone()))
+                            {
+                                match_count += 1;
+                                let replace = match &selected {
+                                    Some((selected_priority, _)) => 1042u32 > *selected_priority,
+                                    None => true,
+                                };
+                                if replace {
+                                    selected = Some((
+                                        1042u32,
+                                        LooseAnimal::LooseAnimalVariant2(inner),
+                                    ));
+                                }
+                            }
+                        }
+                        if match_count > 0 {
+                            break;
                         }
                     }
                     match selected {
@@ -12461,7 +13021,7 @@ pub mod types {
         ///Default: `auto`.
         #[must_use]
         pub fn mode_or_default(&self) -> Mode {
-            self.mode.unwrap_or(Mode::Auto)
+            self.mode.clone().unwrap_or(Mode::Auto)
         }
     }
     pub type SettingsColor = String;

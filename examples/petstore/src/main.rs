@@ -179,8 +179,9 @@ async fn main() {
 
     // RFC 9457 problems. The description narrows `createPet`'s `409` problem `type` to
     // `…/name-taken`, and the server answers with `…/name-reserved`, a type it added after the
-    // description was written. `build.rs` turns on `open_narrowing`, so the response is still the
-    // typed `409` body rather than a decode failure, and the unlisted type is kept.
+    // description was written. The problem `type` is an open enum, as every string enum is by
+    // default, so the response is still the typed `409` body rather than a decode failure, and the
+    // unlisted type is kept in its `Unknown` variant.
     let reserved = client
         .create_pet(types::NewPetRequired {
             name: "Taken".to_owned(),

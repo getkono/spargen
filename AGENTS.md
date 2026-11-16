@@ -40,8 +40,8 @@ head, not the merge, and skips the `package` job's macro dry-run.
   reaches are host/build-time only.
 - Generated code never silently degrades a typed schema to `serde_json::Value`, and every spec
   construct is supported, warned, or rejected — no fourth, silent behavior. The one `Value` a
-  typed schema yields is opt-in: under `open_unions`, a discriminated union's `Unknown { tag,
-  value }` variant, holding only a payload no listed variant claims.
+  typed schema yields is opt-in: under `open_unions`, a discriminated union's
+  `Unknown(UnknownPayload<Self>)` variant, holding only a payload no listed variant claims.
 - Generated output stays consumable via `include!`: no crate-level inner attributes.
 - Prefer `pub(crate)` over `pub` outside the `build.rs` facade and emitted APIs.
 - A doc comment may say something **does not exist** only while a test fails as soon as that stops

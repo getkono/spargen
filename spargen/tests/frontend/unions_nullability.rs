@@ -569,7 +569,6 @@ fn a_nullable_scalar_type_beside_an_untyped_oneof_is_rejected_as_its_allof_spell
 /// the codes the two spellings already give whenever a sibling excludes every branch.
 #[test]
 fn a_type_array_listing_null_gives_untyped_oneof_branches_no_null_its_enum_refuses() {
-    let only_a = "pub enum Pick {\n        #[serde(rename = \"a\")]\n        A,\n    }";
     let mut mismatches = Vec::new();
     for (site, rejected_with) in [
         (
@@ -627,7 +626,7 @@ fn a_type_array_listing_null_gives_untyped_oneof_branches_no_null_its_enum_refus
                 // Both spellings hold the field to the non-optional type: the `allOf` member's
                 // `enum` / `const` refuses the `null` its type array lists (#649).
                 if report.outcome() == Outcome::Rejected
-                    || !types.contains(only_a)
+                    || enum_variants(&types, "Pick") != ["A"]
                     || field_type(&types, "pub pick").as_deref() != Some("Pick")
                 {
                     mismatches.push(format!(

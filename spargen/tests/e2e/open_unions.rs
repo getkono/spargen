@@ -10,8 +10,8 @@ use super::*;
 /// (`Envelope`), and one holding it a property down (`Holder`).
 const OPEN_UNIONS_SPEC: &str = include_str!("specs/open_unions.yaml");
 
-/// The doc line the open variant's `value` field carries, which only an open union emits.
-const OPEN_VARIANT_DOC: &str = "The whole payload, as it arrived.";
+/// A phrase of the doc the open variant carries, which only an open union emits.
+const OPEN_VARIANT_DOC: &str = "no other variant takes; its `tag()` is that";
 
 #[test]
 fn open_unions_decodes_an_unlisted_tag_into_the_unknown_variant() {
@@ -37,6 +37,7 @@ fn open_unions_decodes_an_unlisted_tag_into_the_unknown_variant() {
     std::fs::write(
         out.join("tests/open.rs"),
         r##"use open_unions::types::{Envelope, Holder, Memo, Notice, ServerEvent, Shape};
+use open_unions::UnknownPayload;
 
 /// `decoded` failed because the type refused a well-formed value: a `Data` error, never a syntax
 /// or end-of-input one, which would mean the test's own document was malformed and proved nothing.
@@ -59,11 +60,11 @@ fn a_listed_tag_selects_its_variant_and_an_unlisted_one_is_kept() {
 
     let wire = serde_json::json!({"kind": "resize", "w": 3});
     let unknown: ServerEvent = serde_json::from_value(wire.clone()).unwrap();
-    let ServerEvent::Unknown { tag, value } = &unknown else {
+    let ServerEvent::Unknown(payload) = &unknown else {
         panic!("an unlisted tag decodes into `Unknown`: {unknown:?}");
     };
-    assert_eq!(tag, "resize");
-    assert_eq!(value, &wire);
+    assert_eq!(payload.tag(), "resize");
+    assert_eq!(payload.value(), &wire);
     // It is written back as it arrived.
     assert_eq!(serde_json::to_value(&unknown).unwrap(), wire);
 
@@ -84,39 +85,36 @@ fn a_listed_tag_selects_its_variant_and_an_unlisted_one_is_kept() {
 }
 
 #[test]
-fn a_constructed_unknown_payload_is_written_with_its_tag() {
-    let event = ServerEvent::Unknown {
-        tag: "resize".to_owned(),
-        value: serde_json::json!({"w": 3}),
-    };
-    assert_eq!(
-        serde_json::to_value(&event).unwrap(),
-        serde_json::json!({"kind": "resize", "w": 3})
-    );
-    // A tag the value already carries is kept, as a tagged variant keeps its own field.
-    let event = ServerEvent::Unknown {
-        tag: "resize".to_owned(),
-        value: serde_json::json!({"kind": "other"}),
-    };
-    assert_eq!(
-        serde_json::to_value(&event).unwrap(),
-        serde_json::json!({"kind": "other"})
-    );
-    // A non-object value has nowhere to carry the tag.
-    let event = ServerEvent::Unknown {
-        tag: "resize".to_owned(),
-        value: serde_json::json!([1]),
-    };
-    assert!(serde_json::to_value(&event).is_err());
+fn an_unknown_payload_is_built_only_for_an_unlisted_tag_and_written_as_it_arrived() {
+    let wire = serde_json::json!({"kind": "resize", "w": 3});
+    let payload = UnknownPayload::<ServerEvent>::from_payload(wire.clone())
+        .expect("an object under an unlisted string tag");
+    assert_eq!(payload.tag(), "resize");
+    let event = ServerEvent::Unknown(payload);
+    assert_eq!(serde_json::to_value(&event).unwrap(), wire);
+    // A tag the union lists, a missing or non-string tag, and a non-object build none: `Unknown`
+    // never holds a payload a listed variant would claim by its tag.
+    for refused in [
+        serde_json::json!({"kind": "tick", "n": 1}),
+        serde_json::json!({"kind": "stop"}),
+        serde_json::json!({"w": 3}),
+        serde_json::json!({"kind": 7}),
+        serde_json::json!([1]),
+    ] {
+        assert!(
+            UnknownPayload::<ServerEvent>::from_payload(refused.clone()).is_none(),
+            "{refused}"
+        );
+    }
 }
 
 #[test]
 fn an_untagged_member_is_tried_before_the_unknown_variant() {
     let note: Notice = serde_json::from_str(r#"{"kind":"memo","note":"hi"}"#).unwrap();
-    assert!(!matches!(note, Notice::Unknown { .. }), "{note:?}");
+    assert!(!matches!(note, Notice::Unknown(_)), "{note:?}");
     let unknown: Notice = serde_json::from_str(r#"{"kind":"memo"}"#).unwrap();
     assert!(
-        matches!(unknown, Notice::Unknown { ref tag, .. } if tag == "memo"),
+        matches!(unknown, Notice::Unknown(ref payload) if payload.tag() == "memo"),
         "{unknown:?}"
     );
 }
@@ -125,9 +123,9 @@ fn an_untagged_member_is_tried_before_the_unknown_variant() {
 fn a_payload_two_untagged_members_match_is_refused_not_unknown() {
     // Each member alone takes its payload.
     let note: Memo = serde_json::from_str(r#"{"kind":"memo","note":"hi"}"#).unwrap();
-    assert!(!matches!(note, Memo::Unknown { .. }), "{note:?}");
+    assert!(!matches!(note, Memo::Unknown(_)), "{note:?}");
     let body: Memo = serde_json::from_str(r#"{"kind":"memo","body":"hi"}"#).unwrap();
-    assert!(!matches!(body, Memo::Unknown { .. }), "{body:?}");
+    assert!(!matches!(body, Memo::Unknown(_)), "{body:?}");
     // Both take this one, so `oneOf` refuses it rather than calling it an unknown kind.
     assert_refused(
         serde_json::from_str::<Memo>(r#"{"kind":"memo","note":"a","body":"b"}"#),
@@ -136,7 +134,7 @@ fn a_payload_two_untagged_members_match_is_refused_not_unknown() {
     // Neither takes this one: it is an unknown kind.
     let unknown: Memo = serde_json::from_str(r#"{"kind":"memo"}"#).unwrap();
     assert!(
-        matches!(unknown, Memo::Unknown { ref tag, .. } if tag == "memo"),
+        matches!(unknown, Memo::Unknown(ref payload) if payload.tag() == "memo"),
         "{unknown:?}"
     );
 }
@@ -162,7 +160,7 @@ fn a_nested_open_union_yields_to_a_member_that_matches() {
     let wire = serde_json::json!({"kind": "resize"});
     let unknown: Envelope = serde_json::from_value(wire.clone()).unwrap();
     assert!(
-        matches!(&unknown, Envelope::ServerEvent(event) if matches!(**event, ServerEvent::Unknown { .. })),
+        matches!(&unknown, Envelope::ServerEvent(event) if matches!(**event, ServerEvent::Unknown(_))),
         "{unknown:?}"
     );
     assert_eq!(serde_json::to_value(&unknown).unwrap(), wire);

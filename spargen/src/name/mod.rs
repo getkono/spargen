@@ -69,8 +69,7 @@ pub(crate) struct Names {
     /// The variant holding any unlisted string, per open string enum, and the one holding any
     /// unlisted discriminator value, per open union. Allocated in the type's variant scope after
     /// every listed variant, so a listed variant keeps the name it has in the closed type, and one
-    /// spelled `other` (`unknown` for a union) pushes this one to a disambiguated name instead. A
-    /// type id is either an enum or a union, so the two never collide.
+    /// spelled `unknown` pushes this one to a disambiguated name instead. A type id is either an enum or a union, so the two never collide.
     pub(crate) open_variants: HashMap<TypeId, Ident>,
     /// Builder type name per declared server, by index.
     pub(crate) servers: Vec<Ident>,
@@ -102,10 +101,10 @@ pub(crate) struct CredentialSetterNames {
     pub(crate) without: Ident,
 }
 
-/// The inherent associated `const` listing a closed string enum's variants. It shares the
-/// variants' namespace, so [`allocate`] reserves it in each closed string enum's variant scope and
-/// codegen emits it under this spelling.
-pub(crate) const CLOSED_ENUM_ALL: &str = "ALL";
+/// The inherent associated `const` listing a string enum's listed variants, open or closed. It
+/// shares the variants' namespace, so [`allocate`] reserves it in each string enum's variant scope
+/// and codegen emits it under this spelling.
+pub(crate) const STRING_ENUM_ALL: &str = "ALL";
 
 impl Names {
     /// The names allocated for the operation `id`, which every operation of the allocated [`Api`]
@@ -382,7 +381,8 @@ pub(crate) const SERVERS_MODULE_NAMES: &[&str] = &["Default", "Into", "String"];
 /// takes, `ClientConfig` and `TransportConfig` what `Client::with_config`'s closure configures,
 /// `HttpBody` is the body of every request and
 /// response an `HttpBackend` handles, `MaybeSend` and `MaybeSync` bound the body `HttpBody::wrap`
-/// adopts, and the taxonomy's payload types are matched on.
+/// adopts, the taxonomy's payload types are matched on, and `UnknownValue` and `UnknownPayload` are
+/// what an open string enum's and an open discriminated union's `Unknown` variant holds.
 /// Anything short of that leaves a generated signature a caller can call but cannot write down.
 /// `ApiErrorBody` is the bound `Error::api_body` needs, implemented by the uniform-body error enum,
 /// the single-body newtype, and the uninhabited shape (an enum whose bodies are different generated
@@ -447,6 +447,8 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "TotalTimeout",
     "TransportConfig",
     "TransportError",
+    "UnknownPayload",
+    "UnknownValue",
     "UnknownVariant",
     "exponential_backoff",
     "full_jitter",
@@ -847,10 +849,10 @@ pub(crate) fn allocate(api: &Api) -> Names {
             }
             TypeKind::Enum(enumeration) => {
                 let mut scope = Scope::default();
-                // A closed string enum's inherent `ALL` constant shares the variants' namespace,
-                // and a variant spelled `ALL` (the value `a_l_l`) would shadow it.
-                if enumeration.repr == ScalarRepr::String && !enumeration.is_open() {
-                    scope.reserve_exact(CLOSED_ENUM_ALL);
+                // A string enum's inherent `ALL` constant, open or closed, shares the variants'
+                // namespace, and a variant spelled `ALL` (the value `a_l_l`) would shadow it.
+                if enumeration.repr == ScalarRepr::String {
+                    scope.reserve_exact(STRING_ENUM_ALL);
                 }
                 let values: Vec<String> =
                     enumeration.variants.iter().map(ScalarValue::wire).collect();
@@ -867,7 +869,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
                 if enumeration.is_open() {
                     names.open_variants.insert(
                         id,
-                        scope.alloc("Other", IdentRole::Variant, &def.provenance.pointer),
+                        scope.alloc("Unknown", IdentRole::Variant, &def.provenance.pointer),
                     );
                 }
             }

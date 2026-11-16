@@ -218,24 +218,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // description forbids. Where `open_narrowing` is out of effect (inside a union, which
             // `intersect_union` reaches with a set the response already opened) the meet is
             // closed: two variants that each held an unlisted value would both match it, and the
-            // trial union would refuse every value. A locked set (one narrowed against a `uuid` or
-            // date string) locks the meet, open side or not, which is again order-independent: the
-            // format's domain holds no unlisted string for the open side to keep. Two integer sets
-            // meet at the narrower of their widths, keeping the shared members it holds.
+            // trial union would refuse every value. Two integer sets meet at the narrower of their
+            // widths, keeping the shared members it holds.
             (TypeKind::Enum(left), TypeKind::Enum(right)) if left.repr == right.repr => {
                 let width = intersect_primitives(left.width, right.width).unwrap_or(left.width);
                 let variants: Vec<ScalarValue> = held_values(&left.variants, width)
                     .into_iter()
                     .filter(|value| right.variants.contains(value))
                     .collect();
-                let openness =
-                    if left.openness == Openness::Locked || right.openness == Openness::Locked {
-                        Openness::Locked
-                    } else if self.narrowing_opens && (left.is_open() || right.is_open()) {
-                        Openness::Open
-                    } else {
-                        Openness::Closed
-                    };
+                let openness = if self.narrowing_opens && (left.is_open() || right.is_open()) {
+                    Openness::Open
+                } else {
+                    Openness::Closed
+                };
                 let keeps = |set: &ScalarEnum| set.variants == variants && set.width == width;
                 if variants.is_empty() {
                     // Both value sets are finite and listed in full, so sharing no value is proof.

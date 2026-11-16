@@ -11,14 +11,15 @@ mod api {
 ```
 
 Keyed form, with every argument the macro accepts besides the spec path. The `spargen.toml`
-beside the spec is always discovered and applied first; the six switches override it in either
+beside the spec is always discovered and applied first; the seven switches override it in either
 direction, `datetime` and the two caps replace its values, `omit { ... }` adds rules to its
 `[[omit]]` rules, and `keep { ... }` adds operations to its `[[keep]]` allow-list (once any is
 kept, every other operation, and every component the kept ones do not reach, is omitted), and each
 `bound_header = "..."` adds a header to its `bound_headers`, bound once on the client rather than
 taken at every call.
 
-Each switch — `uuid`, `carve`, `open_narrowing`, `open_unions`, `verbatim_docs`, `testing` — is
+Each switch — `uuid`, `carve`, `open_narrowing`, `open_unions`, `closed_enums`, `verbatim_docs`,
+`testing` — is
 written alone or as `= true` to turn it on, and as `no_<switch>` (`no_carve`, `no_testing`, …) or
 `= false` to turn it off. `datetime = "…"` names the crate `format: date-time`/`date` map to —
 `"time"`, `"jiff"`, `"chrono"`, or `"string"` for none.
@@ -45,6 +46,7 @@ spargen_macro::generate_api!(
     carve,
     open_narrowing = true,
     open_unions = true,
+    no_closed_enums,
     no_verbatim_docs,
     testing = false,
     error_body_cap = 65536,

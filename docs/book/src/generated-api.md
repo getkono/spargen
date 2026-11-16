@@ -196,9 +196,24 @@ use.
   whose statuses are all exact codes gets `status()`. Every error shape implements `ApiErrorProblem`, so `Error::problem()` reads the RFC 9457
   members (`type`, `title`, `status`, `detail`, `instance`) of whichever error body a failure
   carried, across every operation and body type: the typed body on `Error::Api`, and the raw body
-  of a `4xx`/`5xx` `Error::Decode` or `Error::UnexpectedStatus`. The opt-in `open_narrowing`
-  decodes a problem type the description does not list into `Error::Api`; see
+  of a `4xx`/`5xx` `Error::Decode` or `Error::UnexpectedStatus`. A problem type the description
+  does not list decodes into `Error::Api`, its open enum holding it; see
   [problem details](./runtime.md#problem-details).
+- A string `enum` (or `const`) is a Rust enum with one unit variant per listed value and, by
+  default, one more, `Unknown(UnknownValue<Self>)`, holding any other string, so a server that
+  adds a value still decodes. Decoding and `FromStr` map a listed value to its own variant and any
+  other to `Unknown`, and nothing else builds an `UnknownValue` (its field is private, and the
+  runtime builds one only after asking the enum's own listing), so `Unknown` never holds a listed
+  value. The enum is `Debug`, `Clone`, `Eq` and `Hash`, and has `ALL` (the listed variants, in
+  order), `as_str(&self) -> &str`, `Display` and an infallible `FromStr`; `UnknownValue::as_str`
+  reads the value it holds. A union with no discriminator tells its variants apart by the values
+  they list: it tries them with every open enum read closed first, and keeps an unlisted value
+  only where its `oneOf`/`anyOf` rule still picks out a variant with them open. Under
+  `closed_enums` (`Spec::with_closed_enums(StringEnums::Closed)`, `closed_enums = true`,
+  `--closed-enums`, or `closed_enums` in `generate_api!`) every string enum lists its values and
+  nothing else: it is `Copy`, `as_str` is a `const fn(self) -> &'static str`, `FromStr` fails
+  with `UnknownVariant`, and an unlisted value is `Error::Decode`. An integer or boolean `enum` is
+  a checked newtype instead, which `open_narrowing` opens in a response body's own narrowing.
 - Beyond the request/response path, the embedded runtime carries a swappable transport seam
   (`HttpBackend`) with composable retry and middleware adapters, `Link:`-header pagination, typed
   SSE/NDJSON/JSON-sequence streams, an opt-in `blocking` client, and `wasm32-unknown-unknown`

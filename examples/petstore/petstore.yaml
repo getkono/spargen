@@ -71,8 +71,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Pet"
-        # RFC 9457 problems, each status narrowing the shared `Problem`'s `type`. `build.rs` turns
-        # on `open_narrowing`, so a problem type the server adds later still decodes, typed.
+        # RFC 9457 problems, each status narrowing the shared `Problem`'s `type`. Every string enum
+        # is open by default, so a problem type the server adds later still decodes, typed.
         "409":
           description: A pet with that name already exists.
           content:

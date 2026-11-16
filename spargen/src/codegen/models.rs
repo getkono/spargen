@@ -73,10 +73,11 @@ pub(super) fn emit_models(
     }
 }
 
-/// Emit an open string enum (`open_narrowing`): one unit variant per listed value, as the closed
-/// enum has, plus a variant holding any other string. It cannot derive serde with a catch-all and
-/// stay a plain string on the wire, so `Serialize` writes `as_str()` and `Deserialize` reads a
-/// string and matches it, reaching the catch-all only for a value no unit variant lists.
+/// Emit an open string enum, every string enum unless `closed_enums` is set: one unit variant per
+/// listed value, as the closed enum has, plus `Unknown(UnknownValue<Self>)` holding any other
+/// string. Its `OpenEnum` impl names the listed values, and `FromStr` and `Deserialize` both read
+/// through the runtime's `parse_open`, which asks it first, so `Unknown` never holds a listed value.
+/// `Serialize` writes `as_str()`.
 ///
 /// `listed` are the [`string_variants`] the closed enum declares, and `display_arms` its `Display`
 /// arms, which map each unit variant to its value.
@@ -89,41 +90,72 @@ fn emit_open_string_enum(
     deprecated: Option<TokenStream>,
     display_arms: Vec<TokenStream>,
 ) -> TokenStream {
-    let other = names
+    let unknown = names
         .open_variants
         .get(&id)
         .expect("open variant name allocated");
     let variants = listed
         .iter()
         .map(|(_, variant_ident)| quote! { #variant_ident, });
-    let decode_arms = listed.iter().map(|(value, variant_ident)| {
-        quote! { #value => #ident::#variant_ident, }
+    let listed_arms = listed.iter().map(|(value, variant_ident)| {
+        quote! { #value => Some(#ident::#variant_ident), }
     });
-    let other_doc = "A value the description does not list here. Decoding produces it only for a \
-                     string no other variant names.";
+    let all = listed
+        .iter()
+        .map(|(_, variant_ident)| quote! { #ident::#variant_ident, });
+    // Reserved in the variant scope, so no variant shadows it.
+    let all_const = format_ident!("{}", crate::name::STRING_ENUM_ALL);
+    let unknown_doc = "A value the description does not list here. Only decoding and `FromStr` \
+                       build one, and only for a string no other variant names.";
     quote! {
         #docs
         #deprecated
-        #[derive(Debug, Clone, PartialEq, Eq)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         pub enum #ident {
             #(#variants)*
-            #[doc = #other_doc]
-            #other(String),
+            #[doc = #unknown_doc]
+            #unknown(super::support::UnknownValue<#ident>),
         }
 
         impl #ident {
+            /// Every listed variant, in the order the description lists its values.
+            pub const #all_const: &'static [Self] = &[#(#all)*];
+
             /// The wire value.
             pub fn as_str(&self) -> &str {
                 match self {
                     #(#display_arms)*
-                    #ident::#other(value) => value.as_str(),
+                    #ident::#unknown(value) => value.as_str(),
                 }
+            }
+        }
+
+        impl super::support::OpenEnum for #ident {
+            fn listed(value: &str) -> Option<Self> {
+                match value {
+                    #(#listed_arms)*
+                    _ => None,
+                }
+            }
+
+            fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+                #ident::#unknown(value)
             }
         }
 
         impl std::fmt::Display for #ident {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(self.as_str())
+            }
+        }
+
+        impl std::str::FromStr for #ident {
+            type Err = std::convert::Infallible;
+
+            /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+            /// any other string is `Unknown`.
+            fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+                Ok(super::support::parse_open(value))
             }
         }
 
@@ -141,11 +173,7 @@ fn emit_open_string_enum(
             where
                 D: serde::Deserializer<'de>,
             {
-                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-                Ok(match value.as_str() {
-                    #(#decode_arms)*
-                    _ => #ident::#other(value),
-                })
+                super::support::deserialize_open(deserializer)
             }
         }
     }
@@ -175,7 +203,7 @@ fn emit_closed_string_enum(
     });
     let type_name = ident.as_str();
     // Reserved in the variant scope, so no variant shadows it.
-    let all_const = format_ident!("{}", crate::name::CLOSED_ENUM_ALL);
+    let all_const = format_ident!("{}", crate::name::STRING_ENUM_ALL);
     quote! {
         #docs
         #deprecated
