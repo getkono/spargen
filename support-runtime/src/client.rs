@@ -345,9 +345,9 @@ impl ClientCore {
     /// Unregister the credential for a named security scheme, returning it if one was registered.
     ///
     /// This is how a caller reaches a later security alternative: an operation attaches the first
-    /// alternative whose schemes all have a registered credential, so removing a scheme of an
-    /// earlier one lets the next call pass over it. Removing a scheme that was never registered is
-    /// a no-op returning `None`.
+    /// non-empty alternative whose schemes all have a registered credential, so removing a scheme
+    /// of an earlier one lets the next call pass over it. Removing a scheme that was never
+    /// registered is a no-op returning `None`.
     pub fn remove_credential(&mut self, scheme: &str) -> Option<Credential> {
         self.credentials.remove(scheme)
     }

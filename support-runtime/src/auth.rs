@@ -116,8 +116,9 @@ where
 /// the scheme is called. Every failure below is therefore an error of that call, raised as a
 /// request-construction error before anything is sent — never a 401 from the server:
 ///
-/// - no alternative of the operation's requirement has every scheme registered:
-///   [`super::RequestError::MissingCredential`];
+/// - no non-empty alternative of the operation's requirement has every scheme registered, and
+///   either the requirement lists no empty `{}` alternative or a credential is registered for
+///   some scheme of its non-empty alternatives: [`super::RequestError::MissingCredential`];
 /// - the selected alternative has a credential of a variant its scheme cannot carry:
 ///   [`super::RequestError::CredentialMismatch`];
 /// - the selected alternative's `http basic` scheme has a [`Credential::Basic`] whose username

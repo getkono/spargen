@@ -127,8 +127,8 @@ use.
   alternatives, and an alternative with only some of its schemes registered fails as missing
   rather than falling back to anonymous. A missing required credential is a
   request-construction error — typed as `RequestError::MissingCredential`, listing for each
-  security alternative the schemes with no registered credential; a credential of a kind its
-  scheme cannot carry as `RequestError::CredentialMismatch`, naming the scheme, the
+  non-empty security alternative the schemes with no registered credential; a credential of a
+  kind its scheme cannot carry as `RequestError::CredentialMismatch`, naming the scheme, the
   `SchemeCarrier` it requires and the `CredentialKind` registered; an `http basic` username
   holding `:` (which RFC 7617 §2 forbids) as `RequestError::InvalidBasicUsername`; and a failed
   token provider as `RequestError::CredentialProvider` — never a silent 401. A failure inside the

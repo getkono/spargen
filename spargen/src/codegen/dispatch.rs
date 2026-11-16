@@ -14,7 +14,7 @@ use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 
 /// The statements that attach the operation's credentials to `request_binding` and bind
 /// `replay_binding` to what replays a call a refreshable credential was rejected on: the first
-/// `security` alternative whose schemes are all registered is attached through
+/// non-empty `security` alternative whose schemes are all registered is attached through
 /// `support::attach_auth_replayable`, and `support::execute` spends the replay. An operation with
 /// no `security` requirement attaches nothing and has no replay.
 ///
