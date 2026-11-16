@@ -1017,7 +1017,8 @@ fn open_member_unknown_test(types: &TypeGraph, names: &Names, ty: Ty) -> Option<
 /// A trial's `attempts` (or serialize validations), run where the API has an open string enum
 /// first inside a closed `EnumScope`, which refuses a value an open enum does not list, and again
 /// as decoded anywhere else only where that pass matched no variant (and, with `kept`, kept no
-/// open member's `Unknown`). A variant is told apart by what it refuses, and an open enum anywhere
+/// open member's `Unknown`) and no enclosing union's closed pass is decoding this one
+/// (`EnumScope::passes`). A variant is told apart by what it refuses, and an open enum anywhere
 /// inside it refuses no string: tried open alone, two variants that each list a different value
 /// of one property would both take either. So a value some variant lists selects as it would with
 /// every enum closed, and an unlisted one only where the variants that still match it open meet
@@ -1036,7 +1037,7 @@ fn scoped_trial_tokens(
     }
     let kept = kept.map(|kept| quote! { || #kept });
     quote! {
-        for closed in [true, false] {
+        for &closed in super::support::EnumScope::passes() {
             {
                 let _scope = super::support::EnumScope::enter(closed);
                 #attempts

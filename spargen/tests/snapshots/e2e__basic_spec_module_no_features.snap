@@ -3958,6 +3958,13 @@ mod support {
                     enclosing: CLOSED.with(|cell| cell.replace(closed)),
                 }
             }
+            /// The readings a union trial tries its variants under, in order: closed, then open, or only
+            /// closed where an enclosing scope already reads closed. A union decoded inside another's
+            /// closed pass so keeps that reading, and the enclosing pass matches a variant only through
+            /// listed values.
+            pub fn passes() -> &'static [bool] {
+                if CLOSED.with(Cell::get) { &[true] } else { &[true, false] }
+            }
         }
         impl Drop for EnumScope {
             fn drop(&mut self) {
@@ -10547,7 +10554,7 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            for closed in [true, false] {
+            for &closed in super::support::EnumScope::passes() {
                 {
                     let _scope = super::support::EnumScope::enter(closed);
                     if let Some(Ok(inner)) = value
@@ -10623,7 +10630,7 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            for closed in [true, false] {
+            for &closed in super::support::EnumScope::passes() {
                 {
                     let _scope = super::support::EnumScope::enter(closed);
                     if value.is_string()
@@ -10670,7 +10677,7 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            for closed in [true, false] {
+            for &closed in super::support::EnumScope::passes() {
                 {
                     let _scope = super::support::EnumScope::enter(closed);
                     if let Some(Ok(inner)) = value
@@ -10749,7 +10756,7 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            for closed in [true, false] {
+            for &closed in super::support::EnumScope::passes() {
                 {
                     let _scope = super::support::EnumScope::enter(closed);
                     if value.is_number()
@@ -10799,7 +10806,7 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            for closed in [true, false] {
+            for &closed in super::support::EnumScope::passes() {
                 {
                     let _scope = super::support::EnumScope::enter(closed);
                     if let Some(Ok(inner)) = value
@@ -10875,7 +10882,7 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            for closed in [true, false] {
+            for &closed in super::support::EnumScope::passes() {
                 {
                     let _scope = super::support::EnumScope::enter(closed);
                     if value.is_string()
@@ -10949,7 +10956,7 @@ pub mod types {
             let value = serde_json::Value::deserialize(deserializer)?;
             let mut match_count = 0_usize;
             let mut selected: Option<(u32, Self)> = None;
-            for closed in [true, false] {
+            for &closed in super::support::EnumScope::passes() {
                 {
                     let _scope = super::support::EnumScope::enter(closed);
                     if let Some(Ok(inner)) = (value.is_object()
@@ -11026,7 +11033,7 @@ pub mod types {
                 }
             };
             let mut match_count = 0_usize;
-            for closed in [true, false] {
+            for &closed in super::support::EnumScope::passes() {
                 {
                     let _scope = super::support::EnumScope::enter(closed);
                     if (value.is_object()
@@ -12113,7 +12120,7 @@ pub mod types {
                 return {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    for closed in [true, false] {
+                    for &closed in super::support::EnumScope::passes() {
                         {
                             let _scope = super::support::EnumScope::enter(closed);
                             if let Some(Ok(inner)) = (value.is_object()
@@ -12171,7 +12178,7 @@ pub mod types {
                 _ => {
                     let mut match_count = 0_usize;
                     let mut selected: Option<(u32, Self)> = None;
-                    for closed in [true, false] {
+                    for &closed in super::support::EnumScope::passes() {
                         {
                             let _scope = super::support::EnumScope::enter(closed);
                             if let Some(Ok(inner)) = (value.is_object()

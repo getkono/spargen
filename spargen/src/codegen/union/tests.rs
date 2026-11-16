@@ -335,7 +335,7 @@ paths:
 #[test]
 fn a_trial_tries_its_variants_with_open_enums_closed_first() {
     let scoped = concat!(
-        r#"forclosedin[true,false]{{let_scope=super::support::EnumScope::enter(closed);"#,
+        r#"for&closedinsuper::support::EnumScope::passes(){{let_scope=super::support::EnumScope::enter(closed);"#,
         r#"ifletSome(Ok(inner))=value.is_object().then(||serde_json::from_value::<Box<Cat>>(value.clone())){"#,
     );
     let open = generated_with(ENUM_TOLD, |spec| spec);
@@ -346,7 +346,7 @@ fn a_trial_tries_its_variants_with_open_enums_closed_first() {
             scoped,
             r#"}}ifmatch_count>0{break;}}if"#,
             concat!(
-                r#"forclosedin[true,false]{{let_scope=super::support::EnumScope::enter(closed);"#,
+                r#"for&closedinsuper::support::EnumScope::passes(){{let_scope=super::support::EnumScope::enter(closed);"#,
                 r#"ifvalue.is_object()&&serde_json::from_value::<Box<Cat>>(value.clone()).is_ok(){match_count+=1;}"#,
             ),
         ],

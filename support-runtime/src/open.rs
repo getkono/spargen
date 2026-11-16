@@ -139,6 +139,18 @@ impl EnumScope {
             enclosing: CLOSED.with(|cell| cell.replace(closed)),
         }
     }
+
+    /// The readings a union trial tries its variants under, in order: closed, then open, or only
+    /// closed where an enclosing scope already reads closed. A union decoded inside another's
+    /// closed pass so keeps that reading, and the enclosing pass matches a variant only through
+    /// listed values.
+    pub fn passes() -> &'static [bool] {
+        if CLOSED.with(Cell::get) {
+            &[true]
+        } else {
+            &[true, false]
+        }
+    }
 }
 
 impl Drop for EnumScope {
@@ -288,6 +300,21 @@ mod tests {
     #[test]
     fn a_non_string_fails_to_decode() {
         assert!(serde_json::from_str::<Priority>("3").is_err());
+    }
+
+    #[test]
+    fn a_trial_inside_a_closed_scope_keeps_it_closed() {
+        assert_eq!(EnumScope::passes(), &[true, false]);
+        {
+            let _closed = EnumScope::enter(true);
+            assert_eq!(EnumScope::passes(), &[true]);
+            {
+                let _open = EnumScope::enter(false);
+                assert_eq!(EnumScope::passes(), &[true, false]);
+            }
+            assert_eq!(EnumScope::passes(), &[true]);
+        }
+        assert_eq!(EnumScope::passes(), &[true, false]);
     }
 
     #[test]
