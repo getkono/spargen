@@ -327,11 +327,23 @@ impl std::fmt::Debug for Credential {
 }
 
 /// Attach credentials for an operation's security requirement. `requirements` is an OR
-/// of alternatives, each an AND of schemes; the first alternative whose schemes all have a
-/// registered credential wins, deterministically. An empty alternative (`{}` in the spec) marks
-/// security optional and always satisfies. If no alternative is satisfiable the request fails
-/// before it is sent — [`RequestError::MissingCredential`], never a silent 401 — and a registered
-/// token provider that fails does too, as [`RequestError::CredentialProvider`].
+/// of alternatives, each an AND of schemes; the first non-empty alternative whose schemes all have
+/// a registered credential wins, deterministically, in declared order. A `mutualTLS` scheme is
+/// satisfied by the transport, so an alternative made only of `mutualTLS` schemes is always
+/// satisfied and competes in that order like any other.
+///
+/// An empty alternative (`{}` in the spec) marks security optional, not preferred: wherever it is
+/// listed, it applies only when no non-empty alternative is satisfied, and then sends the request
+/// anonymously only if no credential is registered under any scheme of the non-empty
+/// alternatives. An alternative with some of its schemes registered and others not shows the
+/// caller meant to authenticate, so it fails as below rather than going out anonymously. An
+/// alternative made only of `mutualTLS` schemes attaches nothing, as `{}` does, so between the
+/// two the wire shows the first listed.
+///
+/// If no alternative applies the request fails before it is sent —
+/// [`RequestError::MissingCredential`], naming each non-empty alternative's missing schemes,
+/// never a silent 401 — and a registered token provider that fails does too, as
+/// [`RequestError::CredentialProvider`].
 ///
 /// **Selection is on registration, not on success, and there is no fall-through.** Once an
 /// alternative is chosen, a failure while attaching it — a token provider that errors, or a
@@ -561,8 +573,9 @@ fn unbuffered(response: http::Response<Bytes>) -> http::Response<HttpBody> {
 }
 
 /// The security alternative [`attach_auth`] attaches: `None` for an operation with no
-/// requirement, and otherwise the first alternative with no scheme missing, or the
-/// [`RequestError::MissingCredential`] that reports each alternative's missing schemes.
+/// requirement, or for one whose `{}` alternative applies; otherwise the first non-empty
+/// alternative with no scheme missing, or the [`RequestError::MissingCredential`] that reports
+/// each non-empty alternative's missing schemes.
 fn select<'r>(
     core: &ClientCore,
     requirements: &[&'r [AuthScheme]],
@@ -572,31 +585,46 @@ fn select<'r>(
     if requirements.is_empty() {
         return Ok(None);
     }
+    // `{}` marks security optional, never preferred: it applies only once no credentialed
+    // alternative is satisfied, wherever it is listed.
+    let credentialed = || {
+        requirements
+            .iter()
+            .filter(|alternative| !alternative.is_empty())
+    };
     // Selection and reporting read the one predicate `is_missing`: an alternative is chosen
     // exactly when none of its schemes is missing, and its missing schemes are what
-    // `MissingCredential` reports for it. So every reported inner list is non-empty by
-    // construction, and the outer list is non-empty because `requirements` is. The report is
-    // built only once no alternative was chosen.
+    // `MissingCredential` reports for it. A non-empty alternative that is not chosen has a
+    // missing scheme, so every reported inner list is non-empty by construction; `{}` is never
+    // reported. The report is built only once no alternative was chosen.
     let is_missing = |scheme: &AuthScheme| matches!(resolve(core, scheme), Resolution::Missing);
-    let Some(chosen) = requirements
+    if let Some(chosen) = credentialed().find(|alternative| !alternative.iter().any(is_missing)) {
+        return Ok(Some(*chosen));
+    }
+    // `{}` sends the call anonymously only when the caller registered nothing for any
+    // credentialed alternative. A partially registered one shows they meant to authenticate, so
+    // it fails as `MissingCredential` rather than silently going out without its credentials.
+    let optional = requirements
         .iter()
-        .find(|alternative| !alternative.iter().any(is_missing))
-    else {
-        let alternatives = requirements
-            .iter()
-            .map(|alternative| {
-                alternative
-                    .iter()
-                    .filter(|scheme| is_missing(scheme))
-                    .map(|scheme| scheme.name)
-                    .collect()
-            })
-            .collect();
-        return Err(Error::RequestConstruction(
-            RequestError::MissingCredential { alternatives },
-        ));
-    };
-    Ok(Some(*chosen))
+        .any(|alternative| alternative.is_empty());
+    let registered_any = credentialed()
+        .flat_map(|alternative| alternative.iter())
+        .any(|scheme| matches!(resolve(core, scheme), Resolution::Registered(_)));
+    if optional && !registered_any {
+        return Ok(None);
+    }
+    let alternatives = credentialed()
+        .map(|alternative| {
+            alternative
+                .iter()
+                .filter(|scheme| is_missing(scheme))
+                .map(|scheme| scheme.name)
+                .collect()
+        })
+        .collect();
+    Err(Error::RequestConstruction(
+        RequestError::MissingCredential { alternatives },
+    ))
 }
 
 /// How one scheme of a security alternative is satisfied, if at all.

@@ -120,7 +120,12 @@ use.
   setter's rustdoc carries its scheme's description, flows and scopes. A setter whose name an
   operation method or a fixed method already spells (a scheme named `timeout`) takes a
   disambiguated name instead. Operation `security` requirements pick the first satisfiable
-  alternative and attach bearer/basic/apiKey credentials. A missing required credential is a
+  non-empty alternative, in declared order, and attach bearer/basic/apiKey credentials; one made
+  only of `mutualTLS` schemes is always satisfiable and attaches nothing. An empty alternative
+  (`{}`, security optional) never outranks a registered credential, wherever it is listed: the
+  request goes out anonymously only when no credential is registered for any scheme of the other
+  alternatives, and an alternative with only some of its schemes registered fails as missing
+  rather than falling back to anonymous. A missing required credential is a
   request-construction error — typed as `RequestError::MissingCredential`, listing for each
   security alternative the schemes with no registered credential; a credential of a kind its
   scheme cannot carry as `RequestError::CredentialMismatch`, naming the scheme, the
