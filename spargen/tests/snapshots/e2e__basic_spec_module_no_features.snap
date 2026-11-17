@@ -11342,35 +11342,38 @@ pub mod types {
         where
             S: serde::Serializer,
         {
+            let non_finite = match self {
+                MixedContent::MixedContentVariant0(inner) => {
+                    super::support::holds_non_finite(inner)
+                }
+                MixedContent::ContentFile(inner) => {
+                    super::support::holds_non_finite(inner)
+                }
+                MixedContent::ContentLink(inner) => {
+                    super::support::holds_non_finite(inner)
+                }
+            };
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 MixedContent::MixedContentVariant0(inner) => {
-                    if super::support::holds_non_finite(inner) {
-                        return serde::Serialize::serialize(inner, serializer);
-                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         None,
                     )
                 }
                 MixedContent::ContentFile(inner) => {
-                    if super::support::holds_non_finite(inner) {
-                        return serde::Serialize::serialize(inner, serializer);
-                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("file"),
                     )
                 }
                 MixedContent::ContentLink(inner) => {
-                    if super::support::holds_non_finite(inner) {
-                        return serde::Serialize::serialize(inner, serializer);
-                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("symlink"),
                     )
                 }
             };
+            let wrote_tag = value.get("type").is_some();
             if let Some(tag) = tag {
                 let serde_json::Value::Object(map) = &mut value else {
                     return Err(
@@ -11414,6 +11417,30 @@ pub mod types {
                         serde_json::Value::String(tag.to_owned()),
                     );
                 }
+            }
+            if non_finite {
+                #[derive(serde::Serialize)]
+                struct Tagged<'a, T> {
+                    #[serde(rename = "type")]
+                    tag: &'a str,
+                    #[serde(flatten)]
+                    inner: &'a T,
+                }
+                return match self {
+                    Self::MixedContentVariant0(inner) => inner.serialize(serializer),
+                    Self::ContentFile(inner) => {
+                        match tag.filter(|_| !wrote_tag) {
+                            Some(tag) => Tagged { tag, inner }.serialize(serializer),
+                            None => inner.serialize(serializer),
+                        }
+                    }
+                    Self::ContentLink(inner) => {
+                        match tag.filter(|_| !wrote_tag) {
+                            Some(tag) => Tagged { tag, inner }.serialize(serializer),
+                            None => inner.serialize(serializer),
+                        }
+                    }
+                };
             }
             value.serialize(serializer)
         }
@@ -12048,26 +12075,25 @@ pub mod types {
         where
             S: serde::Serializer,
         {
+            let non_finite = match self {
+                Pet::Cat(inner) => super::support::holds_non_finite(inner),
+                Pet::Dog(inner) => super::support::holds_non_finite(inner),
+            };
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 Pet::Cat(inner) => {
-                    if super::support::holds_non_finite(inner) {
-                        return serde::Serialize::serialize(inner, serializer);
-                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("cat"),
                     )
                 }
                 Pet::Dog(inner) => {
-                    if super::support::holds_non_finite(inner) {
-                        return serde::Serialize::serialize(inner, serializer);
-                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("dog"),
                     )
                 }
             };
+            let wrote_tag = value.get("petType").is_some();
             if let Some(tag) = tag {
                 let serde_json::Value::Object(map) = &mut value else {
                     return Err(
@@ -12106,6 +12132,29 @@ pub mod types {
                         serde_json::Value::String(tag.to_owned()),
                     );
                 }
+            }
+            if non_finite {
+                #[derive(serde::Serialize)]
+                struct Tagged<'a, T> {
+                    #[serde(rename = "petType")]
+                    tag: &'a str,
+                    #[serde(flatten)]
+                    inner: &'a T,
+                }
+                return match self {
+                    Self::Cat(inner) => {
+                        match tag.filter(|_| !wrote_tag) {
+                            Some(tag) => Tagged { tag, inner }.serialize(serializer),
+                            None => inner.serialize(serializer),
+                        }
+                    }
+                    Self::Dog(inner) => {
+                        match tag.filter(|_| !wrote_tag) {
+                            Some(tag) => Tagged { tag, inner }.serialize(serializer),
+                            None => inner.serialize(serializer),
+                        }
+                    }
+                };
             }
             value.serialize(serializer)
         }
@@ -12283,35 +12332,34 @@ pub mod types {
         where
             S: serde::Serializer,
         {
+            let non_finite = match self {
+                LooseAnimal::Cat(inner) => super::support::holds_non_finite(inner),
+                LooseAnimal::Dog(inner) => super::support::holds_non_finite(inner),
+                LooseAnimal::LooseAnimalVariant2(inner) => {
+                    super::support::holds_non_finite(inner)
+                }
+            };
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 LooseAnimal::Cat(inner) => {
-                    if super::support::holds_non_finite(inner) {
-                        return serde::Serialize::serialize(inner, serializer);
-                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("Cat"),
                     )
                 }
                 LooseAnimal::Dog(inner) => {
-                    if super::support::holds_non_finite(inner) {
-                        return serde::Serialize::serialize(inner, serializer);
-                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("Dog"),
                     )
                 }
                 LooseAnimal::LooseAnimalVariant2(inner) => {
-                    if super::support::holds_non_finite(inner) {
-                        return serde::Serialize::serialize(inner, serializer);
-                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         None,
                     )
                 }
             };
+            let wrote_tag = value.get("petType").is_some();
             if let Some(tag) = tag {
                 let serde_json::Value::Object(map) = &mut value else {
                     return Err(
@@ -12368,6 +12416,30 @@ pub mod types {
                         ),
                     );
                 }
+            }
+            if non_finite {
+                #[derive(serde::Serialize)]
+                struct Tagged<'a, T> {
+                    #[serde(rename = "petType")]
+                    tag: &'a str,
+                    #[serde(flatten)]
+                    inner: &'a T,
+                }
+                return match self {
+                    Self::Cat(inner) => {
+                        match tag.filter(|_| !wrote_tag) {
+                            Some(tag) => Tagged { tag, inner }.serialize(serializer),
+                            None => inner.serialize(serializer),
+                        }
+                    }
+                    Self::Dog(inner) => {
+                        match tag.filter(|_| !wrote_tag) {
+                            Some(tag) => Tagged { tag, inner }.serialize(serializer),
+                            None => inner.serialize(serializer),
+                        }
+                    }
+                    Self::LooseAnimalVariant2(inner) => inner.serialize(serializer),
+                };
             }
             value.serialize(serializer)
         }
@@ -12534,26 +12606,25 @@ pub mod types {
         where
             S: serde::Serializer,
         {
+            let non_finite = match self {
+                Channel::Webhook(inner) => super::support::holds_non_finite(inner),
+                Channel::Apprise(inner) => super::support::holds_non_finite(inner),
+            };
             let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                 Channel::Webhook(inner) => {
-                    if super::support::holds_non_finite(inner) {
-                        return serde::Serialize::serialize(inner, serializer);
-                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("webhook"),
                     )
                 }
                 Channel::Apprise(inner) => {
-                    if super::support::holds_non_finite(inner) {
-                        return serde::Serialize::serialize(inner, serializer);
-                    }
                     (
                         serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
                         Some("apprise"),
                     )
                 }
             };
+            let wrote_tag = value.get("type").is_some();
             if let Some(tag) = tag {
                 let serde_json::Value::Object(map) = &mut value else {
                     return Err(
@@ -12592,6 +12663,29 @@ pub mod types {
                         serde_json::Value::String(tag.to_owned()),
                     );
                 }
+            }
+            if non_finite {
+                #[derive(serde::Serialize)]
+                struct Tagged<'a, T> {
+                    #[serde(rename = "type")]
+                    tag: &'a str,
+                    #[serde(flatten)]
+                    inner: &'a T,
+                }
+                return match self {
+                    Self::Webhook(inner) => {
+                        match tag.filter(|_| !wrote_tag) {
+                            Some(tag) => Tagged { tag, inner }.serialize(serializer),
+                            None => inner.serialize(serializer),
+                        }
+                    }
+                    Self::Apprise(inner) => {
+                        match tag.filter(|_| !wrote_tag) {
+                            Some(tag) => Tagged { tag, inner }.serialize(serializer),
+                            None => inner.serialize(serializer),
+                        }
+                    }
+                };
             }
             value.serialize(serializer)
         }

@@ -496,6 +496,9 @@ pub(super) fn discriminated_arms(code: &str, name: &str) -> DiscriminatedArms {
     let ser_impl = code
         .split(&format!("impl serde::Serialize for {name} {{"))
         .nth(1)
+        // The encode arms are the `(value, tag)` match; the non-finite scan before it also
+        // matches every variant, but writes no tag.
+        .and_then(|rest| rest.split("let (mut value, tag)").nth(1))
         .and_then(|rest| rest.split("if let Some(tag) = tag").next())
         .map(flat)
         .unwrap_or_else(|| panic!("no Serialize for {name}:\n{code}"));

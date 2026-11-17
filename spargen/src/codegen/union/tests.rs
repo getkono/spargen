@@ -79,9 +79,11 @@ fn types(open: bool) -> String {
     between(&generated, "pubmodtypes{", "pubstructClient{").to_owned()
 }
 
-/// The declaration and serde impls of union `name` in `types`, up to the next derived item.
+/// The declaration and serde impls of union `name` in `types`, up to the next derived item: one
+/// deriving `Debug`, as every generated type does, so the local `Tagged` helper a discriminated
+/// union's `Serialize` derives does not end it.
 fn union<'t>(types: &'t str, name: &str) -> &'t str {
-    between(types, &format!("pubenum{name}{{"), "#[derive(")
+    between(types, &format!("pubenum{name}{{"), "#[derive(Debug")
 }
 
 /// A discriminated union decodes by tag, each arm matching every tag that selects its member, and
@@ -102,15 +104,25 @@ fn a_discriminated_union_dispatches_by_tag_and_refuses_a_foreign_one() {
                 r#"_=>{Err(serde::de::Error::custom("unknowndiscriminatorvalueforunionEvent",),)}}"#,
             ),
             concat!(
-                r#"Event::Tick(inner)=>{ifsuper::support::holds_non_finite(inner){returnserde::Serialize::serialize(inner,serializer);}(serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,Some("tick"),)}"#,
-                r#"Event::Stop(inner)=>{ifsuper::support::holds_non_finite(inner){returnserde::Serialize::serialize(inner,serializer);}(serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,Some("stop"),)}};"#,
+                r#"letnon_finite=matchself{Event::Tick(inner)=>super::support::holds_non_finite(inner),"#,
+                r#"Event::Stop(inner)=>super::support::holds_non_finite(inner),};"#,
+                r#"let(mutvalue,tag):(serde_json::Value,Option<&str>)=matchself{"#,
+                r#"Event::Tick(inner)=>{(serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,Some("tick"),)}"#,
+                r#"Event::Stop(inner)=>{(serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,Some("stop"),)}};"#,
+                r#"letwrote_tag=value.get("kind").is_some();"#,
             ),
             concat!(
                 r#"ifletSome(held)=map.get("kind"){letrefusal:Option<&str>=matchself{"#,
                 r#"Event::Tick(_)=>{matchheld.as_str(){Some("tick")|Some("Tick")=>None,_=>Some("doesnotselectvariantEvent::Tick"),}}"#,
                 r#"Event::Stop(_)=>{matchheld.as_str(){Some("stop")|Some("halt")|Some("Stop")=>None,_=>Some("doesnotselectvariantEvent::Stop"),}}};"#,
             ),
-            r#"}else{map.insert("kind".to_owned(),serde_json::Value::String(tag.to_owned()),);}}value.serialize(serializer)}}"#,
+            concat!(
+                r#"}else{map.insert("kind".to_owned(),serde_json::Value::String(tag.to_owned()),);}}"#,
+                r#"ifnon_finite{#[derive(serde::Serialize)]structTagged<'a,T>{#[serde(rename="kind")]tag:&'astr,#[serde(flatten)]inner:&'aT,}"#,
+                r#"returnmatchself{Self::Tick(inner)=>{matchtag.filter(|_|!wrote_tag){Some(tag)=>Tagged{tag,inner}.serialize(serializer),None=>inner.serialize(serializer),}}"#,
+                r#"Self::Stop(inner)=>{matchtag.filter(|_|!wrote_tag){Some(tag)=>Tagged{tag,inner}.serialize(serializer),None=>inner.serialize(serializer),}}};}"#,
+                r#"value.serialize(serializer)}}"#,
+            ),
         ],
     );
     for absent in [
