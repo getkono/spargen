@@ -294,7 +294,7 @@ fn a_union_holding_a_non_finite_number_keeps_its_tag_rules() {
             error.to_string().contains("does not select variant Shape::Circle"),
             "{error}"
         );
-        assert!(unreachable().post_shape(PostShapeParams::default(), &foreign).is_err());
+        assert!(unreachable().post_shape(PostShapeParams::default(), foreign).is_err());
 
         let triangle = Shape::Triangle(Box::new(Triangle { side: number }));
         assert_eq!(
@@ -302,7 +302,7 @@ fn a_union_holding_a_non_finite_number_keeps_its_tag_rules() {
             serde_json::json!({ "kind": "triangle", "side": null })
         );
         assert!(matches!(
-            parameter_error(unreachable().post_shape(PostShapeParams::default(), &triangle)),
+            parameter_error(unreachable().post_shape(PostShapeParams::default(), triangle)),
             ParameterError::NonFiniteNumber
         ));
     }
