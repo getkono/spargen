@@ -62,6 +62,7 @@ mod document;
 mod encoding;
 mod encoding_headers;
 mod encoding_style;
+mod multipart_untyped_parts;
 mod open_enums;
 mod parameters;
 mod parameters_querystring;

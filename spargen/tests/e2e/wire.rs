@@ -1,8 +1,8 @@
 //! Values on the wire: dates, a per-operation server override, an operation's URL accessor against
-//! the request it describes, RFC 6570 multipart parts, CBOR bodies, `contentEncoding: base64`
-//! content, an explicit `null` content parameter, cookie parameters and cookie credentials in one
-//! `Cookie` header, cookie values RFC 6265 refuses, unsigned integers in parameters, headers and
-//! bodies, and the mock server's reading of a chunked request body.
+//! the request it describes, CBOR bodies, `contentEncoding: base64` content, an explicit `null`
+//! content parameter, cookie parameters and cookie credentials in one `Cookie` header, cookie
+//! values RFC 6265 refuses, unsigned integers in parameters, headers and bodies, and the mock
+//! server's reading of a chunked request body.
 
 use super::*;
 use spargen::DateTimeBackend;
@@ -870,126 +870,6 @@ fn a_url_accessor_leaves_off_the_query_api_key_its_request_sends() {
     assert_eq!(seen, vec!["GET /api/v1/search?q=a%20b&api_key=s3cret HTTP/1.1".to_owned()]);
 }
 "##;
-
-/// RFC 6570-mode `multipart/form-data` parts must carry literal delimiters, not percent-encoded
-/// ones.
-///
-/// The specification is explicit that "when using RFC6570-style serialization for
-/// `multipart/form-data`, URI percent-encoding MUST NOT be applied", but the part values were built
-/// from the query-fragment builders, whose delimiters are pre-encoded `%20` / `%7C` triples. Only a
-/// look at the raw body catches that; the existing multipart fixtures all use `contentType` mode.
-#[test]
-fn multipart_rfc6570_parts_carry_literal_delimiters() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = write_spec(
-        temp.path(),
-        "openapi.yaml",
-        r##"
-openapi: 3.1.0
-info: { title: Multipart, version: 1.0.0 }
-paths:
-  /upload:
-    post:
-      operationId: upload
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              required: [tags, paths, names]
-              properties:
-                tags:
-                  type: array
-                  items: { type: string }
-                paths:
-                  type: array
-                  items: { type: string }
-                names:
-                  type: array
-                  items: { type: string }
-            encoding:
-              tags:
-                style: spaceDelimited
-                explode: false
-              paths:
-                style: pipeDelimited
-                explode: false
-              names:
-                style: form
-                explode: true
-                # A pinned part header rides on every part the style serialization produces.
-                headers:
-                  X-Part-Kind:
-                    schema: { type: string, const: name }
-      responses:
-        "204": { description: No Content }
-"##,
-    );
-    let out = temp.path().join("client");
-    let report = generate_fixture_crate(&spec, &out, "multipart_client");
-    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-
-    write_fixture_test(
-        &out,
-        "multipart",
-        r##"#![cfg(feature = "blocking")]
-
-mod common;
-
-#[test]
-fn rfc6570_multipart_parts_are_not_percent_encoded() {
-    let (base, server) = common::serve_no_content();
-    let client = multipart_client::BlockingClient::new(&base).unwrap();
-    let body = multipart_client::types::UploadBody {
-        tags: vec!["blue".into(), "black".into()],
-        paths: vec!["a/b".into(), "c".into()],
-        names: vec!["ada".into(), "grace".into()],
-    };
-    client.upload(body).expect("upload round-trips");
-
-    let request = server.join().unwrap().text();
-
-    // `spaceDelimited` joins with a literal space, `pipeDelimited` with a literal `|`.
-    assert!(
-        request.contains("blue black"),
-        "spaceDelimited must join with a literal space: {request}"
-    );
-    assert!(
-        request.contains("a/b|c"),
-        "pipeDelimited must join with a literal pipe: {request}"
-    );
-    // The encoded forms are exactly the defect.
-    assert!(
-        !request.contains("blue%20black"),
-        "a part value must not be percent-encoded: {request}"
-    );
-    assert!(
-        !request.contains("%7C"),
-        "a part delimiter must not be percent-encoded: {request}"
-    );
-    // `form` + `explode` sends one part per item, under the same name (RFC 7578 s4.3).
-    assert_eq!(
-        request.matches(r#"name="names""#).count(),
-        2,
-        "an exploded array must send one part per item: {request}"
-    );
-    // The pinned `X-Part-Kind` header rides on each of those parts, and on no other.
-    assert_eq!(
-        request.to_ascii_lowercase().matches("x-part-kind: name\r\n").count(),
-        2,
-        "every style-serialized part must carry its pinned header: {request}"
-    );
-}
-"##,
-    );
-
-    let status = fixture_cargo(&out)
-        .args(["test", "--features", "blocking", "--test", "multipart"])
-        .status()
-        .unwrap();
-    assert!(status.success(), "the multipart wire round-trip must pass");
-}
 
 /// A CBOR body travels as the exact bytes it is (#900): `application/cbor` and a `+cbor` suffixed
 /// type are each sent as their own `Content-Type` and asked for as their own `Accept`, and the

@@ -763,6 +763,8 @@ mod dependencies;
 mod manifest_audit;
 #[path = "e2e/mock_server.rs"]
 mod mock_server;
+#[path = "e2e/multipart.rs"]
+mod multipart;
 #[path = "e2e/oas32.rs"]
 mod oas32;
 #[path = "e2e/open_enums.rs"]
