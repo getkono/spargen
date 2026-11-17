@@ -395,3 +395,92 @@ components:
         "{code}"
     );
 }
+
+/// The most specific statement of a part's media type is its `Content-Type`: a `contentMediaType`
+/// on an untyped part that also carries the `format: binary` annotation outranks the
+/// `application/octet-stream` that annotation and the bytes it lowers to imply, and is read rather
+/// than reported.
+#[test]
+fn a_content_media_type_outranks_a_format_binary_annotation_on_an_untyped_part() {
+    let (report, code) = generate_with_code(
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [sheet]
+              properties:
+                sheet: { format: binary, contentMediaType: text/csv }
+      responses: { "204": { description: ok } }
+"#,
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::ValidationKeywordIgnored),
+        "{report:#?}"
+    );
+    let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    for expected in [
+        "pub type UploadBodySheet = bytes::Bytes;",
+        "support::MultipartPart::bytes(body.sheet.to_vec())",
+        ".mime_str(\"text/csv\")",
+    ] {
+        assert!(code.contains(expected), "missing `{expected}` in {code}");
+    }
+    for unexpected in [
+        ".mime_str(\"text/plain\")",
+        ".mime_str(\"application/octet-stream\")",
+    ] {
+        assert!(
+            !code.contains(unexpected),
+            "unexpected `{unexpected}` in {code}"
+        );
+    }
+}
+
+/// A `format: binary` string form field is the text it holds, so with no `contentMediaType` read
+/// its serialization syntax is `text/plain`; a `contentMediaType` beside its `type` is not read
+/// there and keeps its `W001`.
+#[test]
+fn a_typed_format_binary_form_field_with_a_content_media_type_is_text_and_keeps_its_w001() {
+    let (report, code) = generate_with_code(
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [sheet]
+              properties:
+                sheet: { type: string, format: binary, contentMediaType: text/csv }
+      responses: { "204": { description: ok } }
+"#,
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        has_code(&report, Code::ValidationKeywordIgnored),
+        "{report:#?}"
+    );
+    let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    for expected in [
+        "pub type UploadBodySheet = String;",
+        "support::FormProperty { name: \"sheet\", mode: support::FormMode::Text, }",
+    ] {
+        assert!(code.contains(expected), "missing `{expected}` in {code}");
+    }
+}
