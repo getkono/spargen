@@ -212,13 +212,14 @@ fn removed_operation_is_major() {
 }
 
 #[test]
-fn added_optional_param_is_minor() {
+fn added_optional_param_is_major() {
     // A header leaves the URL accessor's arguments alone; an optional query parameter is the
-    // accessor's change too (`a_change_to_the_url_accessors_arguments_is_major`).
+    // accessor's change too (`a_change_to_the_url_accessors_arguments_is_major`). The new
+    // parameter is a new `pub` field of `…Params`, so every struct literal of it breaks.
     let header = PARAM_OPTIONAL_INT.replace("in: query", "in: header");
     let report = diff(&base(), &spec(&header, "id", PET_PROPS, ""));
     assert_eq!(kinds(&report), vec![ChangeKind::OptionalParamAdded]);
-    assert_eq!(report.bump, Impact::Minor);
+    assert_eq!(report.bump, Impact::Major);
 }
 
 #[test]
@@ -246,19 +247,79 @@ fn changed_param_type_is_major() {
 }
 
 #[test]
-fn added_optional_field_is_minor() {
+fn added_optional_field_is_major() {
+    // The field is `pub`, so a literal `Pet { id, name }` stops compiling (E0063).
     let with_tag = "        id: { type: integer }\n        name: { type: string }\n        tag: { type: string }\n";
     let report = diff(&base(), &spec("", "id", with_tag, ""));
     assert_eq!(kinds(&report), vec![ChangeKind::FieldAdded]);
-    assert_eq!(report.bump, Impact::Minor);
+    assert_eq!(report.bump, Impact::Major);
 }
 
 #[test]
 fn added_required_field_is_major() {
-    // A newly-required field breaks every existing constructor of the type.
+    // A newly-required field is a new field of `PetRequired`, so every literal of it breaks.
     let with_tag = "        id: { type: integer }\n        name: { type: string }\n        tag: { type: string }\n";
     let report = diff(&base(), &spec("", "id, tag", with_tag, ""));
     assert_eq!(kinds(&report), vec![ChangeKind::RequiredFieldAdded]);
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn reordering_required_members_is_no_change() {
+    // Issue #1441: `Pet` is built from `PetRequired { id, name }`, whose members are named at
+    // every call site, so declaring them in another order changes nothing a consumer writes.
+    let id_then_name = "        id: { type: string }\n        name: { type: string }\n";
+    let name_then_id = "        name: { type: string }\n        id: { type: string }\n";
+    let report = diff(
+        &spec("", "id, name", id_then_name, ""),
+        &spec("", "name, id", name_then_id, ""),
+    );
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
+}
+
+#[test]
+fn a_required_struct_appearing_or_renamed_is_reported() {
+    // `Pet` gains its first required member, and with it `PetRequired`: the member turning
+    // required is the major change, and the new type is reported beside it.
+    let report = diff(&spec("", "", PET_PROPS, ""), &base());
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::FieldRequirednessChanged, ChangeKind::TypeAdded],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+
+    // A schema spelled `PetRequired` keeps its name, so `Pet`'s companion yields to it: every
+    // literal of the old `PetRequired` now names the other type.
+    let tags = "  /tags:
+    get:
+      operationId: listTags
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PetRequired' }
+";
+    let taken = format!(
+        "{}    PetRequired:\n      type: object\n      properties:\n        tag: {{ type: string }}\n",
+        spec("", "id", PET_PROPS, tags)
+    );
+    let report = diff(&base(), &taken);
+    assert!(
+        report
+            .changes
+            .iter()
+            .any(|change| change.kind == ChangeKind::TypeRemoved
+                && change.location == "PetRequired"
+                && change
+                    .detail
+                    .starts_with("the required members of `Pet` renamed")),
+        "{:?}",
+        report.changes
+    );
     assert_eq!(report.bump, Impact::Major);
 }
 
@@ -278,9 +339,38 @@ fn changed_field_type_is_major() {
     assert_eq!(report.bump, Impact::Major);
 }
 
+/// An optional member's applied schema `default` gives its struct a `name_or_default()`
+/// accessor: gaining one is a new inherent method, and losing one breaks its calls. Another
+/// default value keeps the accessor, so it changes no surface.
+#[test]
+fn a_default_accessor_appearing_is_minor_and_disappearing_is_major() {
+    let defaulted = "        id: { type: integer }\n        name: { type: string, default: rex }\n";
+    let other_value =
+        "        id: { type: integer }\n        name: { type: string, default: max }\n";
+    // A required member's default is documented only: no accessor reads it.
+    let required = spec("", "id, name", defaulted, "");
+    let with_accessor = spec("", "id", defaulted, "");
+
+    let added = diff(&base(), &with_accessor);
+    assert_eq!(kinds(&added), vec![ChangeKind::DefaultAccessorAdded]);
+    assert_eq!(added.bump, Impact::Minor);
+
+    let removed = diff(&with_accessor, &base());
+    assert_eq!(kinds(&removed), vec![ChangeKind::DefaultAccessorRemoved]);
+    assert_eq!(removed.bump, Impact::Major);
+
+    let revalued = diff(&with_accessor, &spec("", "id", other_value, ""));
+    assert_eq!(kinds(&revalued), vec![]);
+    assert_eq!(revalued.bump, Impact::Patch);
+
+    let unapplied = diff(&required, &spec("", "id, name", PET_PROPS, ""));
+    assert_eq!(kinds(&unapplied), vec![]);
+    assert_eq!(unapplied.bump, Impact::Patch);
+}
+
 #[test]
 fn overall_bump_is_max_impact_across_mixed_changes() {
-    // New spec: adds an optional param (minor) AND removes a field (major) AND adds an operation
+    // New spec: adds an optional param (major) AND removes a field (major) AND adds an operation
     // (minor). The overall bump is the max — major — and every change is reported.
     let only_id = "        id: { type: integer }\n";
     let old = base();
@@ -290,9 +380,9 @@ fn overall_bump_is_max_impact_across_mixed_changes() {
         kinds(&report),
         vec![
             ChangeKind::UrlAccessorArgsChanged,
+            ChangeKind::OptionalParamAdded,
             ChangeKind::FieldRemoved,
             ChangeKind::OperationAdded,
-            ChangeKind::OptionalParamAdded,
         ],
         "{:?}",
         report.changes
@@ -663,6 +753,8 @@ mod keywords;
 mod labels;
 #[path = "diff/narrowing.rs"]
 mod narrowing;
+#[path = "diff/omit.rs"]
+mod omit;
 #[path = "diff/operations.rs"]
 mod operations;
 #[path = "diff/rebinding.rs"]

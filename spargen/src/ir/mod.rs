@@ -107,12 +107,15 @@ impl Api {
         }
     }
 
-    /// Whether the types the output carries contain a `contentEncoding: base64` definition, each
-    /// emitted as a newtype whose serde form the embedded `base64` runtime module writes and reads.
+    /// Whether the types the output carries contain a `contentEncoding: base64` or `base64url`
+    /// definition, each emitted as a newtype whose serde form the embedded `base64` runtime module writes and reads.
     /// An [elided](TypeGraph::elide) definition is no type of the output, so it counts for nothing.
     pub(crate) fn uses_base64(&self) -> bool {
         self.types.emitted().any(|(_, definition)| {
-            matches!(definition.kind, TypeKind::Bytes(BytesEncoding::Base64))
+            matches!(
+                definition.kind,
+                TypeKind::Bytes(BytesEncoding::Base64 | BytesEncoding::Base64Url)
+            )
         })
     }
 
@@ -155,8 +158,8 @@ impl Api {
     pub(crate) fn streams_binary_success(&self, operation: &Operation) -> bool {
         operation.responses.stream_success().is_none()
             && match operation.responses.success() {
-                SuccessShape::Unit => false,
-                SuccessShape::Plain(ty) => self.is_raw_bytes(ty),
+                SuccessShape::Unit(_) => false,
+                SuccessShape::Plain(ty, _) => self.is_raw_bytes(ty),
                 SuccessShape::Enum(entries) => {
                     entries.iter().any(|(_, ty)| self.streams_binary_arm(*ty))
                 }
@@ -322,7 +325,7 @@ fn contains_bytes(types: &TypeGraph, id: TypeId, visiting: &mut BTreeSet<TypeId>
         Some(TypeKind::Bytes(BytesEncoding::Raw)) => true,
         // A base64 newtype's serde impls call the embedded codec over the bytes, never `bytes`'
         // own (#1230).
-        Some(TypeKind::Bytes(BytesEncoding::Base64)) => false,
+        Some(TypeKind::Bytes(BytesEncoding::Base64 | BytesEncoding::Base64Url)) => false,
         Some(TypeKind::Struct(object)) => {
             object
                 .fields
@@ -1500,6 +1503,7 @@ mod tests {
             explode: false,
             deprecated: false,
             default_display: None,
+            form_encoding: None,
         }
     }
 

@@ -92,7 +92,7 @@ pub(crate) struct Operation {
     pub(crate) server: Option<String>,
     /// Where the operation came from.
     pub(crate) provenance: Provenance,
-    /// The header parameters the build bound once on the client (`Spec::bind_header`), in
+    /// The header parameters the build bound once on the client (`Spec::add_bound_header`), in
     /// declaration order. Lowering takes each out of [`Self::params`]: it is sent from the client's
     /// bound value rather than taken as an argument.
     pub(crate) bound_headers: Vec<BoundHeader>,
@@ -151,8 +151,8 @@ impl Operation {
         self.params.iter().any(|param| !param.is_positional())
     }
 
-    /// Whether the `…Params` bundle holds a required parameter, so the bundle is constructed with
-    /// `…Params::new(required…)` and the method takes it by value rather than as an optional
+    /// Whether the `…Params` bundle holds a required parameter, so the bundle converts from its
+    /// `…Required` struct and the method takes `impl Into<…Params>` rather than an optional
     /// `impl Into<Option<…Params>>`.
     pub(crate) fn params_required(&self) -> bool {
         self.params
@@ -208,6 +208,11 @@ pub(crate) struct Parameter {
     /// (never serde-wired: a params struct is only serialized, and a server-side default means the
     /// client may legitimately omit the value).
     pub(crate) default_display: Option<String>,
+    /// The resolved Encoding Objects of a form-urlencoded `in: querystring` parameter, one entry
+    /// per property of its object schema, lowered by the rules of a form-urlencoded request body
+    /// (the specification applies them "in the same way"). `Some` exactly for that parameter,
+    /// which [`check_invariants`](super::check_invariants) holds; `None` for every other one.
+    pub(crate) form_encoding: Option<super::BodyEncoding>,
 }
 
 impl Parameter {

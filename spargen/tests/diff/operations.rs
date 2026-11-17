@@ -323,10 +323,12 @@ fn photo_body(media: &str, required: bool) -> String {
 }
 
 #[test]
-fn a_body_turning_multipart_with_a_file_part_adds_its_file_name_setter_and_is_minor() {
+fn a_body_turning_multipart_with_a_file_part_adds_its_file_name_setter_and_retypes_the_part() {
     // Issue #1385: the binary `photo` becomes a file part, whose `filename` a caller sets with
     // `photo_file_name` on the `MultipartBody` the method now takes. A required body is
-    // `impl AsMultipartBody<T>`, which the `&T` every caller passes still satisfies.
+    // `impl AsMultipartBody<T>`, which the `&T` every caller passes still satisfies. The member
+    // itself changes type: in the JSON body `format: binary` is the `String` the wire holds, and in
+    // the multipart part it is the bytes (#1417).
     let old = full(
         &pets_get("listPets", &photo_body("application/json", true), PET_REF),
         PET_SCHEMA,
@@ -342,16 +344,20 @@ fn a_body_turning_multipart_with_a_file_part_adds_its_file_name_setter_and_is_mi
     let report = diff(&old, &new);
     assert_eq!(
         kinds(&report),
-        vec![ChangeKind::FileNameSetterAdded],
+        vec![
+            ChangeKind::FieldTypeChanged,
+            ChangeKind::FileNameSetterAdded
+        ],
         "{:?}",
         report.changes
     );
-    assert_eq!(report.changes[0].location, "GET /pets");
+    assert_eq!(report.changes[0].detail, "field type `String` -> `Bytes`");
+    assert_eq!(report.changes[1].location, "GET /pets");
     assert_eq!(
-        report.changes[0].detail,
+        report.changes[1].detail,
         "file name setter `photo_file_name` added"
     );
-    assert_eq!(report.bump, Impact::Minor);
+    assert_eq!(report.bump, Impact::Major);
 }
 
 #[test]
@@ -371,7 +377,10 @@ fn a_body_losing_its_file_part_removes_its_file_name_setter_and_is_major() {
     let report = diff(&old, &new);
     assert_eq!(
         kinds(&report),
-        vec![ChangeKind::FileNameSetterRemoved],
+        vec![
+            ChangeKind::FileNameSetterRemoved,
+            ChangeKind::FieldTypeChanged
+        ],
         "{:?}",
         report.changes
     );
@@ -399,6 +408,7 @@ fn an_optional_body_turning_multipart_with_a_file_part_changes_its_argument_type
         kinds(&report),
         vec![
             ChangeKind::RequestBodyTypeChanged,
+            ChangeKind::FieldTypeChanged,
             ChangeKind::FileNameSetterAdded
         ],
         "{:?}",
@@ -502,6 +512,54 @@ fn success_type_detail(old: &str, new: &str) -> String {
     assert_eq!(details.len(), 1, "{:?}", report.changes);
     assert_eq!(report.bump, Impact::Major);
     details[0].to_owned()
+}
+
+#[test]
+fn a_changed_success_status_under_the_same_success_type_is_major() {
+    // Issue #1426: a unit or single-body success decodes only its documented 2xx statuses, so
+    // moving or adding one changes which responses succeed though the success type stays put.
+    let pets = |responses: &str| {
+        full(
+            &format!(
+                "  /pets:\n    get:\n      operationId: listPets\n      responses:\n{responses}"
+            ),
+            PET_SCHEMA,
+        )
+    };
+    let bodied = |status: &str| {
+        format!(
+            "        '{status}':\n          description: ok\n          content:\n            \
+             application/json:\n              schema: {PET_REF}\n"
+        )
+    };
+    let bodyless = |status: &str| format!("        '{status}': {{ description: ok }}\n");
+
+    assert_eq!(
+        success_type_detail(&pets(&bodied("200")), &pets(&bodied("201"))),
+        "success statuses `200` -> `201` of success type `Pet`"
+    );
+    assert_eq!(
+        success_type_detail(
+            &pets(&bodyless("204")),
+            &pets(&format!("{}{}", bodyless("202"), bodyless("204")))
+        ),
+        "success statuses `204` -> `202, 204` of success type `()`"
+    );
+    assert_eq!(
+        success_type_detail(&pets(&bodyless("200")), &pets(&bodyless("2XX"))),
+        "success statuses `200` -> `2xx` of success type `()`"
+    );
+    // Neither a 2xx nor a `default`: no 2xx succeeds.
+    assert_eq!(
+        success_type_detail(&pets(&bodyless("204")), &pets(&bodyless("404"))),
+        "success statuses `204` -> `none` of success type `()`"
+    );
+    // A `2XX` range and a lone `default` each document every 2xx, so they decode alike.
+    let ranged = pets(&bodyless("2XX"));
+    let fallback = pets("        default: { description: ok }\n");
+    let report = diff(&ranged, &fallback);
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
 }
 
 #[test]
@@ -1322,12 +1380,12 @@ fn moving_a_parameter_to_another_location_compares_it_as_one_parameter() {
         kinds_at(&report),
         vec![
             (ChangeKind::UrlAccessorArgsChanged, "GET /pets"),
-            (ChangeKind::ParamRemoved, "GET /pets param `id` (query)"),
-            (ChangeKind::IdentifierRebound, "GET /pets params field `id`"),
             (
                 ChangeKind::OptionalParamAdded,
                 "GET /pets param `id` (header)"
             ),
+            (ChangeKind::ParamRemoved, "GET /pets param `id` (query)"),
+            (ChangeKind::IdentifierRebound, "GET /pets params field `id`"),
         ],
         "{:?}",
         report.changes
@@ -1405,7 +1463,8 @@ fn a_change_to_the_url_accessors_arguments_is_major() {
     );
     assert_eq!(report.bump, Impact::Major);
 
-    // A second optional query parameter rides in a bundle the accessor already takes: additive.
+    // A second optional query parameter rides in a bundle the accessor already takes, so the
+    // accessor holds; the parameter alone is the change, major as a new `pub` `…Params` field.
     let report = diff(
         &declared_params(&[("limit", "query", false)]),
         &declared_params(&[("limit", "query", false), ("offset", "query", false)]),
@@ -1419,41 +1478,28 @@ fn a_change_to_the_url_accessors_arguments_is_major() {
         "{:?}",
         report.changes
     );
-    assert_eq!(report.bump, Impact::Minor);
+    assert_eq!(report.bump, Impact::Major);
 }
 
 #[test]
-fn reordering_two_required_parameters_is_major() {
-    // Issue #1338: `ListPetsParams::new(from, to)` -> `new(to, from)`. Both are `i64`, so every
-    // call site still compiles and silently sends each value as the other: the same parameters,
-    // each unchanged, in another positional order.
+fn reordering_required_parameters_is_no_change() {
+    // Issue #1441: the required parameters are named fields of `ListPetsParamsRequired`, so a
+    // literal of it reads the same whatever order the description declares them in, and two
+    // same-typed ones cannot trade places at a call site.
     let report = diff(
         &declared_params(&[("from", "query", true), ("to", "query", true)]),
         &declared_params(&[("to", "query", true), ("from", "query", true)]),
     );
-    assert_eq!(
-        kinds_at(&report),
-        vec![(ChangeKind::PositionalArgsReordered, "GET /pets")],
-        "{:?}",
-        report.changes
-    );
-    assert_eq!(
-        report.changes[0].detail,
-        "positional arguments [`from` (query), `to` (query)] -> [`to` (query), `from` (query)]"
-    );
-    assert_eq!(report.bump, Impact::Major);
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
 
-    // Headers too: the URL accessor never takes them, so only the positional order reports it.
+    // Headers too.
     let report = diff(
         &declared_params(&[("x-org", "header", true), ("x-project", "header", true)]),
         &declared_params(&[("x-project", "header", true), ("x-org", "header", true)]),
     );
-    assert_eq!(
-        kinds_at(&report),
-        vec![(ChangeKind::PositionalArgsReordered, "GET /pets")],
-        "{:?}",
-        report.changes
-    );
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
 
     // An optional parameter is set by name, so reordering it beside a required one moves nothing.
     let report = diff(

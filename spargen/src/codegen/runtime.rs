@@ -57,7 +57,8 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
     let stream_reexport = uses_streams.then(|| {
         quote! {
             pub use stream::{
-                EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
+                EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, Resend,
+                StreamError,
             };
         }
     });
@@ -93,11 +94,15 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
     let datetime_reexport = datetime.is_some().then(|| {
         quote! { pub use datetime::{Date, DateParseError, DateTime}; }
     });
-    // The base64 codec is embedded only when a `contentEncoding: base64` newtype survives lowering;
-    // the newtype's serde impls are its only callers. It adds no dependency.
+    // The base64 codecs are embedded only when a `contentEncoding: base64` or `base64url` newtype
+    // survives lowering; the newtypes' serde impls are their only callers. They add no dependency.
     let base64_module = uses_base64.then(|| embed(&crate::support::base64_runtime_file()));
     let base64_reexport = uses_base64.then(|| {
-        quote! { pub use base64::{deserialize_base64, serialize_base64}; }
+        quote! {
+            pub use base64::{
+                deserialize_base64, deserialize_base64url, serialize_base64, serialize_base64url,
+            };
+        }
     });
     // The blocking runtime (`BlockingRuntime`) is embedded unconditionally under `blocking_cfg`. A
     // consumer opts in by declaring its own `blocking` feature wired to an optional, non-wasm tokio
@@ -111,7 +116,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
     };
     let blocking_reexport = quote! {
         #blocking_cfg
-        pub use blocking::BlockingRuntime;
+        pub use blocking::{BlockingRuntime, NestedRuntime};
     };
     quote! {
         /// The freestanding runtime embedded into this output; no spargen crate is a runtime
@@ -127,14 +132,15 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
             #base64_module
             #blocking_module
 
-            pub use auth::{attach_auth, attach_auth_replayable, replay_rejected, token_provider, AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, RejectionCheck, Replay, SecretString, TokenFuture, TokenProvider, TokenRefresher};
+            pub use auth::{attach_auth, attach_auth_replayable, replay_rejected, token_provider, AuthError, AuthKind, AuthScheme, Credential, CredentialKind, ExposeSecret, RejectionCheck, Replay, SchemeCarrier, SecretString, TokenFuture, TokenProvider, TokenRefresher};
             pub use client::{ClientConfig, ClientCore, RequestOptions, TransportConfig};
             pub use dispatch::{build_url_on, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, classify_with, decode_success, decode_success_bytes, decode_success_text, decode_success_with, decode_text_body, execute, prepare, send, send_streaming, unexpected_status, with_body_limits, StatusSpec};
             pub use error::{ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind, TransportError, UnknownVariant};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
             pub use nullable::Nullable;
+            pub use open::{deserialize_open, parse_open, EnumScope, OpenEnum, OpenUnion, UnknownPayload, UnknownValue};
             pub use header::{parse_header, require_header, HeaderError, HeaderShape};
-            pub use parameter::{cookie_pair, encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, CookieValue, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
+            pub use parameter::{cookie_pair, encode, holds_non_finite, path_segment, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, to_json_string, to_json_vec, CookieValue, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
             pub use paginate::{next_link, LinkPaginator};
             pub use request::{AsMultipartBody, MultipartBody, MultipartForm, MultipartPart, RequestBuilder};
             pub use response::{stream_success_bytes, ByteStream, ResponseValue};

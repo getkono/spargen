@@ -41,6 +41,8 @@ fn a_re_emitted_union_meet_emits_no_meet_its_result_does_not_use() {
             })
             .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
             .filter(|name| name.starts_with("HolderField"))
+            // A struct's `…Required` struct is no type the field lowered to.
+            .filter(|name| !code.contains(&format!("impl std::convert::From<{name}>")))
             .map(str::to_owned)
             .collect()
     }

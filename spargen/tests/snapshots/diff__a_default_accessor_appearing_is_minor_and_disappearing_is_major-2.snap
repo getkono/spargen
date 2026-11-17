@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|default-accessor-removed|Pet::name_or_default|default accessor `name_or_default()` removed
+bump=major

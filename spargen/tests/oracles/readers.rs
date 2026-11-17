@@ -112,7 +112,9 @@ pub fn alias_target(code: &str, ty: &str) -> Option<String> {
 }
 
 /// The variant declarations `pub enum ty` carries, in source order, each trimmed of its trailing
-/// comma, attributes and doc lines skipped.
+/// comma, attributes and doc lines skipped. An open string enum's catch-all, the variant holding
+/// an `UnknownValue`, is no value the schema lists, so it is left out too: what is read is the
+/// listed values, the same for an open and a closed enum.
 ///
 /// The union counterpart of [`declared_fields`], and the only way to see a union *member* go
 /// missing. Binding the enum's name says the union was represented; it does not say how many
@@ -128,8 +130,18 @@ pub fn enum_variants(code: &str, ty: &str) -> Vec<String> {
     lines
         .take_while(|line| !line.starts_with('}'))
         .filter(|line| !line.is_empty() && !line.starts_with("#[") && !line.starts_with("///"))
+        .filter(|line| !line.contains("support::UnknownValue<"))
         .map(|line| line.trim_end_matches(',').to_owned())
         .collect()
+}
+
+/// Whether `name` is a struct's `…Required` struct in generated source `code`: the struct a model
+/// or `…Params` type converts from, holding its required members (#1441).
+#[allow(dead_code)]
+pub fn is_required_struct(code: &str, name: &str) -> bool {
+    let from = format!("impl std::convert::From<{name}>");
+    code.lines()
+        .any(|line| line.trim_start().starts_with(&from))
 }
 
 /// The names of `pub struct`s in generated source that begin with `prefix` and whose remainder
@@ -139,13 +151,15 @@ pub fn enum_variants(code: &str, ty: &str) -> Vec<String> {
 /// generated module embeds the runtime, whose own items can share a prefix (`pub struct L` also
 /// matches `LinkPaginator`), and a count alone cannot say *which* types were emitted when it
 /// disagrees. Returning the names makes a failure legible and makes an off-by-a-constant bound
-/// impossible to mistake for a bound.
+/// impossible to mistake for a bound. A struct's `…Required` struct is no type a schema lowered
+/// to, so it is left out: a name some type converts from (#1441).
 #[allow(dead_code)]
 pub fn declared_types(code: &str, prefix: &str, suffix_ok: impl Fn(&str) -> bool) -> Vec<String> {
     code.lines()
         .filter_map(|line| line.trim_start().strip_prefix("pub struct "))
         .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
         .filter(|name| !name.is_empty())
+        .filter(|name| !is_required_struct(code, name))
         .filter_map(|name| name.strip_prefix(prefix).map(|tail| (name, tail)))
         .filter(|(_, tail)| suffix_ok(tail))
         .map(|(name, _)| name.to_owned())

@@ -1,10 +1,11 @@
 //! Request Body Objects: choosing the `content` entry a request sends and typing its body.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{
-    BytesEncoding, Docs, MediaType, Prim, RequestBody, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+    AdditionalProps, BytesEncoding, Docs, MediaType, Operation, Prim, RequestBody, Ty, TypeDef,
+    TypeGraph, TypeId, TypeKind,
 };
 use crate::oas31::media::{
     classify_media_range, media_essence, media_essence_is_suffix_range, media_object_is_opaque,
@@ -288,7 +289,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ))
     }
 
-    /// A whole non-streaming body's type, with a `contentEncoding: base64` definition taken as raw
+    /// A whole non-streaming body's type, with a `contentEncoding: base64` (or `base64url`)
+    /// definition taken as raw
     /// bytes: the emitter sends and decodes a whole `bytes` body verbatim whatever the media, so the
     /// body is `bytes::Bytes` itself rather than the base64 newtype a serde-encoded position takes
     /// (#1230). `check_invariants` holds every non-streaming body to that.
@@ -306,7 +308,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ) -> Ty {
         if !matches!(
             self.graph.get(ty.id).map(|definition| &definition.kind),
-            Some(TypeKind::Bytes(BytesEncoding::Base64))
+            Some(TypeKind::Bytes(
+                BytesEncoding::Base64 | BytesEncoding::Base64Url
+            ))
         ) {
             return ty;
         }
@@ -390,6 +394,269 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         Some(self.insert_type(hint, kind, Docs::default(), Some(provenance.clone())))
     }
+
+    /// Give every raw `bytes` value a serde codec carries the `String` its wire holds, and report
+    /// each as `W001` (#1417).
+    ///
+    /// `format: binary` is an annotation in OpenAPI 3.1 and 3.2, with no effect on how a value is
+    /// encoded (3.2.0.md:1646), so inside a JSON, XML or form body, or a sequential response's
+    /// items, the value is a JSON string: `bytes::Bytes`' own serde form, an array of numbers,
+    /// would send and expect what no server writes. The bytes are the wire itself in two places
+    /// only, which keep raw `bytes::Bytes`:
+    ///
+    /// - a whole non-streaming body, under any media, which the emitter sends and reads verbatim;
+    /// - a part of a `multipart/form-data` body: a field, or the typed `additionalProperties`
+    ///   value, of a struct that is a multipart request body and that nothing else carries — no
+    ///   other definition's member, and no other body, response or parameter.
+    ///
+    /// A multipart body struct that a serde codec also carries is one Rust type for both, and its
+    /// members take the serde answer: the part is then sent as text. A `oneOf` variant retyped
+    /// beside one that is, or becomes, a `String` would leave two variants no value tells apart, so
+    /// the two are then merged as lowering merges any such branches (#1511).
+    ///
+    /// A definition no raw position holds is retyped in place, keeping its name; one that a raw
+    /// position holds too keeps its bytes, and the serde positions take a `String` copy of it.
+    /// Run once every operation is lowered and the unreachable definitions are elided, so every
+    /// use of every definition is known.
+    pub(super) fn retype_serde_binary(&mut self, operations: &mut [Operation]) {
+        let raw = |graph: &TypeGraph, id: TypeId| {
+            matches!(
+                graph.get(id).map(|definition| &definition.kind),
+                Some(TypeKind::Bytes(BytesEncoding::Raw))
+            )
+        };
+        let mut raw_uses: HashSet<TypeId> = HashSet::new();
+        let members: HashSet<TypeId> = self
+            .graph
+            .emitted()
+            .flat_map(|(_, definition)| super::prune::kind_edges(&definition.kind))
+            .collect();
+        let mut carried_elsewhere: HashSet<TypeId> = HashSet::new();
+        let mut multipart_bodies: Vec<TypeId> = Vec::new();
+        for operation in operations.iter() {
+            carried_elsewhere.extend(operation.params.iter().map(|parameter| parameter.ty.id));
+            if let Some((body, ty)) = operation.typed_body() {
+                if body.media == MediaType::Multipart {
+                    multipart_bodies.push(ty.id);
+                } else {
+                    carried_elsewhere.insert(ty.id);
+                    if raw(&self.graph, ty.id) {
+                        raw_uses.insert(ty.id);
+                    }
+                }
+            }
+            for (_, response) in operation.responses.entries() {
+                carried_elsewhere.extend(response.headers.iter().map(|header| header.ty.id));
+                if let Some(ty) = response.body {
+                    carried_elsewhere.insert(ty.id);
+                    if response.stream.is_none() && raw(&self.graph, ty.id) {
+                        raw_uses.insert(ty.id);
+                    }
+                }
+            }
+        }
+        let part_holders: HashSet<TypeId> = multipart_bodies
+            .into_iter()
+            .filter(|id| !members.contains(id) && !carried_elsewhere.contains(id))
+            .collect();
+
+        // Every serde position holding raw bytes, grouped by the definition it holds.
+        let mut serde_slots: BTreeMap<TypeId, Vec<SerdeSlot>> = BTreeMap::new();
+        let mut retyped_unions: Vec<TypeId> = Vec::new();
+        let mut hold = |target: TypeId, slot: SerdeSlot| {
+            serde_slots.entry(target).or_default().push(slot);
+        };
+        for (owner, definition) in self.graph.emitted() {
+            match &definition.kind {
+                TypeKind::Struct(object) => {
+                    let parts = part_holders.contains(&owner);
+                    for (index, field) in object.fields.iter().enumerate() {
+                        if !raw(&self.graph, field.ty.id) {
+                        } else if parts {
+                            raw_uses.insert(field.ty.id);
+                        } else {
+                            hold(field.ty.id, SerdeSlot::Field { owner, index });
+                        }
+                    }
+                    if let AdditionalProps::Typed(value) = &object.additional {
+                        if !raw(&self.graph, value.id) {
+                        } else if parts {
+                            raw_uses.insert(value.id);
+                        } else {
+                            hold(value.id, SerdeSlot::Additional { owner });
+                        }
+                    }
+                }
+                TypeKind::Array(item) if raw(&self.graph, item.id) => {
+                    hold(item.id, SerdeSlot::Item { owner });
+                }
+                TypeKind::Tuple(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        if raw(&self.graph, item.id) {
+                            hold(item.id, SerdeSlot::Position { owner, index });
+                        }
+                    }
+                }
+                TypeKind::Union(union) => {
+                    // A variant beside another that is, or becomes, a plain `String` is merged
+                    // with it once the slots are retyped ([`Self::merge_retyped_unions`]).
+                    for (index, variant) in union.variants.iter().enumerate() {
+                        if raw(&self.graph, variant.ty.id) {
+                            retyped_unions.push(owner);
+                            hold(variant.ty.id, SerdeSlot::Variant { owner, index });
+                        }
+                    }
+                }
+                // A reservation is filled before any operation is lowered, so none is left here;
+                // the rest hold no member.
+                TypeKind::Reserved
+                | TypeKind::Array(_)
+                | TypeKind::Primitive(_)
+                | TypeKind::Enum(_)
+                | TypeKind::Bytes(_)
+                | TypeKind::Null
+                | TypeKind::Never
+                | TypeKind::Any => {}
+            }
+        }
+        for (operation, entry) in operations.iter().enumerate() {
+            let statuses = entry
+                .responses
+                .by_status
+                .iter()
+                .map(|(_, response)| response)
+                .enumerate()
+                .map(|(index, response)| (Some(index), response));
+            let default = entry
+                .responses
+                .default
+                .iter()
+                .map(|response| (None, response));
+            for (status, response) in statuses.chain(default) {
+                if let (Some(_), Some(ty)) = (response.stream, response.body) {
+                    if raw(&self.graph, ty.id) {
+                        hold(ty.id, SerdeSlot::StreamItem { operation, status });
+                    }
+                }
+            }
+        }
+
+        for (target, slots) in serde_slots {
+            let definition = self
+                .graph
+                .get(target)
+                .expect("a held definition is in the graph");
+            let provenance = definition.provenance.clone();
+            let replacement = if raw_uses.contains(&target) {
+                let (hint, docs) = (definition.name_hint.clone(), definition.docs.clone());
+                self.insert_type(
+                    &hint,
+                    TypeKind::Primitive(Prim::String),
+                    docs,
+                    Some(provenance.clone()),
+                )
+                .id
+            } else {
+                self.graph
+                    .get_mut(target)
+                    .expect("a held definition is in the graph")
+                    .kind = TypeKind::Primitive(Prim::String);
+                target
+            };
+            for slot in slots {
+                let ty = match slot {
+                    SerdeSlot::StreamItem { operation, status } => {
+                        let responses = &mut operations[operation].responses;
+                        let response = match status {
+                            Some(index) => &mut responses.by_status[index].1,
+                            None => responses
+                                .default
+                                .as_mut()
+                                .expect("a held default response exists"),
+                        };
+                        response.body.as_mut()
+                    }
+                    SerdeSlot::Field { owner, index } => match self.kind_mut(owner) {
+                        Some(TypeKind::Struct(object)) => Some(&mut object.fields[index].ty),
+                        Some(TypeKind::Reserved) | None => None,
+                        _ => None,
+                    },
+                    SerdeSlot::Additional { owner } => match self.kind_mut(owner) {
+                        Some(TypeKind::Struct(object)) => match &mut object.additional {
+                            AdditionalProps::Typed(value) => Some(&mut **value),
+                            AdditionalProps::Allow | AdditionalProps::Deny => None,
+                        },
+                        Some(TypeKind::Reserved) | None => None,
+                        _ => None,
+                    },
+                    SerdeSlot::Item { owner } => match self.kind_mut(owner) {
+                        Some(TypeKind::Array(item)) => Some(&mut **item),
+                        Some(TypeKind::Reserved) | None => None,
+                        _ => None,
+                    },
+                    SerdeSlot::Position { owner, index } => match self.kind_mut(owner) {
+                        Some(TypeKind::Tuple(items)) => Some(&mut items[index]),
+                        Some(TypeKind::Reserved) | None => None,
+                        _ => None,
+                    },
+                    SerdeSlot::Variant { owner, index } => match self.kind_mut(owner) {
+                        Some(TypeKind::Union(union)) => Some(&mut union.variants[index].ty),
+                        Some(TypeKind::Reserved) | None => None,
+                        _ => None,
+                    },
+                };
+                ty.expect("a held slot keeps the shape it was found in").id = replacement;
+            }
+            // W001 case: binary-format
+            Diagnostic::warning(Code::ValidationKeywordIgnored, provenance)
+                .message(
+                    "`format: binary` is an annotation in OpenAPI 3.1 and 3.2, with no effect on \
+                     how a value is encoded, so where a JSON, XML or form body or a stream item \
+                     carries this value it is the `String` the wire holds, not raw bytes",
+                )
+                .remedy(
+                    "spell binary content inside a structured body as `contentEncoding: base64` \
+                     or `base64url`, which generate typed bytes",
+                )
+                .emit(self.diags);
+        }
+        self.merge_retyped_unions(retyped_unions, operations);
+    }
+
+    /// The kind of the definition `id` names, for rewriting a member in place.
+    fn kind_mut(&mut self, id: TypeId) -> Option<&mut TypeKind> {
+        self.graph
+            .get_mut(id)
+            .map(|definition| &mut definition.kind)
+    }
+}
+
+/// A position in which a serde codec carries a value: a member of the definition `owner`, or the
+/// item type of the sequential response `status` (`None` for `default`) of operation `operation`.
+#[derive(Debug, Clone, Copy)]
+enum SerdeSlot {
+    Field {
+        owner: TypeId,
+        index: usize,
+    },
+    Additional {
+        owner: TypeId,
+    },
+    Item {
+        owner: TypeId,
+    },
+    Position {
+        owner: TypeId,
+        index: usize,
+    },
+    Variant {
+        owner: TypeId,
+        index: usize,
+    },
+    StreamItem {
+        operation: usize,
+        status: Option<usize>,
+    },
 }
 
 /// The schemas `media`'s raw codec carries, as the `E009` raw-schema message names them.

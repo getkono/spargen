@@ -22,13 +22,18 @@ use.
   `Result<ResponseValue<T>, Error<E>>` out. Where every parameter in the struct is optional, it
   derives `Default` and is built `…Params::default().limit(20)`, and the method takes it as
   `impl Into<Option<…>>`. Where a query, header, cookie or `querystring` parameter is required,
-  `…Params::new(..)` takes each required one, in declaration order, the optional ones are set by
-  name as before, and the method takes the struct itself: `client.search(SearchParams::new(from,
-  to).limit(20))`. Only path parameters and `new`'s arguments are positional, and `spargen diff`
-  reports a reorder of either as major (`positional-args-reordered`), since two same-typed
-  arguments trading places still compiles. String parameters and the optional bundle take
-  `impl Into<…>`, so `client.get_pet("1")` and `client.list_pets(params)` need no `to_owned()` or
-  `Some`. An operation whose method name
+  the struct converts from its `…ParamsRequired` struct, whose `pub` fields are the required
+  parameters, the optional ones are set by name as before, and the method takes `impl
+  Into<…Params>`, so a `…ParamsRequired` literal passes straight in:
+  `client.search(SearchParamsRequired { from, to })`, or
+  `client.search(SearchParams::from(SearchParamsRequired { from, to }).limit(20))`. Each required
+  parameter is named at the call site, so two same-typed ones cannot trade places unseen, and
+  reordering them in the description changes no call site. Only path parameters are positional.
+  String path parameters, the bundle and a required body take `impl Into<…>`, so
+  `client.get_pet("1")` and `client.list_pets(params)` need no `to_owned()` or `Some`, and
+  `client.add_pet(PetRequired { .. })` needs no `Pet::from`. A required body whose type is a
+  number or nullable is taken as `&T`, and an optional body as `Option<&T>`. An operation whose
+  method name
   would spell one of `Client`'s or `BlockingClient`'s fixed methods (`new`, `with_timeout`,
   …) takes a disambiguated name instead. Both clients emit `with_default_server` when the
   description declares a server, and only `BlockingClient` emits `inner`; both names are reserved
@@ -55,6 +60,13 @@ use.
   a caller names an operation without copying its path. Every request an operation builds carries
   its `Operation` in its extensions, a replay or stream reconnect included, so a transport backend
   can sign, route or meter by operation.
+- A request asks, in `Accept`, for the media its success responses are decoded from: the essence
+  of each bodied success response's chosen `content` key, once each in document order and
+  comma-joined (`text/event-stream` for an SSE stream, `application/json` for a `200` that also
+  offers XML, `application/json, text/plain` for a JSON `200` beside a text `202`). An operation
+  with no bodied success response sets none, so the HTTP stack's own default goes out, and so
+  does one whose success is chosen from a structured-suffix range key (`application/*+json`),
+  which is no RFC 9110 media range a server need understand.
 - A `format: binary` request body is taken as `impl Into<HttpBody>`: `Bytes` or `Vec<u8>` move in
   without a copy, and `HttpBody::wrap` streams an upload as it is read. A `format: binary` success
   body read whole, as the one success body or as a status of a success enum, is bounded (64 MiB
@@ -71,12 +83,22 @@ use.
   and the twin's name takes a disambiguated one, as the twin's enum does where another type
   already spells `{Method}StreamResponse`.
 - Every object struct in `types` derives `PartialEq`, as does every type it can hold, so a test
-  compares a decoded value with an expected one by `assert_eq!`. `Type::new(..)` takes the
-  required members by value in declaration order and sets each optional member as decoding an
-  absent one does (its schema `default`, else `None`); a consuming `with_<member>(value)` per
-  optional member, and per typed `additionalProperties` map, sets the rest, so a new optional
-  member leaves code built that way compiling. A struct with no required member implements
-  `Default` as `new()`.
+  compares a decoded value with an expected one by `assert_eq!`. A struct with a required member
+  converts from its `<Type>Required` struct, whose `pub` fields are those members, named at the
+  call site (`Person::from(PersonRequired { first_name, last_name })`), and leaves each optional
+  member unset, as decoding an absent one does, so serializing it writes only the members given.
+  A consuming `with_<member>(value)` per optional member, and per typed `additionalProperties`
+  map, sets the rest, so a new optional member leaves code built that way compiling; a setter
+  takes `impl Into<T>`, so `with_name("Rex")` needs no `to_owned()`, except where `T` is a number,
+  whose literal takes its type from the argument. A struct with no required member has `new()`
+  and derives `Default`, which builds the same value. Where a declared schema already spells
+  `<Type>Required`, the schema keeps that name and the companion takes a disambiguated one.
+- An optional, non-nullable member whose schema `default` is a scalar of its type stays `None`
+  when absent, on decode and on construction alike, so a decoded value sent back never pins a
+  default the server chose; `<member>_or_default()` returns its value, else that default, and its
+  rustdoc names the default. Where `<member>_or_default` would spell another method of the
+  struct, such as the `with_` setter of a member named `<x>_or_default`, the accessor takes a
+  disambiguated name and the setter keeps its own.
 - A member that is both optional and nullable has three wire states, so it is a
   `Nullable<T>` (re-exported at the root): `Nullable::Absent` leaves it off the wire and is what a
   missing member decodes as, `Nullable::Null` writes and reads an explicit `null`, and
@@ -98,10 +120,17 @@ use.
   setter's rustdoc carries its scheme's description, flows and scopes. A setter whose name an
   operation method or a fixed method already spells (a scheme named `timeout`) takes a
   disambiguated name instead. Operation `security` requirements pick the first satisfiable
-  alternative and attach bearer/basic/apiKey credentials. A missing required credential is a
+  non-empty alternative, in declared order, and attach bearer/basic/apiKey credentials; one made
+  only of `mutualTLS` schemes is always satisfiable and attaches nothing. An empty alternative
+  (`{}`, security optional) never outranks a registered credential, wherever it is listed: the
+  request goes out anonymously only when no credential is registered for any scheme of the other
+  alternatives, and an alternative with only some of its schemes registered fails as missing
+  rather than falling back to anonymous. A missing required credential is a
   request-construction error — typed as `RequestError::MissingCredential`, listing for each
-  security alternative the schemes with no registered credential; an `http basic` username
-  holding `:` (which RFC 7617 §2 forbids) as `RequestError::CredentialMismatch`; and a failed
+  non-empty security alternative the schemes with no registered credential; a credential of a
+  kind its scheme cannot carry as `RequestError::CredentialMismatch`, naming the scheme, the
+  `SchemeCarrier` it requires and the `CredentialKind` registered; an `http basic` username
+  holding `:` (which RFC 7617 §2 forbids) as `RequestError::InvalidBasicUsername`; and a failed
   token provider as `RequestError::CredentialProvider` — never a silent 401. A failure inside the
   selected alternative never falls through to a later one; `without_<scheme>()` unregisters a
   scheme, so a client derived with it (`client.clone().without_oauth()`) selects the next fully
@@ -112,10 +141,11 @@ use.
   runtime asks it for a fresh token and sends the call once more, returning the original response
   when the body cannot be cloned, the refresh fails, or the replay is rejected again.
 - A header every operation repeats (an API version, a tenant) can be bound once on the client:
-  `Spec::bind_header("X-Api-Version")` drops it from every operation's arguments, and
+  `Spec::add_bound_header("X-Api-Version")` drops it from every operation's arguments, and
   `Client::with_bound_header(name, value)?` sets the value each operation declaring it sends,
-  refusing a value that is not a valid header value (a control character but a tab, such as CR or
-  LF) as `Error::RequestConstruction`. An operation that requires it while no value is bound fails
+  refusing a name that is not a valid header name (a space or a colon in it) or a value that is
+  not a valid header value (a control character but a tab, such as CR or LF) as
+  `Error::RequestConstruction`. An operation that requires it while no value is bound fails
   before anything is sent, as `RequestError::MissingBoundParameter`.
 - Cookie parameters share one `Cookie` header, and each value is checked before it joins it, so
   no value can split into a cookie the caller never declared. A `content` or `style: cookie`
@@ -125,8 +155,24 @@ use.
   character `allowReserved` left literal is refused. A refused value fails the call before
   anything is sent, as `Error::RequestConstruction` whose `RequestError::Other` source downcasts
   to `ParameterError::InvalidCookie`, which names the parameter and never the value.
+- A parameter value that would send a different request fails the call before anything is sent,
+  as `Error::RequestConstruction` whose `RequestError::Other` source downcasts to a
+  `ParameterError`: a path value that renders to nothing (`""`, an empty array), which would
+  re-target `/users/{id}` at `/users/`, is `ParameterError::EmptyPathSegment`, and an `f64` or
+  `f32` NaN or infinity anywhere in a styled parameter or form-urlencoded value, which would
+  otherwise reach the wire as an undefined value (`ratio=`), is `ParameterError::NonFiniteNumber`.
+  The same number in a JSON `content` parameter, a JSON `in: querystring` value, a JSON request
+  body or a JSON-encoded multipart part, where `serde_json` would write `null`, is refused the
+  same way, including inside a union-typed value.
+- A response succeeds only with a 2xx status the operation documents, whatever its success shape
+  (`()`, one body, a stream, a success enum, or a `_stream` twin): an exact code, then a `2XX`
+  range, or, where no 2xx is declared, a `default`, which then documents every 2xx. Any other
+  2xx is `Error::UnexpectedStatus` with its status, headers and capped body, read before any
+  body is decoded or stream opened: a `202` to an operation documenting only `201` is not decoded
+  as the `201` body, and a `200` to one documenting only `204` does not drop its body as `()`. An
+  operation that documents neither a 2xx nor a `default` succeeds with no status.
 - A closed error taxonomy, identical across all spargen output: request-construction
-  (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
+  (`Error::RequestConstruction`, carrying a `RequestError` — one of the four credential causes
   above, the missing bound header above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
   (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
   error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
@@ -155,9 +201,24 @@ use.
   whose statuses are all exact codes gets `status()`. Every error shape implements `ApiErrorProblem`, so `Error::problem()` reads the RFC 9457
   members (`type`, `title`, `status`, `detail`, `instance`) of whichever error body a failure
   carried, across every operation and body type: the typed body on `Error::Api`, and the raw body
-  of a `4xx`/`5xx` `Error::Decode` or `Error::UnexpectedStatus`. The opt-in `open_narrowing`
-  decodes a problem type the description does not list into `Error::Api`; see
+  of a `4xx`/`5xx` `Error::Decode` or `Error::UnexpectedStatus`. A problem type the description
+  does not list decodes into `Error::Api`, its open enum holding it; see
   [problem details](./runtime.md#problem-details).
+- A string `enum` (or `const`) is a Rust enum with one unit variant per listed value and, by
+  default, one more, `Unknown(UnknownValue<Self>)`, holding any other string, so a server that
+  adds a value still decodes. Decoding and `FromStr` map a listed value to its own variant and any
+  other to `Unknown`, and nothing else builds an `UnknownValue` (its field is private, and the
+  runtime builds one only after asking the enum's own listing), so `Unknown` never holds a listed
+  value. The enum is `Debug`, `Clone`, `Eq` and `Hash`, and has `ALL` (the listed variants, in
+  order), `as_str(&self) -> &str`, `Display` and an infallible `FromStr`; `UnknownValue::as_str`
+  reads the value it holds. A union with no discriminator tells its variants apart by the values
+  they list: it tries them with every open enum read closed first, and keeps an unlisted value
+  only where its `oneOf`/`anyOf` rule still picks out a variant with them open. Under
+  `closed_enums` (`Spec::with_closed_enums(StringEnums::Closed)`, `closed_enums = true`,
+  `--closed-enums`, or `closed_enums` in `generate_api!`) every string enum lists its values and
+  nothing else: it is `Copy`, `as_str` is a `const fn(self) -> &'static str`, `FromStr` fails
+  with `UnknownVariant`, and an unlisted value is `Error::Decode`. An integer or boolean `enum` is
+  a checked newtype instead, which `open_narrowing` opens in a response body's own narrowing.
 - Beyond the request/response path, the embedded runtime carries a swappable transport seam
   (`HttpBackend`) with composable retry and middleware adapters, `Link:`-header pagination, typed
   SSE/NDJSON/JSON-sequence streams, an opt-in `blocking` client, and `wasm32-unknown-unknown`
@@ -222,4 +283,7 @@ use.
 The semver surface is the public API of generated output: changes that alter generated
 signatures, type shapes, or variant sets are major; output changes invisible to that API are
 minor; generator-internal fixes are patch. [`spargen diff`](./cli.md#spargen-diff) classifies a
-spec change the same way.
+spec change the same way. Generated enums and unions are exhaustive, an open enum included, and
+model, `…Params` and response-header fields are `pub`, so a spec adding a variant, a field (an
+optional one or an `additionalProperties` map included), an optional parameter or an optional
+response header breaks a consumer's exhaustive `match` or struct literal: `major`.

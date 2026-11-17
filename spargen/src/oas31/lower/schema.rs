@@ -259,6 +259,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // parameter or property from the generated client.
             return self.reject_ref_sibling_intersection(schema);
         };
+        // Beside a union sibling the meet is branch by branch, and a closed target is reported
+        // against the union's branches (#1500).
+        self.warn_closed_ref_meet(schema, reference, referenced, (sibling, schema));
         // The met union is collapsed by which union it holds. Beside a `oneOf`/`anyOf` sibling it
         // is the sibling's, lowered with its merge held back. Beside a non-union sibling it is a
         // union target met branch by branch (#1014): the target merged the branches alike on
@@ -376,18 +379,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.lower_type_array(schema, hint, &non_null_types);
         }
 
-        // A binary payload — `contentEncoding: base64` or `format: binary` (the OpenAPI file/upload
-        // marker) — lowers to `bytes::Bytes` rather than a `String`, so a multipart file part
-        // carries bytes and a byte body is not misdecoded as UTF-8. `contentEncoding: base64` also
-        // fixes how a serde-encoded body spells the value, a base64 string, so it wins over
-        // `format: binary` beside it (#1230). A `"null"` in the type array
-        // (`type: [string, 'null']`) makes it nullable exactly as the `oneOf [.., null]` spelling
-        // is, so both spellings reach the raw-body gates, and a JSON member becomes an `Option`,
-        // rather than the `null` being dropped here.
-        let encoding = if schema.content_encoding.as_deref() == Some("base64") {
-            Some(BytesEncoding::Base64)
-        } else {
-            (schema.format.as_deref() == Some("binary")).then_some(BytesEncoding::Raw)
+        // A binary payload — `contentEncoding: base64`/`base64url` or `format: binary` (the
+        // OpenAPI file/upload marker) — lowers to `bytes::Bytes` rather than a `String`, so a
+        // multipart file part carries bytes and a byte body is not misdecoded as UTF-8.
+        // `contentEncoding` also fixes how a serde-encoded body spells the value, base64 or
+        // base64url text, so it wins over `format: binary` beside it (#1230, #1417). Raw bytes are
+        // the wire only in a whole body and a multipart part; everywhere a serde codec carries
+        // them, `retype_serde_binary` makes them the `String` the wire holds once every use is
+        // known. A `"null"` in the type array (`type: [string, 'null']`) makes it nullable
+        // exactly as the `oneOf [.., null]` spelling is, so both spellings reach the raw-body
+        // gates, and a JSON member becomes an `Option`, rather than the `null` being dropped here.
+        let encoding = match schema.content_encoding.as_deref() {
+            Some("base64") => Some(BytesEncoding::Base64),
+            Some("base64url") => Some(BytesEncoding::Base64Url),
+            _ => (schema.format.as_deref() == Some("binary")).then_some(BytesEncoding::Raw),
         };
         if let Some(encoding) = encoding {
             let mut ty = self.insert_schema_type(schema, hint, TypeKind::Bytes(encoding));
@@ -534,25 +539,48 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Lower an array schema with `prefixItems` to a tuple of its entries' types, rejected
-    /// (`E015`) where an `items` other than `false` allows a typed remainder beside them.
+    /// (`E015`) unless the array is closed at the prefix — by `items: false`, by a `maxItems` at
+    /// or below the prefix length, or, with no `items`, by `unevaluatedItems: false`: any other
+    /// `items`, or none, allows a remainder beside them.
     fn lower_tuple(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
-        // `items` beside `prefixItems` is the 2020-12 rest-element schema. A Rust tuple
-        // is fixed-length, so a typed remainder is not representable — except
-        // `items: false`, which closes the array at the prefix and *is* a tuple.
-        if let Some(rest) = &schema.items {
-            if !matches!(rest.as_ref(), SchemaOr::Bool(false)) {
-                Diagnostic::error(Code::TupleRestNotRepresentable, schema.provenance.clone())
-                    .message(
-                        "`items` beside `prefixItems` allows a typed variable-length \
-                         remainder, which no single Rust type expresses",
-                    )
-                    .remedy(
-                        "use `items: false` to close the tuple, describe the whole array \
-                         with `items`, or omit this API segment with spargen::omit!",
-                    )
-                    .emit(self.diags);
-                return None;
-            }
+        // `items` beside `prefixItems` is the 2020-12 rest-element schema, and an absent
+        // `items` admits any remainder, as `items: true` does (#1413). A Rust tuple is
+        // fixed-length, so a remainder is not representable — except where the array is closed
+        // at the prefix, which *is* a tuple. `maxItems` no greater than the prefix length is the
+        // spelling schemars 1.x (and so aide) emits for one; `unevaluatedItems: false` closes
+        // what no `items` evaluated, so it closes the remainder only where `items` is absent.
+        let bounded = schema.validation.max_items.is_some_and(|max| {
+            usize::try_from(max).is_ok_and(|max| max <= schema.prefix_items.len())
+        });
+        let unevaluated_closed = schema.validation_children.iter().any(|(keyword, child)| {
+            keyword == "unevaluatedItems" && matches!(child, SchemaOr::Bool(false))
+        });
+        let message = match schema.items.as_deref() {
+            _ if bounded => None,
+            Some(SchemaOr::Bool(false)) => None,
+            None if unevaluated_closed => None,
+            Some(_) => Some(
+                "`items` beside `prefixItems` allows a typed variable-length remainder, which \
+                 no single Rust type expresses; `items: false`, or a `maxItems` no greater than \
+                 the prefix length, closes the tuple",
+            ),
+            None => Some(
+                "`prefixItems` with no `items` allows any remainder after the prefix, as \
+                 `items: true` does, which no single Rust type expresses; `items: false`, \
+                 `unevaluatedItems: false`, or a `maxItems` no greater than the prefix length \
+                 closes the tuple",
+            ),
+        };
+        if let Some(message) = message {
+            Diagnostic::error(Code::TupleRestNotRepresentable, schema.provenance.clone())
+                .message(message)
+                .remedy(
+                    "add `items: false` (or `maxItems` equal to the prefix length) to close the \
+                     tuple, describe the whole array with \
+                     `items`, or omit this API segment with spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
         }
         let mut items = Vec::new();
         for (index, child) in schema.prefix_items.iter().enumerate() {
@@ -764,18 +792,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate
         // (last-insert invariant: `lower_into_reservation`).
-        //
-        // A string set whose own schema names a `uuid` or date format is narrowed against that
-        // format exactly as an `allOf` member declaring it would narrow it (`narrowed_set`).
-        let formatted = matches!(
-            schema.format.as_deref(),
-            Some("uuid" | "date" | "date-time")
-        );
-        let openness = if self.open_narrowing && repr == ScalarRepr::String && formatted {
-            Openness::Locked
-        } else {
-            Openness::Closed
-        };
         let mut ty = self.insert_schema_type(
             schema,
             hint,
@@ -783,7 +799,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 repr,
                 variants,
                 width,
-                openness,
+                openness: Openness::Closed,
             }),
         );
         if self.narrowing_opens {

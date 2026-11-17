@@ -7,8 +7,8 @@ use crate::source::{InputBundle, SpannedMap, SpannedValue};
 use super::{
     Components, Document, EncodingObject, HeaderObject, Info, MediaTypeObject, OAuthFlow,
     OperationObject, ParameterObject, PathItem, Paths, RefOr, Reference, RequestBodyObject,
-    ResponseObject, ResponsesObject, SecurityRequirement, SecuritySchemeObject, Server,
-    ServerVariable, Tag,
+    ResponseObject, ResponsesObject, SchemaDialect, SecurityRequirement, SecuritySchemeObject,
+    Server, ServerVariable, Tag,
 };
 
 mod keywords;
@@ -27,16 +27,30 @@ const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
 /// purposes, so a 3.2 document may spell it either way; anything else is still `E002`.
 const OAS32_DIALECT: &str = "https://spec.openapis.org/oas/3.2/dialect/2025-09-17";
 
-/// Whether a URI names the OAS Schema Object dialect under either of its two published spellings.
+/// The plain JSON Schema 2020-12 dialect: the OAS dialect without the OAS vocabulary.
+const JSON_SCHEMA_2020_12_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
+
+/// The dialect a URI names: the OAS Schema Object dialect under either of its two published
+/// spellings, or the plain JSON Schema 2020-12 dialect, each by its exact spelling; `None` for
+/// any other, which is `E002`.
 ///
 /// This is the rule for a Schema Object's own `$schema`, which names a dialect outright. The
 /// document-level `jsonSchemaDialect` default is additionally scoped by version in
-/// [`parse_document`], where the document version is known; a Schema Object is parsed through
-/// function pointers with a fixed signature, so it does not carry that version, and the root gate
-/// is what stops a 3.1 document from adopting the 3.2 spelling as its default.
-fn is_oas_dialect(uri: &str) -> bool {
-    uri == OAS31_DIALECT || uri == OAS32_DIALECT
+/// [`parse_document`], where the document version is known; a Schema Object is parsed without
+/// that version, and the root gate is what stops a 3.1 document from adopting the 3.2 spelling as
+/// its default.
+pub(super) fn schema_dialect(uri: &str) -> Option<SchemaDialect> {
+    match uri {
+        OAS31_DIALECT | OAS32_DIALECT => Some(SchemaDialect::Oas),
+        JSON_SCHEMA_2020_12_DIALECT => Some(SchemaDialect::JsonSchema202012),
+        _ => None,
+    }
 }
+
+/// How an object that may hold a Schema Object is parsed from its node: the node, its pointer,
+/// and the dialect a Schema Object in it that declares no `$schema` is read under.
+pub(super) type ObjectParser<T> =
+    fn(&SpannedValue, &JsonPointer, SchemaDialect, &mut Diagnostics) -> Option<T>;
 
 /// Build the typed [`Document`] from a loaded [`InputBundle`], carrying spans through.
 pub(crate) fn parse_document(
@@ -62,26 +76,24 @@ pub(crate) fn parse_document(
 
     let is_oas32 = openapi_text.starts_with("3.2.");
 
-    if let Some(dialect) = root.get("jsonSchemaDialect") {
-        let dialect_text = dialect.as_str();
-        let accepted = dialect_text == Some(OAS31_DIALECT)
-            || (is_oas32 && dialect_text == Some(OAS32_DIALECT));
-        if !accepted {
-            Diagnostic::error(
-                Code::UnsupportedDialect,
-                provenance(&root_pointer.push("jsonSchemaDialect"), dialect),
-            )
-            .message("jsonSchemaDialect is not the OpenAPI Schema Object dialect")
-            .remedy(if is_oas32 {
-                format!(
-                    "set jsonSchemaDialect to `{OAS31_DIALECT}` or `{OAS32_DIALECT}`, or omit it"
-                )
-            } else {
-                format!("set jsonSchemaDialect to `{OAS31_DIALECT}`, or omit it")
-            })
-            .emit(diags);
-        }
-    }
+    let json_schema_dialect = document_dialect(root, is_oas32, diags);
+    // `jsonSchemaDialect` is the default "within this OAS document", so it does not reach into a
+    // referenced file: a referenced file that is a complete OpenAPI document reads its own, and
+    // any other referenced file is read under the OAS dialect (3.2.0.md, Specifying Schema
+    // Dialects).
+    let referenced_dialects = bundle
+        .file_ids()
+        .filter(|&file| file != bundle.root_id())
+        .filter_map(|file| {
+            let value = bundle.value_at(file);
+            let openapi = value.get("openapi")?;
+            let is_oas32 = openapi
+                .as_str()
+                .is_some_and(|text| text.starts_with("3.2."));
+            Some((file, document_dialect(value, is_oas32, diags)))
+        })
+        .filter(|(_, dialect)| *dialect != SchemaDialect::Oas)
+        .collect();
 
     let mut info = root
         .get("info")
@@ -106,12 +118,26 @@ pub(crate) fn parse_document(
 
     let paths = root
         .get("paths")
-        .map(|value| parse_paths(value, &root_pointer.push("paths"), diags))
+        .map(|value| {
+            parse_paths(
+                value,
+                &root_pointer.push("paths"),
+                json_schema_dialect,
+                diags,
+            )
+        })
         .unwrap_or_default();
 
     let components = root
         .get("components")
-        .map(|value| parse_components(value, &root_pointer.push("components"), diags))
+        .map(|value| {
+            parse_components(
+                value,
+                &root_pointer.push("components"),
+                json_schema_dialect,
+                diags,
+            )
+        })
         .unwrap_or_default();
 
     let security = root.get("security").map(parse_security).unwrap_or_default();
@@ -132,6 +158,8 @@ pub(crate) fn parse_document(
 
     let document = Document {
         is_oas32,
+        json_schema_dialect,
+        referenced_dialects,
         info,
         servers,
         paths,
@@ -141,6 +169,45 @@ pub(crate) fn parse_document(
         provenance: provenance(&root_pointer, root),
     };
     diags.result(document)
+}
+
+/// The default dialect `jsonSchemaDialect` names at the root of the complete OpenAPI document
+/// `root`, a 3.2 document when `is_oas32`: the OAS dialect when it is absent, and `E002` (read as
+/// the OAS dialect) when it names one spargen does not read, or the 3.2 spelling in a 3.1
+/// document.
+fn document_dialect(root: &SpannedValue, is_oas32: bool, diags: &mut Diagnostics) -> SchemaDialect {
+    let Some(dialect) = root.get("jsonSchemaDialect") else {
+        return SchemaDialect::Oas;
+    };
+    let accepted = match dialect.as_str() {
+        Some(OAS32_DIALECT) if !is_oas32 => None,
+        Some(uri) => schema_dialect(uri),
+        None => None,
+    };
+    if let Some(accepted) = accepted {
+        return accepted;
+    }
+    Diagnostic::error(
+        Code::UnsupportedDialect,
+        provenance(&JsonPointer::root().push("jsonSchemaDialect"), dialect),
+    )
+    .message(
+        "jsonSchemaDialect is neither the OpenAPI Schema Object dialect nor plain JSON Schema \
+         2020-12",
+    )
+    .remedy(if is_oas32 {
+        format!(
+            "set jsonSchemaDialect to `{OAS31_DIALECT}`, `{OAS32_DIALECT}` or \
+             `{JSON_SCHEMA_2020_12_DIALECT}`, or omit it"
+        )
+    } else {
+        format!(
+            "set jsonSchemaDialect to `{OAS31_DIALECT}` or `{JSON_SCHEMA_2020_12_DIALECT}`, or \
+             omit it"
+        )
+    })
+    .emit(diags);
+    SchemaDialect::Oas
 }
 
 /// Whether an `openapi` value names a release spargen implements: `3.1.<patch>` or `3.2.<patch>`.
@@ -311,7 +378,12 @@ fn parse_server_variable(value: &SpannedValue) -> Option<ServerVariable> {
     })
 }
 
-fn parse_paths(value: &SpannedValue, pointer: &JsonPointer, diags: &mut Diagnostics) -> Paths {
+fn parse_paths(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    dialect: SchemaDialect,
+    diags: &mut Diagnostics,
+) -> Paths {
     let mut paths = Paths::default();
     if let Some(map) = object(value, pointer, diags) {
         for (key, value) in map.iter() {
@@ -322,7 +394,7 @@ fn parse_paths(value: &SpannedValue, pointer: &JsonPointer, diags: &mut Diagnost
             if key.name.starts_with("x-") {
                 continue;
             }
-            if let Some(item) = parse_path_item(value, &pointer.push(&key.name), diags) {
+            if let Some(item) = parse_path_item(value, &pointer.push(&key.name), dialect, diags) {
                 paths.items.insert(key.name.clone(), item);
             }
         }
@@ -333,13 +405,16 @@ fn parse_paths(value: &SpannedValue, pointer: &JsonPointer, diags: &mut Diagnost
 pub(super) fn parse_path_item(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Option<PathItem> {
     let map = object(value, pointer, diags)?;
     let mut operations = IndexMap::new();
     for (key, value) in map.iter() {
         if let Some(method) = parse_method(&key.name) {
-            if let Some(operation) = parse_operation(value, &pointer.push(&key.name), diags) {
+            if let Some(operation) =
+                parse_operation(value, &pointer.push(&key.name), dialect, diags)
+            {
                 operations.insert(method, operation);
             }
         }
@@ -375,7 +450,7 @@ pub(super) fn parse_path_item(
                     .emit(diags);
                     continue;
                 }
-                if let Some(operation) = parse_operation(value, &at, diags) {
+                if let Some(operation) = parse_operation(value, &at, dialect, diags) {
                     operations.insert(Method::Custom(method.name.clone()), operation);
                 }
             }
@@ -383,7 +458,15 @@ pub(super) fn parse_path_item(
     }
     let parameters = value
         .get("parameters")
-        .map(|value| parse_ref_array(value, &pointer.push("parameters"), diags, parse_parameter))
+        .map(|value| {
+            parse_ref_array(
+                value,
+                &pointer.push("parameters"),
+                dialect,
+                diags,
+                parse_parameter,
+            )
+        })
         .unwrap_or_default();
     // `$ref` on a Path Item is not a Reference Object: the specification explicitly leaves the
     // behavior of adjacent fields undefined. `summary`/`description` are documentation and cannot
@@ -424,6 +507,7 @@ pub(super) fn parse_path_item(
 fn parse_operation(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Option<OperationObject> {
     require_object(value, pointer, diags)?;
@@ -437,19 +521,28 @@ fn parse_operation(
     }
     let parameters = value
         .get("parameters")
-        .map(|value| parse_ref_array(value, &pointer.push("parameters"), diags, parse_parameter))
+        .map(|value| {
+            parse_ref_array(
+                value,
+                &pointer.push("parameters"),
+                dialect,
+                diags,
+                parse_parameter,
+            )
+        })
         .unwrap_or_default();
     let request_body = value.get("requestBody").and_then(|value| {
         parse_ref_or(
             value,
             &pointer.push("requestBody"),
+            dialect,
             diags,
             parse_request_body,
         )
     });
     let responses = value
         .get("responses")
-        .map(|value| parse_responses(value, &pointer.push("responses"), diags))
+        .map(|value| parse_responses(value, &pointer.push("responses"), dialect, diags))
         .unwrap_or_default();
     Some(OperationObject {
         operation_id: value
@@ -491,6 +584,7 @@ fn parse_operation(
 pub(super) fn parse_parameter(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Option<ParameterObject> {
     require_object(value, pointer, diags)?;
@@ -528,10 +622,10 @@ pub(super) fn parse_parameter(
             .unwrap_or(false),
         schema: value
             .get("schema")
-            .and_then(|value| parse_schema_ref_or(value, &pointer.push("schema"), diags)),
+            .and_then(|value| parse_schema_ref_or(value, &pointer.push("schema"), dialect, diags)),
         content: value
             .get("content")
-            .map(|value| parse_media_map(value, &pointer.push("content"), diags))
+            .map(|value| parse_media_map(value, &pointer.push("content"), dialect, diags))
             .unwrap_or_default(),
         provenance: provenance(pointer, value),
     })
@@ -540,13 +634,14 @@ pub(super) fn parse_parameter(
 pub(super) fn parse_request_body(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Option<RequestBodyObject> {
     require_object(value, pointer, diags)?;
     Some(RequestBodyObject {
         content: value
             .get("content")
-            .map(|value| parse_media_map(value, &pointer.push("content"), diags))
+            .map(|value| parse_media_map(value, &pointer.push("content"), dialect, diags))
             .unwrap_or_default(),
         required: value
             .get("required")
@@ -559,6 +654,7 @@ pub(super) fn parse_request_body(
 fn parse_responses(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> ResponsesObject {
     let mut responses = ResponsesObject::default();
@@ -573,7 +669,7 @@ fn parse_responses(
                 continue;
             }
             let at = pointer.push(&key.name);
-            let parsed = parse_ref_or(value, &at, diags, parse_response);
+            let parsed = parse_ref_or(value, &at, dialect, diags, parse_response);
             if key.name == "default" {
                 responses.default = parsed;
             } else if let Some(parsed) = parsed {
@@ -587,6 +683,7 @@ fn parse_responses(
 pub(super) fn parse_response(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Option<ResponseObject> {
     require_object(value, pointer, diags)?;
@@ -609,7 +706,7 @@ pub(super) fn parse_response(
             .map(str::to_owned),
         content: value
             .get("content")
-            .map(|value| parse_media_map(value, &pointer.push("content"), diags))
+            .map(|value| parse_media_map(value, &pointer.push("content"), dialect, diags))
             .unwrap_or_default(),
         headers: value
             .get("headers")
@@ -622,6 +719,7 @@ pub(super) fn parse_response(
                         parse_ref_or(
                             value,
                             &headers_pointer.push(&key.name),
+                            dialect,
                             diags,
                             parse_header_object,
                         )
@@ -703,6 +801,7 @@ fn validate_tag_hierarchy(tags: &[Tag], diags: &mut Diagnostics) {
 fn parse_media_map(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> IndexMap<String, MediaTypeObject> {
     object(value, pointer, diags)
@@ -711,7 +810,7 @@ fn parse_media_map(
                 .map(|(key, value)| {
                     (
                         key.name.clone(),
-                        parse_media_type(value, &pointer.push(&key.name), diags),
+                        parse_media_type(value, &pointer.push(&key.name), dialect, diags),
                     )
                 })
                 .collect()
@@ -722,16 +821,17 @@ fn parse_media_map(
 pub(super) fn parse_media_type(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> MediaTypeObject {
     MediaTypeObject {
         reference: reference_object(value, pointer),
-        schema: value
-            .get("schema")
-            .and_then(|schema| parse_schema_ref_or(schema, &pointer.push("schema"), diags)),
-        item_schema: value
-            .get("itemSchema")
-            .and_then(|schema| parse_schema_ref_or(schema, &pointer.push("itemSchema"), diags)),
+        schema: value.get("schema").and_then(|schema| {
+            parse_schema_ref_or(schema, &pointer.push("schema"), dialect, diags)
+        }),
+        item_schema: value.get("itemSchema").and_then(|schema| {
+            parse_schema_ref_or(schema, &pointer.push("itemSchema"), dialect, diags)
+        }),
         encoding: value
             .get("encoding")
             .and_then(SpannedValue::as_object)
@@ -741,7 +841,12 @@ pub(super) fn parse_media_type(
                     .map(|(key, value)| {
                         (
                             key.name.clone(),
-                            parse_encoding(value, &encoding_pointer.push(&key.name), diags),
+                            parse_encoding(
+                                value,
+                                &encoding_pointer.push(&key.name),
+                                dialect,
+                                diags,
+                            ),
                         )
                     })
                     .collect()
@@ -757,7 +862,7 @@ pub(super) fn parse_media_type(
                     .enumerate()
                     .map(|(index, item)| {
                         let at = prefix_pointer.index(index);
-                        let encoding = parse_encoding(item, &at, diags);
+                        let encoding = parse_encoding(item, &at, dialect, diags);
                         let where_ = provenance(&at, item);
                         (encoding, where_)
                     })
@@ -766,7 +871,7 @@ pub(super) fn parse_media_type(
             .unwrap_or_default(),
         item_encoding: value.get("itemEncoding").map(|item| {
             let at = pointer.push("itemEncoding");
-            let encoding = parse_encoding(item, &at, diags);
+            let encoding = parse_encoding(item, &at, dialect, diags);
             let where_ = provenance(&at, item);
             (encoding, where_)
         }),
@@ -779,6 +884,7 @@ pub(super) fn parse_media_type(
 fn parse_encoding(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> EncodingObject {
     let Some(map) = object(value, pointer, diags) else {
@@ -798,7 +904,7 @@ fn parse_encoding(
                     .iter()
                     .filter_map(|(key, value)| {
                         let at = headers_pointer.push(&key.name);
-                        parse_ref_or(value, &at, diags, parse_header_object)
+                        parse_ref_or(value, &at, dialect, diags, parse_header_object)
                             .map(|header| (key.name.clone(), header))
                     })
                     .collect()
@@ -839,6 +945,7 @@ fn empty_encoding(provenance: Provenance) -> EncodingObject {
 pub(super) fn parse_header_object(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Option<HeaderObject> {
     let map = object(value, pointer, diags)?;
@@ -856,12 +963,12 @@ pub(super) fn parse_header_object(
             .and_then(SpannedValue::as_bool)
             .unwrap_or(false),
         explode: map.get("explode").and_then(SpannedValue::as_bool),
-        schema: map
-            .get("schema")
-            .and_then(|schema| parse_schema_ref_or(schema, &pointer.push("schema"), diags)),
+        schema: map.get("schema").and_then(|schema| {
+            parse_schema_ref_or(schema, &pointer.push("schema"), dialect, diags)
+        }),
         content: map
             .get("content")
-            .map(|content| parse_media_map(content, &pointer.push("content"), diags))
+            .map(|content| parse_media_map(content, &pointer.push("content"), dialect, diags))
             .unwrap_or_default(),
         provenance: provenance(pointer, value),
     })
@@ -870,6 +977,7 @@ pub(super) fn parse_header_object(
 fn parse_components(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Components {
     let mut components = Components::default();
@@ -886,7 +994,7 @@ fn parse_components(
             schemas
                 .iter()
                 .filter_map(|(key, value)| {
-                    parse_schema_ref_or(value, &schemas_pointer.push(&key.name), diags)
+                    parse_schema_ref_or(value, &schemas_pointer.push(&key.name), dialect, diags)
                         .map(|item| (key.name.clone(), item))
                 })
                 .collect()
@@ -895,18 +1003,21 @@ fn parse_components(
     components.responses = parse_component_map(
         map.get("responses"),
         &pointer.push("responses"),
+        dialect,
         diags,
         parse_response,
     );
     components.parameters = parse_component_map(
         map.get("parameters"),
         &pointer.push("parameters"),
+        dialect,
         diags,
         parse_parameter,
     );
     components.request_bodies = parse_component_map(
         map.get("requestBodies"),
         &pointer.push("requestBodies"),
+        dialect,
         diags,
         parse_request_body,
     );
@@ -919,7 +1030,12 @@ fn parse_components(
                 .map(|(key, value)| {
                     (
                         key.name.clone(),
-                        parse_media_type(value, &pointer.push("mediaTypes").push(&key.name), diags),
+                        parse_media_type(
+                            value,
+                            &pointer.push("mediaTypes").push(&key.name),
+                            dialect,
+                            diags,
+                        ),
                     )
                 })
                 .collect()
@@ -933,7 +1049,7 @@ fn parse_components(
             items
                 .iter()
                 .filter_map(|(key, value)| {
-                    parse_path_item(value, &items_pointer.push(&key.name), diags)
+                    parse_path_item(value, &items_pointer.push(&key.name), dialect, diags)
                         .map(|item| (key.name.clone(), item))
                 })
                 .collect()
@@ -942,12 +1058,14 @@ fn parse_components(
     components.headers = parse_component_map(
         map.get("headers"),
         &pointer.push("headers"),
+        dialect,
         diags,
         parse_header_object,
     );
     components.security_schemes = parse_component_map(
         map.get("securitySchemes"),
         &pointer.push("securitySchemes"),
+        dialect,
         diags,
         parse_security_scheme,
     );
@@ -957,15 +1075,16 @@ fn parse_components(
 fn parse_component_map<T>(
     value: Option<&SpannedValue>,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
-    parse: fn(&SpannedValue, &JsonPointer, &mut Diagnostics) -> Option<T>,
+    parse: ObjectParser<T>,
 ) -> IndexMap<String, RefOr<T>> {
     value
         .and_then(SpannedValue::as_object)
         .map(|map| {
             map.iter()
                 .filter_map(|(key, value)| {
-                    parse_ref_or(value, &pointer.push(&key.name), diags, parse)
+                    parse_ref_or(value, &pointer.push(&key.name), dialect, diags, parse)
                         .map(|item| (key.name.clone(), item))
                 })
                 .collect()
@@ -973,9 +1092,12 @@ fn parse_component_map<T>(
         .unwrap_or_default()
 }
 
+/// Parse a Security Scheme Object, which holds no Schema Object, so `_dialect` reads nothing: it
+/// is taken so the parser is an [`ObjectParser`], as every other component's is.
 pub(super) fn parse_security_scheme(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    _dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Option<SecuritySchemeObject> {
     require_object(value, pointer, diags)?;
@@ -1116,27 +1238,31 @@ fn expect_bool(
 fn parse_ref_array<T>(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
-    parse: fn(&SpannedValue, &JsonPointer, &mut Diagnostics) -> Option<T>,
+    parse: ObjectParser<T>,
 ) -> Vec<RefOr<T>> {
     value
         .as_array()
         .unwrap_or_default()
         .iter()
         .enumerate()
-        .filter_map(|(index, value)| parse_ref_or(value, &pointer.index(index), diags, parse))
+        .filter_map(|(index, value)| {
+            parse_ref_or(value, &pointer.index(index), dialect, diags, parse)
+        })
         .collect()
 }
 
 pub(super) fn parse_ref_or<T>(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
-    parse: fn(&SpannedValue, &JsonPointer, &mut Diagnostics) -> Option<T>,
+    parse: ObjectParser<T>,
 ) -> Option<RefOr<T>> {
     match reference_object(value, pointer) {
         Some(reference) => Some(RefOr::Ref(reference)),
-        None => parse(value, pointer, diags).map(RefOr::Item),
+        None => parse(value, pointer, dialect, diags).map(RefOr::Item),
     }
 }
 

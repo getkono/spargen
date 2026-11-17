@@ -1,8 +1,8 @@
 use crate::diag::{Code, Diagnostic, Diagnostics};
 
 use super::{
-    AdditionalProps, Api, BytesEncoding, MediaType, ParamLoc, ScalarRepr, ScalarValue, Ty,
-    TypeKind, UnionStrategy,
+    AdditionalProps, Api, BytesEncoding, MediaType, ParamLoc, ParamStyle, ScalarRepr, ScalarValue,
+    Ty, TypeKind, UnionStrategy,
 };
 
 /// The prefix of every message [`check_invariants`] emits. The fuzz harness
@@ -12,7 +12,7 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 
 /// Check the IR's well-formedness invariants, reporting any violation through `diags`.
 ///
-/// Run unconditionally after every lowering, on every entry point. It checks ten invariants:
+/// Run unconditionally after every lowering, on every entry point. It checks eleven invariants:
 ///
 /// 1. Referential integrity of the type graph: every [`super::Ty`] reachable from the API —
 ///    operation parameters, request bodies, response bodies, response headers, and, transitively,
@@ -28,8 +28,9 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 /// 4. Every variant of a union that is not elided carries a [`super::VariantDispatch`] of its
 ///    union's [`super::UnionStrategy`] arm ([`super::UnionStrategy::admits`]).
 /// 5. No whole non-streaming body — a request body, or a response body that is not a stream — is
-///    of a [`BytesEncoding::Base64`] definition: the emitter sends and decodes a whole `bytes` body
-///    raw, as `bytes::Bytes`, which the base64 newtype is not.
+///    of a [`BytesEncoding::Base64`] or [`BytesEncoding::Base64Url`] definition: the emitter
+///    sends and decodes a whole `bytes` body raw, as `bytes::Bytes`, which the base64 newtype is
+///    not.
 /// 6. Every request body has a type: the emitter gives an operation a body argument, and sends a
 ///    body, only for a typed one, so an untyped body would be dropped from the request.
 /// 7. A discriminated union's `defaultMapping` position ([`UnionStrategy::Discriminated`]'s
@@ -45,6 +46,9 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 ///     once: the emitter names a response variant after its selector, and the decode-precedence
 ///     sort is total only over distinct selectors. Lowering parses distinct `Responses` keys to
 ///     distinct selectors.
+/// 11. A parameter carries [`super::Parameter::form_encoding`] exactly when it is an
+///     `in: querystring` parameter of [`MediaType::FormUrlEncoded`] content: the emitter renders
+///     that one member by member through it, and reads it on no other parameter.
 ///
 /// A failure here is a frontend bug, not a spec problem, so it is reported as
 /// [`Code::InvalidInput`] against the construct that carries the violation.
@@ -109,6 +113,27 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                     "{INVARIANT_FAILURE}: operation `{}` has {querystrings} `in: querystring` \
                      parameters, but its method sends only one",
                     operation.id.0
+                ))
+                .emit(diags);
+        }
+        // The emitter renders a form-urlencoded querystring member by member through its resolved
+        // Encoding Objects, and reads them on no other parameter.
+        for parameter in &operation.params {
+            let form_querystring = parameter.location == ParamLoc::QueryString
+                && parameter.style == ParamStyle::Content(MediaType::FormUrlEncoded);
+            let problem = match (form_querystring, parameter.form_encoding.is_some()) {
+                (true, false) => {
+                    "is a form-urlencoded querystring with no resolved Encoding Objects"
+                }
+                (false, true) => {
+                    "carries Encoding Objects, but is not a form-urlencoded querystring"
+                }
+                _ => continue,
+            };
+            Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                .message(format!(
+                    "{INVARIANT_FAILURE}: parameter `{}` of operation `{}` {problem}",
+                    parameter.name, operation.id.0
                 ))
                 .emit(diags);
         }
@@ -315,11 +340,12 @@ fn check_raw_body(
     label: &str,
     provenance: &crate::diag::Provenance,
 ) {
-    if api
-        .types
-        .get(ty.id)
-        .is_some_and(|def| matches!(def.kind, TypeKind::Bytes(BytesEncoding::Base64)))
-    {
+    if api.types.get(ty.id).is_some_and(|def| {
+        matches!(
+            def.kind,
+            TypeKind::Bytes(BytesEncoding::Base64 | BytesEncoding::Base64Url)
+        )
+    }) {
         Diagnostic::error(Code::InvalidInput, provenance.clone())
             .message(format!(
                 "{INVARIANT_FAILURE}: `{label}` is a whole body of a base64 bytes type, which the \
@@ -504,6 +530,7 @@ mod tests {
                         explode: true,
                         deprecated: false,
                         default_display: None,
+                        form_encoding: None,
                     });
                 }),
             ),
@@ -1157,9 +1184,54 @@ mod tests {
                 explode: false,
                 deprecated: false,
                 default_display: None,
+                form_encoding: None,
             });
         }
         api
+    }
+
+    /// The resolvable header API whose operation carries one `in: querystring` parameter of
+    /// `media`, with `form_encoding`.
+    fn api_with_querystring_encoding(media: MediaType, form_encoding: Option<BodyEncoding>) -> Api {
+        let mut api = api_with_querystrings(1);
+        let parameter = &mut api.operations[0].params[0];
+        parameter.style = ParamStyle::Content(media);
+        parameter.form_encoding = form_encoding;
+        api
+    }
+
+    /// The emitter renders a form-urlencoded querystring through its resolved Encoding Objects,
+    /// so one without them would send no member; one on any other parameter would be ignored.
+    #[test]
+    fn a_form_encoding_is_carried_exactly_by_a_form_querystring() {
+        assert!(accepted(&api_with_querystring_encoding(
+            MediaType::FormUrlEncoded,
+            Some(BodyEncoding::default())
+        )));
+        assert!(accepted(&api_with_querystring_encoding(
+            MediaType::Json,
+            None
+        )));
+        assert_eq!(
+            only_failure(&api_with_querystring_encoding(
+                MediaType::FormUrlEncoded,
+                None
+            )),
+            format!(
+                "{INVARIANT_FAILURE}: parameter `filter0` of operation `listItems` is a \
+                 form-urlencoded querystring with no resolved Encoding Objects"
+            )
+        );
+        assert_eq!(
+            only_failure(&api_with_querystring_encoding(
+                MediaType::Json,
+                Some(BodyEncoding::default())
+            )),
+            format!(
+                "{INVARIANT_FAILURE}: parameter `filter0` of operation `listItems` carries \
+                 Encoding Objects, but is not a form-urlencoded querystring"
+            )
+        );
     }
 
     /// The emitter sets the raw query from the first `in: querystring` parameter it finds, so a

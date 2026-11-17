@@ -1,5 +1,5 @@
-//! Encoding Objects of `multipart` and form bodies: each property's mode, content type and
-//! headers.
+//! Encoding Objects of `multipart` and form bodies, and of a form-urlencoded `in: querystring`
+//! parameter: each property's mode, content type and headers.
 
 use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{
@@ -16,9 +16,9 @@ use super::parameter::StyleDomain;
 use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
-    /// Resolve the Encoding Objects of a form or multipart request body into a fully-populated
-    /// [`BodyEncoding`] — one entry per body property, so the emitted code never has to infer a
-    /// default at runtime.
+    /// Resolve the Encoding Objects of a form or multipart request body, or of a form-urlencoded
+    /// `in: querystring` parameter, into a fully-populated [`BodyEncoding`] — one entry per
+    /// property, so the emitted code never has to infer a default at runtime.
     ///
     /// Returns `None` only when the body is unrepresentable; an encoding that simply has no effect
     /// here is reported as `W011` and dropped.
@@ -404,12 +404,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Media mode for one property: a part's bytes come from the property's lowered type and its
     /// declared `contentType` ([`Self::declared_content_type`]), else `default` (an untyped
-    /// part's `contentMediaType`), else the default for the type, rides on it as the header. A
-    /// declared `contentType` is refused (`E009`) where it and the
-    /// bytes cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose
+    /// part's `contentMediaType`), else `text/plain` for a form field whose `format: binary` is
+    /// the text it holds, else the default for the type, rides on it as the header. A declared
+    /// `contentType` is refused (`E009`) where it and the bytes cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose
     /// declared type is not JSON, on multipart (the part's header) and on form-urlencoded (the
     /// field's serialization syntax) alike. A binary property on form-urlencoded is refused
-    /// (`E009`) whether or not a `contentType` made it binary.
+    /// (`E009`) whether or not a `contentType` made it binary, except a `format: binary` string,
+    /// which there is the text it holds.
     fn encoding_media_mode(
         &mut self,
         declared: Option<&EncodingObject>,
@@ -420,9 +421,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         at: &Provenance,
     ) -> Option<EncodingMode> {
         let explicit = declared.and_then(|encoding| encoding.content_type.as_deref());
+        // A form field is serialized as text, and `format: binary` there is an annotation: the
+        // field is the `String` the wire holds (`retype_serde_binary`, #1417), so with no
+        // `contentType` declaring it binary it defaults to text, not to the octets a form has no
+        // representation of.
+        let annotated_text = media == MediaType::FormUrlEncoded
+            && explicit.is_none()
+            && matches!(
+                self.kind_of(field_ty.id),
+                Some(TypeKind::Bytes(crate::ir::BytesEncoding::Raw))
+            );
         let content_type = match explicit {
             Some(list) => self.declared_content_type(list, declared, media, name, at)?,
-            None => default.unwrap_or_else(|| self.default_content_type(field_ty)),
+            // The most specific statement of the wire wins: a declared `contentType` above, then
+            // the property's own `contentMediaType`, then the `text/plain` a `format: binary`
+            // form field's annotation implies, then the type's default.
+            None => match default {
+                Some(media) => media,
+                None if annotated_text => "text/plain".to_owned(),
+                None => self.default_content_type(field_ty),
+            },
         };
         // The declared `contentType` is a wire *header*; how the value is rendered into bytes is
         // decided by the property's own lowered type. That is what lets a part declare

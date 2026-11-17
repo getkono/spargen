@@ -11,7 +11,7 @@ use crate::name::{ByteStreamNames, Names, OperationNames};
 use super::body::{accept_tokens, body_send_tokens};
 use super::dispatch::{
     attach_auth_tokens, error_branch_tokens, success_decode_tokens, success_enum_dispatch,
-    success_type,
+    success_type, undocumented_success_guard,
 };
 use super::docs::{doc_tokens, normalize_rustdoc};
 use super::params::{
@@ -27,8 +27,9 @@ use super::ty::{reqwest_method, ty_tokens};
 /// its extensions. The `#[inline] pub async fn` operation method sends what the preparer built
 /// through `support::execute`, which replays it once after a rejected refreshable credential, and
 /// hands the response to the decoder, which dispatches it by status into the operation's typed
-/// success value or typed error; a streaming success's stream is then handed the request it sent,
-/// to reconnect. The request builder is the preparer without its replay. The wire work itself —
+/// success value or typed error; a streaming success's stream is then handed the `support::Resend`
+/// the preparer kept of the request before its credentials were attached, to sign afresh and
+/// resend on each reconnect. The request builder is the preparer without its replay. The wire work itself —
 /// encoding, sending, and decoding — is done by `support` routines, most of them generic over the
 /// body or error type.
 ///
@@ -61,7 +62,7 @@ pub(super) fn emit_operation(
     } = sig;
     let decls: Vec<&TokenStream> = args.iter().map(|arg| &arg.decl).collect();
     let normalizations = args.iter().filter_map(|arg| arg.normalize.as_ref());
-    let url_building = url_building(operation, operation_names);
+    let url_building = url_building(operation, names, operation_names);
     let UrlBuilding {
         statements: url_statements,
         build_url,
@@ -104,9 +105,33 @@ pub(super) fn emit_operation(
     let body_send = body_send_tokens(operation, api, names, bindings);
     let streaming = operation.responses.stream_success().is_some();
     let replay_binding = &bindings.replay;
-    let attach_auth = attach_auth_tokens(operation, api, request_binding, replay_binding);
+    // A streaming success keeps what its stream signs afresh and resends to reconnect: the request
+    // as it stood before its credentials were attached, which the preparer returns beside the
+    // request and its replay, carrying what the request the method sends carries. The decoder
+    // alone, which never saw the request, has none to give it.
+    let reconnect_request_binding = &bindings.reconnect_request;
+    let attach_auth = attach_auth_tokens(
+        operation,
+        api,
+        request_binding,
+        replay_binding,
+        streaming.then_some(reconnect_request_binding),
+    );
     let error_branch = error_branch_tokens(operation, api, names, error_ident);
     let success_decode = success_decode_tokens(operation, api, names, success_ty, error_ident);
+    // An operation documenting no 2xx answers one as its error branch answers every undocumented
+    // status, `Error::UnexpectedStatus` (no error entry is a 2xx), so it is the whole decode.
+    let decode_by_class = if operation.responses.success().documents_no_2xx() {
+        error_branch.clone()
+    } else {
+        quote! {
+            if response.status().is_success() {
+                #success_decode
+            } else {
+                #error_branch
+            }
+        }
+    };
     let url_accessor = emit_operation_url(operation_names, sig, &url_building);
     let preparer = &operation_names.preparer;
     let request_builder = &operation_names.request_builder;
@@ -137,20 +162,36 @@ pub(super) fn emit_operation(
             .collect()
     };
     let forwards = forwards_streaming(streaming);
-    // A streaming success keeps a clone of the request it sent, which its stream resends to
-    // reconnect; the decoder alone, which never saw the request, has none to give it.
-    let reconnect_request_binding = &bindings.reconnect_request;
-    let (reconnect_request_init, resend) = if streaming {
+    let (prepared, prepared_ty, reconnect_request_init, resend) = if streaming {
         (
+            quote! { (#request_binding, #replay_binding, #reconnect_request_binding) },
+            quote! {
+                (
+                    http::Request<support::HttpBody>,
+                    Option<support::Replay>,
+                    Option<support::Resend>,
+                )
+            },
             Some(quote! {
-                let #reconnect_request_binding = support::try_clone_request(&#request_binding);
+                let #reconnect_request_binding = #reconnect_request_binding
+                    .map(|resend| resend.carrying(&#request_binding));
             }),
             Some(quote! {
                 .map(|stream| stream.resending(&self.core, #reconnect_request_binding))
             }),
         )
     } else {
-        (None, None)
+        (
+            quote! { (#request_binding, #replay_binding) },
+            quote! { (http::Request<support::HttpBody>, Option<support::Replay>) },
+            None,
+            None,
+        )
+    };
+    let request_only = if streaming {
+        quote! { (#request_binding, ..) }
+    } else {
+        quote! { (#request_binding, _) }
     };
     // A non-streaming response is read under the client's body limits, which `execute` gives the
     // responses it returns; a response the caller obtained some other way is given them here.
@@ -191,14 +232,19 @@ pub(super) fn emit_operation(
                     true,
                 ),
             ),
-            _ => (
-                quote! { support::ByteStream },
-                quote! {
-                    Ok(support::stream_success_bytes(
-                        response.map(support::read_as_it_arrives),
-                    ))
-                },
-            ),
+            (_, shape) => {
+                // The single binary body's twin decodes the 2xx statuses its method does.
+                let guard = undocumented_success_guard(&shape, error_ident);
+                (
+                    quote! { support::ByteStream },
+                    quote! {
+                        #guard
+                        Ok(support::stream_success_bytes(
+                            response.map(support::read_as_it_arrives),
+                        ))
+                    },
+                )
+            }
         };
         let twin_return = quote! {
             Result<support::ResponseValue<#twin_success_ty>, support::Error<#error_ty>>
@@ -258,7 +304,7 @@ pub(super) fn emit_operation(
             &self,
             #(#preparer_decls),*
         ) -> Result<
-            (http::Request<support::HttpBody>, Option<support::Replay>),
+            #prepared_ty,
             support::Error<std::convert::Infallible>,
         > {
             #(#normalizations)*
@@ -277,7 +323,7 @@ pub(super) fn emit_operation(
             let #request_binding = #request_binding.build()?;
             let mut #request_binding = support::prepare(&self.core, #request_binding, #streaming_arg);
             #request_binding.extensions_mut().insert(ops::#operation_const);
-            Ok((#request_binding, #replay_binding))
+            Ok(#prepared)
         }
 
         #attrs
@@ -286,7 +332,7 @@ pub(super) fn emit_operation(
             &self,
             #(#decls),*
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
-            let (#request_binding, #replay_binding) = self
+            let #prepared = self
                 .#preparer(#(#forwards),*)
                 .await
                 .map_err(support::Error::widen)?;
@@ -311,7 +357,7 @@ pub(super) fn emit_operation(
         ) -> Result<http::Request<support::HttpBody>, support::Error<std::convert::Infallible>> {
             self.#preparer(#(#forwards),*)
                 .await
-                .map(|(#request_binding, _)| #request_binding)
+                .map(|#request_only| #request_binding)
         }
 
         #[doc = #decoder_doc]
@@ -322,11 +368,7 @@ pub(super) fn emit_operation(
             response: http::Response<support::HttpBody>,
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
             #body_limits
-            if response.status().is_success() {
-                #success_decode
-            } else {
-                #error_branch
-            }
+            #decode_by_class
         }
 
         #url_accessor
@@ -585,8 +627,13 @@ struct UrlBuilding {
     build_url: TokenStream,
 }
 
-/// Build an operation's [`UrlBuilding`] over the bindings `name` allocated for it.
-fn url_building(operation: &Operation, operation_names: &OperationNames) -> UrlBuilding {
+/// Build an operation's [`UrlBuilding`] over the bindings `name` allocated for it, and the
+/// `names` of the types a form-urlencoded querystring value is rendered from.
+fn url_building(
+    operation: &Operation,
+    names: &Names,
+    operation_names: &OperationNames,
+) -> UrlBuilding {
     let bindings = &operation_names.bindings;
     let path_binding = &bindings.path;
     let query_binding = &bindings.query;
@@ -598,8 +645,12 @@ fn url_building(operation: &Operation, operation_names: &OperationNames) -> UrlB
         .map(|(param, ident)| {
             let placeholder = format!("{{{}}}", param.name);
             let value = param_value_tokens(param, quote! { &#ident });
+            // An empty rendering would leave an empty segment and re-target the request.
             quote! {
-                #path_binding = #path_binding.replace(#placeholder, &#value);
+                #path_binding = #path_binding.replace(
+                    #placeholder,
+                    &support::path_segment(#value).map_err(support::Error::request_construction)?,
+                );
             }
         });
     let query = location_statements(
@@ -645,7 +696,7 @@ fn url_building(operation: &Operation, operation_names: &OperationNames) -> UrlB
             if initializes_raw_query {
                 return quote! {};
             }
-            querystring_param_tokens(parameter, value, query_binding, raw_query_binding)
+            querystring_param_tokens(parameter, value, names, query_binding, raw_query_binding)
         },
     );
 
@@ -685,8 +736,7 @@ fn url_building(operation: &Operation, operation_names: &OperationNames) -> UrlB
     }
 }
 
-/// Whether a required parameter, a path argument or a `…Params::new` argument, is emitted as
-/// `impl Into<String>` rather than its concrete type.
+/// Whether a path argument is emitted as `impl Into<String>` rather than its concrete type.
 ///
 /// Exactly a non-nullable, unboxed [`Prim::String`](crate::ir::Prim::String). `Option<String>`
 /// and `Box<String>` positions stay concrete: `Into` would make `None` ambiguous at the call site
@@ -698,6 +748,34 @@ pub(super) fn takes_into_string(api: &Api, ty: Ty) -> bool {
         && matches!(
             api.types.get(ty.id).map(|definition| &definition.kind),
             Some(TypeKind::Primitive(crate::ir::Prim::String))
+        )
+}
+
+/// Whether a request-body argument or a setter's value of type `ty` is emitted as `impl Into<T>`
+/// rather than `T`, so a `…Required` struct literal, a `&str` or a model passes straight in.
+///
+/// Every type but three. A nullable one is an `Option<T>` position, where `Into` would leave a bare
+/// `None` uninferable. A numeric primitive: an integer or float literal takes its type from
+/// the position, which `impl Into<u8>` or `impl Into<f32>` no longer gives, so `5` would fall back
+/// to `i32` and stop compiling. And an uninhabited type: no value converts
+/// into it, and the `.into()` that would is an unreachable expression rustc warns of.
+pub(super) fn takes_into(types: &crate::ir::TypeGraph, ty: Ty) -> bool {
+    use crate::ir::Prim;
+    !ty.nullable
+        && !matches!(
+            types.get(ty.id).map(|definition| &definition.kind),
+            Some(
+                TypeKind::Never
+                    | TypeKind::Primitive(
+                        Prim::I32
+                            | Prim::I64
+                            | Prim::U8
+                            | Prim::U16
+                            | Prim::U32
+                            | Prim::U64
+                            | Prim::F64
+                    )
+            )
         )
 }
 
@@ -872,9 +950,14 @@ impl OperationSig {
         }
         if let Some(params_binding) = &bindings.params {
             let (decl, normalize) = if operation.params_required() {
-                // A required parameter rides in the bundle, so the bundle is always passed, built
-                // by `…Params::new(required…)`.
-                (quote! { #params_binding: #params_ident }, None)
+                // A required parameter rides in the bundle, so the bundle is always passed: the
+                // bundle itself, or its `…Required` struct, which converts into it.
+                (
+                    quote! { #params_binding: impl Into<#params_ident> },
+                    Some(quote! {
+                        let #params_binding: #params_ident = #params_binding.into();
+                    }),
+                )
             } else {
                 // `impl Into<Option<..>>` accepts the bundle directly as well as
                 // `None`/`Some(..)`, so a caller who sets optional parameters passes the bundle
@@ -893,8 +976,8 @@ impl OperationSig {
                 shapes_url: operation.url_takes_params(),
             });
         }
-        if let Some((body, ty)) = operation.typed_body() {
-            let ty = ty_tokens(ty, names, true);
+        if let Some((body, body_ty)) = operation.typed_body() {
+            let ty = ty_tokens(body_ty, names, true);
             let body_binding = bindings
                 .body
                 .as_ref()
@@ -908,7 +991,10 @@ impl OperationSig {
             // `filename` a caller sets for each: a required one is `&T` or a `MultipartBody`, so a
             // call passing the body alone sends every file part under its part name; an optional
             // one is the concrete `Option<MultipartBody>`, where `impl AsMultipartBody` would
-            // leave a bare `None` uninferable.
+            // leave a bare `None` uninferable. Any other required body is taken by value as
+            // anything that converts into its type ([`takes_into`]), so a `…Required` struct
+            // literal passes straight in, and is borrowed once converted, as the encoders read it;
+            // an optional one is `Option<&T>`.
             let files = api.multipart_file_parts(operation).is_some();
             let (decl, normalize) = match (api.sends_binary_body(operation), files, body.required) {
                 (true, _, true) => (quote! { #body_binding: impl Into<support::HttpBody> }, None),
@@ -922,6 +1008,10 @@ impl OperationSig {
                 (false, true, false) => (
                     quote! { #body_binding: Option<support::MultipartBody<'_, #ty>> },
                     None,
+                ),
+                (false, false, true) if takes_into(&api.types, body_ty) => (
+                    quote! { #body_binding: impl Into<#ty> },
+                    Some(quote! { let #body_binding: &#ty = &#body_binding.into(); }),
                 ),
                 (false, false, true) => (quote! { #body_binding: &#ty }, None),
                 (false, false, false) => (quote! { #body_binding: Option<&#ty> }, None),
@@ -988,3 +1078,6 @@ impl Arg {
         &self.forward
     }
 }
+
+#[cfg(test)]
+mod tests;

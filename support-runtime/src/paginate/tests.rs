@@ -178,6 +178,19 @@ fn a_rel_value_is_unquoted_only_when_quotes_open_and_close_it() {
 }
 
 #[test]
+fn only_the_first_rel_parameter_is_read() {
+    // RFC 8288 §3.3: occurrences of `rel` after the first MUST be ignored (#1445).
+    assert_eq!(
+        next_of(r#"<https://api.example.com/items?page=1>; rel="prev"; rel="next""#),
+        None
+    );
+    assert_eq!(
+        next_of(r#"<https://x/2>; rel="next"; rel="prev""#),
+        Some("https://x/2".to_owned())
+    );
+}
+
+#[test]
 fn text_before_the_uri_reference_does_not_shift_it() {
     // The URI-reference is whatever sits between the first `<` and the `>` after it, wherever
     // that `<` falls in the entry.

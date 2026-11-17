@@ -52,18 +52,6 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
         if operation.url_takes_params() {
             url_args.push(UrlArgSurface::Params);
         }
-        // Then `…Params::new`'s arguments: every required bundled parameter, in declaration order,
-        // as codegen's `params_constructor` takes them.
-        let positional_args = positional
-            .into_iter()
-            .chain(
-                operation
-                    .params
-                    .iter()
-                    .filter(|param| param.required && !param.is_positional()),
-            )
-            .map(key_of)
-            .collect();
         for param in &operation.params {
             // A param that sends an explicit `null` is set through `Nullable<T>`, so the same
             // nullable type behind another serialization is a different surface.
@@ -130,12 +118,12 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                         ),
                     }),
                 url_args,
-                positional_args,
                 params,
                 param_fields,
                 request_body,
                 file_name_setters,
                 success: success_sig(&operation.responses.success(), api, names, settings),
+                success_statuses: success_statuses(&operation.responses.success()),
                 error: error_sig(&error, api, names, settings),
                 error_body: error_body_sig(&error, api, names, settings),
                 response_headers: response_headers(operation, api, names, settings),
@@ -167,10 +155,10 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                     bindings.insert(field_name.clone(), field.name.wire.clone());
                     // An optional nullable field is a `Nullable<T>`, where a required one is the
                     // `Option<T>` `canon_ty` renders. A member is `required` here exactly when
-                    // `new` takes it, so a property gaining `readOnly` leaves `new` as a required
-                    // field turning optional does. A `writeOnly` one `new` still takes is an
-                    // optional member read back, so its type is spelled with the `Option` (or
-                    // `Nullable`) the struct declares.
+                    // the `…Required` struct holds it, so a property gaining `readOnly` leaves it
+                    // as a required field turning optional does. A `writeOnly` one it still
+                    // holds is an optional member read back, so its type is spelled with the
+                    // `Option` (or `Nullable`) the struct declares.
                     let ty = if field.decodes_optional() && field.ty.nullable {
                         nullable_canon_ty(field.ty, api, names, settings)
                     } else {
@@ -203,7 +191,24 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                     }),
                     AdditionalProps::Allow | AdditionalProps::Deny => None,
                 };
-                TypeSurface::Struct(fields, overflow, bindings)
+                let accessors = object
+                    .fields
+                    .iter()
+                    .filter(|field| field.applied_default().is_some())
+                    .map(|field| {
+                        names
+                            .default_accessors
+                            .get(&(id, field.name.wire.clone()))
+                            .expect("default accessor allocated")
+                            .as_str()
+                            .to_owned()
+                    })
+                    .collect();
+                let required = names
+                    .required_structs
+                    .get(&id)
+                    .map(|ident| ident.as_str().to_owned());
+                TypeSurface::Struct(fields, overflow, bindings, accessors, required)
             }
             // A string enum generates a real `pub enum` whose variants are surface; an integer or
             // boolean set a checked newtype whose scalar and associated `const`s are. A boolean set
@@ -250,7 +255,7 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
                 if let Some(unknown) = names.open_variants.get(&id) {
                     variants.insert(
                         unknown.as_str().to_owned(),
-                        "{ tag: String, value: serde_json::Value }".to_owned(),
+                        "UnknownPayload<Self>".to_owned(),
                     );
                 }
                 TypeSurface::Union(variants)
@@ -267,6 +272,9 @@ pub(crate) fn build(api: &Api, names: &Names, settings: Settings) -> Surface {
             // A base64 schema is a nominal newtype over `bytes::Bytes`, whose serde form is the
             // base64 string; its public `.0` field is the bytes.
             Emission::Base64 => TypeSurface::Newtype("Bytes".to_owned()),
+            // A base64url newtype has the same `.0`, but reads and writes another alphabet, so a
+            // change between the two is reported as the change of wire form it is.
+            Emission::Base64Url => TypeSurface::Newtype("Bytes as base64url".to_owned()),
             Emission::BoolAlias | Emission::Alias => {
                 aliases.insert(name);
                 continue;
@@ -434,7 +442,8 @@ pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names, settings: Settings) -> 
         | Emission::Union(_)
         | Emission::Newtype
         | Emission::Never
-        | Emission::Base64 => nominal_name(ty, names),
+        | Emission::Base64
+        | Emission::Base64Url => nominal_name(ty, names),
         // A boolean set listing both values is its `bool` alias.
         Emission::BoolAlias => "bool".to_owned(),
         Emission::Alias => match &def.kind {
@@ -449,7 +458,9 @@ pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names, settings: Settings) -> 
             | TypeKind::Enum(_)
             | TypeKind::Union(_)
             | TypeKind::Never
-            | TypeKind::Bytes(crate::ir::BytesEncoding::Base64)
+            | TypeKind::Bytes(
+                crate::ir::BytesEncoding::Base64 | crate::ir::BytesEncoding::Base64Url,
+            )
             | TypeKind::Reserved => unreachable!("`TypeGraph::emission` never aliases {def:?}"),
         },
     };
@@ -499,9 +510,30 @@ fn nominal_name(ty: Ty, names: &Names) -> String {
 /// Render an operation's success shape to a stable string.
 fn success_sig(shape: &SuccessShape, api: &Api, names: &Names, settings: Settings) -> String {
     match shape {
-        SuccessShape::Unit => "()".to_owned(),
-        SuccessShape::Plain(ty) => canon_ty(*ty, api, names, settings),
+        SuccessShape::Unit(_) => "()".to_owned(),
+        SuccessShape::Plain(ty, _) => canon_ty(*ty, api, names, settings),
         SuccessShape::Enum(entries) => status_enum_sig("Success", entries, api, names, settings),
+    }
+}
+
+/// The 2xx statuses a unit or single-body success decodes, as labels: `2xx` alone where its
+/// selectors cover every 2xx (a `2XX` range, or the success-source `default`), since those decode
+/// alike; otherwise each selector's Responses Object key, in decode precedence; empty where none is
+/// documented. Empty for a success enum, whose statuses its [`success_sig`] already renders.
+fn success_statuses(shape: &SuccessShape) -> Vec<String> {
+    match shape {
+        SuccessShape::Unit(statuses) | SuccessShape::Plain(_, statuses) => {
+            if statuses.cover_every_2xx() {
+                vec!["2xx".to_owned()]
+            } else {
+                statuses
+                    .selectors()
+                    .iter()
+                    .map(|status| status.display_label())
+                    .collect()
+            }
+        }
+        SuccessShape::Enum(_) => Vec::new(),
     }
 }
 

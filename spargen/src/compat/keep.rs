@@ -15,42 +15,24 @@ pub(super) type Kept = BTreeMap<String, BTreeSet<&'static str>>;
 
 /// Resolve every keep rule against `bundle`, before any omit rule applies, so a rule naming an
 /// operation an omit rule also removes is not a stale rule. A rule that names no declared
-/// operation is an `E019`; `None` when any rule was.
+/// operation is an `E019`, unless `elsewhere` holds it (the other spec of a diff declares what it
+/// names), in which case it keeps nothing and is satisfied; `None` when any rule was an `E019`.
 pub(super) fn resolve(
     rules: &[KeepRule],
+    elsewhere: &HashSet<KeepRule>,
     bundle: &InputBundle,
     diags: &mut Diagnostics,
 ) -> Option<Kept> {
     let mut kept = Kept::new();
     let mut complete = true;
-    let paths = bundle.root().get("paths").and_then(SpannedValue::as_object);
     for rule in rules {
         let KeepRule::Operation { method, path } = rule;
-        let method_key = method.as_oas_key();
-        let candidates: Vec<String> = match paths {
-            None => Vec::new(),
-            Some(paths) if has_glob_meta(path) => {
-                let glob = Glob::compile(path);
-                paths
-                    .iter()
-                    .map(|(key, _)| key.name.clone())
-                    .filter(|key| glob.matches(key))
-                    .collect()
-            }
-            Some(_) => vec![unescape_glob(path)],
-        };
-        let mut matched = false;
-        for key in candidates {
-            let declares = paths
-                .and_then(|paths| paths.get(&key))
-                .and_then(|item| path_item_target(bundle, item))
-                .is_some_and(|item| item.get(method_key).is_some());
-            if declares {
-                matched = true;
-                kept.entry(key).or_default().insert(method_key);
-            }
+        let declared = declared_paths(rule, bundle);
+        let matched = !declared.is_empty();
+        for key in declared {
+            kept.entry(key).or_default().insert(method.as_oas_key());
         }
-        if !matched {
+        if !matched && !elsewhere.contains(rule) {
             complete = false;
             let message = if has_glob_meta(path) {
                 "glob keep rule did not match any declared operation"
@@ -70,6 +52,34 @@ pub(super) fn resolve(
         }
     }
     complete.then_some(kept)
+}
+
+/// The root `paths` keys whose Path Item declares the operation `rule` names: the one key an exact
+/// rule names, or every key a glob matches, where that item carries the rule's method.
+pub(super) fn declared_paths(rule: &KeepRule, bundle: &InputBundle) -> Vec<String> {
+    let KeepRule::Operation { method, path } = rule;
+    let Some(paths) = bundle.root().get("paths").and_then(SpannedValue::as_object) else {
+        return Vec::new();
+    };
+    let candidates: Vec<String> = if has_glob_meta(path) {
+        let glob = Glob::compile(path);
+        paths
+            .iter()
+            .map(|(key, _)| key.name.clone())
+            .filter(|key| glob.matches(key))
+            .collect()
+    } else {
+        vec![unescape_glob(path)]
+    };
+    candidates
+        .into_iter()
+        .filter(|key| {
+            paths
+                .get(key)
+                .and_then(|item| path_item_target(bundle, item))
+                .is_some_and(|item| item.get(method.as_oas_key()).is_some())
+        })
+        .collect()
 }
 
 /// The Path Item a `paths` entry stands for: the entry itself, or the item its `$ref` names.

@@ -67,21 +67,28 @@ pub(crate) struct SpecArgs {
     /// Max diagnostics collected before batching stops (default 100).
     #[arg(long, value_name = "COUNT")]
     pub(crate) batch_cap: Option<usize>,
-    /// Lower a response body's own `enum`/`const` narrowings of a plain `string`, `integer` or
-    /// `boolean` as open sets, so a value the description does not list still decodes.
+    /// Lower a response body's own `enum`/`const` narrowings of a plain `integer` or `boolean` as
+    /// open sets, so a value the description does not list still decodes.
     #[arg(long, conflicts_with = "no_open_narrowing")]
     pub(crate) open_narrowing: bool,
     /// Keep response-body narrowings closed, overriding `open_narrowing = true` in
     /// `spargen.toml`.
     #[arg(long)]
     pub(crate) no_open_narrowing: bool,
-    /// Give every discriminated union without a `defaultMapping` an `Unknown { tag, value }`
+    /// Give every discriminated union without a `defaultMapping` an `Unknown(UnknownPayload<Self>)`
     /// variant, so a discriminator value the description does not list still decodes.
     #[arg(long, conflicts_with = "no_open_unions")]
     pub(crate) open_unions: bool,
     /// Keep discriminated unions closed, overriding `open_unions = true` in `spargen.toml`.
     #[arg(long)]
     pub(crate) no_open_unions: bool,
+    /// Generate every string `enum` closed, with no `Unknown` variant, so a value the description
+    /// does not list fails to decode.
+    #[arg(long, conflicts_with = "no_closed_enums")]
+    pub(crate) closed_enums: bool,
+    /// Generate every string `enum` open, overriding `closed_enums = true` in `spargen.toml`.
+    #[arg(long)]
+    pub(crate) no_closed_enums: bool,
     /// Carry the spec's prose into rustdoc as written, overriding `verbatim_docs = false` in
     /// `spargen.toml`.
     #[arg(long, conflicts_with = "no_verbatim_docs")]
@@ -114,10 +121,10 @@ pub(crate) struct SpecArgs {
     #[arg(long = "keep-operation", value_name = "METHOD /path")]
     pub(crate) keep_operation: Vec<String>,
     /// Bind a header parameter once on the client instead of taking it at every call
-    /// (repeatable), e.g. `--bind-header X-Api-Version`; added to `bind_headers` in
+    /// (repeatable), e.g. `--bound-header X-Api-Version`; added to `bound_headers` in
     /// `spargen.toml`.
-    #[arg(long = "bind-header", value_name = "NAME")]
-    pub(crate) bind_header: Vec<String>,
+    #[arg(long = "bound-header", value_name = "NAME")]
+    pub(crate) bound_header: Vec<String>,
 }
 
 impl SpecArgs {
@@ -141,6 +148,8 @@ impl SpecArgs {
             no_open_narrowing,
             open_unions,
             no_open_unions,
+            closed_enums,
+            no_closed_enums,
             verbatim_docs,
             no_verbatim_docs,
             testing,
@@ -150,7 +159,7 @@ impl SpecArgs {
             omit_component,
             omit_pointer,
             keep_operation,
-            bind_header,
+            bound_header,
         } = self;
         [
             (*carve, "--carve"),
@@ -163,6 +172,8 @@ impl SpecArgs {
             (*no_open_narrowing, "--no-open-narrowing"),
             (*open_unions, "--open-unions"),
             (*no_open_unions, "--no-open-unions"),
+            (*closed_enums, "--closed-enums"),
+            (*no_closed_enums, "--no-closed-enums"),
             (*verbatim_docs, "--verbatim-docs"),
             (*no_verbatim_docs, "--no-verbatim-docs"),
             (*testing, "--testing"),
@@ -172,7 +183,7 @@ impl SpecArgs {
             (!omit_component.is_empty(), "--omit-component"),
             (!omit_pointer.is_empty(), "--omit-pointer"),
             (!keep_operation.is_empty(), "--keep-operation"),
-            (!bind_header.is_empty(), "--bind-header"),
+            (!bound_header.is_empty(), "--bound-header"),
         ]
         .into_iter()
         .filter_map(|(given, flag)| given.then_some(flag))
@@ -224,7 +235,7 @@ pub(crate) struct DiffArgs {
     pub(crate) old: Utf8PathBuf,
     /// Path to the NEW (candidate) OpenAPI document.
     pub(crate) new: Utf8PathBuf,
-    /// Exit non-zero (status 1) when the diff is a breaking (`major`) change — a CI gate. Without
+    /// Exit non-zero (status 4) when the diff is a breaking (`major`) change — a CI gate. Without
     /// this flag a completed comparison exits 0 whatever its bump; a spec that fails to lower
     /// exits 1, and a configuration error 3, either way.
     #[arg(long)]

@@ -6,15 +6,16 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use crate::diag::Provenance;
-use crate::ir::{Ty, TypeKind, UnionVariant};
+use crate::ir::{AdditionalProps, Ty, TypeKind, UnionVariant};
 use crate::oas31::{Schema, SchemaOr};
+use crate::source::schema_component_name;
 
 use super::combine::{objects_met_as_their_unions, take_refiners, Contribution};
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::refiner::implied_applicator_category;
 use super::shape::schema_has_union;
 use super::union::HeldUntypedWarning;
-use super::{LowerCtx, MetUnion, Refiner};
+use super::{LowerCtx, MetUnion, Refiner, ScopedRefiners};
 
 /// A union an `allOf` meet met with its other members, for
 /// [`LowerCtx::warn_excluded_union_member_branches`].
@@ -475,7 +476,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return None;
         };
         let reference = member.reference.as_deref()?;
-        reference.strip_prefix("#/components/schemas/")?;
+        schema_component_name(reference)?;
         let target = self
             .ref_target_body(reference, &member.provenance)?
             .into_owned();
@@ -792,8 +793,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .iter()
                 .map(|(member, refiner)| (member.as_ref(), *refiner)),
         );
+        // Where each member that closes the composition writes the keyword that closes it.
+        let closing: Vec<Provenance> = contributions
+            .iter()
+            .filter_map(|contribution| match contribution {
+                Contribution::Object { closed_at, .. } => closed_at.clone(),
+                _ => None,
+            })
+            .collect();
         let met = self.meet_union_with_all_of(
-            schema, hint, composed, refiners, union, union_hint, spelling,
+            schema,
+            hint,
+            (composed, &closing),
+            refiners,
+            union,
+            union_hint,
+            spelling,
         );
         Some((met, composed_lowered))
     }
@@ -839,16 +854,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A `$ref` member's component stays open on [`Self::union_member_stack`] while its body
         // is lowered here, so a `$ref` back to it inside that body is not expanded again.
         let expanded = match &schema.all_of[union_index] {
-            SchemaOr::Schema(member) => member
-                .reference
-                .as_deref()
-                .and_then(|reference| reference.strip_prefix("#/components/schemas/")),
+            SchemaOr::Schema(member) => member.reference.as_deref().and_then(schema_component_name),
             SchemaOr::Bool(_) => None,
         };
         let Some(name) = expanded else {
             return self.meet_all_of_union_member(schema, hint, union_index);
         };
-        self.union_member_stack.push(name.to_owned());
+        self.union_member_stack.push(name.into_owned());
         let lowered = self.meet_all_of_union_member(schema, hint, union_index);
         self.union_member_stack.pop();
         lowered
@@ -1138,6 +1150,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ) -> Option<Ty> {
         let keywords_hint = format!("{hint}Constraint");
         let keywords_mark = self.graph_mark();
+        let target = schema
+            .reference
+            .as_deref()
+            .and_then(|reference| self.ref_target_body(reference, &schema.provenance))
+            .map(Cow::into_owned);
+        // A closed target closes each branch the composition meets (#1500).
+        let mut closing: Vec<Provenance> = self
+            .closed_at(referenced, target.as_ref(), &schema.provenance)
+            .into_iter()
+            .collect();
         let (composed, refiners) = if implied_applicator_category(keywords).is_some() {
             let scoped = self.lower_untyped_refiners(keywords, &keywords_hint)?;
             (referenced, vec![(keywords, Refiner::Scoped(scoped))])
@@ -1154,10 +1176,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     Some(TypeKind::Struct(_))
                 )
             };
-            let target_union = schema.reference.as_deref().is_some_and(|reference| {
-                self.ref_target_body(reference, &schema.provenance)
-                    .is_some_and(|target| real_union(&target))
-            });
+            let target_union = target.as_ref().is_some_and(real_union);
             let unions = usize::from(target_union)
                 + self.unions_reached(keywords_schema)
                 + usize::from(real_union(union));
@@ -1169,13 +1188,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             else {
                 return self.reject_ref_sibling_intersection(schema);
             };
+            // The target met with the keywords is the closed reading the `$ref` spelling without
+            // a union reports, and closed keywords close each branch as a closed target does.
+            if let Some(reference) = schema.reference.as_deref() {
+                self.warn_closed_ref_meet(
+                    schema,
+                    reference,
+                    referenced,
+                    (keywords, keywords_schema),
+                );
+            }
+            closing.extend(self.closed_at(keywords, Some(keywords_schema), &schema.provenance));
             (composed, Vec::new())
         };
         let keywords_lowered = keywords_mark..self.graph_mark();
         let ty = self.meet_union_with_all_of(
             schema,
             hint,
-            Some(composed),
+            (Some(composed), &closing),
             refiners,
             union,
             &format!("{hint}Union"),
@@ -1197,12 +1227,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`Self::meet_ref_union_sibling`], whose `composed` is the `$ref` target met with the
     /// keywords beside the union. A union uninhabited on its own (a lone `false` branch) makes the
     /// whole meet that uninhabited type ([`Self::uninhabited_union_meet`]), not `E013`.
+    ///
+    /// `closing` locates each `additionalProperties: false` that closes `composed`, and a closing
+    /// refiner its own: each is reported where a branch it closes declares a property it does not
+    /// ([`Self::warn_closed_union_meet`]).
     #[allow(clippy::too_many_arguments)]
     fn meet_union_with_all_of(
         &mut self,
         schema: &Schema,
         hint: &str,
-        composed: Option<Ty>,
+        (composed, closing): (Option<Ty>, &[Provenance]),
         refiners: Vec<(&Schema, Refiner)>,
         union: &Schema,
         union_hint: &str,
@@ -1251,6 +1285,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self.reject_all_of_union_meet(schema, spelling);
             };
             meet = met;
+            // A closed composition closes each branch it meets to the fields the two declare
+            // (#1500).
+            if let Some(TypeKind::Struct(composed)) = self.kind_of(composed.id).cloned() {
+                if matches!(composed.additional, AdditionalProps::Deny) {
+                    self.warn_closed_union_meet(&composed.fields, closing, lowered);
+                }
+            }
         }
         // Collapsed before the refiners, which meet each branch apart and so would give branches
         // the composition left as one type distinct definitions of the same shape: the refiners
@@ -1289,6 +1330,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let Ok(met) = met else {
                 return self.reject_all_of_union_meet(schema, spelling);
             };
+            // Untyped object keywords that close their object close each object branch they
+            // refine to the fields the two declare, as a closed composition does (#1500).
+            if let Refiner::Scoped(ScopedRefiners {
+                object: Some(object),
+                ..
+            }) = refiner
+            {
+                let at = self.closed_at(object, Some(member), &member.provenance);
+                if let (Some(at), Some(TypeKind::Struct(closed))) =
+                    (at, self.kind_of(object.id).cloned())
+                {
+                    self.warn_closed_union_meet(&closed.fields, &[at], meet);
+                }
+            }
             meet = met;
         }
         // The refiners narrow each branch of their category apart, so two branches the collapse

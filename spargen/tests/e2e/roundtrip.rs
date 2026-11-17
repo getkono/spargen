@@ -25,6 +25,17 @@ fn union_and_allof_roundtrip_under_proptest() {
     let report = generate_fixture_crate(&spec, &out, "roundtrip_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
+    // A model with a required member is built only from its `…Required` struct: its inherent
+    // `impl` holds the optional members' setters and no positional `new` (#1441).
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    let person = generated
+        .split("    impl Person {\n")
+        .nth(1)
+        .expect("`Person` has an inherent impl for its optional member's setter");
+    let person = &person[..person.find("\n    }\n").expect("the impl closes")];
+    assert!(person.contains("fn with_nickname("), "{person}");
+    assert!(!person.contains("fn new("), "{person}");
+
     // The property-test dependency is exclusively scaffolding for this test harness's crate.
     let mut manifest = std::fs::read_to_string(out.join("Cargo.toml")).unwrap();
     assert!(
@@ -45,8 +56,7 @@ fn union_and_allof_roundtrip_under_proptest() {
         status.success(),
         "the generated union/allOf types must survive the proptest JSON round-trip"
     );
-    // The union serde these types exercise, the `defaultMapping` trial check among it, lints
-    // clean.
+    // The union serde these types exercise lints clean.
     let status = fixture_cargo(&out)
         .args(["clippy", "--", "-D", "warnings"])
         .status()
@@ -276,43 +286,6 @@ fn an_untagged_discriminated_variant_holding_a_claimed_tag_does_not_serialize() 
     }
 }
 
-// The `defaultMapping` variant holding an unclaimed tag decodes through the untagged variants'
-// trial before the fallback, so a payload the untagged variant's schema accepts would come back as
-// that variant (#1376): it is refused. One no untagged variant accepts, or holding its own tag,
-// decodes back as itself.
-#[test]
-fn a_default_mapping_payload_an_untagged_variant_claims_does_not_serialize() {
-    let claimed = types::Ride::RideOther(Box::new(types::RideOther {
-        kind: Some("bus".to_owned()),
-        label: Some("x".to_owned()),
-        note: None,
-    }));
-    let error = serde_json::to_value(&claimed).expect_err("claimed by the untagged variant");
-    let error = error.to_string();
-    assert!(error.contains("Ride::RideOther"), "{error}");
-    assert!(error.contains("Ride::RideVariant1"), "{error}");
-    for (kind, label) in [(Some("bus"), None), (Some("RideOther"), Some("x"))] {
-        let ride = types::Ride::RideOther(Box::new(types::RideOther {
-            kind: kind.map(str::to_owned),
-            label: label.map(str::to_owned),
-            note: Some("n".to_owned()),
-        }));
-        let written = serde_json::to_value(&ride).expect("unclaimed by any untagged variant");
-        let back: types::Ride = serde_json::from_value(written).expect("decodes back");
-        assert_eq!(back, ride);
-    }
-    // Holding no tag, the variant is written with its own, which routes it back by tag.
-    let untagged = types::Ride::RideOther(Box::new(types::RideOther {
-        kind: None,
-        label: Some("x".to_owned()),
-        note: None,
-    }));
-    let written = serde_json::to_value(&untagged).expect("its own tag is inserted");
-    assert_eq!(written["kind"], "RideOther", "{written}");
-    let back: types::Ride = serde_json::from_value(written).expect("decodes back");
-    assert!(matches!(back, types::Ride::RideOther(_)), "{back:?}");
-}
-
 // `Chain` is lowered while `Node`, which holds one, is still being lowered: its dispatch is decided
 // once `Node` is, so a tagged payload both members' schemas accept decodes as the member its tag
 // names, at every depth (#1400). Trial-matched, `{"kind": "Leaf"}` matched both and failed.
@@ -359,6 +332,108 @@ fn a_trial_string_variant_refuses_a_one_key_object() {
     let back: types::Status = serde_json::from_value(serde_json::json!("queued")).unwrap();
     assert_eq!(back, types::Status::Phase(Box::new(types::Phase::Queued)));
 }
+
+// An `anyOf` variant that decodes a payload by ignoring members it does not declare is not a
+// match (#1404): the variant that keeps the payload is selected over a more specific one that
+// would drop `a`, and writes it back unchanged.
+#[test]
+fn an_any_of_trial_selects_the_variant_that_keeps_the_payload() {
+    let payload = serde_json::json!({ "a": 5 });
+    let thing: types::Thing = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(thing, types::Thing::ThingVariant0(_)), "{thing:?}");
+    assert_eq!(serde_json::to_value(&thing).unwrap(), payload);
+}
+
+// A payload every `anyOf` variant decodes only by dropping a member is a decode error naming the
+// union, not a lossy pick.
+#[test]
+fn an_any_of_payload_every_variant_would_drop_part_of_does_not_decode() {
+    let error = serde_json::from_value::<types::Thing>(serde_json::json!({ "z": 1 }))
+        .expect_err("no variant keeps `z`")
+        .to_string();
+    assert!(error.contains("union Thing"), "{error}");
+}
+
+// Where more than one `anyOf` variant keeps the payload, the more specific one is selected, as
+// before; one only the broader variant keeps decodes as that one.
+#[test]
+fn an_any_of_trial_selects_the_more_specific_of_two_lossless_variants() {
+    let payload = serde_json::json!({ "a": 1 });
+    let brief: types::Briefing = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(brief, types::Briefing::Fuller(_)), "{brief:?}");
+    assert_eq!(serde_json::to_value(&brief).unwrap(), payload);
+    let payload = serde_json::json!({ "a": 1, "b": "x" });
+    let full: types::Briefing = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(full, types::Briefing::Fuller(_)), "{full:?}");
+    assert_eq!(serde_json::to_value(&full).unwrap(), payload);
+    let payload = serde_json::json!({ "a": 1, "c": true });
+    let brief: types::Briefing = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(brief, types::Briefing::Brief(_)), "{brief:?}");
+    assert_eq!(serde_json::to_value(&brief).unwrap(), payload);
+    // A `readOnly` member is declared, so a payload carrying it is kept, though a request leaves
+    // it out when the value is written back.
+    let full: types::Briefing =
+        serde_json::from_value(serde_json::json!({ "a": 1, "d": "server" })).unwrap();
+    assert!(matches!(full, types::Briefing::Fuller(_)), "{full:?}");
+}
+
+// The untagged members of a discriminated `anyOf` are selected by the same rule: a payload no tag
+// selects decodes as the member that keeps it, and one no member keeps does not decode.
+#[test]
+fn an_untagged_discriminated_any_of_member_is_selected_only_where_it_keeps_the_payload() {
+    let payload = serde_json::json!({ "kind": "bike", "a": 1 });
+    let gadget: types::Gadget = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(gadget, types::Gadget::GadgetVariant1(_)), "{gadget:?}");
+    assert_eq!(serde_json::to_value(&gadget).unwrap(), payload);
+    let payload = serde_json::json!({ "kind": "bike", "b": "x" });
+    let gadget: types::Gadget = serde_json::from_value(payload.clone()).unwrap();
+    assert!(matches!(gadget, types::Gadget::GadgetVariant2(_)), "{gadget:?}");
+    assert_eq!(serde_json::to_value(&gadget).unwrap(), payload);
+    let decoded = serde_json::from_value::<types::Gadget>(serde_json::json!({ "kind": "bike", "z": 1 }));
+    assert!(decoded.is_err(), "no member keeps `z`: {decoded:?}");
+}
+
+// An overflow entry whose key is a declared member's name is never written, so the declared
+// member's own value is the only one on the wire, as the form and multipart encoders already do
+// (#1412).
+#[test]
+fn an_overflow_key_naming_a_declared_member_is_not_serialized() {
+    let overflow = std::collections::BTreeMap::from([
+        ("host".to_owned(), "b".to_owned()),
+        ("code".to_owned(), "c".to_owned()),
+        ("x-extra".to_owned(), "e".to_owned()),
+    ]);
+    let headers = types::Headers::new()
+        .with_host("a".to_owned())
+        .with_code("z".to_owned())
+        .with_additional(overflow.clone());
+    let written = serde_json::to_string(&headers).unwrap();
+    assert_eq!(written, r#"{"host":"a","code":"z","x-extra":"e"}"#);
+    // With the declared members unset, the overflow still does not stand in for them.
+    let headers = types::Headers::new().with_additional(overflow);
+    let written = serde_json::to_string(&headers).unwrap();
+    assert_eq!(written, r#"{"x-extra":"e"}"#);
+}
+
+// A model with required members is built from its `…Required` struct, which names each one, so
+// two same-typed members can never trade places at the call site (#1441). The optional member is
+// left unset, and set by name; the value round-trips.
+#[test]
+fn a_model_with_required_members_is_built_from_its_required_struct() {
+    let person = types::Person::from(types::PersonRequired {
+        first_name: "Ada".to_owned(),
+        last_name: "Lovelace".to_owned(),
+    });
+    assert_eq!(
+        serde_json::to_value(&person).unwrap(),
+        serde_json::json!({ "first_name": "Ada", "last_name": "Lovelace" })
+    );
+    let person = person.with_nickname("Countess");
+    let written = serde_json::to_value(&person).unwrap();
+    let back: types::Person = serde_json::from_value(written.clone()).unwrap();
+    assert_eq!(back, person);
+    assert_eq!(written["nickname"], "Countess");
+}
 "####;
 
 /// The spec generated for [`union_and_allof_roundtrip_under_proptest`]: a `User` object pulling in a
@@ -367,10 +442,14 @@ fn a_trial_string_variant_refuses_a_one_key_object() {
 /// `allOf`-merged struct (`Account`), and the trial-matched unions a payload of another JSON
 /// category must not satisfy: two open objects and an array as a `oneOf` (`Mixed`) and an `anyOf`
 /// (`MixedAny`), a string enum beside a string (`Status`), and a discriminated union with an
-/// untagged object member (`Vehicle`), and one whose `defaultMapping` member overlaps an untagged
-/// one (`Ride`); a discriminated union lowered while its member `Node` is still being lowered
-/// (`Chain`), and one with a union member and two string members (`Creature`). One operation
-/// references `User` so every type is emitted.
+/// untagged object member (`Vehicle`); a discriminated union lowered while its member `Node` is
+/// still being lowered (`Chain`), and one with a union member and two string members (`Creature`);
+/// two `anyOf` unions of open objects whose selection keeps every member of the payload, one of
+/// inline members no specificity favours correctly (`Thing`) and one ranked by it (`Briefing`), and
+/// a discriminated `anyOf` whose untagged members are held to the same rule (`Gadget`); and a
+/// struct with a typed overflow map beside declared members (`Headers`).
+/// One operation references `User` so every type is emitted. The document is 3.1, so the
+/// `defaultMapping` union (`Ride`) is in `OAS32_SPEC`, whose fixture's `wire` test drives it.
 const ROUNDTRIP_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: Roundtrip, version: 1.0.0 }
@@ -403,9 +482,66 @@ components:
         mixedAny: { $ref: "#/components/schemas/MixedAny" }
         status: { $ref: "#/components/schemas/Status" }
         vehicle: { $ref: "#/components/schemas/Vehicle" }
-        ride: { $ref: "#/components/schemas/Ride" }
         node: { $ref: "#/components/schemas/Node" }
         creature: { $ref: "#/components/schemas/Creature" }
+        thing: { $ref: "#/components/schemas/Thing" }
+        briefing: { $ref: "#/components/schemas/Briefing" }
+        gadget: { $ref: "#/components/schemas/Gadget" }
+        headers: { $ref: "#/components/schemas/Headers" }
+        person: { $ref: "#/components/schemas/Person" }
+    Person:
+      type: object
+      required: [first_name, last_name]
+      properties:
+        first_name: { type: string }
+        last_name: { type: string }
+        nickname: { type: string }
+    Headers:
+      type: object
+      properties:
+        host: { type: string }
+        code: { type: string }
+      additionalProperties: { type: string }
+    Thing:
+      anyOf:
+        - type: object
+          properties:
+            a: { type: integer }
+        - type: object
+          properties:
+            b: { type: string }
+            c: { type: string }
+    Brief:
+      type: object
+      properties:
+        a: { type: integer }
+        c: { type: boolean }
+    Fuller:
+      type: object
+      properties:
+        a: { type: integer }
+        b: { type: string }
+        d: { type: string, readOnly: true }
+    Briefing:
+      anyOf:
+        - $ref: "#/components/schemas/Brief"
+        - $ref: "#/components/schemas/Fuller"
+    Gadget:
+      anyOf:
+        - $ref: "#/components/schemas/Car"
+        - type: object
+          properties:
+            kind: { type: string }
+            a: { type: integer }
+        - type: object
+          properties:
+            kind: { type: string }
+            b: { type: string }
+            c: { type: string }
+      discriminator:
+        propertyName: kind
+        mapping:
+          car: "#/components/schemas/Car"
     Bird:
       type: object
       required: [kind]
@@ -501,26 +637,6 @@ components:
         propertyName: kind
         mapping:
           car: "#/components/schemas/Car"
-    RideOther:
-      type: object
-      properties:
-        kind: { type: string }
-        label: { type: string }
-        note: { type: string }
-    Ride:
-      oneOf:
-        - $ref: "#/components/schemas/Car"
-        - type: object
-          required: [label]
-          properties:
-            kind: { type: string }
-            label: { type: string }
-        - $ref: "#/components/schemas/RideOther"
-      discriminator:
-        propertyName: kind
-        mapping:
-          car: "#/components/schemas/Car"
-        defaultMapping: "#/components/schemas/RideOther"
     Cat:
       type: object
       required: [petType, name]

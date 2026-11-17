@@ -30,14 +30,60 @@ fn assert_refuses<T: serde::de::DeserializeOwned + std::fmt::Debug>(document: &s
 }
 
 #[test]
-fn absent_optional_fields_use_schema_defaults() {
-    let settings: basic_client::types::Settings =
-        serde_json::from_str(r#"{"retries": 7}"#).unwrap();
-    assert_eq!(settings.color.as_deref(), Some("red"));
-    assert_eq!(settings.enabled, Some(true));
-    assert_eq!(settings.ratio, Some(1.5));
+fn an_absent_defaulted_member_decodes_as_absent_and_its_accessor_reads_the_default() {
+    use basic_client::types::{Mode, Settings};
+    let settings: Settings = serde_json::from_str(r#"{"retries": 7}"#).unwrap();
+    // Absent means the server's choice: nothing is filled in, so nothing is re-sent.
+    assert_eq!(settings.color, None);
+    assert_eq!(settings.enabled, None);
+    assert_eq!(settings.ratio, None);
+    assert_eq!(settings.mode, None);
     assert_eq!(settings.retries, 7);
-    assert_eq!(settings.mode, Some(basic_client::types::Mode::Auto));
+    assert_eq!(serde_json::to_string(&settings).unwrap(), r#"{"retries":7}"#);
+    // The accessor supplies the schema default for an absent member...
+    assert_eq!(settings.color_or_default(), "red");
+    assert!(settings.enabled_or_default());
+    assert_eq!(settings.ratio_or_default(), 1.5);
+    assert_eq!(settings.mode_or_default(), Mode::Auto);
+    // ...and the member's own value for a present one.
+    let present: Settings = serde_json::from_str(
+        r#"{"retries": 7, "color": "blue", "enabled": false, "ratio": 0.5, "mode": "manual"}"#,
+    )
+    .unwrap();
+    assert_eq!(present.color_or_default(), "blue");
+    assert!(!present.enabled_or_default());
+    assert_eq!(present.ratio_or_default(), 0.5);
+    assert_eq!(present.mode_or_default(), Mode::Manual);
+}
+
+#[test]
+fn construction_leaves_a_defaulted_member_unset_so_it_is_not_sent() {
+    use basic_client::types::{MergedDefault, Settings, SettingsRequired};
+    let settings = Settings::from(SettingsRequired { retries: 3 });
+    assert_eq!(settings.color, None);
+    assert_eq!(settings.enabled, None);
+    assert_eq!(serde_json::to_string(&settings).unwrap(), r#"{"retries":3}"#);
+    // Setting one member sends that member alone, never the defaults beside it.
+    assert_eq!(
+        serde_json::to_string(&settings.with_color("blue")).unwrap(),
+        r#"{"color":"blue","retries":3}"#
+    );
+    // A struct with no required member derives `Default`, which is `new()`: every member unset.
+    let merged = MergedDefault::default();
+    assert_eq!(merged, MergedDefault::new());
+    assert_eq!(merged.p, None);
+    assert_eq!(serde_json::to_string(&merged).unwrap(), "{}");
+}
+
+#[test]
+fn a_default_accessor_never_takes_a_setters_name() {
+    // `with_b`'s accessor would spell `with_b_or_default`, the setter of `b_or_default`: the
+    // setter keeps its name, and the accessor takes a disambiguated one.
+    let clash = basic_client::types::DefaultAccessorClash::new()
+        .with_b_or_default("set".to_owned())
+        .with_with_b("w".to_owned());
+    assert_eq!(clash.b_or_default.as_deref(), Some("set"));
+    assert_eq!(clash.with_b.as_deref(), Some("w"));
 }
 
 #[test]
@@ -58,50 +104,56 @@ fn an_uninhabited_optional_field_drops_its_members_default() {
 
 #[test]
 fn a_narrowing_meet_retypes_or_drops_its_members_default() {
-    // Absent, `valid` takes the default as the enum's variant and `ratio` as an integer, on both
-    // spellings of the meet; `bad` and `fraction` admit no default of the narrowed type.
+    // `valid` reads the default as the enum's variant and `ratio` as an integer, on both spellings
+    // of the meet; `bad` and `fraction` admit no default of the narrowed type, so they have no
+    // accessor. Absent, every member decodes as absent.
     let merged: basic_client::types::NarrowDefault = serde_json::from_str("{}").unwrap();
     let sibling: basic_client::types::NarrowDefaultSibling = serde_json::from_str("{}").unwrap();
+    assert_eq!(serde_json::to_string(&merged).unwrap(), "{}");
+    assert_eq!(serde_json::to_string(&sibling).unwrap(), "{}");
     // The two spellings name their enums differently, so each is compared through its wire form.
     for (valid, bad, ratio, fraction) in [
         (
-            serde_json::to_value(&merged.valid).unwrap(),
+            serde_json::to_value(merged.valid_or_default()).unwrap(),
             serde_json::to_value(&merged.bad).unwrap(),
-            merged.ratio,
+            merged.ratio_or_default(),
             merged.fraction,
         ),
         (
-            serde_json::to_value(&sibling.valid).unwrap(),
+            serde_json::to_value(sibling.valid_or_default()).unwrap(),
             serde_json::to_value(&sibling.bad).unwrap(),
-            sibling.ratio,
+            sibling.ratio_or_default(),
             sibling.fraction,
         ),
     ] {
         assert_eq!(valid, serde_json::json!("a"));
         assert!(bad.is_null());
-        assert_eq!(ratio, Some(3_i64));
+        assert_eq!(ratio, 3_i64);
         assert!(fraction.is_none());
     }
     // The wider member keeps its own defaults as it wrote them.
     let base: basic_client::types::NarrowDefaultBase = serde_json::from_str("{}").unwrap();
-    assert_eq!(base.valid.as_deref(), Some("a"));
-    assert_eq!(base.bad.as_deref(), Some("zzz"));
-    assert_eq!(base.fraction, Some(2.5));
+    assert_eq!(base.valid, None);
+    assert_eq!(base.valid_or_default(), "a");
+    assert_eq!(base.bad_or_default(), "zzz");
+    assert_eq!(base.fraction_or_default(), 2.5);
 }
 
 #[test]
 fn a_meet_applies_a_default_only_a_later_side_declares() {
     use basic_client::types::{MergedDefault, MergedDefaultClash, MergedDefaultSibling};
     let merged: MergedDefault = serde_json::from_str("{}").unwrap();
-    assert_eq!(merged.p.as_deref(), Some("hello"));
+    assert_eq!(merged.p, None);
+    assert_eq!(merged.p_or_default(), "hello");
     let sibling: MergedDefaultSibling = serde_json::from_str("{}").unwrap();
-    assert_eq!(sibling.p.as_deref(), Some("hello"));
+    assert_eq!(sibling.p_or_default(), "hello");
     // `world` comes first here, yet the clash keeps `hello`, as it does in the other order.
     let clash: MergedDefaultClash = serde_json::from_str("{}").unwrap();
-    assert_eq!(clash.p.as_deref(), Some("hello"));
+    assert_eq!(clash.p_or_default(), "hello");
     // A present value is still the value.
     let present: MergedDefault = serde_json::from_str(r#"{"p": "x"}"#).unwrap();
     assert_eq!(present.p.as_deref(), Some("x"));
+    assert_eq!(present.p_or_default(), "x");
 }
 
 // An optional uninhabited field is `Option<Never>`, and serde's `Option<T>` maps a JSON `null` to
@@ -156,10 +208,11 @@ fn an_optional_non_nullable_field_rejects_a_present_null() {
         let document = format!(r#"{{"{field}": null}}"#);
         assert_refuses::<OptionalFields>(&document, &format!("`{field}` is not nullable"));
     }
-    // Absence is still `None` (or the schema default), and serialises back to absence.
+    // Absence is still `None`, a defaulted member included, and serialises back to absence.
     let absent: OptionalFields = serde_json::from_str("{}").unwrap();
     assert!(absent.name.is_none() && absent.count.is_none() && absent.choice.is_none());
-    assert_eq!(absent.colour.as_deref(), Some("red"));
+    assert_eq!(absent.colour, None);
+    assert_eq!(absent.colour_or_default(), "red");
     // A present, well-typed value still decodes.
     let present: OptionalFields = serde_json::from_str(
         r#"{"name": "n", "count": 2, "flag": false, "tags": [], "mode": "manual", "nested": {},
@@ -174,14 +227,14 @@ fn an_optional_non_nullable_field_rejects_a_present_null() {
     assert_eq!(untyped.anything, Some(serde_json::Value::Null));
     assert_eq!(
         serde_json::to_value(&untyped).unwrap(),
-        serde_json::json!({"anything": null, "colour": "red"})
+        serde_json::json!({"anything": null})
     );
     // A nullable optional property keeps `null` and absence apart, on decode and on the wire.
     let nullable: OptionalFields = serde_json::from_str(r#"{"maybe": null}"#).unwrap();
     assert_eq!(nullable.maybe, basic_client::Nullable::Null);
     assert_eq!(
         serde_json::to_value(&nullable).unwrap(),
-        serde_json::json!({"maybe": null, "colour": "red"})
+        serde_json::json!({"maybe": null})
     );
     assert_eq!(absent.maybe, basic_client::Nullable::Absent);
 }
@@ -271,6 +324,17 @@ fn overlapping_unions_enforce_one_of_and_canonicalize_any_of() {
         owner,
         basic_client::types::AnyOwner::DetailedOwner(_)
     ));
+    // `BroadOwner` declares no member, so under anyOf it takes only an object holding none.
+    let empty: basic_client::types::AnyOwner = serde_json::from_str("{}").unwrap();
+    assert!(matches!(
+        empty,
+        basic_client::types::AnyOwner::BroadOwner(_)
+    ));
+    // Neither variant declares `x`, so each would drop it, and the payload fails to decode.
+    assert_refuses::<basic_client::types::AnyOwner>(
+        r#"{"id":7,"x":1}"#,
+        "AnyOwner decoding a member no variant declares",
+    );
 
     // Both branches accept `special`, so oneOf rejects it. A manually constructed broad branch is
     // revalidated during serialization and rejected for the same reason.
@@ -333,6 +397,31 @@ fn component_nullability_propagates_through_ref() {
     assert_eq!(
         set.history,
         vec![Some(basic_client::types::Priority::Low), None]
+    );
+}
+
+#[test]
+fn an_absent_required_nullable_member_fails_decode() {
+    // `priority` is required: a `null` is an admitted value, but leaving the member out is not, so
+    // the payload must not decode as if it held `null` (#1407).
+    let error = serde_json::from_str::<basic_client::types::Ticket>(r#"{"history": []}"#)
+        .expect_err("an absent required member is refused");
+    assert_eq!(error.classify(), serde_json::error::Category::Data, "{error}");
+    assert!(error.to_string().contains("missing field `priority`"), "{error}");
+    // Read from a parsed value too, which cannot fail on syntax.
+    let error = serde_json::from_value::<basic_client::types::Ticket>(
+        serde_json::json!({ "history": [] }),
+    )
+    .expect_err("an absent required member is refused");
+    assert!(error.to_string().contains("missing field `priority`"), "{error}");
+
+    // An explicit `null` still decodes as `None`, and is written back.
+    let null_priority: basic_client::types::Ticket =
+        serde_json::from_str(r#"{"priority": null, "history": []}"#).unwrap();
+    assert_eq!(null_priority.priority, None);
+    assert_eq!(
+        serde_json::to_value(&null_priority).unwrap(),
+        serde_json::json!({ "priority": null, "history": [] })
     );
 }
 
@@ -590,14 +679,16 @@ fn xml_body_types_carry_attribute_and_rename() {
     assert!(xml.starts_with("<order "), "{xml}");
     assert!(xml.ends_with("</order>"), "{xml}");
 
-    let receipt: basic_client::types::XmlReceipt =
-        quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
+    let receipt: basic_client::types::XmlReceipt = quick_xml::de::from_str(
+        r#"<XmlReceipt count="7"><ReceiptCode>OK</ReceiptCode></XmlReceipt>"#,
+    )
+    .unwrap();
     assert_eq!(receipt.code, "OK");
     assert_eq!(receipt.note, None);
     // Without a root `xml.name`, the component name `xml-receipt` names the root element, as
     // OpenAPI infers it, in place of the Rust type's name.
     let xml = quick_xml::se::to_string(&receipt).unwrap();
-    assert_eq!(xml, "<xml-receipt><ReceiptCode>OK</ReceiptCode></xml-receipt>");
+    assert_eq!(xml, r#"<xml-receipt count="7"><ReceiptCode>OK</ReceiptCode></xml-receipt>"#);
     // A present optional element is decoded as the field's own type through its present-value
     // deserializer, not through quick-xml's `Option` handling.
     let noted: basic_client::types::XmlReceipt = quick_xml::de::from_str(
@@ -605,6 +696,36 @@ fn xml_body_types_carry_attribute_and_rename() {
     )
     .unwrap();
     assert_eq!(noted.note.as_deref(), Some("late"));
+}
+
+#[test]
+fn an_omitted_required_nullable_xml_attribute_decodes_as_none() {
+    // OAS 3.2 writes a `null` attribute by omitting it (§Handling `null` Values,
+    // `productWithNulls.xml`), so a required nullable attribute that is absent is `null`, not a
+    // missing member.
+    let receipt: basic_client::types::XmlReceipt =
+        quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
+    assert_eq!(receipt.count, None);
+    let counted: basic_client::types::XmlReceipt = quick_xml::de::from_str(
+        r#"<XmlReceipt count="42"><ReceiptCode>OK</ReceiptCode></XmlReceipt>"#,
+    )
+    .unwrap();
+    assert_eq!(counted.count, Some(42.0));
+}
+
+#[test]
+fn a_null_required_xml_attribute_is_omitted_and_decodes_back_to_none() {
+    // OAS 3.2 §Handling `null` Values: "For attributes, omit the attribute". An empty `count=""`
+    // is no `null` a reader can recover, and no number at all.
+    let receipt = basic_client::types::XmlReceipt {
+        code: "OK".to_owned(),
+        count: None,
+        note: None,
+    };
+    let xml = quick_xml::se::to_string(&receipt).unwrap();
+    assert_eq!(xml, "<xml-receipt><ReceiptCode>OK</ReceiptCode></xml-receipt>");
+    let decoded: basic_client::types::XmlReceipt = quick_xml::de::from_str(&xml).unwrap();
+    assert_eq!(decoded, receipt);
 }
 
 #[test]

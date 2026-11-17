@@ -255,17 +255,50 @@ pub(crate) fn lower_frontend(
     spec: &Spec,
     diags: &mut diag::Diagnostics,
 ) -> Result<(ir::Api, name::Names), ()> {
-    let bundle = load_bundle(spec, diags)?;
+    lower_frontend_beside(spec, &compat::MatchedElsewhere::default(), diags)
+}
+
+/// [`lower_frontend`] for one side of a [`diff`](crate::diff): its omit profile applied
+/// [`beside`](compat::Omit::apply_beside) the rules `elsewhere` says the other spec matches.
+pub(crate) fn lower_frontend_beside(
+    spec: &Spec,
+    elsewhere: &compat::MatchedElsewhere,
+    diags: &mut diag::Diagnostics,
+) -> Result<(ir::Api, name::Names), ()> {
+    let bundle = load_bundle(spec, elsewhere, diags)?;
     lower_bundle(spec, &bundle, diags)
 }
 
-/// The input bundle `spec` names, with its omit profile applied: the first half of
-/// [`lower_frontend`], split out so the carve driver can map a rejection back onto the very bundle
-/// that produced it.
-fn load_bundle(spec: &Spec, diags: &mut diag::Diagnostics) -> Result<source::InputBundle, ()> {
+/// The rules of `spec`'s omit profile that `other`'s document matches as written, for lowering
+/// `spec` as one side of a [`diff`](crate::diff) whose other side is `other`. A document that does
+/// not load matches nothing; lowering `other` reports why.
+pub(crate) fn matched_by(spec: &Spec, other: &Spec) -> compat::MatchedElsewhere {
+    if spec.omit.is_empty() {
+        return compat::MatchedElsewhere::default();
+    }
+    let mut ignored = diag::Diagnostics::new(usize::MAX);
+    match source::InputBundle::load(&other.path, &mut ignored) {
+        Ok(bundle) => spec.omit.matched_in(&bundle),
+        Err(_) => compat::MatchedElsewhere::default(),
+    }
+}
+
+/// The input bundle `spec` names, with its omit profile applied beside `elsewhere`: the first
+/// half of [`lower_frontend`], split out so the carve driver can map a rejection back onto the
+/// very bundle that produced it.
+fn load_bundle(
+    spec: &Spec,
+    elsewhere: &compat::MatchedElsewhere,
+    diags: &mut diag::Diagnostics,
+) -> Result<source::InputBundle, ()> {
     let mut bundle = source::InputBundle::load(&spec.path, diags).map_err(|_| ())?;
 
-    if !spec.omit.is_empty() && spec.omit.apply(&mut bundle, diags).is_err() {
+    if !spec.omit.is_empty()
+        && spec
+            .omit
+            .apply_beside(&mut bundle, elsewhere, diags)
+            .is_err()
+    {
         return Err(());
     }
     Ok(bundle)
@@ -297,7 +330,8 @@ fn lower_bundle(
     let options = oas31::LowerOptions {
         open_narrowing: spec.open_narrowing.is_on(),
         open_unions: spec.open_unions.is_on(),
-        bind_headers: &spec.bind_headers,
+        closed_enums: spec.closed_enums.is_on(),
+        bind_headers: &spec.bound_headers,
     };
     let api = oas31::lower(&document, &resolver, diags, options).map_err(|_| ())?;
     ir::check_invariants(&api, diags);
@@ -308,7 +342,7 @@ fn lower_bundle(
     // Lowering bound each header the spec names, so no argument, field or binding is named for
     // one; a binding no operation's header parameter matched is reported against `paths`, where
     // the operations it searched are declared.
-    for name in api.unmatched_bindings(&spec.bind_headers) {
+    for name in api.unmatched_bindings(&spec.bound_headers) {
         Diagnostic::error(
             Code::BoundHeaderNotDeclared,
             diag::Provenance::new(diag::JsonPointer::root().push("paths"), None),
@@ -432,6 +466,16 @@ fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
 /// (its enclosing operation is omitted) or, if un-carvable, reported — the document is never
 /// emitted broken. The round cap ([`compat::MAX_CARVE_ROUNDS`]) guarantees termination.
 pub(crate) fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
+    carve_spec_beside(spec, &compat::MatchedElsewhere::default())
+}
+
+/// [`carve_spec`] for one side of a [`diff`](crate::diff): every probe applies the omit profile
+/// beside the rules `elsewhere` says the other spec matches. The rules carve adds are read off
+/// this side's own bundle, so `elsewhere` needs none of them.
+pub(crate) fn carve_spec_beside(
+    spec: &Spec,
+    elsewhere: &compat::MatchedElsewhere,
+) -> Result<Spec, Report> {
     let mut omit = spec.omit.clone();
     let mut last_rejection: Option<Report> = None;
 
@@ -449,7 +493,7 @@ pub(crate) fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
         // finitely many constructs); the user's `batch_cap` still governs the final report: a
         // converged carve reruns under it, and a rejection is replayed into it by `capped`.
         let mut diags = diag::Diagnostics::new(usize::MAX);
-        let bundle = load_bundle(&probe, &mut diags).ok();
+        let bundle = load_bundle(&probe, elsewhere, &mut diags).ok();
         let lowered = bundle
             .as_ref()
             .is_some_and(|bundle| lower_bundle(&probe, bundle, &mut diags).is_ok());

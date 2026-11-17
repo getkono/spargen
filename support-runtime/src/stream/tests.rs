@@ -5,12 +5,12 @@ use reqwest::Method;
 
 use super::{
     EventStream, FrameBuffer, FramePoll, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait,
-    SseMetadata,
+    Resend, SseMetadata,
 };
 use crate::tests::{
     core, poll_ready, poll_to_completion, Chunk, Chunks, PendingOnce, Reply, SequenceBackend,
 };
-use crate::{ClientCore, Error, HttpBody};
+use crate::{ClientCore, Error};
 
 /// A [`FrameBuffer`] holding `bytes`, with nothing searched yet.
 fn frame_buffer(bytes: &[u8]) -> FrameBuffer {
@@ -154,14 +154,14 @@ fn oas32_sse_does_not_treat_done_data_as_a_private_sentinel() {
 
 #[test]
 fn oas32_sse_json_data_yields_payload_and_retains_metadata() {
-    let mut buf = b"id: event-7\nretry: 1250\ndata: {\"kind\":\"ready\"}\n\n".to_vec();
-    let frame = next_frame(&mut buf, Framing::SseJsonData, false);
+    let mut framer = frame_buffer(b"id: event-7\nretry: 1250\ndata: {\"kind\":\"ready\"}\n\n");
+    let frame = super::next_frame(&mut framer, Framing::SseJsonData, false);
     let FramePoll::Item { payload, metadata } = frame else {
         panic!("expected one dispatched SSE event");
     };
     assert_eq!(payload, br#"{"kind":"ready"}"#);
     assert_eq!(metadata.id.as_deref(), Some("event-7"));
-    assert_eq!(metadata.retry, Some(1_250));
+    assert_eq!(framer.retry, Some(1_250));
 }
 
 #[test]
@@ -222,7 +222,8 @@ fn sse_tolerates_crlf_terminators() {
 
 /// Issue #1330: WHATWG's "if the file ends in the middle of an event, before the final empty line,
 /// the incomplete event is not dispatched", whether its last line is terminated or not, and the
-/// `id` and `retry` it set are dropped with it. Every framing of SSE reads it the same way.
+/// `id` it set is dropped with it (a `retry` applies on read, as #1423 pins). Every framing of SSE
+/// reads it the same way.
 #[test]
 fn sse_discards_an_event_cut_off_at_eof() {
     for framing in [Framing::Sse, Framing::SseEvent, Framing::SseJsonData] {
@@ -312,7 +313,6 @@ fn a_bare_cr_terminates_an_sse_line() {
             payload: b"1".to_vec(),
             metadata: SseMetadata {
                 id: Some("7".to_owned()),
-                retry: None,
             },
         }
     );
@@ -413,7 +413,6 @@ fn a_carried_frame_buffer_resumes_where_it_stopped() {
             payload: b"1\n2".to_vec(),
             metadata: SseMetadata {
                 id: Some("7".to_owned()),
-                retry: None,
             },
         }
     );
@@ -543,12 +542,12 @@ impl ReconnectPolicy for ImmediateReconnect {
     }
 }
 
-/// `request` as a streaming operation sends it and keeps it to reconnect: prepared on `core`.
-fn prepared(
-    core: &ClientCore,
-    request: http::Request<HttpBody>,
-) -> Option<http::Request<HttpBody>> {
-    Some(crate::prepare(core, request, true))
+/// What a streaming operation with no security requirement keeps of `request` to reconnect: its
+/// [`Resend`], carrying what the request it sends, prepared on `core`, carries.
+fn prepared(core: &ClientCore, request: crate::RequestBuilder) -> Option<Resend> {
+    let (request, _, resend) = poll_ready(Resend::attach(core, request, &[])).unwrap();
+    let sent = crate::prepare(core, request.build().unwrap(), true);
+    resend.map(|resend| resend.carrying(&sent))
 }
 
 fn reconnectable_stream(
@@ -568,9 +567,7 @@ fn reconnectable_stream_over(
 ) -> EventStream<serde_json::Value> {
     let core = ClientCore::with_backend(backend, "https://example.com").unwrap();
     let request = crate::tests::builder(Method::GET, "https://example.com/events")
-        .header(reqwest::header::COOKIE, "session=secret")
-        .build()
-        .unwrap();
+        .header(reqwest::header::COOKIE, "session=secret");
     let stream = EventStream::new_reconnectable(
         initial,
         Framing::SseJsonData,
@@ -579,7 +576,7 @@ fn reconnectable_stream_over(
     );
     match stream.with_reconnect(policy) {
         Ok(stream) => stream,
-        Err(error) => panic!("reconnect should be available: {error}"),
+        Err((_, error)) => panic!("reconnect should be available: {error}"),
     }
 }
 
@@ -656,9 +653,7 @@ fn a_reconnect_carries_the_cores_option_headers_and_extensions() {
     options.headers.insert("x-option", "set".parse().unwrap());
     options.extensions.insert(Tag(7));
     core.set_options(options);
-    let request = crate::tests::builder(Method::GET, "https://example.com/events")
-        .build()
-        .unwrap();
+    let request = crate::tests::builder(Method::GET, "https://example.com/events");
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response("data: {\"seq\":1}\n\n"),
         Framing::SseJsonData,
@@ -669,7 +664,9 @@ fn a_reconnect_carries_the_cores_option_headers_and_extensions() {
         max_attempts: 1,
         ..ImmediateReconnect::default()
     });
-    let mut stream = stream.with_reconnect(policy).unwrap();
+    let mut stream = stream
+        .with_reconnect(policy)
+        .unwrap_or_else(|(_, error)| panic!("reconnect should be available: {error}"));
 
     assert_eq!(
         poll_ready(stream.next()).unwrap().unwrap(),
@@ -729,9 +726,7 @@ fn an_unsendable_sse_id_reconnects_without_last_event_id() {
     let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
     let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .header("last-event-id", "evt-0")
-        .header(reqwest::header::COOKIE, "session=secret")
-        .build()
-        .unwrap();
+        .header(reqwest::header::COOKIE, "session=secret");
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response("id: a\u{1}b\ndata: {\"seq\":1}\n\n"),
         Framing::SseJsonData,
@@ -740,7 +735,7 @@ fn an_unsendable_sse_id_reconnects_without_last_event_id() {
     );
     let mut stream = match stream.with_reconnect(policy.clone()) {
         Ok(stream) => stream,
-        Err(error) => panic!("reconnect should be available: {error}"),
+        Err((_, error)) => panic!("reconnect should be available: {error}"),
     };
 
     assert_eq!(
@@ -771,9 +766,7 @@ fn an_empty_sse_id_reconnects_without_last_event_id() {
     let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
     let request = crate::tests::builder(Method::GET, "https://example.com/events")
         .header("last-event-id", "evt-0")
-        .header(reqwest::header::COOKIE, "session=secret")
-        .build()
-        .unwrap();
+        .header(reqwest::header::COOKIE, "session=secret");
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response("id: evt-1\ndata: {\"seq\":1}\n\nid:\ndata: {\"seq\":2}\n\n"),
         Framing::SseJsonData,
@@ -782,7 +775,7 @@ fn an_empty_sse_id_reconnects_without_last_event_id() {
     );
     let mut stream = match stream.with_reconnect(policy.clone()) {
         Ok(stream) => stream,
-        Err(error) => panic!("reconnect should be available: {error}"),
+        Err((_, error)) => panic!("reconnect should be available: {error}"),
     };
 
     assert_eq!(
@@ -841,9 +834,7 @@ fn a_rejected_reconnect_outlives_its_core_and_keeps_its_error_body_cap() {
     });
     let mut core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
     core.config_mut().max_error_body = 4;
-    let request = crate::tests::builder(Method::GET, "https://example.com/events")
-        .build()
-        .unwrap();
+    let request = crate::tests::builder(Method::GET, "https://example.com/events");
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response(""),
         Framing::SseJsonData,
@@ -853,7 +844,7 @@ fn a_rejected_reconnect_outlives_its_core_and_keeps_its_error_body_cap() {
     drop(core);
     let mut stream = match stream.with_reconnect(policy) {
         Ok(stream) => stream,
-        Err(error) => panic!("reconnect should be available: {error}"),
+        Err((_, error)) => panic!("reconnect should be available: {error}"),
     };
 
     match poll_ready(stream.next()) {
@@ -986,31 +977,58 @@ fn the_reconnect_attempt_resets_after_a_decoded_item_and_not_after_a_decode_erro
     );
 }
 
-/// A stream built without a replayable request refuses a reconnect policy rather than
-/// accepting one it could never act on.
+/// A stream built without a replayable request reports that it cannot reconnect, and refuses a
+/// reconnect policy rather than accepting one it could never act on, handing the stream back
+/// with the error so the caller can keep reading it without reconnects.
 #[test]
 fn with_reconnect_refuses_a_stream_that_holds_no_replayable_request() {
     let policy: Arc<dyn ReconnectPolicy> = Arc::new(ImmediateReconnect::default());
     let core = core();
     for stream in [
-        EventStream::<serde_json::Value>::new(response(""), Framing::Sse),
-        EventStream::new_reconnectable(response(""), Framing::Sse, &core, None),
+        EventStream::<serde_json::Value>::new(response("{\"seq\":1}\n"), Framing::Ndjson),
+        EventStream::new_reconnectable(response("{\"seq\":1}\n"), Framing::Ndjson, &core, None),
     ] {
-        match stream.with_reconnect(policy.clone()) {
-            Err(Error::RequestConstruction(cause)) => assert_eq!(
-                std::error::Error::source(&cause)
-                    .expect("the message is the cause")
-                    .to_string(),
-                "this streaming request cannot be cloned safely for automatic reconnect"
-            ),
-            Err(error) => panic!("expected RequestConstruction, got {error}"),
+        assert!(!stream.can_reconnect());
+        let mut stream = match stream.with_reconnect(policy.clone()) {
+            Err((stream, Error::RequestConstruction(cause))) => {
+                assert_eq!(
+                    std::error::Error::source(&cause)
+                        .expect("the message is the cause")
+                        .to_string(),
+                    "this streaming request cannot be cloned safely for automatic reconnect"
+                );
+                stream
+            }
+            Err((_, error)) => panic!("expected RequestConstruction, got {error}"),
             Ok(_) => panic!("a stream without a request accepted a reconnect policy"),
-        }
+        };
+        assert!(!stream.can_reconnect());
+        assert_eq!(
+            poll_ready(stream.next()).unwrap().unwrap(),
+            serde_json::json!({"seq": 1})
+        );
+        assert!(poll_ready(stream.next()).is_none());
     }
 }
 
-/// A request whose body is a one-shot stream cannot be cloned for the replay. Once the policy's
-/// wait elapses, the stream yields that as `RequestConstruction`, sends nothing, and ends.
+/// A stream holding a replayable request reports that it can reconnect, before and after a
+/// policy is set.
+#[test]
+fn a_stream_holding_a_replayable_request_can_reconnect() {
+    let core = core();
+    let request = crate::tests::builder(Method::GET, "https://example.com/events");
+    let stream: EventStream<serde_json::Value> =
+        EventStream::new_reconnectable(response(""), Framing::Sse, &core, prepared(&core, request));
+    assert!(stream.can_reconnect());
+    let stream = stream
+        .with_reconnect(Arc::new(ImmediateReconnect::default()))
+        .unwrap_or_else(|(_, error)| panic!("reconnect should be available: {error}"));
+    assert!(stream.can_reconnect());
+}
+
+/// A request whose body is a one-shot stream cannot be cloned for the replay. [`Resend::attach`]
+/// keeps no such request, so the stream is handed one directly here. Once the policy's wait
+/// elapses, the stream yields that as `RequestConstruction`, sends nothing, and ends.
 #[test]
 fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
     let backend = SequenceBackend::statuses([200]);
@@ -1019,22 +1037,26 @@ fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
         ..ImmediateReconnect::default()
     });
     let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
-    let request = crate::tests::builder(Method::POST, "https://example.com/events")
-        .body(crate::HttpBody::wrap(Chunks::new([Chunk::data(
-            "one-shot",
-        )])))
-        .build()
-        .unwrap();
-    assert!(crate::try_clone_request(&request).is_none());
-    let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
-        response(""),
-        Framing::SseJsonData,
-        &core,
-        prepared(&core, request),
-    );
+    let one_shot = || {
+        crate::tests::builder(Method::POST, "https://example.com/events").body(
+            crate::HttpBody::wrap(Chunks::new([Chunk::data("one-shot")])),
+        )
+    };
+    assert!(one_shot().try_clone().is_none());
+    assert!(prepared(&core, one_shot()).is_none());
+    let resend = Resend {
+        unsigned: one_shot(),
+        requirements: Vec::new(),
+        extensions: http::Extensions::new(),
+        last_event_id: None,
+    };
+    let stream: EventStream<serde_json::Value> =
+        EventStream::new_reconnectable(response(""), Framing::SseJsonData, &core, Some(resend));
     let mut stream = match stream.with_reconnect(policy.clone()) {
         Ok(stream) => stream,
-        Err(error) => panic!("the stream holds a request, so reconnect is available: {error}"),
+        Err((_, error)) => {
+            panic!("the stream holds a request, so reconnect is available: {error}")
+        }
     };
 
     match poll_ready(stream.next()) {
@@ -1085,28 +1107,30 @@ fn an_sse_retry_counts_only_as_ascii_digits() {
         ("retry:", None),
         ("retry: 99999999999999999999999", None),
     ] {
-        let mut buf = format!("{field}\ndata: 1\n\n").into_bytes();
+        let mut framer = frame_buffer(format!("{field}\ndata: 1\n\n").as_bytes());
         assert_eq!(
-            next_frame(&mut buf, Framing::SseJsonData, false),
-            FramePoll::Item {
-                payload: b"1".to_vec(),
-                metadata: SseMetadata { id: None, retry },
-            },
+            super::next_frame(&mut framer, Framing::SseJsonData, false),
+            super::frame_item(b"1".to_vec()),
             "{field}"
         );
+        assert_eq!(framer.retry, retry, "{field}");
     }
-    // An ignored `retry` leaves the one an earlier line of the same event set.
-    for field in ["retry: 12a", "retry:"] {
-        let mut buf = format!("retry: 5\n{field}\ndata: 1\n\n").into_bytes();
+    // An ignored `retry`, an overflowing one included, leaves the one an earlier line of the same
+    // event set, both for the stream and in the event envelope.
+    for field in ["retry: 12a", "retry:", "retry: 99999999999999999999999"] {
+        let body = format!("retry: 5\n{field}\ndata: 1\n\n");
+        let mut framer = frame_buffer(body.as_bytes());
         assert_eq!(
-            next_frame(&mut buf, Framing::SseJsonData, false),
-            FramePoll::Item {
-                payload: b"1".to_vec(),
-                metadata: SseMetadata {
-                    id: None,
-                    retry: Some(5)
-                },
-            },
+            super::next_frame(&mut framer, Framing::SseJsonData, false),
+            super::frame_item(b"1".to_vec()),
+            "{field}"
+        );
+        assert_eq!(framer.retry, Some(5), "{field}");
+        let mut buf = body.into_bytes();
+        let (items, _) = drain(&mut buf, Framing::SseEvent, false);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&items[0]).unwrap(),
+            serde_json::json!({"data": "1", "retry": 5}),
             "{field}"
         );
     }
@@ -1117,6 +1141,67 @@ fn an_sse_retry_counts_only_as_ascii_digits() {
         FramePoll::NeedMore
     );
     assert!(buf.is_empty());
+}
+
+/// Issue #1423: WHATWG sets the reconnection time as soon as a valid `retry` line is read, not
+/// when its event dispatches, so a `retry:` in an event the body ends before dispatching still
+/// applies, and is what the reconnect policy is offered as `server_delay`. A final line ended by
+/// a CR at EOF is a complete line and counts too.
+#[test]
+fn an_sse_retry_applies_when_read_even_if_its_event_never_dispatches() {
+    for framing in [Framing::Sse, Framing::SseEvent, Framing::SseJsonData] {
+        for body in [
+            "retry: 30000\n",
+            "retry: 30000\r",
+            "retry: 30000\r\n",
+            "retry: 30000\ndata: {\"a\":1}\n",
+            "data: {\"a\":1}\nretry: 30000\ndata: {\"a\":",
+        ] {
+            let policy = Arc::new(ImmediateReconnect::default());
+            let core =
+                ClientCore::with_backend(SequenceBackend::new([]), "https://example.com").unwrap();
+            let request = crate::tests::builder(Method::GET, "https://example.com/events");
+            let stream = EventStream::<serde_json::Value>::new_reconnectable(
+                response(body),
+                framing,
+                &core,
+                prepared(&core, request),
+            );
+            let Ok(mut stream) = stream.with_reconnect(policy.clone()) else {
+                panic!("reconnect should be available");
+            };
+            assert!(poll_ready(stream.next()).is_none(), "{framing:?} {body:?}");
+            assert_eq!(
+                stream.reconnect_delay(),
+                Some(std::time::Duration::from_secs(30)),
+                "{framing:?} {body:?}"
+            );
+            assert_eq!(
+                *policy.seen.lock().unwrap(),
+                [(0, "eof", Some(std::time::Duration::from_secs(30)))],
+                "{framing:?} {body:?}"
+            );
+        }
+    }
+}
+
+/// Issue #1423: an all-digit `retry` too large for a `u64` is ignored like any other invalid
+/// value, so an earlier valid one, in the same event or an earlier one, stays in force.
+#[test]
+fn an_overflowing_sse_retry_leaves_the_earlier_one_in_force() {
+    for body in [
+        "retry: 5000\nretry: 99999999999999999999999\ndata: {}\n\n",
+        "retry: 5000\ndata: {}\n\nretry: 99999999999999999999999\ndata: {}\n\n",
+    ] {
+        let mut stream: EventStream<serde_json::Value> =
+            EventStream::new(response(body), Framing::SseJsonData);
+        while poll_ready(stream.next()).is_some() {}
+        assert_eq!(
+            stream.reconnect_delay(),
+            Some(std::time::Duration::from_secs(5)),
+            "{body:?}"
+        );
+    }
 }
 
 /// A line with no colon is a field name with an empty value: a bare `data` dispatches an empty
@@ -1176,9 +1261,7 @@ fn sse_frames_the_event_behind_one_that_dispatches_nothing() {
 fn a_reconnectable_stream_starts_from_the_requests_last_event_id() {
     let core = core();
     let request = crate::tests::builder(Method::GET, "https://example.com/events")
-        .header("last-event-id", "evt-0")
-        .build()
-        .unwrap();
+        .header("last-event-id", "evt-0");
     let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
         response("data: 1\n\n"),
         Framing::SseJsonData,
@@ -1266,14 +1349,12 @@ fn bounded_stream(
     let mut core = ClientCore::with_backend(backend, "https://example.com").unwrap();
     core.config_mut().max_stream_frame = max_stream_frame;
     core.config_mut().max_error_body = 4;
-    let request = crate::tests::builder(Method::GET, "https://example.com/events")
-        .build()
-        .unwrap();
+    let request = crate::tests::builder(Method::GET, "https://example.com/events");
     match EventStream::new_reconnectable(response(body), framing, &core, prepared(&core, request))
         .with_reconnect(policy)
     {
         Ok(stream) => stream,
-        Err(error) => panic!("reconnect should be available: {error}"),
+        Err((_, error)) => panic!("reconnect should be available: {error}"),
     }
 }
 
@@ -1565,3 +1646,4 @@ proptest::proptest! {
 }
 
 mod failure;
+mod reauth;

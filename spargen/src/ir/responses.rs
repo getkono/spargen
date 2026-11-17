@@ -17,8 +17,9 @@ impl StatusSpec {
     /// Whether the selector covers only 2xx statuses (an exact code in `200..=299`, or `2XX`), the
     /// class RFC 9110 §15.3 calls successful and the emitted dispatch enters its success branch on
     /// through `StatusCode::is_success()`, so every other selector, `304` included, is on the error
-    /// side (issue #198) and `default` is never a success selector (see
-    /// [`Responses::default_is_success_source`]). A documented `301`/`302`/`303`/`307`/`308`
+    /// side (issue #198) and `default` is false here: it reaches the success side only as the
+    /// success source, where it documents every 2xx (see [`Responses::default_is_success_source`]
+    /// and [`SuccessStatuses`]). A documented `301`/`302`/`303`/`307`/`308`
     /// reaches the error side only when the injected client's redirect policy does not follow it.
     pub(crate) fn is_success(self) -> bool {
         match self {
@@ -55,10 +56,10 @@ pub(crate) struct Response {
     /// a bodied stream anywhere but the operation's single bodied success (see
     /// [`Responses::stream_outside_single_success`]).
     pub(crate) stream: Option<Framing>,
-    /// The selected content key's essence when the request announces it in `Accept`, which
-    /// lowering does for a CBOR key (`application/cbor`, or a `+cbor` suffix): such a body is
-    /// read as opaque octets, so the media type is the one place its representation is stated.
-    /// `None` for every other media, and for a bodyless response. See [`Responses::accept`].
+    /// The selected content key's essence, which the request announces in `Accept` when this is a
+    /// bodied success response; lowering records it for every chosen media, so a stream asks for
+    /// its framing and a response declaring several media asks for the one its decoder reads.
+    /// `None` for a bodyless response. See [`Responses::accept`].
     pub(crate) accept: Option<String>,
     /// Documented response headers, in source order. A `Content-Type` entry is dropped during
     /// lowering, because the specification says it is ignored.
@@ -227,29 +228,40 @@ impl Responses {
         // With no success status documented, `default` is what documents every 2xx, so it is the
         // operation's single success body.
         if self.default_is_success_source() {
+            // A declared `default` documents every 2xx; with none, no 2xx is documented at all.
+            let statuses = SuccessStatuses(
+                self.default
+                    .as_ref()
+                    .map(|_| StatusSpec::Default)
+                    .into_iter()
+                    .collect(),
+            );
             return match self.default.as_ref().and_then(|default| default.body) {
-                Some(body) => SuccessShape::Plain(body),
-                None => SuccessShape::Unit,
+                Some(body) => SuccessShape::Plain(body, statuses),
+                None => SuccessShape::Unit(statuses),
             };
         }
 
-        let entries: Vec<(StatusSpec, Option<Ty>)> = self
+        let mut entries: Vec<(StatusSpec, Option<Ty>)> = self
             .entries()
             .filter(|(status, _)| status.is_success())
             .map(|(status, response)| (status, response.body))
             .collect();
-        let into_enum = |mut entries: Vec<(StatusSpec, Option<Ty>)>| {
-            entries.sort_by_key(|(status, _)| precedence_key(*status));
-            SuccessShape::Enum(entries)
-        };
+        entries.sort_by_key(|(status, _)| precedence_key(*status));
+        let statuses = SuccessStatuses(entries.iter().map(|(status, _)| *status).collect());
         // One body beside a documented bodyless status: two outcomes a plain `T` cannot tell
         // apart, so the bodyless one gets its own unit variant — unless the body is a stream,
         // which an empty body satisfies as-is.
         let bodied = entries.iter().filter(|(_, body)| body.is_some()).count();
         if bodied == 1 && entries.len() > 1 && self.stream_success().is_none() {
-            return into_enum(entries);
+            return SuccessShape::Enum(entries);
         }
-        finish_shape(entries, SuccessShape::Unit, SuccessShape::Plain, into_enum)
+        finish_shape(
+            entries,
+            SuccessShape::Unit(statuses.clone()),
+            |body| SuccessShape::Plain(body, statuses),
+            SuccessShape::Enum,
+        )
     }
 
     /// Whether two or more success responses carry a body — the shapes whose success enum decodes
@@ -289,10 +301,10 @@ impl Responses {
     }
 
     /// The `Accept` header value the operation's request sends: the distinct
-    /// [`Response::accept`] keys of the bodied success responses, comma-joined in document order,
-    /// when every bodied success response carries one. `None` when any bodied success response
-    /// carries none, so a success representation the document declares is never refused by the
-    /// header, and when no success response is bodied. Error responses do not contribute.
+    /// [`Response::accept`] keys of the bodied success responses, whatever their media,
+    /// comma-joined in document order. `None` when no success response is bodied, and when a
+    /// bodied success response records no key, so a success representation the document declares
+    /// is never refused by the header. Error responses do not contribute.
     pub(crate) fn accept(&self) -> Option<String> {
         let mut announced: Vec<&str> = Vec::new();
         for response in self.success_responses() {
@@ -484,17 +496,18 @@ fn has_two_bodied(responses: &[&Response]) -> bool {
         .is_some()
 }
 
-/// The success return type of an operation (before wrapping in `ResponseValue<T>`). Generated code
-/// enters the success branch on the raw transport status alone, and only [`SuccessShape::Enum`]
-/// carries a status set to compare it against — [`SuccessShape::Unit`] and [`SuccessShape::Plain`]
-/// name no status, so they draw no distinction between a documented 2xx and any other. When
-/// `default` reaches the success side is [`Responses::default_is_success_source`]'s rule.
+/// The success return type of an operation (before wrapping in `ResponseValue<T>`). Every shape
+/// carries the documented success selectors it decodes, and generated code decodes a 2xx as a
+/// success only where one of them matches it: any other 2xx is `Error::UnexpectedStatus`, whatever
+/// the shape (issue #1426). When `default` reaches the success side is
+/// [`Responses::default_is_success_source`]'s rule.
 #[derive(Debug, Clone)]
 pub(crate) enum SuccessShape {
-    /// No success body.
-    Unit,
-    /// A single success body type.
-    Plain(Ty),
+    /// No success body: every documented success status is bodyless.
+    Unit(SuccessStatuses),
+    /// A single success body type, and every documented success status, the bodied one and, for
+    /// a streaming body, its bodyless siblings, which decode to a stream that yields nothing.
+    Plain(Ty, SuccessStatuses),
     /// Two or more success `by_status` entries of which at least one carries a body: several
     /// bodies, or a single non-streaming body beside a documented bodyless status (a bodied `200`
     /// beside a bodyless `204` is `Status200(T)` and `Status204`, since a plain `T` would decode
@@ -505,6 +518,38 @@ pub(crate) enum SuccessShape {
     /// precedence (exact before range); decode dispatches by HTTP status in that
     /// order and rejects any other 2xx as `Error::UnexpectedStatus`.
     Enum(Vec<(StatusSpec, Option<Ty>)>),
+}
+
+impl SuccessShape {
+    /// Whether the shape documents no 2xx at all: a [`SuccessShape::Unit`] with neither a 2xx
+    /// entry nor a `default`, whose every 2xx is `Error::UnexpectedStatus`.
+    pub(crate) fn documents_no_2xx(&self) -> bool {
+        matches!(self, SuccessShape::Unit(statuses) if statuses.0.is_empty())
+    }
+}
+
+/// The documented success selectors of a [`SuccessShape::Unit`] or [`SuccessShape::Plain`], in
+/// decode precedence (exact code ascending, then range): the lowered 2xx entries of
+/// [`Responses::by_status`], or [`StatusSpec::Default`] alone where `default` is the success source
+/// ([`Responses::default_is_success_source`]), since it then documents every 2xx. Empty only for
+/// a [`SuccessShape::Unit`] with neither a 2xx entry nor a `default`, which documents no 2xx, so
+/// every 2xx is `Error::UnexpectedStatus`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SuccessStatuses(Vec<StatusSpec>);
+
+impl SuccessStatuses {
+    /// The selectors, in decode precedence.
+    pub(crate) fn selectors(&self) -> &[StatusSpec] {
+        &self.0
+    }
+
+    /// Whether the selectors match every 2xx status — a `2XX` range or the success-source
+    /// `default` among them — so a 2xx needs no check against them.
+    pub(crate) fn cover_every_2xx(&self) -> bool {
+        self.0
+            .iter()
+            .any(|status| matches!(status, StatusSpec::Range(2) | StatusSpec::Default))
+    }
 }
 
 /// The typed error body `E` of an operation (matrix: Responses).

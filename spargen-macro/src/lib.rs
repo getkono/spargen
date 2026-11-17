@@ -61,6 +61,7 @@ struct Args {
     carve: Option<spargen::Carve>,
     open_narrowing: Option<spargen::Narrowing>,
     open_unions: Option<spargen::UnionTags>,
+    closed_enums: Option<spargen::StringEnums>,
     verbatim_docs: Option<spargen::CarriedDocs>,
     testing: Option<spargen::TestingModule>,
     error_body_cap: Option<usize>,
@@ -68,20 +69,27 @@ struct Args {
     omit: spargen::Omit,
     /// The operations a `keep { … }` block names, in the order it names them.
     keep: Vec<(spargen::OmitMethod, String)>,
-    /// The header names each `bind_header = "…"` argument binds, in the order given.
-    bind_headers: Vec<String>,
+    /// The header names each `bound_header = "…"` argument binds, in the order given.
+    bound_headers: Vec<String>,
 }
 
 /// Every switch `generate_api!` takes, in the order its errors list them. Each is spelled `<name>`
 /// (alone, `= true` or `= false`) or `no_<name>`.
-const SWITCHES: [&str; 6] = [
+const SWITCHES: [&str; 7] = [
     "uuid",
     "carve",
     "open_narrowing",
     "open_unions",
+    "closed_enums",
     "verbatim_docs",
     "testing",
 ];
+
+/// Every argument `generate_api!` takes that adds to a list rather than setting a value, in the
+/// order its errors list them; each may repeat. Each is its `spargen.toml` key in the singular:
+/// `omit { … }` for `[[omit]]`, `keep { … }` for `[[keep]]`, `bound_header = "…"` for
+/// `bound_headers`.
+const LIST_ARGUMENTS: [&str; 3] = ["omit", "keep", "bound_header"];
 
 /// The switch `key` spells, as its name in [`SWITCHES`] and whether `key` is its `no_<name>`
 /// form, or `None` when `key` names no switch.
@@ -133,7 +141,9 @@ fn parse_switch<T>(
 
 impl Parse for Args {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        use spargen::{CarriedDocs, Carve, Narrowing, TestingModule, UnionTags, UuidMapping};
+        use spargen::{
+            CarriedDocs, Carve, Narrowing, StringEnums, TestingModule, UnionTags, UuidMapping,
+        };
 
         let mut spec: Option<LitStr> = None;
         let mut uuid = None;
@@ -141,13 +151,14 @@ impl Parse for Args {
         let mut carve = None;
         let mut open_narrowing = None;
         let mut open_unions = None;
+        let mut closed_enums = None;
         let mut verbatim_docs = None;
         let mut testing = None;
         let mut error_body_cap = None;
         let mut batch_cap = None;
         let mut omit = spargen::Omit::default();
         let mut keep = Vec::new();
-        let mut bind_headers = Vec::new();
+        let mut bound_headers = Vec::new();
 
         while !input.is_empty() {
             if input.peek(LitStr) {
@@ -191,6 +202,14 @@ impl Parse for Args {
                             UnionTags::Open,
                             UnionTags::Closed,
                         )?,
+                        "closed_enums" => parse_switch(
+                            input,
+                            &key,
+                            switch,
+                            &mut closed_enums,
+                            StringEnums::Closed,
+                            StringEnums::Open,
+                        )?,
                         "verbatim_docs" => parse_switch(
                             input,
                             &key,
@@ -231,9 +250,9 @@ impl Parse for Args {
                             braced!(body in input);
                             keep.extend(parse_method_paths(&body)?);
                         }
-                        "bind_header" => {
+                        "bound_header" => {
                             input.parse::<Token![=]>()?;
-                            bind_headers.push(input.parse::<LitStr>()?.value());
+                            bound_headers.push(input.parse::<LitStr>()?.value());
                         }
                         other => {
                             return Err(syn::Error::new(
@@ -241,8 +260,9 @@ impl Parse for Args {
                                 format!(
                                     "unknown argument `{other}`; expected a spec path, a switch \
                                  ({}, each also as `no_<switch>`), or one of: datetime, \
-                                 error_body_cap, batch_cap, omit, keep, bind_header",
-                                    SWITCHES.join(", ")
+                                 error_body_cap, batch_cap, {}",
+                                    SWITCHES.join(", "),
+                                    LIST_ARGUMENTS.join(", ")
                                 ),
                             ));
                         }
@@ -266,13 +286,14 @@ impl Parse for Args {
             carve,
             open_narrowing,
             open_unions,
+            closed_enums,
             verbatim_docs,
             testing,
             error_body_cap,
             batch_cap,
             omit,
             keep,
-            bind_headers,
+            bound_headers,
         })
     }
 }
@@ -380,6 +401,9 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
     if let Some(tags) = args.open_unions {
         config = config.with_open_unions(tags);
     }
+    if let Some(enums) = args.closed_enums {
+        config = config.with_closed_enums(enums);
+    }
     if let Some(docs) = args.verbatim_docs {
         config = config.with_verbatim_docs(docs);
     }
@@ -387,13 +411,13 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
         config = config.with_testing(testing);
     }
     for rule in &args.omit.rules {
-        config = config.omit_rule(rule.clone());
+        config = config.add_omit_rule(rule.clone());
     }
     for (method, path) in &args.keep {
-        config = config.keep_operation(*method, path.clone());
+        config = config.add_keep_operation(*method, path.clone());
     }
-    for name in &args.bind_headers {
-        config = config.bind_header(name.clone());
+    for name in &args.bound_headers {
+        config = config.add_bound_header(name.clone());
     }
     if let Some(cap) = args.error_body_cap {
         config = config.with_error_body_cap(cap);

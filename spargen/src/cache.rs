@@ -80,14 +80,18 @@ fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[
     append(&mut hasher, &[u8::from(spec.carve.is_on())]);
     append(&mut hasher, &[u8::from(spec.open_narrowing.is_on())]);
     append(&mut hasher, &[u8::from(spec.open_unions.is_on())]);
+    append(&mut hasher, &[u8::from(spec.closed_enums.is_on())]);
     append(&mut hasher, &[u8::from(spec.verbatim_docs.is_on())]);
     append(&mut hasher, &[u8::from(spec.testing.is_on())]);
     // The omit profile's one canonical encoding, the same bytes its provenance-header
     // fingerprint hashes, so the two cannot drift apart.
     append(&mut hasher, &spec.omit.canonical_encoding());
     // The bound header names: their count, then each name, in the order bound.
-    append(&mut hasher, &(spec.bind_headers.len() as u64).to_be_bytes());
-    for name in &spec.bind_headers {
+    append(
+        &mut hasher,
+        &(spec.bound_headers.len() as u64).to_be_bytes(),
+    );
+    for name in &spec.bound_headers {
         append(&mut hasher, name.as_bytes());
     }
     for (name, bytes) in &named {
@@ -937,9 +941,10 @@ components:
             carve: crate::Carve::Auto,
             open_narrowing: crate::Narrowing::Exact,
             open_unions: crate::UnionTags::Open,
+            closed_enums: crate::StringEnums::Closed,
             verbatim_docs: crate::CarriedDocs::Rewritten,
             testing: crate::TestingModule::Emitted,
-            bind_headers: vec!["X-Api-Version".to_owned()],
+            bound_headers: vec!["X-Api-Version".to_owned()],
             config_files: Vec::new(),
         };
         // A file over a block long, so its bytes cross a block boundary of the hash.
@@ -968,6 +973,7 @@ components:
         frame(&[1]);
         frame(&[0]);
         frame(&[1]);
+        frame(&[1]);
         frame(&[0]);
         frame(&[1]);
         frame(&spec.omit.canonical_encoding());
@@ -985,7 +991,7 @@ components:
         assert_eq!(digest, sha256_hex(&buffer));
         assert_eq!(
             digest,
-            "8ecd1dfb1755bb401d0b0e9105151ba9330a9ddce7cc948776f8e22afe56be23"
+            "bc5983707d88eba593dc5c6b74bf5d77c10dfbb2f0608b8df52e94608506a6ba"
         );
     }
 
@@ -1208,9 +1214,10 @@ components:
             carve,
             open_narrowing,
             open_unions,
+            closed_enums,
             verbatim_docs,
             testing,
-            bind_headers,
+            bound_headers,
             config_files,
         } = &base;
         assert!(config_files.is_empty());
@@ -1285,6 +1292,13 @@ components:
                 },
             ),
             (
+                "closed_enums",
+                Spec {
+                    closed_enums: crate::StringEnums::from_on(!closed_enums.is_on()),
+                    ..base.clone()
+                },
+            ),
+            (
                 "verbatim_docs",
                 Spec {
                     verbatim_docs: crate::CarriedDocs::from_on(!verbatim_docs.is_on()),
@@ -1299,9 +1313,9 @@ components:
                 },
             ),
             (
-                "bind_headers",
+                "bound_headers",
                 Spec {
-                    bind_headers: bind_headers
+                    bound_headers: bound_headers
                         .iter()
                         .cloned()
                         .chain(["X-Api-Version".to_owned()])
@@ -1350,13 +1364,13 @@ components:
         let (_temp, config) = fixture();
         let base = config.spec.clone();
 
-        let by_path = base.clone().omit_rule(OmitRule::Path {
+        let by_path = base.clone().add_omit_rule(OmitRule::Path {
             path: "/things".into(),
         });
-        let by_other_path = base.clone().omit_rule(OmitRule::Path {
+        let by_other_path = base.clone().add_omit_rule(OmitRule::Path {
             path: "/others".into(),
         });
-        let by_component = base.clone().omit_rule(OmitRule::Component {
+        let by_component = base.clone().add_omit_rule(OmitRule::Component {
             kind: crate::ComponentKind::Schemas,
             name: "things".into(),
         });
@@ -1368,11 +1382,11 @@ components:
 
         // A pointer rule with no file and one naming an empty file are different rules, and the
         // shared canonical encoding keeps them apart.
-        let no_file = base.clone().omit_rule(OmitRule::Pointer {
+        let no_file = base.clone().add_omit_rule(OmitRule::Pointer {
             file: None,
             pointer: "/paths/~1things".into(),
         });
-        let empty_file = base.clone().omit_rule(OmitRule::Pointer {
+        let empty_file = base.clone().add_omit_rule(OmitRule::Pointer {
             file: Some("".into()),
             pointer: "/paths/~1things".into(),
         });

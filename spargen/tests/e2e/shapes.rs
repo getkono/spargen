@@ -416,7 +416,7 @@ fn strings_and_nulls_decode_beside_the_refined_object_branch() {
 /// (one nullable), optional members (one nullable, one keyword-named, one with a schema `default`,
 /// one a recursive reference, one a union), a typed overflow map, a struct with no required member,
 /// one with more required members than clippy's argument threshold (issue #1267), and one whose
-/// required member is named like the provider of its defaulted one.
+/// required member is named like the `{field}_or_default` accessor of its defaulted one.
 const CONSTRUCTORS_SPEC: &str = r#"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -480,36 +480,24 @@ components:
         h: { type: string }
     Shadowed:
       type: object
-      required: [default_29_speed]
+      required: [speed_or_default]
       properties:
-        default_29_speed: { type: string }
+        speed_or_default: { type: string }
         speed: { type: string, default: fast }
 "#;
 
-/// The provider `new` calls to apply `Shadowed.speed`'s default. `Shadowed`'s required member has
-/// the same name, so it becomes a `new` parameter that shadows a bare call to the provider.
-const SHADOWED_PROVIDER: &str = "fn default_29_speed(";
-
 /// Issue #1267: an object struct derives `PartialEq` (and `Default` when no member is required),
-/// and `new` plus one `with_*` setter per optional member build the value a struct literal does, so
-/// a test compares a decoded value with an expected one directly.
+/// and its `…Required` struct (#1441), or `new` where no member is required, plus one `with_*`
+/// setter per optional member build the value a struct literal does, so a test compares a decoded
+/// value with an expected one directly.
 #[test]
-fn object_structs_build_through_new_and_setters_and_compare_equal() {
+fn object_structs_build_through_the_required_struct_and_setters_and_compare_equal() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", CONSTRUCTORS_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "constructors_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    let module = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
-    assert!(
-        module.contains(SHADOWED_PROVIDER),
-        "`Shadowed`'s required member must share its default provider's name; providers: {:?}",
-        module
-            .lines()
-            .filter(|line| line.contains("fn default_"))
-            .collect::<Vec<_>>()
-    );
 
     std::fs::create_dir_all(out.join("tests")).unwrap();
     std::fs::write(
@@ -518,24 +506,34 @@ fn object_structs_build_through_new_and_setters_and_compare_equal() {
 use std::collections::BTreeMap;
 
 use constructors_client::types::{
-    Envelope, EnvelopeMode, EnvelopePet, Settings, Shadowed, Tuned, Wide,
+    Envelope, EnvelopeMode, EnvelopePet, EnvelopeRequired, Settings, Shadowed, ShadowedRequired,
+    Tuned, Wide, WideRequired,
 };
 
+fn envelope(id: &str, count: i64, parent: Option<&str>) -> Envelope {
+    Envelope::from(EnvelopeRequired {
+        id: id.to_owned(),
+        count,
+        parent: parent.map(str::to_owned),
+    })
+}
+
 #[test]
-fn new_and_setters_build_the_decoded_value() {
-    let built = Envelope::new("e1".to_owned(), 3, None)
-        .with_note("hi".to_owned())
+fn the_required_struct_and_setters_build_the_decoded_value() {
+    // A setter takes `impl Into<T>`, so a string literal sets a string member.
+    let built = envelope("e1", 3, None)
+        .with_note("hi")
         .with_label("l".to_owned())
         .with_type("kind".to_owned())
         .with_mode(EnvelopeMode::Slow)
         .with_ratio(0.5)
-        .with_child(Box::new(Envelope::new("e2".to_owned(), 0, Some("e1".to_owned()))))
+        .with_child(Box::new(envelope("e2", 0, Some("e1"))))
         .with_pet(EnvelopePet::EnvelopePetVariant0(Box::new("cat".to_owned())))
         .with_additional(BTreeMap::from([("extra".to_owned(), 7)]));
     let wire = serde_json::json!({
         "id": "e1", "count": 3, "parent": null, "note": "hi", "label": "l", "type": "kind",
         "mode": "slow", "ratio": 0.5,
-        "child": { "id": "e2", "count": 0, "parent": "e1", "mode": "fast" },
+        "child": { "id": "e2", "count": 0, "parent": "e1" },
         "pet": "cat", "extra": 7
     });
     let decoded: Envelope = serde_json::from_value(wire.clone()).unwrap();
@@ -545,11 +543,12 @@ fn new_and_setters_build_the_decoded_value() {
 }
 
 #[test]
-fn new_sets_each_optional_member_as_decoding_an_absent_one_does() {
-    let envelope = Envelope::new("e".to_owned(), 1, Some("p".to_owned()));
+fn the_conversion_sets_each_optional_member_as_decoding_an_absent_one_does() {
+    let envelope = envelope("e", 1, Some("p"));
     assert_eq!(envelope.note, None);
     assert_eq!(envelope.label, constructors_client::Nullable::Absent);
-    assert_eq!(envelope.mode, Some(EnvelopeMode::Fast));
+    assert_eq!(envelope.mode, None);
+    assert_eq!(envelope.mode_or_default(), EnvelopeMode::Fast);
     assert!(envelope.additional.is_empty());
     let decoded: Envelope =
         serde_json::from_value(serde_json::json!({ "id": "e", "count": 1, "parent": "p" }))
@@ -565,26 +564,29 @@ fn a_struct_with_no_required_member_defaults_to_new() {
         serde_json::from_value(serde_json::json!({ "verbose": true, "level": 2 })).unwrap();
     assert_eq!(settings, decoded);
 
-    // A schema `default` makes `Default` an `impl` calling `new`, which applies it.
+    // A schema `default` leaves the member unset in `Default` too; its accessor reads it.
     assert_eq!(Tuned::default(), Tuned::new());
-    assert_eq!(Tuned::default().retries, Some(3));
+    assert_eq!(Tuned::default().retries, None);
+    assert_eq!(Tuned::default().retries_or_default(), 3);
     let decoded: Tuned = serde_json::from_value(serde_json::json!({})).unwrap();
     assert_eq!(Tuned::default(), decoded);
 }
 
 #[test]
-fn every_required_member_is_a_new_argument() {
+fn every_required_member_is_a_field_of_the_required_struct() {
     let [a, b, c, d, e, f, g, h] = ["a", "b", "c", "d", "e", "f", "g", "h"].map(str::to_owned);
-    let wide = Wide::new(a, b, c, d, e, f, g, h);
+    let wide = Wide::from(WideRequired { a, b, c, d, e, f, g, h });
     assert_eq!(wide.h, "h");
 }
 
 #[test]
-fn new_applies_a_default_whose_provider_a_required_member_is_named_after() {
-    let shadowed = Shadowed::new("x".to_owned());
-    assert!(shadowed.speed.is_some());
+fn a_default_accessor_and_a_member_of_its_name_coexist() {
+    let shadowed = Shadowed::from(ShadowedRequired { speed_or_default: "x".to_owned() });
+    assert_eq!(shadowed.speed, None);
+    assert_eq!(shadowed.speed_or_default, "x");
+    assert_eq!(shadowed.speed_or_default(), "fast");
     let decoded: Shadowed =
-        serde_json::from_value(serde_json::json!({ "default_29_speed": "x" })).unwrap();
+        serde_json::from_value(serde_json::json!({ "speed_or_default": "x" })).unwrap();
     assert_eq!(shadowed, decoded);
 }
 "##,
@@ -639,16 +641,20 @@ components:
         role: { $ref: '#/components/schemas/WireBlobRole' }
 "#;
 
-/// Issue #1266: a closed string enum is `Copy` and `Hash`, names its wire value through a `const`
-/// `as_str` that `Display` writes, lists its variants in `ALL`, and parses with `FromStr`, which
-/// accepts exactly the values serde decodes and fails with the root-nameable `UnknownVariant`.
+/// Issue #1266: under `closed_enums`, a string enum is `Copy` and `Hash`, names its wire value
+/// through a `const` `as_str` that `Display` writes, lists its variants in `ALL`, and parses with
+/// `FromStr`, which accepts exactly the values serde decodes and fails with the root-nameable
+/// `UnknownVariant`.
 #[test]
 fn closed_string_enums_name_list_and_parse_their_wire_values() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", CLOSED_ENUMS_SPEC);
     let out = temp.path().join("client");
 
-    let report = generate_fixture_crate(&spec, &out, "closed_enums_client");
+    let report =
+        generate_configured_fixture_crate(&spec, &out, "closed_enums_client", "2021", |spec| {
+            spec.with_closed_enums(spargen::StringEnums::Closed)
+        });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     std::fs::create_dir_all(out.join("tests")).unwrap();

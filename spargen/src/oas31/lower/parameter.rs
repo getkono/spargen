@@ -209,14 +209,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 None,
             );
         }
-        Some(self.lowered_parameter(
+        // The specification has a form-urlencoded querystring use Encoding Objects "in the same
+        // way as with request bodies of that media type", so its `encoding` is lowered by the
+        // form body's own rules, refusals (`E009`) and inert fields (`W011`) included.
+        let form_encoding = if media == MediaType::FormUrlEncoded {
+            Some(self.lower_body_encoding(media, media_name, Some(ty), &object)?)
+        } else {
+            None
+        };
+        let mut lowered = self.lowered_parameter(
             parameter,
             ParamLoc::QueryString,
             ty,
             ParamStyle::Content(media),
             true,
             object.schema.as_ref(),
-        ))
+        );
+        lowered.form_encoding = form_encoding;
+        Some(lowered)
     }
 
     /// The serialization style of a parameter outside `querystring`, and its `explode`.
@@ -494,6 +504,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             explode,
             deprecated: parameter.deprecated,
             default_display: self.param_default_display(schema, ty),
+            form_encoding: None,
         }
     }
 }

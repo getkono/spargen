@@ -957,6 +957,16 @@ fn every_parameter_error_displays_its_rule_and_only_serialize_has_a_source() {
             "`style: spaceDelimited` and `style: pipeDelimited` require an array or object \
              parameter value",
         ),
+        (
+            ParameterError::EmptyPathSegment,
+            "a path parameter rendered to an empty segment, which would send the request to a \
+             different resource",
+        ),
+        (
+            ParameterError::NonFiniteNumber,
+            "a parameter or request body value holds a NaN or infinite number, which neither a \
+             parameter style nor JSON can represent",
+        ),
     ] {
         assert_eq!(error.to_string(), expected);
         assert!(std::error::Error::source(&error).is_none(), "{error}");
@@ -1260,4 +1270,199 @@ fn an_encoded_cookie_pair_refuses_only_what_breaks_the_header() {
         cookie_pair("color", "color=a,b:c".to_owned(), CookieValue::Encoded).unwrap(),
         "color=a,b:c"
     );
+}
+
+/// Every serializer's outcome for `value`, labelled with the style that produced it.
+fn every_style<T: Serialize>(value: &T) -> Vec<(&'static str, Result<(), ParameterError>)> {
+    let properties = [FormProperty {
+        name: "a",
+        mode: FormMode::Text,
+    }];
+    vec![
+        ("simple", serialize_simple(value, false, U).map(drop)),
+        ("simple explode", serialize_simple(value, true, U).map(drop)),
+        ("label", serialize_label(value, false, U).map(drop)),
+        ("matrix", serialize_matrix("x", value, false, U).map(drop)),
+        ("form", serialize_form("x", value, false, F).map(drop)),
+        (
+            "form explode",
+            serialize_form("x", value, true, F).map(drop),
+        ),
+        (
+            "querystring form",
+            serialize_form("", value, true, F).map(drop),
+        ),
+        (
+            "spaceDelimited",
+            serialize_delimited("x", value, Delimiter::Space, F).map(drop),
+        ),
+        ("deepObject", serialize_deep_object("x", value, F).map(drop)),
+        (
+            "form body",
+            serialize_form_body(value, &properties, None).map(drop),
+        ),
+        (
+            "multipart",
+            serialize_multipart_values(value, FormStyle::Form, false).map(drop),
+        ),
+    ]
+}
+
+/// `serde_json::to_value` turns a NaN or an infinity into `null`, which every style renders as
+/// undefined, so a non-finite `f64` is refused by each serializer before that happens: at the top
+/// level, inside an array, and as an object member, whichever shape the style otherwise takes.
+#[test]
+fn every_serializer_refuses_a_non_finite_f64() {
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let scalar = every_style(&number);
+        let array = every_style(&vec![1.0, number]);
+        let object = every_style(&std::collections::BTreeMap::from([
+            ("a", 1.0),
+            ("b", number),
+        ]));
+        for (shape, outcomes) in [("scalar", scalar), ("array", array), ("object", object)] {
+            for (style, outcome) in outcomes {
+                assert!(
+                    matches!(outcome, Err(ParameterError::NonFiniteNumber)),
+                    "{style} {shape} {number}: {outcome:?}"
+                );
+            }
+        }
+    }
+}
+
+/// An `f32` is checked as well, and so is a non-finite number nested in a struct member.
+#[test]
+fn a_non_finite_f32_or_nested_member_is_refused() {
+    #[derive(Serialize)]
+    struct Holder {
+        a: Option<Vec<f32>>,
+    }
+    let holder = Holder {
+        a: Some(vec![f32::NAN]),
+    };
+    assert!(matches!(
+        serialize_simple(&f32::INFINITY, false, U),
+        Err(ParameterError::NonFiniteNumber)
+    ));
+    assert!(matches!(
+        serialize_form_body(&holder, &[], None),
+        Err(ParameterError::NonFiniteNumber)
+    ));
+}
+
+/// The JSON encoders refuse a NaN or an infinity, `f64` or `f32`, at the top level, inside an
+/// array, and as a nested struct member, where `serde_json` alone would write `null`; a finite
+/// value encodes to exactly the text `serde_json` writes.
+#[test]
+fn the_json_encoders_refuse_a_non_finite_number() {
+    #[derive(Serialize)]
+    struct Holder {
+        inner: Vec<std::collections::BTreeMap<&'static str, f32>>,
+    }
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let nested = Holder {
+            inner: vec![std::collections::BTreeMap::from([("ratio", number as f32)])],
+        };
+        for outcome in [
+            to_json_string(&number).map(drop),
+            to_json_vec(&number).map(drop),
+            to_json_string(&vec![1.0, number]).map(drop),
+            to_json_vec(&vec![1.0, number]).map(drop),
+            to_json_string(&nested).map(drop),
+            to_json_vec(&nested).map(drop),
+        ] {
+            assert!(
+                matches!(outcome, Err(ParameterError::NonFiniteNumber)),
+                "{number}: {outcome:?}"
+            );
+        }
+    }
+    let finite = vec![0.0, -1.5, f64::MAX];
+    assert_eq!(
+        to_json_string(&finite).unwrap(),
+        serde_json::to_string(&finite).unwrap()
+    );
+    assert_eq!(
+        to_json_vec(&finite).unwrap(),
+        serde_json::to_vec(&finite).unwrap()
+    );
+}
+
+/// A value whose own `Serialize` fails reaches the JSON encoders' real serialization, which
+/// reports it as `ParameterError::Serialize`.
+#[test]
+fn the_json_encoders_report_a_failing_serialize() {
+    struct Failing;
+    impl Serialize for Failing {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("refused"))
+        }
+    }
+    assert!(matches!(
+        to_json_string(&Failing),
+        Err(ParameterError::Serialize(_))
+    ));
+    assert!(matches!(
+        to_json_vec(&Failing),
+        Err(ParameterError::Serialize(_))
+    ));
+}
+
+/// `holds_non_finite` finds a NaN or an infinity at the top level and nested in a struct member,
+/// and answers `false` for a finite value and for one whose own `Serialize` fails.
+#[test]
+fn holds_non_finite_finds_a_nested_non_finite_number() {
+    #[derive(Serialize)]
+    struct Holder {
+        inner: Vec<Option<f32>>,
+    }
+    struct Failing;
+    impl Serialize for Failing {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("refused"))
+        }
+    }
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(holds_non_finite(&number), "{number}");
+        assert!(
+            holds_non_finite(&Holder {
+                inner: vec![None, Some(number as f32)],
+            }),
+            "{number}"
+        );
+    }
+    assert!(!holds_non_finite(&Holder {
+        inner: vec![Some(1.5), None],
+    }));
+    assert!(!holds_non_finite(&Failing));
+}
+
+proptest::proptest! {
+    /// Every finite `f64` still serializes, to the text `serde_json` writes for it.
+    #[test]
+    fn every_finite_f64_serializes(number in proptest::num::f64::NORMAL
+        | proptest::num::f64::SUBNORMAL
+        | proptest::num::f64::ZERO
+    ) {
+        let expected = serde_json::to_string(&number).unwrap();
+        proptest::prop_assert_eq!(serialize_simple(&number, false, P).unwrap(), expected.clone());
+        proptest::prop_assert_eq!(
+            serialize_form("x", &vec![number], true, P).unwrap(),
+            vec![format!("x={expected}")]
+        );
+    }
+}
+
+/// A path parameter that renders to nothing would leave an empty segment, re-targeting
+/// `/users/{id}` at `/users/`, so the rendered value is refused; any other text, `0` included,
+/// passes unchanged.
+#[test]
+fn a_path_segment_refuses_only_the_empty_rendering() {
+    assert!(matches!(
+        path_segment(String::new()),
+        Err(ParameterError::EmptyPathSegment)
+    ));
+    assert_eq!(path_segment("0".to_owned()).unwrap(), "0");
+    assert_eq!(path_segment("%20".to_owned()).unwrap(), "%20");
 }

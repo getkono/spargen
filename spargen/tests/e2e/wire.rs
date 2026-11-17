@@ -80,7 +80,7 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
         .since(at)
         .on(day);
     let response = client
-        .create_event(Some(params), &event)
+        .create_event(Some(params), event.clone())
         .expect("create_event round-trips");
 
     let request = server.join().unwrap();
@@ -217,7 +217,7 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
 
     let params = dates_client::CreateEventParams::default().since(at).on(day);
     let response = client
-        .create_event(Some(params), &event)
+        .create_event(Some(params), event.clone())
         .expect("create_event round-trips");
 
     let request = server.join().unwrap();
@@ -270,7 +270,7 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
 
     let params = dates_client::CreateEventParams::default().since(at).on(day);
     let response = client
-        .create_event(Some(params), &event)
+        .create_event(Some(params), event.clone())
         .expect("create_event round-trips");
 
     let request = server.join().unwrap();
@@ -296,7 +296,7 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
 "##;
 
 /// A `contentEncoding: base64` value: a component, an array item, a nullable member and a union
-/// variant inside a JSON body, and a multipart part.
+/// variant inside a JSON body, and a multipart part; and base64url and `format: binary` members.
 const BASE64_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: Base64, version: 1.0.0 }
@@ -375,6 +375,8 @@ components:
         pieces: { type: array, items: { $ref: '#/components/schemas/Metainfo' } }
         note: { type: [string, 'null'], contentEncoding: base64 }
         either: { oneOf: [{ $ref: '#/components/schemas/Metainfo' }, { type: integer }] }
+        token: { type: string, contentEncoding: base64url }
+        label: { type: string, format: binary }
     Upload:
       type: object
       required: [file]
@@ -407,8 +409,8 @@ fn base64_content_reaches_the_wire_as_base64_text() {
         "a base64 component must be the base64 newtype: {generated}"
     );
     assert!(
-        generated.contains("pub use base64::{deserialize_base64, serialize_base64};"),
-        "the base64 codec must be embedded for a spec that uses it"
+        generated.contains("fn serialize_base64url"),
+        "the base64 codecs must be embedded for a spec that uses them"
     );
 
     write_fixture_test(&out, "base64", BASE64_WIRE_TEST);
@@ -431,7 +433,7 @@ fn json_members_are_base64_strings_in_both_directions() {
     let (base, server) = common::serve_once(
         "application/json",
         "200 OK",
-        br#"{"data":"ZDQ6aW5mb2U=","pieces":["AAE=","/w"],"note":null,"either":"aGk="}"#,
+        br#"{"data":"ZDQ6aW5mb2U=","pieces":["AAE=","/w"],"note":null,"either":"aGk=","token":"-_8","label":"hi"}"#,
     );
     let client = base64_client::BlockingClient::new(&base).unwrap();
 
@@ -443,15 +445,18 @@ fn json_members_are_base64_strings_in_both_directions() {
         ]),
         note: Some(bytes::Bytes::from_static(b"hi").into()),
         either: None,
+        token: Some(types::TorrentSourceToken(bytes::Bytes::from_static(&[0xfb, 0xff]))),
+        label: Some("raw text".to_owned()),
     };
-    let response = client.add_torrent(&source).expect("add_torrent round-trips");
+    let response = client.add_torrent(source.clone()).expect("add_torrent round-trips");
 
     let request = server.join().unwrap();
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(
         body,
-        serde_json::json!({ "data": "ZDQ6aW5mb2U=", "pieces": ["AAE=", "/w=="], "note": "aGk=" }),
-        "base64 members must serialize as padded standard base64 strings"
+        serde_json::json!({ "data": "ZDQ6aW5mb2U=", "pieces": ["AAE=", "/w=="], "note": "aGk=",
+            "token": "-_8=", "label": "raw text" }),
+        "base64 and base64url members are padded text; a `format: binary` one is its string"
     );
 
     let decoded = response.into_inner();
@@ -465,6 +470,8 @@ fn json_members_are_base64_strings_in_both_directions() {
         .collect();
     assert_eq!(pieces, [&[0u8, 1][..], &[0xff][..]], "an unpadded item decodes too");
     assert!(decoded.note.is_none());
+    assert_eq!(&decoded.token.as_ref().unwrap()[..], &[0xfb, 0xff], "unpadded base64url decodes");
+    assert_eq!(decoded.label.as_deref(), Some("hi"));
     // The union's base64 variant decodes the string, and writes the same text back.
     assert_eq!(
         serde_json::to_value(decoded.either.as_ref().unwrap()).unwrap(),
@@ -485,8 +492,10 @@ fn a_member_that_is_not_base64_text_is_a_decode_error() {
         pieces: None,
         note: None,
         either: None,
+        token: None,
+        label: None,
     };
-    assert!(client.add_torrent(&source).is_err());
+    assert!(client.add_torrent(source).is_err());
     server.join().unwrap();
 }
 
@@ -824,7 +833,7 @@ fn each_url_accessor_names_the_url_its_operation_sends_to() {
     assert_eq!(client.inner().stream_file_url("a b/c").unwrap(), stream);
 
     client
-        .stream_file("a b/c", urls_client::StreamFileParams::new("trace"))
+        .stream_file("a b/c", urls_client::StreamFileParamsRequired { x_trace: "trace".to_owned() })
         .unwrap();
     // `login` documents only `302`, so the server's `204` is an undocumented status: the request
     // line is what is compared, not the outcome.
@@ -853,10 +862,10 @@ fn a_url_accessor_leaves_off_the_query_api_key_its_request_sends() {
         .with_key(urls_client::SecretString::from("s3cret"));
 
     let url = client
-        .search_url(urls_client::SearchParams::new("a b"))
+        .search_url(urls_client::SearchParamsRequired { q: "a b".to_owned() })
         .unwrap();
     assert_eq!(url.as_str(), format!("{base}/v1/search?q=a%20b"));
-    client.search(urls_client::SearchParams::new("a b")).unwrap();
+    client.search(urls_client::SearchParamsRequired { q: "a b".to_owned() }).unwrap();
     let seen = server.join().unwrap();
     assert_eq!(seen, vec!["GET /api/v1/search?q=a%20b&api_key=s3cret HTTP/1.1".to_owned()]);
 }
@@ -962,7 +971,7 @@ fn cbor_is_sent_and_asked_for_under_its_own_media_type() {
 }
 
 #[test]
-fn octet_stream_still_leaves_accept_to_the_http_stack() {
+fn octet_stream_is_asked_for_under_its_own_media_type() {
     let (base, server) = common::serve_once("application/octet-stream", "200 OK", SIGNED);
     let client = cbor_client::BlockingClient::new(&base).unwrap();
     client
@@ -971,8 +980,7 @@ fn octet_stream_still_leaves_accept_to_the_http_stack() {
     let request = server.join().unwrap();
     let head = &request.head;
     assert_eq!(request.header("content-type"), ["application/octet-stream"], "{head}");
-    // The generated method sets no `Accept`; what arrives is the HTTP stack's own default.
-    assert_eq!(request.header("accept"), ["*/*"], "{head}");
+    assert_eq!(request.header("accept"), ["application/octet-stream"], "{head}");
 }
 "##,
     );
@@ -1151,13 +1159,13 @@ fn a_patch_clears_one_member_and_leaves_another_off() {
     assert_eq!(clear, PetPatch::new().with_nickname(Nullable::Null));
     assert_eq!(clear.nickname, Nullable::Null);
     assert_eq!(clear.age, Nullable::Absent);
-    let cleared = client.patch_pet(&clear).expect("the clearing patch round-trips");
+    let cleared = client.patch_pet(clear.clone()).expect("the clearing patch round-trips");
     let decoded = cleared.into_inner();
     assert_eq!(decoded.nickname, Nullable::Null);
     assert_eq!(decoded.age, Nullable::Absent);
 
     let set = PetPatch::default().with_nickname("Rex".to_owned()).with_age(3);
-    let renamed = client.patch_pet(&set).expect("the setting patch round-trips");
+    let renamed = client.patch_pet(set.clone()).expect("the setting patch round-trips");
     let decoded = renamed.into_inner();
     assert_eq!(decoded.nickname, Nullable::Value("Rex".to_owned()));
     assert_eq!(decoded.age, Nullable::Null);
@@ -1437,7 +1445,8 @@ fn unsigned_values_are_decimal_on_the_wire() {
         br#"{"count":18446744073709551615}"#,
     ));
     let client = unsigned_client::BlockingClient::new(&base).unwrap();
-    let params = unsigned_client::GetCounterParams::new(u16::MAX).limit(u32::MAX);
+    let required = unsigned_client::GetCounterParamsRequired { x_page: u16::MAX };
+    let params = unsigned_client::GetCounterParams::from(required).limit(u32::MAX);
     let response = client
         .get_counter(u64::MAX, params)
         .expect("the call round-trips");

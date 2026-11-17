@@ -28,8 +28,8 @@ pub(crate) use deserialize::parse_document;
 pub(crate) use document::{
     Components, Document, EncodingObject, HeaderObject, Info, MediaTypeObject, OAuthFlow,
     OperationObject, ParameterObject, PathItem, Paths, RefOr, Reference, RequestBodyObject,
-    ResponseObject, ResponsesObject, SecurityRequirement, SecuritySchemeObject, Server,
-    ServerVariable, Tag,
+    ResponseObject, ResponsesObject, SchemaDialect, SecurityRequirement, SecuritySchemeObject,
+    Server, ServerVariable, Tag,
 };
 pub(crate) use lower::{lower, LowerOptions};
 pub(crate) use metaschema::MetaSchemaValidator;

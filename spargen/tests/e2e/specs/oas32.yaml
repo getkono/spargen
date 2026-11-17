@@ -87,6 +87,24 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Record"
+  # A form-urlencoded `in: querystring` parameter whose Encoding Objects shape the query string as
+  # they would a form body: `tags` joined by `,` rather than repeated, `at` sent as JSON.
+  /records/filtered:
+    get:
+      operationId: filterRecords
+      parameters:
+        - name: filter
+          in: querystring
+          required: true
+          content:
+            application/x-www-form-urlencoded:
+              schema:
+                $ref: "#/components/schemas/RecordFilter"
+              encoding:
+                tags: { style: form, explode: false }
+                at: { contentType: application/json }
+      responses:
+        "204": { description: No Content }
   /events:
     get:
       operationId: streamEvents
@@ -109,6 +127,21 @@ paths:
             text/event-stream:
               itemSchema:
                 $ref: "#/components/schemas/SseTextEvent"
+  # A secured SSE operation: its preparer attaches credentials through `support::Resend::attach`,
+  # which keeps the unsigned request a reconnect signs afresh, so that emission is compiled and
+  # linted in the consumer crate.
+  /events/secured:
+    get:
+      operationId: streamSecuredEvents
+      security:
+        - bearer: []
+      responses:
+        "200":
+          description: ok
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: "#/components/schemas/SseEnvelope"
   # 3.2 `additionalOperations`: a custom method token generates a client method and must reach the
   # wire verbatim. The reusable `components.mediaTypes` reference supplies its request body, and the
   # response is a discriminated union with `defaultMapping` — three constructs that each emit code
@@ -129,7 +162,23 @@ paths:
               application/json:
                 schema:
                   $ref: "#/components/schemas/CacheOutcome"
+  # A discriminated union whose 3.2 `defaultMapping` member overlaps an untagged one; the fixture's
+  # `wire` test drives its serde.
+  /rides:
+    get:
+      operationId: getRide
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ride"
 components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
   schemas:
     Record:
       type: object
@@ -140,6 +189,15 @@ components:
     Query:
       type: object
       properties:
+        term: { type: string }
+    RecordFilter:
+      type: object
+      properties:
+        tags: { type: array, items: { type: string } }
+        at:
+          type: object
+          properties:
+            x: { type: string }
         term: { type: string }
     SseEnvelope:
       type: object
@@ -189,6 +247,32 @@ components:
         # `null` tag reads as an absent one, so it decodes into the fallback too.
         outcome: { type: [string, "null"] }
         detail: { type: string }
+    Car:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+        wheels: { type: integer }
+    RideOther:
+      type: object
+      properties:
+        kind: { type: string }
+        label: { type: string }
+        note: { type: string }
+    Ride:
+      oneOf:
+        - $ref: "#/components/schemas/Car"
+        - type: object
+          required: [label]
+          properties:
+            kind: { type: string }
+            label: { type: string }
+        - $ref: "#/components/schemas/RideOther"
+      discriminator:
+        propertyName: kind
+        mapping:
+          car: "#/components/schemas/Car"
+        defaultMapping: "#/components/schemas/RideOther"
   mediaTypes:
     QueryBody:
       schema:

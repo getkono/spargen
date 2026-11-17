@@ -348,8 +348,8 @@ pub(super) fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
         "application/x-www-form-urlencoded" => (MediaType::FormUrlEncoded, 3),
         "application/octet-stream" => (MediaType::OctetStream, 4),
         // CBOR is lowered as opaque octets at octet-stream's rank: no CBOR codec exists, and the
-        // bodies it carries are handed over byte for byte. Only the wire differs — the key goes
-        // out verbatim as `Content-Type`, and on a response as `Accept` (`is_cbor`).
+        // bodies it carries are handed over byte for byte. Its key goes out verbatim, as every
+        // chosen key does: as `Content-Type` on a request, and on a success response in `Accept`.
         media if is_cbor(media) => (MediaType::OctetStream, 4),
         // The sequential kinds are matched before the `text/` prefix arm so `text/event-stream` is
         // a stream, not text; their rank (6) still sits below text (5).
@@ -376,9 +376,7 @@ pub(super) fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
 /// A suffix *range* (`application/*+cbor`) is not concrete and is not CBOR here. Matched
 /// case-insensitively, as [`classify_media`] states.
 ///
-/// `classify_media` reads CBOR as opaque octets. Response lowering asks this to announce a CBOR
-/// response's key in the request's `Accept`, and `choose_media` to report every alternative such
-/// a selection passes over (`W014`).
+/// `classify_media` asks this to read CBOR as opaque octets at octet-stream's rank.
 pub(super) fn is_cbor(essence: &str) -> bool {
     let Some((family, subtype)) = essence.split_once('/') else {
         return false;

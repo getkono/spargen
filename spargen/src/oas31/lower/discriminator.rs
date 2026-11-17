@@ -1,6 +1,7 @@
 //! A union's Discriminator Object: resolving its `mapping` against the union's members, the
 //! standalone-discriminator warning, and the discriminated dispatch strategy.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic};
@@ -14,6 +15,7 @@ use crate::oas31::discriminator::{
     resolve_discriminator_targets,
 };
 use crate::oas31::{Resolver, Schema, SchemaOr};
+use crate::source::schema_component_name;
 
 use super::shape::schema_has_union;
 use super::strategy::{retain_strategy, UnionDispatch};
@@ -876,15 +878,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 pub(super) fn member_component_name<'m>(
     member: &'m SchemaOr,
     resolver: &Resolver<'_>,
-) -> Option<&'m str> {
+) -> Option<Cow<'m, str>> {
     let SchemaOr::Schema(schema) = member else {
         return None;
     };
     let in_sub_file = resolver.written_in(&schema.provenance) != resolver.root_id();
-    schema
-        .reference
-        .as_deref()?
-        .strip_prefix("#/components/schemas/")
+    schema_component_name(schema.reference.as_deref()?)
         .filter(|name| in_sub_file || !name.contains('/'))
 }
 

@@ -6,11 +6,11 @@ use std::ops::Range;
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::diag::Provenance;
+use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{AdditionalProps, Docs, Field, FieldDefault, Struct, Ty, TypeKind};
 use crate::name::hint_segment;
 use crate::oas31::{JsonType, Resolver, Schema, SchemaOr};
-use crate::source::is_remote_ref;
+use crate::source::{is_remote_ref, schema_component_name};
 
 use super::all_of::real_union;
 use super::meet::{carries_key, drop_applied_default_if_required, merge_field_default, NoMeet};
@@ -383,9 +383,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .or_else(|| self.reject_all_of_required_property(schema, &name));
         }
 
-        // Apply the required union, then keep required fields consistent: a serde default only fires
-        // for an absent optional field, so a field promoted to required by another member drops its
-        // applied default (it stays documented in rustdoc).
+        // Apply the required union, then keep required fields consistent: only an optional member
+        // gets a `{field}_or_default` accessor, so a field promoted to required by another member
+        // drops its applied default (it stays documented in rustdoc).
         let mut fields: Vec<Field> = fields.into_values().collect();
         for field in &mut fields {
             if required.contains(&field.name.wire) {
@@ -394,6 +394,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             drop_applied_default_if_required(field);
         }
 
+        if matches!(additional, AdditionalProps::Deny) {
+            self.warn_closed_merge(contributions);
+        }
         // A property repeated by three or more members is met pair by pair, and each meet replaces
         // the field's type, so the struct refers to the last meet and not to the ones before it.
         let kind = TypeKind::Struct(Struct { fields, additional });
@@ -404,6 +407,223 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ty.nullable = object_all_of_admits_null(contributions);
         self.elide_unused_lowerings(object_member_lowerings(contributions));
         Some(ty)
+    }
+
+    /// Report, as `W011` at each closing member's `additionalProperties`, a merge that member
+    /// closes while another member declares a property it does not (#1431). The merged struct is
+    /// closed to the fields every member declares (see `object_body`), which is the reading such
+    /// a document usually means, but JSON Schema 2020-12 applies the keyword to its own schema's
+    /// `properties` alone, so it would forbid those properties too.
+    fn warn_closed_merge(&mut self, contributions: &[Contribution]) {
+        let members: Vec<(&[Field], Option<&Provenance>)> = contributions
+            .iter()
+            .filter_map(|contribution| match contribution {
+                Contribution::Object {
+                    fields, closed_at, ..
+                } => Some((fields.as_slice(), closed_at.as_ref())),
+                _ => None,
+            })
+            .collect();
+        self.warn_closed_members(&members, ClosedMerge::AllOf);
+    }
+
+    /// The `W011` [`Self::warn_closed_merge`] reports, for `schema`'s `$ref` to `reference`
+    /// (lowered to `target`) met as an object with its sibling keywords (lowered to `sibling`):
+    /// the meet keeps a side's `additionalProperties: false` (`merge_additional`), so it is the
+    /// same closed reading. A side closed by a composition of its own has no one keyword to point
+    /// at, so the schema holding the `$ref` locates it.
+    ///
+    /// Where one side is a union and the other a closed object, the two are met branch by branch
+    /// (a union target beside object siblings, or a closed target beside a union sibling), and
+    /// the closed side is reported against the union's branches instead
+    /// ([`Self::warn_closed_union_meet`], #1500). `sibling` is lowered from `keywords`, the
+    /// sibling keywords as they were lowered.
+    pub(super) fn warn_closed_ref_meet(
+        &mut self,
+        schema: &Schema,
+        reference: &str,
+        target: Ty,
+        (sibling, keywords): (Ty, &Schema),
+    ) {
+        let (Some(target_kind), Some(sibling_kind)) = (
+            self.kind_of(target.id).cloned(),
+            self.kind_of(sibling.id).cloned(),
+        ) else {
+            return;
+        };
+        let body = self.ref_target_body(reference, &schema.provenance);
+        let target_at = self.closed_at(target, body.as_deref(), &schema.provenance);
+        let sibling_at = self.closed_at(sibling, Some(keywords), &schema.provenance);
+        match (&target_kind, &sibling_kind) {
+            // A reservation's body is still being lowered, so nothing is known of what it
+            // declares or closes; the meet itself refuses one (`intersect_types`).
+            (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => {}
+            (TypeKind::Struct(target), TypeKind::Struct(sibling)) => self.warn_closed_members(
+                &[
+                    (&target.fields, target_at.as_ref()),
+                    (&sibling.fields, sibling_at.as_ref()),
+                ],
+                ClosedMerge::RefSiblings,
+            ),
+            (TypeKind::Struct(closed), _) => {
+                self.warn_closed_union_meet(&closed.fields, target_at.as_slice(), sibling);
+            }
+            (_, TypeKind::Struct(closed)) => {
+                self.warn_closed_union_meet(&closed.fields, sibling_at.as_slice(), target);
+            }
+            _ => {}
+        }
+    }
+
+    /// Where the object `ty`, lowered from `keyword` where that is known, writes the
+    /// `additionalProperties: false` that closes it: the keyword's own pointer, or `fallback`
+    /// where `ty` is closed by a composition of its own and so has no one keyword to point at.
+    /// `None` where `ty` is no closed object.
+    pub(super) fn closed_at(
+        &self,
+        ty: Ty,
+        keyword: Option<&Schema>,
+        fallback: &Provenance,
+    ) -> Option<Provenance> {
+        let Some(TypeKind::Struct(structure)) = self.kind_of(ty.id) else {
+            return None;
+        };
+        matches!(structure.additional, AdditionalProps::Deny).then(|| {
+            keyword
+                .and_then(|keyword| self.closing_keyword(keyword))
+                .unwrap_or_else(|| fallback.clone())
+        })
+    }
+
+    /// The `W011` [`Self::warn_closed_merge`] reports, for a closed object whose fields are
+    /// `declared` met with `union` branch by branch (#1500): each met branch is closed to the
+    /// fields it and the object declare, the same reading as the closed merge, so each site in
+    /// `closing` is reported once, naming every property a branch declares that `declared`
+    /// does not. A `union` that lowered to one object is that object's one branch; anything else
+    /// that is no union declares nothing here.
+    pub(super) fn warn_closed_union_meet(
+        &mut self,
+        declared: &[Field],
+        closing: &[Provenance],
+        union: Ty,
+    ) {
+        if closing.is_empty() {
+            return;
+        }
+        let mut branches = Vec::new();
+        let mut pending = vec![union];
+        let mut seen = HashSet::new();
+        while let Some(ty) = pending.pop() {
+            if !seen.insert(ty.id) {
+                continue;
+            }
+            match self.kind_of(ty.id) {
+                Some(TypeKind::Union(union)) => {
+                    pending.extend(union.variants.iter().rev().map(|variant| variant.ty));
+                }
+                Some(TypeKind::Struct(branch)) => branches.extend(branch.fields.iter().cloned()),
+                // A branch closing a cycle is a reservation whose fields are not known yet, so it
+                // names no property here.
+                Some(TypeKind::Reserved) => {}
+                _ => {}
+            }
+        }
+        let mut members: Vec<(&[Field], Option<&Provenance>)> =
+            closing.iter().map(|at| (declared, Some(at))).collect();
+        members.push((&branches, None));
+        self.warn_closed_members(&members, ClosedMerge::UnionBranches);
+    }
+
+    /// The `W011` [`Self::warn_closed_merge`] reports, over the object members of a merge spelled
+    /// as `spelling` says: each member's fields beside where it writes the
+    /// `additionalProperties: false` that closes it, if it does. A closing member is reported
+    /// where another member declares a property it does not.
+    fn warn_closed_members(
+        &mut self,
+        members: &[(&[Field], Option<&Provenance>)],
+        spelling: ClosedMerge,
+    ) {
+        for (index, (own, closed_at)) in members.iter().enumerate() {
+            let Some(at) = closed_at else {
+                continue;
+            };
+            let declared_by_own = |wire: &str| {
+                own.iter()
+                    .any(|field| !field.undeclared && field.name.wire == wire)
+            };
+            let mut others: IndexSet<&str> = IndexSet::new();
+            for (other, (fields, _)) in members.iter().enumerate() {
+                if other == index {
+                    continue;
+                }
+                others.extend(
+                    fields
+                        .iter()
+                        .filter(|field| !field.undeclared && !declared_by_own(&field.name.wire))
+                        .map(|field| field.name.wire.as_str()),
+                );
+            }
+            if others.is_empty() {
+                continue;
+            }
+            let names = others
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let (verb, pronoun) = if others.len() == 1 {
+                ("is", "it")
+            } else {
+                ("are", "them")
+            };
+            let (merged, other, composing) = match spelling {
+                ClosedMerge::AllOf => (
+                    "the merged `allOf` object to the fields every member declares",
+                    "another member",
+                    "the composing schema",
+                ),
+                ClosedMerge::RefSiblings => (
+                    "the object a `$ref` and its sibling keywords compose to the fields both \
+                     declare",
+                    "the other side",
+                    "the schema holding the `$ref`",
+                ),
+                ClosedMerge::UnionBranches => (
+                    "each branch of the union it is met with to the fields the branch and this \
+                     object declare",
+                    "a branch",
+                    "the composing schema",
+                ),
+            };
+            // W011 case: closed-all-of-merge
+            Diagnostic::warning(Code::DeclarationHasNoEffect, (*at).clone())
+                .message(format!(
+                    "`additionalProperties: false` here is read as closing {merged}, so \
+                     {names}, declared by {other}, {verb} accepted; JSON Schema 2020-12 applies \
+                     the keyword to this schema's own `properties` alone, so it would forbid \
+                     {pronoun} as well. The generated struct still refuses every other key; JSON \
+                     Schema spells that closed merge as `unevaluatedProperties: false` on \
+                     {composing}"
+                ))
+                .emit(self.diags);
+        }
+    }
+
+    /// Where `schema` writes `additionalProperties: false`, if it does: the keyword's pointer,
+    /// with the span of the value written there when its file holds one.
+    fn closing_keyword(&self, schema: &Schema) -> Option<Provenance> {
+        if !matches!(
+            schema.additional_properties.as_deref(),
+            Some(SchemaOr::Bool(false))
+        ) {
+            return None;
+        }
+        let pointer = schema.provenance.pointer.push("additionalProperties");
+        let span = self
+            .resolver
+            .node_at(self.resolver.written_in(&schema.provenance), &pointer)
+            .map(|node| node.span);
+        Some(Provenance::new(pointer, span))
     }
 
     /// Gather every member of `schema.all_of` (source order) plus the enclosing schema's own object
@@ -435,6 +655,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 nullable: stated_nullability(schema),
                 union: None,
                 lowered: None,
+                closed_at: self.closing_keyword(schema),
             });
         }
         Some(())
@@ -515,7 +736,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
         out: &mut Vec<Contribution>,
     ) -> Option<()> {
-        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+        if let Some(name) = schema_component_name(reference) {
             // A `$ref` to a component still being lowered is a direct recursive allOf member
             // whose fields are not yet known — irreconcilable (distinct from a member with
             // recursive *fields*, which lowers fine). Refused before `ensure_component` is asked,
@@ -524,12 +745,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // words. Whether the target is still being lowered here can depend on the order the
             // document declares the two in, so the refusal is recorded for the next pass to
             // lower this body first (`record_open_member`).
-            if let Some(target) = self.open_component_root(name) {
+            if let Some(target) = self.open_component_root(&name) {
                 self.record_open_member(target);
                 return self
                     .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_COMPONENT_MEMBER);
             }
-            let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
+            let ty = self.ensure_component(&name, Some(reference), &schema.provenance)?;
             self.record_xml_merger(ty.id);
             let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             // The pre-check above sees root components only. A name the root does not declare
@@ -831,10 +1052,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .map(|field| field.name.wire.clone())
                     .collect();
                 let additional = structure.additional.clone();
-                let union = self
-                    .ref_target_body(reference, provenance)
-                    .is_some_and(|target| schema_has_union(&target))
+                let target = self.ref_target_body(reference, provenance);
+                let union = target
+                    .as_deref()
+                    .is_some_and(schema_has_union)
                     .then_some(ty);
+                // A target closed by a composition of its own has no one keyword to point at, so
+                // the `$ref` written here locates it.
+                let closed_at = matches!(additional, AdditionalProps::Deny).then(|| {
+                    target
+                        .as_deref()
+                        .and_then(|target| self.closing_keyword(target))
+                        .unwrap_or_else(|| provenance.clone())
+                });
                 // A copied field keeps its `undeclared` mark, so one the component carries only
                 // for its own `required` still gives way to a later member's declaration.
                 out.push(Contribution::Object {
@@ -844,6 +1074,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     nullable: decides_null.then_some(ty.nullable),
                     union,
                     lowered: None,
+                    closed_at,
                 });
             }
             _ => out.push(Contribution::Scalar(ty)),
@@ -881,6 +1112,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 nullable: stated_nullability(schema),
                 union,
                 lowered,
+                closed_at: self.closing_keyword(schema),
             });
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
@@ -903,6 +1135,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Otherwise the member is a pure annotation (`{description: ...}`): no constraint.
         Some(())
     }
+}
+
+/// Which spelling of a merge [`LowerCtx::warn_closed_members`] reports a closing member of, for
+/// the wording of its `W011`.
+#[derive(Clone, Copy)]
+enum ClosedMerge {
+    /// The members of an `allOf`, the composing schema's own keywords among them.
+    AllOf,
+    /// A `$ref` met with its shape-bearing sibling keywords.
+    RefSiblings,
+    /// A closed object met with a union branch by branch.
+    UnionBranches,
 }
 
 /// One `allOf` member's contribution to the merged type: a set of object fields (with its
@@ -938,6 +1182,12 @@ pub(super) enum Contribution {
         /// leaves it unused ([`LowerCtx::elide_unused_lowering`]). `None` for every other
         /// object member.
         lowered: Option<Range<u32>>,
+        /// Where the member writes the `additionalProperties: false` that closes it: its own
+        /// keyword, inline or on the `$ref` target it copies, or the `$ref` member itself where
+        /// the target is closed by its own composition. `None` for a member that is not closed.
+        /// The merge reports it ([`LowerCtx::warn_closed_merge`]) where another member declares a
+        /// property this one does not.
+        closed_at: Option<Provenance>,
     },
     Scalar(Ty),
     /// A member of untyped array applicators alone (`items`, `prefixItems`, no `type`): the
@@ -1081,9 +1331,9 @@ impl LowerCtx<'_, '_> {
                 // refuses ([`LowerCtx::gather_ref_target`]); its body is not expanded here. Nor
                 // is one whose body is already being expanded as a union member, which reserves
                 // nothing: the gather lowers it through its reservation, where a recursion stops.
-                let name = reference.strip_prefix("#/components/schemas/")?;
-                if self.open_component_root(name).is_some()
-                    || self.union_member_stack.iter().any(|open| open == name)
+                let name = schema_component_name(reference)?;
+                if self.open_component_root(&name).is_some()
+                    || self.union_member_stack.iter().any(|open| *open == name)
                 {
                     return None;
                 }

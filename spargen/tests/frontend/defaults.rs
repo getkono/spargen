@@ -3,6 +3,17 @@
 
 use super::*;
 
+/// The `{field}_or_default` accessor struct `ty` carries where `field`'s default is applied, from
+/// its signature through the end of its body, or `None` where it is not.
+fn default_accessor<'c>(code: &'c str, ty: &str, field: &str) -> Option<&'c str> {
+    let start = code.find(&format!("impl {ty} {{"))?;
+    let block = &code[start..];
+    let block = &block[..block.find("\n    }").unwrap_or(block.len())];
+    let at = block.find(&format!("pub fn {field}_or_default(&self)"))?;
+    let method = &block[at..];
+    Some(&method[..method.find('}').map_or(method.len(), |end| end + 1)])
+}
+
 /// `W005_SPEC` gives `Thing.count` a string default on an integer and `Thing.meta` an object
 /// default: neither is a scalar of its field's type, so each is reported once, at its own
 /// property, and the run still generates.
@@ -151,7 +162,7 @@ fn a_default_an_intersection_narrows_away_is_reported_not_applied() {
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     // The string literal survives only where the field is still a string: `Base` itself.
     assert_eq!(
-        code.matches("Some(\"a\".to_owned())").count(),
+        code.matches("|| \"a\".to_owned()").count(),
         1,
         "only `Base.valid` is still a `String`: {code}"
     );
@@ -227,7 +238,7 @@ fn a_default_an_uninhabited_meet_drops_is_reported_not_applied() {
     }
     // `Base` itself is no intersection: its `a` is still a string, and applies `z`.
     assert_eq!(
-        code.matches("Some(\"z\".to_owned())").count(),
+        code.matches("|| \"z\".to_owned()").count(),
         1,
         "only `Base` applies `z`: {code}"
     );
@@ -400,12 +411,12 @@ fn an_intersection_merges_a_default_either_side_declares() {
             .unwrap_or_else(|| panic!("`{name}` is emitted: {code}"));
         let body = &code[start..start + code[start..].find('}').unwrap()];
         assert!(
-            body.contains("Default: `hello`.") && body.contains("default = \"default_"),
+            body.contains("Default: `hello`.") && default_accessor(&code, name, "p").is_some(),
             "`{name}.p` documents and applies `hello`: {body}"
         );
     }
     assert_eq!(
-        code.matches("Some(\"world\".to_owned())").count(),
+        code.matches("|| \"world\".to_owned()").count(),
         1,
         "only `Other` itself applies `world`: {code}"
     );
@@ -495,7 +506,7 @@ fn a_conflicting_intersection_default_keeps_the_one_its_side_can_apply() {
         assert!(
             body.contains("Default: `zzz`.")
                 && !body.contains("Default: `aaa`.")
-                && body.contains("default = \"default_"),
+                && default_accessor(&code, name, "p").is_some(),
             "`{name}.p` documents and applies `zzz`: {body}"
         );
     }
@@ -550,7 +561,7 @@ fn an_integer_and_a_number_default_of_equal_value_are_one_default() {
             .unwrap_or_else(|| panic!("`{name}` is emitted: {code}"));
         let body = &code[start..start + code[start..].find('}').unwrap()];
         assert!(
-            body.contains("default = \"default_"),
+            default_accessor(&code, name, "p").is_some(),
             "`{name}.p` applies the merged default: {body}"
         );
     }
@@ -891,13 +902,13 @@ components:
     let body = types_module(&code);
     for literal in ["255", "65535", "4294967295", "9223372036854775807"] {
         assert!(
-            body.contains(&format!("Some({literal})")),
+            body.contains(&format!("unwrap_or({literal})")),
             "`{literal}` is not applied: {body}"
         );
     }
     for literal in ["256", "65536", "4294967296", "-1", "18446744073709551615"] {
         assert!(
-            !body.contains(&format!("Some({literal})")),
+            !body.contains(&format!("unwrap_or({literal})")),
             "`{literal}` is applied: {body}"
         );
     }
@@ -1008,26 +1019,24 @@ fn an_integral_float_default_is_the_integer_it_equals() {
         assert!(code.contains(dropped), "`{dropped}` is documented: {code}");
     }
     assert_eq!(
-        code.matches("default = \"default_").count(),
+        code.matches("_or_default(&self)").count(),
         4,
         "`size`, `narrow`, `level` and `ratio` apply their defaults: {code}"
     );
-    // Each provider returns the literal its field's type takes: an integer for the two plain
+    // Each accessor returns the literal its field's type takes: an integer for the two plain
     // `integer` fields, the checked newtype over one for the `enum` (#1327), a float for the
     // `number` one.
     for (field, literal) in [
-        ("size", "Some(3)"),
-        ("narrow", "Some(7)"),
-        ("level", "Some(PageLevel(2))"),
-        ("ratio", "Some(4.0)"),
+        ("size", "unwrap_or(3)"),
+        ("narrow", "unwrap_or(7)"),
+        ("level", "unwrap_or(PageLevel(2))"),
+        ("ratio", "unwrap_or(4.0)"),
     ] {
-        let start = code
-            .find(&format!("fn default_0_{field}()"))
-            .unwrap_or_else(|| panic!("`{field}` has a default provider: {code}"));
-        let provider = &code[start..start + code[start..].find('}').unwrap()];
+        let accessor = default_accessor(&code, "Page", field)
+            .unwrap_or_else(|| panic!("`{field}` has a default accessor: {code}"));
         assert!(
-            provider.contains(literal),
-            "`{field}` defaults to `{literal}`: {provider}"
+            accessor.contains(literal),
+            "`{field}` defaults to `{literal}`: {accessor}"
         );
     }
 }

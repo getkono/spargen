@@ -830,8 +830,8 @@ fn a_cycle_closing_ref_met_with_an_untyped_schema_keeps_the_ref_in_a_field_and_a
         "    Node:\n      allOf:\n        - { type: object, properties: { next: { $ref: \
          '#/components/schemas/Node' } } }\n        - { type: object, properties: { next: { \
          maxLength: 3 } } }\n    Tup:\n      allOf:\n        - { type: array, prefixItems: [ { \
-         $ref: '#/components/schemas/Tup' } ] }\n        - { type: array, items: { maxItems: 3 } \
-         }\n",
+         $ref: '#/components/schemas/Tup' } ], items: false }\n        - { type: array, items: { \
+         maxItems: 3 } }\n",
     );
     let (report, code) = generate_with_code(&spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");

@@ -134,11 +134,6 @@ struct OpSurface {
     /// The `{method}_url` accessor's arguments, in declaration order. Their types are those of
     /// `params`, compared there.
     url_args: Vec<UrlArgSurface>,
-    /// The parameters a call site passes by position, in order: the method's path arguments in URL
-    /// template order, then `…Params::new`'s arguments in declaration order. `params` holds what
-    /// each one is; this holds only the order, where two same-typed arguments trading places
-    /// still compiles at every call site.
-    positional_args: Vec<ParamKey>,
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
     params: BTreeMap<ParamKey, MemberSurface>,
@@ -156,6 +151,10 @@ struct OpSurface {
     file_name_setters: BTreeSet<String>,
     /// Canonical rendering of the success return type.
     success: String,
+    /// The success selectors the method decodes, labelled as their Responses Object keys in decode
+    /// precedence: any other 2xx is `Error::UnexpectedStatus`, so a change to them changes which
+    /// responses succeed even where the success type stays the same.
+    success_statuses: Vec<String>,
     /// Canonical rendering of the error type.
     error: String,
     /// The canonical `<E as ApiErrorBody>::Body` of the error type, or `None` when it does not
@@ -224,11 +223,13 @@ struct HeadersSurface {
 /// header: its canonical type and whether it is required, which the consumer sees in each:
 ///
 /// - a path parameter is a positional method argument; every other parameter rides in the
-///   `…Params` struct, a required one as a `…Params::new` argument and an optional one as a field
-///   defaulting to unset;
-/// - a required body is a `&T` argument in the generated signature, an optional one `Option<&T>`;
+///   `…Params` struct, a required one as a field of its `…Required` struct too and an optional one
+///   as a field defaulting to unset;
+/// - a required body is an `impl Into<T>` argument in the generated signature (a `&T` where `T`
+///   is numeric or nullable), an optional one `Option<&T>`;
 /// - a struct field is both read (a required field is `T`, an optional one `Option<T>`) and
-///   constructed (a newly-required field breaks every existing constructor);
+///   constructed (a newly-required field is a new field of the struct's `…Required` struct, which
+///   breaks every literal of it);
 /// - a required header is a `T` field read with `require_header`, an optional one an `Option<T>`.
 struct MemberSurface {
     /// The canonical type.
@@ -248,14 +249,21 @@ type ParamKey = (String, &'static str);
 /// rather than as standalone entries.
 enum TypeSurface {
     /// A `struct`: fields keyed by generated field name, its typed `additionalProperties` map,
-    /// when it has one, and the wire property name each field binds, keyed by field name.
+    /// when it has one, the wire property name each field binds, keyed by field name, and the
+    /// generated name of each `{field}_or_default` accessor it carries, one per member with an
+    /// applied schema `default`. An accessor returns its field's type, which the field compares.
+    /// Last, the generated name of its `…Required` struct, where it has a required member: the
+    /// struct's required fields are its fields, which the struct's own compare, so the name is
+    /// all it adds, and a reorder of them, which no struct literal sees, is no change.
     Struct(
         BTreeMap<String, MemberSurface>,
         Option<OverflowSurface>,
         Bindings,
+        BTreeSet<String>,
+        Option<String>,
     ),
-    /// A string `enum`: the set of variant wire values, for an open enum (`open_narrowing`) the
-    /// generated name of the variant holding any other string, and the wire value each listed
+    /// A string `enum`: the set of variant wire values, for an open enum (every one unless
+    /// `closed_enums` is set) the generated name of the variant holding any other string, and the wire value each listed
     /// variant binds, keyed by variant name.
     Enum(BTreeSet<String>, Option<String>, Bindings),
     /// An integer or boolean set's checked newtype (#1327): the scalar it holds (what `get`
@@ -266,7 +274,8 @@ enum TypeSurface {
     Union(BTreeMap<String, String>),
     /// An array or tuple that closes an alias cycle, or a `contentEncoding: base64` schema (`T` is
     /// `Bytes`), emitted as `pub struct X(pub T);` (#648): the canonical rendering of the wrapped
-    /// `T`, which is the type of the public `.0` field.
+    /// `T`, which is the type of the public `.0` field. A `contentEncoding: base64url` schema wraps
+    /// `Bytes` too, and renders as `Bytes as base64url`, so a change of alphabet is a change.
     Newtype(String),
     /// An uninhabited schema (`false`, or one whose constraints admit nothing), emitted as an empty
     /// `pub enum X {}`: it has no structure, but it is a public type a use site names.
@@ -352,20 +361,18 @@ pub enum ChangeKind {
     /// went, or the `…Params` bundle started or stopped shaping the URL. **Major** — every call of
     /// the accessor breaks, even where the method's signature holds.
     UrlAccessorArgsChanged,
-    /// An operation's positional arguments — its path arguments, then `…Params::new`'s — are the
-    /// same parameters in another order. **Major** — two same-typed arguments trading places
-    /// still compiles at every call site, and silently sends each value as the other.
-    PositionalArgsReordered,
-    /// A request body was added to an operation. **Major** — a new `&T` or `Option<&T>` argument.
+    /// A request body was added to an operation. **Major** — a new required or `Option<&T>`
+    /// argument.
     RequestBodyAdded,
     /// An operation's request body was removed. **Major** — an argument disappears.
     RequestBodyRemoved,
     /// An operation's request-body type changed. **Major**.
     RequestBodyTypeChanged,
-    /// An operation's request body flipped between required and optional. **Major** — `&T` ↔
-    /// `Option<&T>`.
+    /// An operation's request body flipped between required and optional. **Major** — `impl
+    /// Into<T>` ↔ `Option<&T>`.
     RequestBodyRequirednessChanged,
-    /// An operation's success return type changed, or its `{method}_stream` twin's did. **Major**.
+    /// An operation's success return type changed, or its `{method}_stream` twin's did, or the
+    /// success statuses it decodes did (any other 2xx is `Error::UnexpectedStatus`). **Major**.
     SuccessTypeChanged,
     /// An operation's error type changed. **Major**.
     ErrorTypeChanged,
@@ -375,10 +382,11 @@ pub enum ChangeKind {
     /// An operation's error type no longer implements `ApiErrorBody`. **Major** — `body()`,
     /// `Error::api_body()`, and `E: ApiErrorBody` bounds stop compiling.
     ApiErrorBodyRemoved,
-    /// A new required parameter was added. **Major** — a new positional argument: of the method
-    /// for a path parameter, of `…Params::new` for any other.
+    /// A new required parameter was added. **Major** — a new positional argument of the method for
+    /// a path parameter, a new field of the `…Required` struct for any other.
     RequiredParamAdded,
-    /// A new optional parameter was added. **Minor** — a new `…Params` field defaulting to unset.
+    /// A new optional parameter was added. **Major** — a new `pub` field of the `…Params` struct,
+    /// so every struct literal of it stops compiling.
     OptionalParamAdded,
     /// A parameter was removed. **Major**.
     ParamRemoved,
@@ -394,7 +402,8 @@ pub enum ChangeKind {
     /// `empty enum`), or a `pub type` alias of the same name became one of those, or the reverse.
     /// **Major**.
     TypeKindChanged,
-    /// A new optional field was added to a struct. **Minor**.
+    /// A new optional field was added to a struct. **Major** — the field is `pub`, so every struct
+    /// literal of the type stops compiling.
     FieldAdded,
     /// A new required field was added to a struct. **Major** — every existing constructor breaks.
     RequiredFieldAdded,
@@ -406,8 +415,9 @@ pub enum ChangeKind {
     /// A struct field's required-ness flipped. **Major** — `T` ↔ `Option<T>`.
     FieldRequirednessChanged,
     /// A new variant was added to an enum/union, or a listed value (its associated `const`) to a
-    /// checked newtype. **Minor** — the documented additive rule (a value a consumer may now
-    /// receive), consistent for string enums, checked newtypes and unions alike.
+    /// checked newtype, or an open enum's catch-all to a closed one. **Major** — generated enums
+    /// and unions are exhaustive, an open enum included, so a consumer's exhaustive `match` over
+    /// the type stops compiling; a checked newtype's new value is classified alike.
     VariantAdded,
     /// A variant was removed from an enum/union, or a listed value from a checked newtype.
     /// **Major**.
@@ -420,8 +430,8 @@ pub enum ChangeKind {
     ResponseHeadersRemoved,
     /// A status's typed response-header struct was renamed. **Major**.
     ResponseHeadersRenamed,
-    /// A new optional header was added to a response-header struct. **Minor** — an `Option<T>`
-    /// field, the struct-field rule.
+    /// A new optional header was added to a response-header struct. **Major** — a new `pub`
+    /// `Option<T>` field, the struct-field rule.
     ResponseHeaderAdded,
     /// A new required header was added to a response-header struct. **Major** — reading the
     /// headers now fails on a response without it, and every literal of the struct breaks.
@@ -443,7 +453,7 @@ pub enum ChangeKind {
     /// A server variable's setter now takes another type: a free-form variable gained or lost its
     /// `enum`, or its variable enum was renamed. **Major**.
     ServerVariableTypeChanged,
-    /// A struct gained a typed `additionalProperties` map. **Minor** — a new public map field, the
+    /// A struct gained a typed `additionalProperties` map. **Major** — a new public map field, the
     /// optional-field rule.
     AdditionalPropertiesAdded,
     /// A struct lost its typed `additionalProperties` map. **Major** — reads of the field break.
@@ -479,6 +489,13 @@ pub enum ChangeKind {
     /// — calls to it break, and where the body has no file part left, so does passing a
     /// `MultipartBody`.
     FileNameSetterRemoved,
+    /// A struct gained a `{field}_or_default` accessor: a member's schema `default` became one
+    /// the accessor returns, or a member with one was added. **Minor** — a new inherent method.
+    DefaultAccessorAdded,
+    /// A struct lost a `{field}_or_default` accessor: a member's schema `default` was removed or
+    /// became one no accessor returns, or the member or its name went. **Major** — calls to it
+    /// break.
+    DefaultAccessorRemoved,
     /// A generated identifier now binds another wire name: a `…Params` field and its setter (bound
     /// by name and location, so a same-named parameter of another location can take it), a
     /// struct field, a string enum variant, or a response-header struct's field (bound by header
@@ -494,23 +511,18 @@ impl ChangeKind {
         match self {
             ChangeKind::OperationAdded
             | ChangeKind::ApiErrorBodyAdded
-            | ChangeKind::OptionalParamAdded
             | ChangeKind::TypeAdded
-            | ChangeKind::FieldAdded
-            | ChangeKind::VariantAdded
             | ChangeKind::ResponseHeadersAdded
-            | ChangeKind::ResponseHeaderAdded
             | ChangeKind::ServerAdded
             | ChangeKind::ServerVariableAdded
-            | ChangeKind::AdditionalPropertiesAdded
             | ChangeKind::StreamTwinAdded
             | ChangeKind::CredentialSchemeAdded
             | ChangeKind::TestingModuleAdded
-            | ChangeKind::FileNameSetterAdded => Impact::Minor,
+            | ChangeKind::FileNameSetterAdded
+            | ChangeKind::DefaultAccessorAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::UrlAccessorArgsChanged
-            | ChangeKind::PositionalArgsReordered
             | ChangeKind::RequestBodyAdded
             | ChangeKind::RequestBodyRemoved
             | ChangeKind::RequestBodyTypeChanged
@@ -519,19 +531,23 @@ impl ChangeKind {
             | ChangeKind::ErrorTypeChanged
             | ChangeKind::ApiErrorBodyRemoved
             | ChangeKind::RequiredParamAdded
+            | ChangeKind::OptionalParamAdded
             | ChangeKind::ParamRemoved
             | ChangeKind::ParamTypeChanged
             | ChangeKind::ParamRequirednessChanged
             | ChangeKind::TypeRemoved
             | ChangeKind::TypeKindChanged
+            | ChangeKind::FieldAdded
             | ChangeKind::RequiredFieldAdded
             | ChangeKind::FieldRemoved
             | ChangeKind::FieldTypeChanged
             | ChangeKind::FieldRequirednessChanged
+            | ChangeKind::VariantAdded
             | ChangeKind::VariantRemoved
             | ChangeKind::VariantTypeChanged
             | ChangeKind::ResponseHeadersRemoved
             | ChangeKind::ResponseHeadersRenamed
+            | ChangeKind::ResponseHeaderAdded
             | ChangeKind::RequiredResponseHeaderAdded
             | ChangeKind::ResponseHeaderRemoved
             | ChangeKind::ResponseHeaderTypeChanged
@@ -539,6 +555,7 @@ impl ChangeKind {
             | ChangeKind::ServerRemoved
             | ChangeKind::ServerVariableRemoved
             | ChangeKind::ServerVariableTypeChanged
+            | ChangeKind::AdditionalPropertiesAdded
             | ChangeKind::AdditionalPropertiesRemoved
             | ChangeKind::AdditionalPropertiesTypeChanged
             | ChangeKind::StreamTwinRemoved
@@ -546,6 +563,7 @@ impl ChangeKind {
             | ChangeKind::CredentialSettersChanged
             | ChangeKind::TestingModuleRemoved
             | ChangeKind::FileNameSetterRemoved
+            | ChangeKind::DefaultAccessorRemoved
             | ChangeKind::IdentifierRebound => Impact::Major,
         }
     }
@@ -557,7 +575,6 @@ impl ChangeKind {
             ChangeKind::OperationRemoved => "operation-removed",
             ChangeKind::MethodRenamed => "method-renamed",
             ChangeKind::UrlAccessorArgsChanged => "url-accessor-args-changed",
-            ChangeKind::PositionalArgsReordered => "positional-args-reordered",
             ChangeKind::RequestBodyAdded => "request-body-added",
             ChangeKind::RequestBodyRemoved => "request-body-removed",
             ChangeKind::RequestBodyTypeChanged => "request-body-type-changed",
@@ -607,6 +624,8 @@ impl ChangeKind {
             ChangeKind::TestingModuleRemoved => "testing-module-removed",
             ChangeKind::FileNameSetterAdded => "file-name-setter-added",
             ChangeKind::FileNameSetterRemoved => "file-name-setter-removed",
+            ChangeKind::DefaultAccessorAdded => "default-accessor-added",
+            ChangeKind::DefaultAccessorRemoved => "default-accessor-removed",
             ChangeKind::IdentifierRebound => "identifier-rebound",
         }
     }

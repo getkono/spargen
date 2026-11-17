@@ -260,9 +260,11 @@ fn typed_parameters_follow_openapi_wire_rules() {
 
     let workflow_id: basic_client::types::WorkflowId =
         serde_json::from_str(r#""build.yml""#).unwrap();
-    let params = basic_client::SerializeParamsParams::new(
-        workflow_id,
-        vec!["fast".to_owned(), "safe".to_owned()],
+    let params = basic_client::SerializeParamsParams::from(
+        basic_client::SerializeParamsParamsRequired {
+            workflow_id,
+            x_flags: vec!["fast".to_owned(), "safe".to_owned()],
+        },
     )
     .labels(vec!["bug".to_owned(), "api".to_owned()])
     .compact(vec!["one".to_owned(), "two".to_owned()])
@@ -360,7 +362,10 @@ fn content_typed_path_and_header_parameters_reach_the_wire() {
         .serialize_content_params(
             "x/../../admin".to_owned(),
             filter(),
-            basic_client::SerializeContentParamsParams::new("x/../../admin", filter()),
+            basic_client::SerializeContentParamsParamsRequired {
+                x_text: "x/../../admin".to_owned(),
+                x_json: filter(),
+            },
         )
         .unwrap();
 
@@ -389,7 +394,7 @@ fn form_urlencoded_body_bytes_follow_the_encoding_object() {
 
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .submit_form(&basic_client::types::SubmitFormBody {
+        .submit_form(basic_client::types::SubmitFormBody {
             name: "Ada Lovelace".to_owned(),
             tags: vec!["a".to_owned(), "b".to_owned()],
             blob: basic_client::types::DeepFilter {
@@ -471,7 +476,7 @@ fn additional_properties_reach_form_and_multipart_bodies() {
     let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .submit_form_additional(&basic_client::types::SubmitFormAdditionalBody {
+        .submit_form_additional(basic_client::types::SubmitFormAdditionalBody {
             a: "x".to_owned(),
             additional: [
                 ("z".to_owned(), "last".to_owned()),
@@ -489,7 +494,7 @@ fn additional_properties_reach_form_and_multipart_bodies() {
     let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .upload_additional(&basic_client::types::UploadAdditionalBody {
+        .upload_additional(basic_client::types::UploadAdditionalBody {
             caption: "c".to_owned(),
             additional: [
                 ("scores".to_owned(), vec![1, 2]),
@@ -572,7 +577,7 @@ fn a_json_or_xml_request_body_declares_its_content_type() {
     client
         .patch_merge_document(
             "d1",
-            &basic_client::types::JsonMeta {
+            basic_client::types::JsonMeta {
                 id: 7,
                 sku: "S".to_owned(),
                 note: None,
@@ -591,7 +596,7 @@ fn a_json_or_xml_request_body_declares_its_content_type() {
     let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .post_json_meta(&basic_client::types::JsonMeta {
+        .post_json_meta(basic_client::types::JsonMeta {
             id: 7,
             sku: "S".to_owned(),
             note: None,
@@ -607,7 +612,7 @@ fn a_json_or_xml_request_body_declares_its_content_type() {
     let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .submit_legacy_order(&basic_client::types::XmlOrder {
+        .submit_legacy_order(basic_client::types::XmlOrder {
             id: 42,
             sku: "ABC".to_owned(),
         })
@@ -620,7 +625,7 @@ fn a_json_or_xml_request_body_declares_its_content_type() {
     let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .submit_order(&basic_client::types::XmlOrder {
+        .submit_order(basic_client::types::XmlOrder {
             id: 42,
             sku: "ABC".to_owned(),
         })
@@ -639,7 +644,7 @@ fn required_path_query_parameter_is_not_shadowed_by_codegen_local() {
 
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
-        .read_file(basic_client::ReadFileParams::new("/tmp/example.txt"))
+        .read_file(basic_client::ReadFileParamsRequired { path: "/tmp/example.txt".to_owned() })
         .expect("read_file sends the caller-provided path query value");
 
     let request = server.join().unwrap().text();
@@ -896,39 +901,53 @@ fn default_beside_multiple_bodied_successes_stays_on_the_error_side() {
 
 // Issue #151: beside a declared success status, `default` satisfies no undeclared 2xx in any of
 // the three success shapes. The enum shape is pinned above (`getMultiDefault`'s 202 is
-// `UnexpectedStatus`); here the plain and unit shapes take an undeclared 201 as their one success,
-// and a `default`-shaped 201 body is never decoded as `Problem`.
+// `UnexpectedStatus`); here the plain and unit shapes do the same (#1426): an undeclared 201 is
+// `UnexpectedStatus` with its body kept, neither decoded as the declared success nor as `Problem`,
+// nor discarded as `()`.
 #[test]
 fn an_undeclared_2xx_is_never_decoded_through_default_beside_a_declared_success() {
     let problem: &'static [u8] = br#"{"title":"t","detail":"d"}"#;
 
-    // Plain: the 201 is the single success body, `MultiOk`.
-    let (base, server) = serve_once("application/json", "201 Created", br#"{"ok":"yes"}"#);
+    // Plain: the declared 200 is the single success body, `MultiOk`.
+    let (base, server) = serve_once("application/json", "200 OK", br#"{"ok":"yes"}"#);
     let client = basic_client::BlockingClient::new(&base).unwrap();
-    let response = client.get_plain_default().expect("any 2xx is the plain success");
-    assert_eq!(response.status(), 201);
+    let response = client.get_plain_default().expect("the declared 200 is the plain success");
+    assert_eq!(response.status(), 200);
     assert_eq!(response.into_inner().ok, "yes");
     server.join().unwrap();
 
-    // A `Problem` body on that 201 is a malformed `MultiOk`, not a `default` decode.
-    let (base, server) = serve_once("application/json", "201 Created", problem);
-    let client = basic_client::BlockingClient::new(&base).unwrap();
-    match client.get_plain_default().unwrap_err() {
-        basic_client::Error::Decode { status, headers, body, .. } => {
-            assert_eq!(status, 201);
-            assert_eq!(headers.get("content-type").unwrap(), "application/json");
-            assert_eq!(&body[..], problem);
+    // An undeclared 201, whether its body is a `MultiOk` or a `Problem`, decodes as neither.
+    for body in [&br#"{"ok":"yes"}"#[..], problem] {
+        let (base, server) = serve_once("application/json", "201 Created", body);
+        let client = basic_client::BlockingClient::new(&base).unwrap();
+        match client.get_plain_default().unwrap_err() {
+            basic_client::Error::UnexpectedStatus { status, headers, body: kept } => {
+                assert_eq!(status, 201);
+                assert_eq!(headers.get("content-type").unwrap(), "application/json");
+                assert_eq!(&kept[..], body);
+            }
+            other => panic!("an undeclared 2xx must be unexpected, got {other:?}"),
         }
-        other => panic!("a 2xx must decode as the declared success, got {other:?}"),
+        server.join().unwrap();
     }
+
+    // Unit: the declared 204 is `()`; an undeclared 201 keeps its `Problem` body as unexpected.
+    let (base, server) = serve_once("application/json", "204 No Content", b"");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    let response = client.get_unit_default().expect("the declared 204 is the unit success");
+    assert_eq!(response.status(), 204);
+    let () = response.into_inner();
     server.join().unwrap();
 
-    // Unit: the 201 is `()`, its `Problem` body discarded rather than decoded.
     let (base, server) = serve_once("application/json", "201 Created", problem);
     let client = basic_client::BlockingClient::new(&base).unwrap();
-    let response = client.get_unit_default().expect("any 2xx is the unit success");
-    assert_eq!(response.status(), 201);
-    let () = response.into_inner();
+    match client.get_unit_default().unwrap_err() {
+        basic_client::Error::UnexpectedStatus { status, body, .. } => {
+            assert_eq!(status, 201);
+            assert_eq!(&body[..], problem);
+        }
+        other => panic!("an undeclared 2xx must be unexpected, got {other:?}"),
+    }
     server.join().unwrap();
 
     // Both still classify a non-2xx through `default`.

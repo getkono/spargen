@@ -63,9 +63,10 @@ pub(super) fn body_send_tokens(
                 // JSON: serialized here rather than through `RequestBuilder::json`, which labels the
                 // body `application/json` whatever the media key says (on wasm it overwrites a
                 // header set before it), so an `application/*+json` body such as JSON Merge Patch
-                // goes out under its declared essence.
+                // goes out under its declared essence. The runtime's encoder refuses a NaN or an
+                // infinity, which `serde_json` alone would send as `null`.
                 MediaType::Json => quote! {
-                    let #body_binding = serde_json::to_vec(#body_binding)
+                    let #body_binding = support::to_json_vec(#body_binding)
                         .map_err(support::Error::request_construction)?;
                     #request_binding = #request_binding
                         .header(reqwest::header::CONTENT_TYPE, #content_type)
@@ -86,36 +87,15 @@ pub(super) fn body_send_tokens(
                     // Rendered property by property through the resolved Encoding Object rather
                     // than `RequestBuilder::form`, whose encoder rejects arrays and objects at
                     // runtime and cannot express a per-property content type.
-                    let properties = form_properties_tokens(encoding);
-                    // The typed `additionalProperties` members, rendered in their type's default
-                    // mode, with the overflow map's length, which tells the runtime how many of
-                    // the serialized members are overflow; `None` when the body has no typed
-                    // overflow to send.
-                    let additional = match (&encoding.additional, names.struct_overflow.get(&ty.id))
-                    {
-                        (Some(mode), Some(overflow)) => {
-                            let mode = form_mode_tokens(mode);
-                            let len = if ty.nullable {
-                                quote! {
-                                    #body_binding
-                                        .as_ref()
-                                        .map_or(0, |body| body.#overflow.len())
-                                }
-                            } else {
-                                quote! { #body_binding.#overflow.len() }
-                            };
-                            quote! { Some((#mode, #len)) }
-                        }
-                        _ => quote! { None },
-                    };
+                    let serialize = form_serialization_tokens(
+                        &quote! { #body_binding },
+                        ty,
+                        encoding,
+                        names,
+                        &quote! { FORM_PROPERTIES },
+                    );
                     quote! {
-                        const FORM_PROPERTIES: &[support::FormProperty] = &[#(#properties),*];
-                        let #body_binding = support::serialize_form_body(
-                            #body_binding,
-                            FORM_PROPERTIES,
-                            #additional,
-                        )
-                        .map_err(support::Error::request_construction)?;
+                        let #body_binding = #serialize;
                         #request_binding = #request_binding
                             .header(
                                 reqwest::header::CONTENT_TYPE,
@@ -233,6 +213,9 @@ fn merged_file_parts(api: &Api) -> Vec<MultipartFileParts<'_>> {
             continue;
         };
         let into = &mut merged[at];
+        // Mutation testing: `|=` as `&=` is equivalent. `overflow` reads only the body type and
+        // whether its encoding has an `additional` mode, which lowering sets exactly when the type
+        // has a typed overflow, so every operation sending one type agrees on it.
         into.overflow |= parts.overflow;
         for field in parts.fields {
             if !into
@@ -266,6 +249,64 @@ pub(super) fn accept_tokens(operation: &Operation, bindings: &OperationBindings)
             #request_binding = #request_binding.header(reqwest::header::ACCEPT, #accept);
         },
         None => quote! {},
+    }
+}
+
+/// The block expression rendering `value`, a binding to `&T` (or, for a nullable `ty`, to
+/// `&Option<T>`) of the form struct `ty`, into its `application/x-www-form-urlencoded` text
+/// through its resolved [`BodyEncoding`](crate::ir::BodyEncoding), `?`-propagating a refusal as a
+/// request-construction error. A form request body and a form-urlencoded `in: querystring`
+/// parameter share it, as the specification has them share Encoding Objects. `properties` names
+/// the block's `const` table of `support::FormProperty` entries.
+pub(super) fn form_serialization_tokens(
+    value: &TokenStream,
+    ty: Ty,
+    encoding: &crate::ir::BodyEncoding,
+    names: &Names,
+    properties: &TokenStream,
+) -> TokenStream {
+    let entries = form_properties_tokens(encoding);
+    // The typed `additionalProperties` members, rendered in their type's default mode, with how
+    // many overflow entries the struct serializes, which tells the runtime how many of the
+    // serialized members are overflow; `None` when the struct has no typed overflow to send. The
+    // struct's serde encoding leaves out an entry keyed by a declared property's name, so the
+    // count does too.
+    let additional = match (&encoding.additional, names.struct_overflow.get(&ty.id)) {
+        (Some(mode), Some(overflow)) => {
+            let mode = form_mode_tokens(mode);
+            let declared = encoding
+                .properties
+                .iter()
+                .map(|property| property.name.as_str())
+                .collect::<Vec<_>>();
+            let count = |map: TokenStream| {
+                if declared.is_empty() {
+                    quote! { #map.len() }
+                } else {
+                    quote! {
+                        #map
+                            .keys()
+                            .filter(|key| !matches!(key.as_str(), #(#declared)|*))
+                            .count()
+                    }
+                }
+            };
+            let len = if ty.nullable {
+                let count = count(quote! { value.#overflow });
+                quote! { #value.as_ref().map_or(0, |value| #count) }
+            } else {
+                count(quote! { #value.#overflow })
+            };
+            quote! { Some((#mode, #len)) }
+        }
+        _ => quote! { None },
+    };
+    quote! {
+        {
+            const #properties: &[support::FormProperty] = &[#(#entries),*];
+            support::serialize_form_body(#value, #properties, #additional)
+                .map_err(support::Error::request_construction)?
+        }
     }
 }
 
@@ -392,7 +433,7 @@ fn emit_multipart_body(
             }
         });
         // `receiver` is the value for method calls (`.to_vec()`/`.to_string()` auto-ref); `reference`
-        // is an explicit `&value` for `serde_json::to_string`, which takes `&T`. Splitting them keeps
+        // is an explicit `&value` for `support::to_json_string`, which takes `&T`. Splitting them keeps
         // the emitted code free of `clippy::needless_borrow` on the method-call receivers.
         let add_part = |receiver: &TokenStream, reference: &TokenStream| {
             let build = match &property.map(|property| &property.mode) {
@@ -534,7 +575,7 @@ fn additional_parts_tokens(
 /// value's lowered type: a binary value becomes a file part, whose `filename` is `file_name` (the
 /// one the caller set on the `MultipartBody`, else the part's name), a scalar a text part via `Display`, and anything composite a JSON-encoded text
 /// part. `receiver` is the value for method calls; `reference` is a `&value` for
-/// `serde_json::to_string`.
+/// `support::to_json_string`.
 fn media_part_tokens(
     kind: Option<&TypeKind>,
     receiver: &TokenStream,
@@ -559,10 +600,10 @@ fn media_part_tokens(
         Some(TypeKind::Reserved) => unreachable!(
             "a reservation reached codegen; `check_invariants` should have rejected it"
         ),
-        // Any composite property → a JSON-encoded text part.
+        // Any composite property → a JSON-encoded text part, a non-finite number in it refused.
         _ => quote! {
             let mut part = support::MultipartPart::text(
-                serde_json::to_string(#reference)
+                support::to_json_string(#reference)
                     .map_err(support::Error::request_construction)?,
             );
         },
@@ -583,3 +624,6 @@ fn set_part_type_tokens(mode: Option<&crate::ir::EncodingMode>) -> Option<TokenS
             .map_err(support::Error::widen)?;
     })
 }
+
+#[cfg(test)]
+mod tests;

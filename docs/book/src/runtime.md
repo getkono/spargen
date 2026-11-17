@@ -11,7 +11,7 @@ itself, so it adds nothing:
 
 | Capability | Adds |
 | --- | --- |
-| A raw `bytes` value serde encodes (a `format: binary` value in a model, a JSON `content` parameter, or a serde-encoded body; a [`contentEncoding: base64`](#binary-content) one carries its own codec) | `bytes`' `serde` feature |
+| A model holding a raw `bytes` value (a `format: binary` multipart part; a [`contentEncoding: base64`](#binary-content) or `base64url` one carries its own codec) | `bytes`' `serde` feature |
 | A body read as it arrives: [streaming](#streaming) (sequential responses), or a [binary `_stream` twin](#binary-content) | `futures-core` and reqwest's `stream` feature |
 | [XML bodies](#xml-bodies) | `quick-xml` |
 | [`format: date-time` / `date`](#uuid-and-dates) | `time`, or the `jiff` or `chrono` crate the `datetime` backend selects |
@@ -280,22 +280,22 @@ fn validation_errors<E: api::ApiErrorProblem>(error: &api::Error<E>) -> Option<s
 A standard member carried with another type than the RFC gives it is in neither place.
 
 A description that narrows the problem `type` per status (`allOf: [$ref: Problem, {properties:
-{type: {const: …}}}]`) makes an unlisted `type` a decode failure by default, so it reaches the raw
-path above. The opt-in `open_narrowing` (`Spec::with_open_narrowing(Narrowing::Open)`, `open_narrowing = true` in
-`spargen.toml`, `--open-narrowing`, or `open_narrowing` in `generate_api!`) lowers that narrowing,
-in a response body's own schema, to an open enum instead: each listed value keeps its variant, one
-more (`Other(String)`, renamed when a listed value takes that name) holds any other string, and
-the response decodes into `Error::Api`, where `problem()` reads it like any other. An integer or
-boolean `enum`/`const` narrowing a plain `integer` or `boolean` there opens the same way: its
-checked newtype decodes any value of its width, while its `TryFrom` still accepts only the listed
-values.
+{type: {const: …}}}]`) generates an open enum, as every string enum is by default: each listed
+value keeps its variant, one more (`Unknown(UnknownValue<Self>)`, renamed when a listed value
+takes that name) holds any other string, and the response decodes into `Error::Api`, where
+`problem()` reads it like any other. Under `closed_enums` an unlisted `type` is a decode failure
+instead, which reaches the raw path above.
 
-Only that position opens. A narrowing written inside a `$ref` target (a component, a sub-file
-schema) or inside a `oneOf`/`anyOf` stays closed, because a target is shared by every use and a
-union's variants are told apart by what each refuses. A narrowing whose value set is itself a
-`$ref` target opens a copy and leaves the target closed. Request bodies, parameters, and a
-formatted (`uuid`, date) string base stay closed. `spargen diff` reads a string set's catch-all as
-a variant: `variant-added` when a set opens, `variant-removed` when it closes or is renamed. An
+The opt-in `open_narrowing` (`Spec::with_open_narrowing(Narrowing::Open)`, `open_narrowing = true`
+in `spargen.toml`, `--open-narrowing`, or `open_narrowing` in `generate_api!`) does the same for an
+integer or boolean `enum`/`const` narrowing a plain `integer` or `boolean` in a response body's own
+schema: its checked newtype decodes any value of its width, while its `TryFrom` still accepts only
+the listed values. A narrowing written inside a `$ref` target (a component, a sub-file schema) or
+inside a `oneOf`/`anyOf` stays closed, because a target is shared by every use and a union's
+variants are told apart by what each refuses; request bodies and parameters stay closed too.
+`spargen diff` reads a string enum's catch-all as a variant: `variant-added` when `closed_enums` is
+turned off, `variant-removed` when it is turned on or the catch-all is renamed. Both are `major`,
+as is a value added to an open enum, because the open enum is as exhaustive as a closed one. An
 integer or boolean set opening or closing changes what it decodes, not its API.
 
 ## Middleware
@@ -332,14 +332,24 @@ the response through ordinary HTTP drop semantics.
 For OpenAPI 3.2 SSE, spargen parses the envelope fields first. A string `data` property annotated
 with `contentMediaType: application/json` and a typed `contentSchema` yields that JSON payload type
 directly. `last_event_id()` and `reconnect_delay()` expose the latest valid `id:` and `retry:`
-metadata, including metadata-only events. An SSE event the body ends in the middle of, before its
-closing blank line, is not dispatched, and its `id:` and `retry:` are dropped with it, as the SSE
-specification requires; a final ndjson line or JSON Text Sequence record is still yielded.
+metadata, including metadata-only events. A valid `retry:` applies as soon as its line is read; one
+too large for a `u64` is ignored, like any other invalid value, leaving the earlier one in force. An
+SSE event the body ends in the middle of, before its closing blank line, is not dispatched, and its
+`id:` is dropped with it, as the SSE specification requires; a final ndjson line or JSON Text
+Sequence record is still yielded.
 
 Automatic reconnect is explicit: call `with_reconnect(Arc<dyn ReconnectPolicy>)`. The caller's
 policy owns attempt limits and supplies the wait future, so the runtime introduces neither a timer
-nor a retry default. A replayable prepared request is cloned, its cookies and other headers are
-preserved, and the latest event ID is sent as `Last-Event-ID`. Declining a reconnect yields the
+nor a retry default. `can_reconnect()` says whether the stream holds a request it can resend; one
+that does not (a streaming request body that could not be cloned, or a stream built by a
+`decode_{method}` from a response alone) makes `with_reconnect` return `Err((stream,
+Error::RequestConstruction(..)))`, the stream handed back unchanged so the caller can keep reading
+it without reconnects. Each reconnect rebuilds the operation's request from a copy taken before its
+credentials were attached, its cookies and other headers preserved, and signs it afresh with the
+client's credentials as they were registered when the call was made: a `Credential::Provider` or
+`Credential::Refreshable` is asked for a token again, and a reconnect whose refreshable token is
+rejected is refreshed and replayed once, as a call is. The latest event ID is sent as
+`Last-Event-ID`. Declining a reconnect yields the
 original typed stream error unchanged. A mid-stream read failure is reported by its class, as any
 other body read's is (a stalled read is `Error::Timeout`), and is offered to the policy. A `204`
 answering a reconnect ends the stream cleanly, and an SSE reconnect whose response is not
@@ -355,7 +365,8 @@ It compiles only under the `blocking` feature on a non-wasm32 target, so a wasm3
 carries it. The feature resolves against the consumer crate, so leaving `blocking` undeclared
 compiles the facade out; [`spargen deps`](./cli.md#spargen-deps) prints the opt-in. A
 `BlockingClient` must not be called from inside another async runtime, where tokio's `block_on`
-panics; the [`blocking` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/blocking.rs)
+panics. `BlockingRuntime::try_block_on` returns the typed `NestedRuntime` error there instead of
+panicking, for code that drives a `BlockingRuntime` itself; the [`blocking` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/blocking.rs)
 says where to drive one instead. Building one inside an async runtime is fine, and so is dropping
 one there: the drop
 shuts its runtime down in the background without waiting, so a blocking client held in async
@@ -465,12 +476,19 @@ sets out why `time`'s own representation is not RFC 3339.
 
 ### Binary content
 
-`format: binary` maps to `bytes::Bytes`. A `contentEncoding: base64` string is a generated newtype
-over `bytes::Bytes` (`pub struct Data(pub bytes::Bytes);`), which `Deref`s to the bytes and
-converts with `From` in both directions. Its serde form is RFC 4648 base64 text, standard alphabet
-and padded, wherever a JSON, XML or form body carries it: a field, an array item, a map value or a
-union variant. Decoding also accepts the text without its padding. `bytes::Bytes`' own serde form
-is a sequence of numbers, so the newtype carries the embedded
+`format: binary` maps to `bytes::Bytes` where the bytes are the wire itself: a whole request or
+response body, and a part of a `multipart/form-data` body. Where a JSON, XML or form body or a
+stream item carries the value, `format` is an annotation with no effect on its encoding (OpenAPI
+3.1 and 3.2), so the value is the JSON string the wire holds and is typed `String`, with a `W001`
+saying so; `bytes::Bytes` there would be written as an array of numbers.
+
+A `contentEncoding: base64` or `base64url` string is a generated newtype over `bytes::Bytes`
+(`pub struct Data(pub bytes::Bytes);`), which `Deref`s to the bytes and converts with `From` in
+both directions. Its serde form is RFC 4648 text, padded, in the standard alphabet for `base64`
+and the URL- and filename-safe one (`-` and `_`) for `base64url`, wherever a JSON, XML or form
+body carries it: a field, an array item, a map value or a union variant. Decoding also accepts the
+text without its padding, and refuses the other alphabet. `bytes::Bytes`' own serde form is a
+sequence of numbers, so the newtype carries the embedded
 [`base64` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/base64.rs)'s
 codec instead, which adds no dependency and is embedded only when such a schema is emitted. A
 whole request or response body and a multipart part carry the octets themselves under either

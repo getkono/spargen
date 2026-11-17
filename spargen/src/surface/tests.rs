@@ -14,7 +14,6 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::OperationRemoved,
         ChangeKind::MethodRenamed,
         ChangeKind::UrlAccessorArgsChanged,
-        ChangeKind::PositionalArgsReordered,
         ChangeKind::RequestBodyAdded,
         ChangeKind::RequestBodyRemoved,
         ChangeKind::RequestBodyTypeChanged,
@@ -64,6 +63,8 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::TestingModuleRemoved,
         ChangeKind::FileNameSetterAdded,
         ChangeKind::FileNameSetterRemoved,
+        ChangeKind::DefaultAccessorAdded,
+        ChangeKind::DefaultAccessorRemoved,
         ChangeKind::IdentifierRebound,
     ];
     for kind in every {
@@ -74,7 +75,6 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::UrlAccessorArgsChanged
-            | ChangeKind::PositionalArgsReordered
             | ChangeKind::RequestBodyAdded
             | ChangeKind::RequestBodyRemoved
             | ChangeKind::RequestBodyTypeChanged
@@ -124,6 +124,8 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::TestingModuleRemoved
             | ChangeKind::FileNameSetterAdded
             | ChangeKind::FileNameSetterRemoved
+            | ChangeKind::DefaultAccessorAdded
+            | ChangeKind::DefaultAccessorRemoved
             | ChangeKind::IdentifierRebound => {}
         }
     }
@@ -137,7 +139,6 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::OperationRemoved => "OperationRemoved",
         ChangeKind::MethodRenamed => "MethodRenamed",
         ChangeKind::UrlAccessorArgsChanged => "UrlAccessorArgsChanged",
-        ChangeKind::PositionalArgsReordered => "PositionalArgsReordered",
         ChangeKind::RequestBodyAdded => "RequestBodyAdded",
         ChangeKind::RequestBodyRemoved => "RequestBodyRemoved",
         ChangeKind::RequestBodyTypeChanged => "RequestBodyTypeChanged",
@@ -187,6 +188,8 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::TestingModuleRemoved => "TestingModuleRemoved",
         ChangeKind::FileNameSetterAdded => "FileNameSetterAdded",
         ChangeKind::FileNameSetterRemoved => "FileNameSetterRemoved",
+        ChangeKind::DefaultAccessorAdded => "DefaultAccessorAdded",
+        ChangeKind::DefaultAccessorRemoved => "DefaultAccessorRemoved",
         ChangeKind::IdentifierRebound => "IdentifierRebound",
     }
 }
@@ -195,7 +198,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
 fn the_kind_list_covers_the_whole_enum() {
     assert_eq!(
         all_kinds().len(),
-        55,
+        56,
         "a `ChangeKind` variant reached the exhaustive match without joining the list"
     );
 }
@@ -251,7 +254,9 @@ fn every_impact_serializes_and_displays_as_its_lowercase_label() {
     }
 }
 
-/// Additive changes are minor and everything else is major. Stated as a closed list so that
+/// Additions that leave every existing literal and exhaustive `match` compiling are minor, and
+/// everything else is major: an added variant, field, optional parameter, response header or
+/// `additionalProperties` map breaks one of those. Stated as a closed list so that
 /// reclassifying a kind — which changes the version bump spargen recommends — is a deliberate
 /// edit here rather than a silent consequence of moving a match arm.
 #[test]
@@ -259,19 +264,15 @@ fn only_the_additive_kinds_are_minor() {
     const MINOR: &[ChangeKind] = &[
         ChangeKind::OperationAdded,
         ChangeKind::ApiErrorBodyAdded,
-        ChangeKind::OptionalParamAdded,
         ChangeKind::TypeAdded,
-        ChangeKind::FieldAdded,
-        ChangeKind::VariantAdded,
         ChangeKind::ResponseHeadersAdded,
-        ChangeKind::ResponseHeaderAdded,
         ChangeKind::ServerAdded,
         ChangeKind::ServerVariableAdded,
-        ChangeKind::AdditionalPropertiesAdded,
         ChangeKind::StreamTwinAdded,
         ChangeKind::CredentialSchemeAdded,
         ChangeKind::TestingModuleAdded,
         ChangeKind::FileNameSetterAdded,
+        ChangeKind::DefaultAccessorAdded,
     ];
     for kind in all_kinds() {
         let expected = if MINOR.contains(&kind) {
@@ -312,7 +313,13 @@ fn the_surface_spellings_follow_the_table() {
     assert_eq!(UrlArgSurface::Params.to_string(), "parameters bundle");
     let kinds = [
         (
-            TypeSurface::Struct(BTreeMap::new(), None, BTreeMap::new()),
+            TypeSurface::Struct(
+                BTreeMap::new(),
+                None,
+                BTreeMap::new(),
+                BTreeSet::new(),
+                None,
+            ),
             "struct",
         ),
         (

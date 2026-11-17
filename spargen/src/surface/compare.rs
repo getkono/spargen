@@ -181,21 +181,6 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             ),
         ));
     }
-    // Only a reorder of the same parameters: one that appears, goes or turns positional is the
-    // parameter's own change below.
-    if old.positional_args != new.positional_args
-        && sorted(&old.positional_args) == sorted(&new.positional_args)
-    {
-        changes.push(Change::new(
-            ChangeKind::PositionalArgsReordered,
-            key,
-            format!(
-                "positional arguments [{}] -> [{}]",
-                params_label(&old.positional_args),
-                params_label(&new.positional_args)
-            ),
-        ));
-    }
     diff_member(
         &BODY,
         key,
@@ -226,6 +211,27 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             ChangeKind::SuccessTypeChanged,
             key,
             format!("success type `{}` -> `{}`", old.success, new.success),
+        ));
+    } else if old.success_statuses != new.success_statuses {
+        // The same success type, decoded from other statuses: a 2xx only one side documents
+        // succeeds on that side and is `Error::UnexpectedStatus` on the other. A success enum's
+        // statuses are its variants, so this is reached only by a unit or single-body success.
+        let label = |statuses: &[String]| {
+            if statuses.is_empty() {
+                "none".to_owned()
+            } else {
+                statuses.join(", ")
+            }
+        };
+        changes.push(Change::new(
+            ChangeKind::SuccessTypeChanged,
+            key,
+            format!(
+                "success statuses `{}` -> `{}` of success type `{}`",
+                label(&old.success_statuses),
+                label(&new.success_statuses),
+                new.success
+            ),
         ));
     }
     diff_byte_stream(key, old, new, changes);
@@ -343,22 +349,6 @@ fn diff_byte_stream(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut V
         }
         _ => {}
     }
-}
-
-/// Parameters as a change's detail lists them, comma-separated.
-fn params_label(params: &[ParamKey]) -> String {
-    params
-        .iter()
-        .map(param_key_label)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// `params` in a fixed order, so two lists holding the same parameters compare equal.
-fn sorted(params: &[ParamKey]) -> Vec<&ParamKey> {
-    let mut sorted: Vec<&ParamKey> = params.iter().collect();
-    sorted.sort();
-    sorted
 }
 
 /// A URL accessor's arguments as a change's detail lists them, comma-separated.
@@ -680,14 +670,62 @@ fn diff_types(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
     }
 }
 
+/// The `…Required` struct of struct `name` appearing, going, or renamed. It appears with the
+/// struct's first required member and goes with its last, which the struct's fields report too;
+/// a rename, an allocation yielding to a type spelled as it, breaks every literal of it.
+fn diff_required_struct(
+    name: &str,
+    old: Option<&str>,
+    new: Option<&str>,
+    changes: &mut Vec<Change>,
+) {
+    match (old, new) {
+        (None, Some(new)) => changes.push(Change::new(
+            ChangeKind::TypeAdded,
+            new,
+            format!("new public type: the required members of `{name}`"),
+        )),
+        (Some(old), None) => changes.push(Change::new(
+            ChangeKind::TypeRemoved,
+            old,
+            format!("public type removed: the required members of `{name}`"),
+        )),
+        (Some(old), Some(new)) if old != new => changes.push(Change::new(
+            ChangeKind::TypeRemoved,
+            old,
+            format!("the required members of `{name}` renamed `{old}` -> `{new}`"),
+        )),
+        _ => {}
+    }
+}
+
 fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec<Change>) {
     match (old, new) {
         (
-            TypeSurface::Struct(old_fields, old_overflow, old_bindings),
-            TypeSurface::Struct(new_fields, new_overflow, new_bindings),
+            TypeSurface::Struct(
+                old_fields,
+                old_overflow,
+                old_bindings,
+                old_accessors,
+                old_required,
+            ),
+            TypeSurface::Struct(
+                new_fields,
+                new_overflow,
+                new_bindings,
+                new_accessors,
+                new_required,
+            ),
         ) => {
             diff_struct(name, old_fields, new_fields, changes);
+            diff_required_struct(
+                name,
+                old_required.as_deref(),
+                new_required.as_deref(),
+                changes,
+            );
             diff_overflow(name, old_overflow.as_ref(), new_overflow.as_ref(), changes);
+            diff_default_accessors(name, old_accessors, new_accessors, changes);
             diff_bindings(
                 old_bindings,
                 new_bindings,
@@ -751,6 +789,31 @@ fn push_kind_change(name: &str, old: &str, new: &str, changes: &mut Vec<Change>)
         name,
         format!("type kind `{old}` -> `{new}`"),
     ));
+}
+
+/// The changes to a struct's `{field}_or_default` accessors, compared by name: an accessor that
+/// renames is the old one removed and a new one added. Its return type is its field's, which
+/// [`diff_struct`] compares.
+fn diff_default_accessors(
+    name: &str,
+    old: &BTreeSet<String>,
+    new: &BTreeSet<String>,
+    changes: &mut Vec<Change>,
+) {
+    for accessor in old.difference(new) {
+        changes.push(Change::new(
+            ChangeKind::DefaultAccessorRemoved,
+            format!("{name}::{accessor}"),
+            format!("default accessor `{accessor}()` removed"),
+        ));
+    }
+    for accessor in new.difference(old) {
+        changes.push(Change::new(
+            ChangeKind::DefaultAccessorAdded,
+            format!("{name}::{accessor}"),
+            format!("default accessor `{accessor}()` added"),
+        ));
+    }
 }
 
 /// The changes to a struct's typed `additionalProperties` map. A map that moves to another field
@@ -839,7 +902,7 @@ fn diff_variant_set(
 }
 
 /// An open enum's catch-all is a variant like any other to a consumer that matches on the enum:
-/// opening a closed enum adds one (`VariantAdded`, the additive rule), closing an open one removes
+/// opening a closed enum adds one (`VariantAdded`, major like any added variant), closing an open one removes
 /// it, and renaming it — a listed value spelled `other` taking its name — is both.
 fn diff_open_variant(name: &str, old: Option<&str>, new: Option<&str>, changes: &mut Vec<Change>) {
     if old == new {
@@ -849,14 +912,16 @@ fn diff_open_variant(name: &str, old: Option<&str>, new: Option<&str>, changes: 
         changes.push(Change::new(
             ChangeKind::VariantAdded,
             name,
-            format!("variant added: `{variant}(String)`, holding any unlisted value"),
+            format!("variant added: `{variant}(UnknownValue<Self>)`, holding any unlisted value"),
         ));
     }
     if let Some(variant) = old {
         changes.push(Change::new(
             ChangeKind::VariantRemoved,
             name,
-            format!("variant removed: `{variant}(String)`, which held any unlisted value"),
+            format!(
+                "variant removed: `{variant}(UnknownValue<Self>)`, which held any unlisted value"
+            ),
         ));
     }
 }

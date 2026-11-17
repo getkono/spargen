@@ -1,0 +1,8 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|type-removed|PetRequired|the required members of `Pet` renamed `PetRequired` -> `PetRequired58d74607`
+minor|operation-added|GET /tags|new operation
+minor|type-added|PetRequired|new public type
+bump=major

@@ -28,6 +28,7 @@ fn parameter(name: &str, location: ParamLoc, required: bool) -> Parameter {
         explode: false,
         deprecated: false,
         default_display: None,
+        form_encoding: None,
     }
 }
 
@@ -881,9 +882,9 @@ fn a_component_keeps_its_type_name_from_an_inline_type_spelling_it() {
 }
 
 #[test]
-fn a_closed_string_enum_variant_never_takes_the_all_constants_spelling() {
-    // `a_l_l` cases to `ALL`, the closed enum's inherent constant, which the variant would shadow.
-    // An open enum emits no such constant, so its variant keeps the spelling.
+fn a_string_enum_variant_never_takes_the_all_constants_spelling() {
+    // `a_l_l` cases to `ALL`, the inherent constant every string enum has, open or closed, which
+    // the variant would shadow.
     use crate::ir::{Openness, ScalarEnum, ScalarRepr, ScalarValue};
     let mut api = api(Vec::new(), false);
     let mut enumeration = |hint: &str, openness: Openness| {
@@ -906,9 +907,9 @@ fn a_closed_string_enum_variant_never_takes_the_all_constants_spelling() {
     let names = allocate(&api);
 
     let variant = |id| names.variants[&(id, "a_l_l".to_owned())].as_str();
-    assert_eq!(super::CLOSED_ENUM_ALL, "ALL");
+    assert_eq!(super::STRING_ENUM_ALL, "ALL");
     assert_ne!(variant(closed), "ALL");
-    assert_eq!(variant(open), "ALL");
+    assert_ne!(variant(open), "ALL");
 }
 
 /// Does `text` lex as exactly one Rust identifier token, spelled as itself? `Ident`'s
@@ -1415,13 +1416,12 @@ proptest::proptest! {
                         variants.len(),
                         enumeration.variants.len() + usize::from(enumeration.is_open())
                     );
-                    // A closed string enum's `ALL` constant shares its variants' namespace.
-                    let reserved: &[&str] = if enumeration.is_open() {
-                        &[]
-                    } else {
-                        &[super::CLOSED_ENUM_ALL]
-                    };
-                    assert_scope(&format!("variants of {}", def.name_hint), variants, reserved)?;
+                    // A string enum's `ALL` constant shares its variants' namespace, open or not.
+                    assert_scope(
+                        &format!("variants of {}", def.name_hint),
+                        variants,
+                        &[super::STRING_ENUM_ALL],
+                    )?;
                 }
                 TypeKind::Union(union) => {
                     let variants: Vec<&Ident> = union

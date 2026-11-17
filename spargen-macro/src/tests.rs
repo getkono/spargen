@@ -1,7 +1,7 @@
 use super::{config, failure_message, spec_for, tracking, Args, Consumer, SWITCHES};
 use spargen::{
     CarriedDocs, Carve, ComponentKind, DateTimeBackend, Narrowing, OmitMethod, OmitRule, Spec,
-    TestingModule, UnionTags, UuidMapping,
+    StringEnums, TestingModule, UnionTags, UuidMapping,
 };
 
 fn os(value: &str) -> Option<std::ffi::OsString> {
@@ -78,7 +78,8 @@ fn a_non_utf8_location_is_an_error_not_a_lossy_path() {
 
 /// Every argument the keyed form accepts, each set away from its default.
 const EVERY_CONTROL: &str = r#"spec = "openapi.yaml", no_uuid, datetime = "jiff", carve,
-               open_narrowing, open_unions, verbatim_docs, testing, error_body_cap = 4096,
+               open_narrowing, open_unions, closed_enums, verbatim_docs, testing,
+               error_body_cap = 4096,
                batch_cap = 7,
                omit {
                    operations { post "/legacy"; }
@@ -88,7 +89,7 @@ const EVERY_CONTROL: &str = r#"spec = "openapi.yaml", no_uuid, datetime = "jiff"
                    file("shared.yaml") { pointers { "/Legacy"; } }
                },
                keep { get "/pets"; post "/pets"; },
-               bind_header = "X-Api-Version", bind_header = "X-Tenant""#;
+               bound_header = "X-Api-Version", bound_header = "X-Tenant""#;
 
 /// The operations [`EVERY_CONTROL`]'s `keep` block names, in the order it names them.
 fn every_kept_operation() -> Vec<(OmitMethod, String)> {
@@ -119,13 +120,14 @@ fn parses_every_build_configuration_control() {
     assert_eq!(args.carve, Some(Carve::Auto));
     assert_eq!(args.open_narrowing, Some(Narrowing::Open));
     assert_eq!(args.open_unions, Some(UnionTags::Open));
+    assert_eq!(args.closed_enums, Some(StringEnums::Closed));
     assert_eq!(args.verbatim_docs, Some(CarriedDocs::Verbatim));
     assert_eq!(args.testing, Some(TestingModule::Emitted));
     assert_eq!(args.error_body_cap, Some(4096));
     assert_eq!(args.batch_cap, Some(7));
     assert_eq!(args.omit.rules, every_omit_rule());
     assert_eq!(args.keep, every_kept_operation());
-    assert_eq!(args.bind_headers, ["X-Api-Version", "X-Tenant"]);
+    assert_eq!(args.bound_headers, ["X-Api-Version", "X-Tenant"]);
 }
 
 #[test]
@@ -138,13 +140,14 @@ fn a_bare_spec_path_sets_no_control() {
     assert_eq!(args.carve, None);
     assert_eq!(args.open_narrowing, None);
     assert_eq!(args.open_unions, None);
+    assert_eq!(args.closed_enums, None);
     assert_eq!(args.verbatim_docs, None);
     assert_eq!(args.testing, None);
     assert_eq!(args.error_body_cap, None);
     assert_eq!(args.batch_cap, None);
     assert_eq!(args.omit.rules, Vec::new());
     assert_eq!(args.keep, Vec::new());
-    assert!(args.bind_headers.is_empty());
+    assert!(args.bound_headers.is_empty());
 }
 
 /// Each argument reaches the `Spec` field it names, and nothing else changes.
@@ -157,19 +160,20 @@ fn every_argument_maps_onto_its_spec_field() {
         .with_carve(spargen::Carve::Auto)
         .with_open_narrowing(spargen::Narrowing::Open)
         .with_open_unions(spargen::UnionTags::Open)
+        .with_closed_enums(spargen::StringEnums::Closed)
         .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
         .with_testing(spargen::TestingModule::Emitted)
         .with_error_body_cap(4096)
         .with_batch_cap(7);
     for rule in every_omit_rule() {
-        expected = expected.omit_rule(rule);
+        expected = expected.add_omit_rule(rule);
     }
     for (method, path) in every_kept_operation() {
-        expected = expected.keep_operation(method, path);
+        expected = expected.add_keep_operation(method, path);
     }
     expected = expected
-        .bind_header("X-Api-Version")
-        .bind_header("X-Tenant");
+        .add_bound_header("X-Api-Version")
+        .add_bound_header("X-Tenant");
     assert_eq!(config(&args, Spec::new("openapi.yaml")), expected);
 }
 
@@ -183,20 +187,21 @@ fn an_absent_argument_keeps_the_config_files_value() {
         .with_carve(spargen::Carve::Auto)
         .with_open_narrowing(spargen::Narrowing::Open)
         .with_open_unions(spargen::UnionTags::Open)
+        .with_closed_enums(spargen::StringEnums::Closed)
         .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
         .with_testing(spargen::TestingModule::Emitted)
         .with_error_body_cap(1024)
         .with_batch_cap(3)
-        .omit_rule(OmitRule::path("/from-file"))
-        .keep_operation(OmitMethod::Get, "/from-file")
-        .bind_header("X-From-File");
+        .add_omit_rule(OmitRule::path("/from-file"))
+        .add_keep_operation(OmitMethod::Get, "/from-file")
+        .add_bound_header("X-From-File");
 
     let bare: Args = syn::parse_str(r#""openapi.yaml""#).unwrap();
     assert_eq!(config(&bare, discovered.clone()), discovered);
 
     let capped: Args = syn::parse_str(
         r#""openapi.yaml", batch_cap = 9, omit { paths { "/from-macro"; } },
-           keep { put "/from-macro"; }, bind_header = "X-From-Macro""#,
+           keep { put "/from-macro"; }, bound_header = "X-From-Macro""#,
     )
     .unwrap();
     let configured = config(&capped, discovered.clone());
@@ -204,9 +209,9 @@ fn an_absent_argument_keeps_the_config_files_value() {
         configured,
         discovered
             .with_batch_cap(9)
-            .omit_rule(OmitRule::path("/from-macro"))
-            .keep_operation(OmitMethod::Put, "/from-macro")
-            .bind_header("X-From-Macro")
+            .add_omit_rule(OmitRule::path("/from-macro"))
+            .add_keep_operation(OmitMethod::Put, "/from-macro")
+            .add_bound_header("X-From-Macro")
     );
     assert_eq!(
         configured.bound_headers(),
@@ -224,6 +229,7 @@ fn each_switch_overrides_the_config_file_either_way() {
         .with_carve(spargen::Carve::Auto)
         .with_open_narrowing(spargen::Narrowing::Open)
         .with_open_unions(spargen::UnionTags::Open)
+        .with_closed_enums(spargen::StringEnums::Closed)
         .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
         .with_testing(spargen::TestingModule::Emitted);
     let off = Spec::new("openapi.yaml")
@@ -231,25 +237,28 @@ fn each_switch_overrides_the_config_file_either_way() {
         .with_carve(spargen::Carve::Off)
         .with_open_narrowing(spargen::Narrowing::Exact)
         .with_open_unions(spargen::UnionTags::Closed)
+        .with_closed_enums(spargen::StringEnums::Open)
         .with_verbatim_docs(spargen::CarriedDocs::Rewritten)
         .with_testing(spargen::TestingModule::Omitted);
 
     let turn_off = args(
         r#""openapi.yaml", uuid = false, carve = false, open_narrowing = false, open_unions = false,
-           verbatim_docs = false, testing = false"#,
+           closed_enums = false, verbatim_docs = false, testing = false"#,
     );
     assert_eq!(config(&turn_off, on.clone()), off);
     let turn_on = args(
         r#""openapi.yaml", uuid = true, carve = true, open_narrowing = true, open_unions = true,
-           verbatim_docs = true, testing = true"#,
+           closed_enums = true, verbatim_docs = true, testing = true"#,
     );
     assert_eq!(config(&turn_on, off.clone()), on);
-    let bare =
-        args(r#""openapi.yaml", uuid, carve, open_narrowing, open_unions, verbatim_docs, testing"#);
+    let bare = args(
+        r#""openapi.yaml", uuid, carve, open_narrowing, open_unions, closed_enums, verbatim_docs,
+           testing"#,
+    );
     assert_eq!(config(&bare, off.clone()), on);
     let negated = args(
         r#""openapi.yaml", no_uuid, no_carve, no_open_narrowing, no_open_unions,
-           no_verbatim_docs, no_testing"#,
+           no_closed_enums, no_verbatim_docs, no_testing"#,
     );
     assert_eq!(config(&negated, on.clone()), off);
     for switch in SWITCHES {
@@ -274,20 +283,21 @@ fn each_negated_switch_overrides_a_config_file_that_enables_it() {
     scratch.write(
         "spargen.toml",
         "uuid = true\ncarve = true\nopen_narrowing = true\nopen_unions = true\n\
-         verbatim_docs = true\ntesting = true\n",
+         closed_enums = true\nverbatim_docs = true\ntesting = true\n",
     );
     let enabled = spec_for(&args(r#""openapi.yaml""#), &scratch.consumer()).unwrap();
     assert_eq!(enabled.uuid(), UuidMapping::Uuid);
     assert_eq!(enabled.carve(), Carve::Auto);
     assert_eq!(enabled.open_narrowing(), Narrowing::Open);
     assert_eq!(enabled.open_unions(), UnionTags::Open);
+    assert_eq!(enabled.closed_enums(), StringEnums::Closed);
     assert_eq!(enabled.verbatim_docs(), CarriedDocs::Verbatim);
     assert_eq!(enabled.testing(), TestingModule::Emitted);
 
     let negated = spec_for(
         &args(
             r#""openapi.yaml", no_uuid, no_carve, no_open_narrowing, no_open_unions,
-               no_verbatim_docs, no_testing"#,
+               no_closed_enums, no_verbatim_docs, no_testing"#,
         ),
         &scratch.consumer(),
     )
@@ -299,6 +309,7 @@ fn each_negated_switch_overrides_a_config_file_that_enables_it() {
             .with_carve(Carve::Off)
             .with_open_narrowing(Narrowing::Exact)
             .with_open_unions(UnionTags::Closed)
+            .with_closed_enums(StringEnums::Open)
             .with_verbatim_docs(CarriedDocs::Rewritten)
             .with_testing(TestingModule::Omitted)
     );
@@ -347,8 +358,8 @@ fn the_datetime_argument_overrides_the_config_file() {
 }
 
 /// Each switch sets its own `Spec` field: `uuid` and `carve`, `carve` and `open_narrowing`, and
-/// `open_narrowing` and `open_unions`, `open_unions` and `verbatim_docs`, and `verbatim_docs` and
-/// `testing`, are given opposite
+/// `open_narrowing` and `open_unions`, `open_unions` and `closed_enums`, `closed_enums` and
+/// `verbatim_docs`, and `verbatim_docs` and `testing`, are given opposite
 /// values over a base holding the inverse of each, so a switch wired to another's setting changes
 /// the result.
 #[test]
@@ -358,24 +369,26 @@ fn each_switch_reaches_its_own_field_when_the_values_differ() {
         .with_carve(spargen::Carve::Off)
         .with_open_narrowing(spargen::Narrowing::Open)
         .with_open_unions(spargen::UnionTags::Closed)
-        .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
-        .with_testing(spargen::TestingModule::Omitted);
+        .with_closed_enums(spargen::StringEnums::Closed)
+        .with_verbatim_docs(spargen::CarriedDocs::Rewritten)
+        .with_testing(spargen::TestingModule::Emitted);
     let expected = Spec::new("openapi.yaml")
         .with_uuid(spargen::UuidMapping::String)
         .with_carve(spargen::Carve::Auto)
         .with_open_narrowing(spargen::Narrowing::Exact)
         .with_open_unions(spargen::UnionTags::Open)
-        .with_verbatim_docs(spargen::CarriedDocs::Rewritten)
-        .with_testing(spargen::TestingModule::Emitted);
+        .with_closed_enums(spargen::StringEnums::Open)
+        .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
+        .with_testing(spargen::TestingModule::Omitted);
 
     let valued = args(
         r#""openapi.yaml", uuid = false, carve = true, open_narrowing = false, open_unions = true,
-           verbatim_docs = false, testing = true"#,
+           closed_enums = false, verbatim_docs = true, testing = false"#,
     );
     assert_eq!(config(&valued, base.clone()), expected);
     let spelled = args(
-        r#""openapi.yaml", no_uuid, carve, open_narrowing = false, open_unions,
-           verbatim_docs = false, testing"#,
+        r#""openapi.yaml", no_uuid, carve, open_narrowing = false, open_unions, no_closed_enums,
+           verbatim_docs, no_testing"#,
     );
     assert_eq!(config(&spelled, base), expected);
 }
@@ -842,16 +855,16 @@ fn every_argument_parse_error_names_what_was_wrong() {
         (
             r#""a.yaml", uuids"#,
             "unknown argument `uuids`; expected a spec path, a switch (uuid, carve, \
-                 open_narrowing, open_unions, verbatim_docs, testing, each also as \
+                 open_narrowing, open_unions, closed_enums, verbatim_docs, testing, each also as \
                  `no_<switch>`), or one of: datetime, error_body_cap, batch_cap, omit, keep, \
-                 bind_header",
+                 bound_header",
         ),
         (
             r#""a.yaml", no_datetime"#,
             "unknown argument `no_datetime`; expected a spec path, a switch (uuid, carve, \
-                 open_narrowing, open_unions, verbatim_docs, testing, each also as \
+                 open_narrowing, open_unions, closed_enums, verbatim_docs, testing, each also as \
                  `no_<switch>`), or one of: datetime, error_body_cap, batch_cap, omit, keep, \
-                 bind_header",
+                 bound_header",
         ),
         (r#""a.yaml", uuid = 1"#, "expected boolean literal"),
         (r#""a.yaml", carve = "yes""#, "expected boolean literal"),
@@ -887,6 +900,11 @@ fn every_argument_parse_error_names_what_was_wrong() {
                  `no_open_unions`)",
         ),
         (
+            r#""a.yaml", closed_enums, closed_enums = false"#,
+            "`closed_enums` given more than once (as `closed_enums`, `closed_enums = …` or \
+                 `no_closed_enums`)",
+        ),
+        (
             r#""a.yaml", verbatim_docs, verbatim_docs = false"#,
             "`verbatim_docs` given more than once (as `verbatim_docs`, `verbatim_docs = …` or \
                  `no_verbatim_docs`)",
@@ -910,8 +928,8 @@ fn every_argument_parse_error_names_what_was_wrong() {
             "number too large to fit in target type",
         ),
         (r#""a.yaml", batch_cap 3"#, "expected `=`"),
-        (r#""a.yaml", bind_header "X-A""#, "expected `=`"),
-        (r#""a.yaml", bind_header = X"#, "expected string literal"),
+        (r#""a.yaml", bound_header "X-A""#, "expected `=`"),
+        (r#""a.yaml", bound_header = X"#, "expected string literal"),
         (
             r#""a.yaml", batch_cap = -1"#,
             "invalid digit found in string",

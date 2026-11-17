@@ -73,6 +73,13 @@ fn assert_reconnect_policy_is_public<P: ReconnectPolicy>() {}
         "a custom method should be built from its token bytes"
     );
 
+    // A secured streaming operation signs through `support::Resend::attach`, the emission the
+    // compile and clippy gates above reach only through this operation.
+    assert!(
+        generated.contains("support::Resend::attach("),
+        "a secured streaming operation should attach credentials through `Resend::attach`"
+    );
+
     // The OpenAPI 3.2 streaming response recognizes the standard SSE envelope annotation and types
     // the stream as its JSON `data.contentSchema`, not as the envelope object.
     let flat: String = generated.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -146,7 +153,7 @@ fn a_json_querystring_parameter_is_one_encoded_query() {
     let query = |term: &str| oas32_client::types::Query { term: Some(term.to_owned()) };
     let client = oas32_client::BlockingClient::new(&base).unwrap();
     client
-        .lookup_records(oas32_client::LookupRecordsParams::new(query("a&b=c#d")))
+        .lookup_records(oas32_client::LookupRecordsParamsRequired { filter: query("a&b=c#d") })
         .unwrap();
     client
         .lookup_records_maybe(Some(
@@ -166,6 +173,40 @@ fn a_json_querystring_parameter_is_one_encoded_query() {
     }
 }
 
+/// A form-urlencoded `in: querystring` parameter is rendered through its Encoding Objects, as a
+/// form body is: `style: form, explode: false` joins `tags` into one `,`-separated field, a JSON
+/// `contentType` sends `at` as its percent-encoded JSON, and an absent optional member adds
+/// nothing. With every member absent the request carries no query at all.
+#[test]
+fn a_form_querystring_parameter_follows_its_encoding_objects() {
+    let (base, server) = common::serve(vec![common::no_content(); 2]);
+
+    let client = oas32_client::BlockingClient::new(&base).unwrap();
+    client
+        .filter_records(oas32_client::FilterRecordsParamsRequired {
+            filter: oas32_client::types::RecordFilter {
+                tags: Some(vec!["a".to_owned(), "b c".to_owned()]),
+                at: Some(oas32_client::types::RecordFilterAt { x: Some("y".to_owned()) }),
+                term: Some("t".to_owned()),
+            },
+        })
+        .unwrap();
+    client
+        .filter_records(oas32_client::FilterRecordsParamsRequired {
+            filter: oas32_client::types::RecordFilter::default(),
+        })
+        .unwrap();
+
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    for (request, expected) in requests.iter().zip([
+        "GET /records/filtered?tags=a,b%20c&at=%7B%22x%22%3A%22y%22%7D&term=t HTTP/1.1",
+        "GET /records/filtered HTTP/1.1",
+    ]) {
+        assert_eq!(request.line(), expected, "{}", request.text());
+    }
+}
+
 /// The fixed 3.2 `QUERY` method on the wire: the method token travels as `QUERY`, the request
 /// carries its serialized JSON body, and the `200` array decodes into the typed records.
 #[test]
@@ -178,7 +219,7 @@ fn a_query_operation_sends_its_method_and_body() {
 
     let client = oas32_client::BlockingClient::new(&base).unwrap();
     let records: Vec<oas32_client::types::Record> = client
-        .search_records(&oas32_client::types::Query { term: Some("find me".to_owned()) })
+        .search_records(oas32_client::types::Query { term: Some("find me".to_owned()) })
         .unwrap()
         .into_inner();
 
@@ -211,7 +252,7 @@ fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
 
         let client = oas32_client::BlockingClient::new(&base).unwrap();
         let outcome = client
-            .purge_cache(&oas32_client::types::Query { term: Some("drop".to_owned()) })
+            .purge_cache(oas32_client::types::Query { term: Some("drop".to_owned()) })
             .unwrap()
             .into_inner();
 
@@ -270,6 +311,44 @@ fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
     assert_eq!(written["outcome"], serde_json::Value::Null, "{written}");
     let back: oas32_client::types::CacheOutcome = serde_json::from_value(written).unwrap();
     assert_eq!(back, unknown);
+}
+
+// The `defaultMapping` variant holding an unclaimed tag decodes through the untagged variants'
+// trial before the fallback, so a payload the untagged variant's schema accepts would come back as
+// that variant (#1376): it is refused. One no untagged variant accepts, or holding its own tag,
+// decodes back as itself.
+#[test]
+fn a_default_mapping_payload_an_untagged_variant_claims_does_not_serialize() {
+    use oas32_client::types;
+    let claimed = types::Ride::RideOther(Box::new(types::RideOther {
+        kind: Some("bus".to_owned()),
+        label: Some("x".to_owned()),
+        note: None,
+    }));
+    let error = serde_json::to_value(&claimed).expect_err("claimed by the untagged variant");
+    let error = error.to_string();
+    assert!(error.contains("Ride::RideOther"), "{error}");
+    assert!(error.contains("Ride::RideVariant1"), "{error}");
+    for (kind, label) in [(Some("bus"), None), (Some("RideOther"), Some("x"))] {
+        let ride = types::Ride::RideOther(Box::new(types::RideOther {
+            kind: kind.map(str::to_owned),
+            label: label.map(str::to_owned),
+            note: Some("n".to_owned()),
+        }));
+        let written = serde_json::to_value(&ride).expect("unclaimed by any untagged variant");
+        let back: types::Ride = serde_json::from_value(written).expect("decodes back");
+        assert_eq!(back, ride);
+    }
+    // Holding no tag, the variant is written with its own, which routes it back by tag.
+    let untagged = types::Ride::RideOther(Box::new(types::RideOther {
+        kind: None,
+        label: Some("x".to_owned()),
+        note: None,
+    }));
+    let written = serde_json::to_value(&untagged).expect("its own tag is inserted");
+    assert_eq!(written["kind"], "RideOther", "{written}");
+    let back: types::Ride = serde_json::from_value(written).expect("decodes back");
+    assert!(matches!(back, types::Ride::RideOther(_)), "{back:?}");
 }
 "##,
     );

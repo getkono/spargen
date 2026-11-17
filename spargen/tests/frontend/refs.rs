@@ -572,6 +572,138 @@ components:
     );
 }
 
+/// One subschema referenced under two spellings of its fragment — a token percent-encoded in one
+/// and written plainly in the other — is one target and lowers to one type (#1451). Lowering
+/// memoises a bundle target on its `(file, pointer)` identity, which is the decoded pointer
+/// whatever the fragment's spelling, so the second spelling reuses the first's type rather than
+/// declaring a twin.
+#[test]
+fn two_percent_encoding_spellings_of_one_subschema_share_one_type() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/big%20cat' }
+  /v:
+    get:
+      operationId: getV
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/big cat' }
+components:
+  schemas:
+    Defs:
+      type: object
+      properties:
+        "big cat":
+          type: object
+          required: [purr]
+          properties: { purr: { type: string } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        declared_types(&code, "BigCat", |_| true),
+        ["BigCat"],
+        "the two spellings of one subschema must share one type: {}",
+        types_module(&code)
+    );
+    for operation in ["get_u", "get_v"] {
+        let signature = code
+            .split(&format!("fn {operation}("))
+            .nth(1)
+            .and_then(|rest| rest.split('{').next())
+            .unwrap_or_else(|| panic!("no `{operation}`: {code}"));
+        assert!(
+            signature.contains("ResponseValue<types::BigCat>"),
+            "`{operation}` must return the one shared type: {signature}"
+        );
+    }
+}
+
+/// A mapping value and a member `$ref` that spell one node two ways — one percent-encoding a token
+/// the other writes plainly — name one member (#1451). Matching compares target identities, and
+/// an identity is the decoded pointer whatever the fragment's spelling, so the mapped tag
+/// dispatches rather than `E007` reporting the mapping's target as no member of the union.
+#[test]
+fn a_mapping_and_a_member_spelling_one_node_differently_are_one_member() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    Defs:\n      type: object\n      properties:\n        \
+         \"big cat\": { type: object, required: [kind], properties: { kind: { type: string } } }\n        \
+         dog: { type: object, required: [kind], properties: { kind: { type: string } } }\n    \
+         Pet:\n      oneOf:\n        \
+         - $ref: '#/components/schemas/Defs/properties/big%20cat'\n        \
+         - $ref: '#/components/schemas/Defs/properties/dog'\n      \
+         discriminator:\n        propertyName: kind\n        mapping:\n          \
+         cat: '#/components/schemas/Defs/properties/big cat'\n          \
+         dog: '#/components/schemas/Defs/properties/dog'\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let arms = super::discriminator::discriminated_arms(&code, "Pet");
+    let tags: Vec<Vec<String>> = arms.decode.into_iter().map(|(_, tags)| tags).collect();
+    assert_eq!(
+        tags,
+        [vec!["cat".to_owned()], vec!["dog".to_owned()]],
+        "{code}"
+    );
+    let written: Vec<Option<String>> = arms.encode.into_iter().map(|(_, tag)| tag).collect();
+    assert_eq!(
+        written,
+        [Some("cat".to_owned()), Some("dog".to_owned())],
+        "{code}"
+    );
+}
+
+/// A root component named by a percent-encoded `#/components/schemas/<name>` is that component
+/// (#1479): `Pe%74` is `Pet` once the fragment is decoded, as the bundle's `(file, pointer)`
+/// identity already reads it, so the name-keyed lookup resolves it rather than reporting `E004`. A
+/// pointer into the component through an encoded name is the same subschema as the plain spelling.
+#[test]
+fn a_percent_encoded_component_schema_name_names_that_component() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    Pet: { type: object, properties: { a: { type: string } } }\n    \
+         Holder:\n      type: object\n      properties:\n        \
+         x: { $ref: '#/components/schemas/Pe%74' }\n        \
+         y: { $ref: '#/components/schemas/Pet' }\n        \
+         z: { $ref: '#/components/schemas/Pe%74/properties/a' }\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    let types = types_module(&code);
+    let holder = types
+        .split("pub struct Holder")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}").next())
+        .unwrap_or_else(|| panic!("no `Holder`: {types}"));
+    for field in ["x", "y"] {
+        assert!(
+            holder.contains(&format!("pub {field}: Option<Pet>")),
+            "`{field}` must be typed `Pet`: {holder}"
+        );
+    }
+    assert!(
+        holder.contains("pub z: Option<A>"),
+        "`z` must be `Pet`'s `a`, named for its own pointer token: {holder}"
+    );
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
@@ -734,7 +866,7 @@ components:
         );
     }
     let code = std::fs::read_to_string(out).unwrap();
-    assert_eq!(code.matches("pub struct Pet").count(), 1, "{code}");
+    assert_eq!(code.matches("pub struct Pet {").count(), 1, "{code}");
 }
 
 /// A relative-file `$ref` whose target cannot be read is an `E011` located at that `$ref`, with its
@@ -894,6 +1026,70 @@ fn moderate_ref_chain_below_the_cap_still_lowers() {
         !has_code(&report, Code::SchemaNestingTooDeep),
         "a 32-deep chain must lower without E014: {report:#?}"
     );
+}
+
+/// A fragment is percent-decoded exactly once. `%25` is a literal `%`, so `100%25` addresses the
+/// key `100%` and `a%2541` the key `a%41`, never `aA`: the identity a reference resolves to is the
+/// decoded pointer, and looking it up must not decode it again.
+#[test]
+fn a_percent_encoded_percent_sign_in_a_fragment_is_decoded_once() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/100%25' }
+  /v:
+    get:
+      operationId: getV
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Defs/properties/a%2541' }
+components:
+  schemas:
+    Defs:
+      type: object
+      properties:
+        "100%":
+          type: object
+          required: [purr]
+          properties: { purr: { type: string } }
+        "a%41":
+          type: object
+          required: [hiss]
+          properties: { hiss: { type: integer } }
+        aA: { type: boolean }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    for (operation, field) in [("get_u", "purr"), ("get_v", "hiss")] {
+        let signature = code
+            .split(&format!("fn {operation}("))
+            .nth(1)
+            .and_then(|rest| rest.split('{').next())
+            .unwrap_or_else(|| panic!("no `{operation}`: {code}"));
+        assert!(
+            !signature.contains("ResponseValue<bool>"),
+            "`{operation}` must not resolve to the twice-decoded key: {signature}"
+        );
+        assert!(
+            types_module(&code).contains(&format!("pub {field}:")),
+            "`{operation}`'s target declares `{field}`: {}",
+            types_module(&code)
+        );
+    }
 }
 
 #[test]

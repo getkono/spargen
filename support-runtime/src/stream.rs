@@ -24,10 +24,12 @@ use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 
 use crate::chunked::read_as_it_arrives;
-use crate::dispatch::{cap_body, read_prefix, send_on, unexpected_status_capped};
-use crate::transport::try_clone_request;
+use crate::dispatch::{cap_body, read_prefix, unexpected_status_capped};
 use crate::wasm::BoxFuture;
-use crate::{ClientConfig, ClientCore, Error, HttpBackend, HttpBody, MaybeSend, MaybeSync};
+use crate::{
+    attach_auth_replayable, AuthScheme, ClientConfig, ClientCore, Error, HttpBody, MaybeSend,
+    MaybeSync, Replay, RequestBuilder,
+};
 
 /// The failure yielded by a streaming response after its initial HTTP response was accepted.
 pub type StreamError = Error<Infallible>;
@@ -160,12 +162,77 @@ enum OwnedReconnectReason {
     Failure(StreamError),
 }
 
-/// What a reconnect resends and through what: the client's transport alone, shared rather than
-/// copied with the rest of its [`ClientCore`]. A reconnect's error body is capped at the stream's
-/// own `max_error_body`, taken from the same client configuration.
+/// What a streaming call's reconnect signs and sends afresh: the call's request as it stood before
+/// any credential was attached, the operation's security requirement, and the extensions and
+/// `Last-Event-ID` of the request the call sent. [`Resend::attach`] builds it where a generated
+/// streaming operation attaches its credentials, [`Resend::carrying`] records what the sent
+/// request carried, and the operation hands it to the [`EventStream`] it returns.
+pub struct Resend {
+    /// The request before [`crate::attach_auth_replayable`] attached anything.
+    unsigned: RequestBuilder,
+    /// The operation's security requirement: alternatives, each an AND of schemes.
+    requirements: Vec<Vec<AuthScheme>>,
+    /// The extensions of the request as it was sent, an operation's `ops::Operation` among them:
+    /// empty until [`Self::carrying`] records them.
+    extensions: http::Extensions,
+    /// The `Last-Event-ID` the request as it was sent carried, the stream's first resume point.
+    last_event_id: Option<String>,
+}
+
+impl Resend {
+    /// [`crate::attach_auth_replayable`], also returning the [`Resend`] a streaming call's
+    /// reconnect signs afresh: `None` when the request's body cannot be cloned (a streaming
+    /// upload), which leaves the stream nothing to reconnect with. Selection and every failure are
+    /// [`crate::attach_auth`]'s.
+    pub async fn attach(
+        core: &ClientCore,
+        request: RequestBuilder,
+        requirements: &[&[AuthScheme]],
+    ) -> Result<(RequestBuilder, Option<Replay>, Option<Resend>), Error<Infallible>> {
+        let unsigned = request.try_clone();
+        let (request, replay) = attach_auth_replayable(core, request, requirements).await?;
+        let resend = unsigned.map(|unsigned| Resend {
+            unsigned,
+            requirements: requirements
+                .iter()
+                .map(|alternative| alternative.to_vec())
+                .collect(),
+            extensions: http::Extensions::new(),
+            last_event_id: None,
+        });
+        Ok((request, replay, resend))
+    }
+
+    /// This resend, carrying the extensions of `request` (the one the call sends, prepared and
+    /// with its `ops::Operation`) onto every reconnect, and starting from the `Last-Event-ID` it
+    /// carries.
+    pub fn carrying(mut self, request: &http::Request<HttpBody>) -> Self {
+        self.extensions = request.extensions().clone();
+        self.last_event_id = request
+            .headers()
+            .get("last-event-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        self
+    }
+}
+
+impl std::fmt::Debug for Resend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The request's headers may hold secrets other than credentials: it is not printed.
+        f.debug_struct("Resend")
+            .field("requirements", &self.requirements)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a reconnect signs and sends, and through which client: a copy of the [`ClientCore`] the
+/// call was made on, taken when the stream was opened, whose credentials sign each reconnect and
+/// whose backend sends it. A reconnect's error body is capped at the stream's own
+/// `max_error_body`, taken from the same client configuration.
 struct ReconnectContext {
-    backend: Arc<dyn HttpBackend>,
-    request: http::Request<HttpBody>,
+    core: Arc<ClientCore>,
+    resend: Resend,
     policy: Option<Arc<dyn ReconnectPolicy>>,
     attempt: u32,
 }
@@ -200,60 +267,72 @@ impl<T> EventStream<T> {
     /// embedded runtime, so they reach it while the [`Framing`] it takes stays outside the
     /// generated public API. The `allow` is for this crate's own build: its caller is generated code.
     ///
-    /// `request` is the clone the operation kept of the [`crate::prepare`]d request it sent, the
-    /// core's [`crate::RequestOptions`] and its `ops::Operation` already on it, so every reconnect
-    /// carries them too; `None` (a generated `decode_{method}`, which never saw the request) leaves
-    /// the stream nothing to resend, as [`Self::resending`] describes.
+    /// `resend` is the [`Resend`] the operation built where it attached its credentials, carrying
+    /// what the request it sent carried, so every reconnect is signed afresh and carries the core's
+    /// [`crate::RequestOptions`] and the operation's `ops::Operation` too; `None` (a generated
+    /// `decode_{method}`, which never saw the request) leaves the stream nothing to resend, as
+    /// [`Self::resending`] describes.
     #[allow(dead_code)]
     pub(crate) fn new_reconnectable(
         response: Response,
         framing: Framing,
         core: &ClientCore,
-        request: Option<http::Request<HttpBody>>,
+        resend: Option<Resend>,
     ) -> Self {
         Self {
             max_frame: core.config().max_stream_frame,
             max_error_body: core.config().max_error_body,
             ..Self::new(response, framing)
         }
-        .resending(core, request)
+        .resending(core, resend)
     }
 
-    /// This stream, able to reconnect by resending `request` through the core's backend once
-    /// [`Self::with_reconnect`] enables it, and seeded with the `Last-Event-ID` `request` carries;
-    /// with `None` (a request whose body could not be cloned) it has nothing to resend. A
-    /// generated operation hands its `decode_{method}`'s stream the request it sent this way.
-    /// Crate-visible, as [`Self::new_reconnectable`] is.
+    /// This stream, able to reconnect once [`Self::with_reconnect`] enables it by signing
+    /// `resend`'s request afresh with `core`'s credentials, as [`crate::attach_auth`] signs a
+    /// call, and sending it through [`crate::execute`] on `core`'s backend, and seeded with the
+    /// `Last-Event-ID` the sent request carried. `core` is copied as it stands now: a credential
+    /// registered or removed on the client afterwards does not reach the stream, while a
+    /// [`crate::Credential::Provider`] or [`crate::Credential::Refreshable`] is asked for a token
+    /// on each reconnect. With `None` (a request whose body could not be cloned) the stream has
+    /// nothing to resend. A generated operation hands its `decode_{method}`'s stream the
+    /// [`Resend`] of the request it sent this way. Crate-visible, as [`Self::new_reconnectable`]
+    /// is.
     #[allow(dead_code)]
-    pub(crate) fn resending(
-        mut self,
-        core: &ClientCore,
-        request: Option<http::Request<HttpBody>>,
-    ) -> Self {
-        self.last_event_id = request.as_ref().and_then(|request| {
-            request
-                .headers()
-                .get("last-event-id")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)
-        });
-        self.reconnect = request.map(|request| ReconnectContext {
-            backend: Arc::clone(core.backend()),
-            request,
+    pub(crate) fn resending(mut self, core: &ClientCore, resend: Option<Resend>) -> Self {
+        self.last_event_id = resend
+            .as_ref()
+            .and_then(|resend| resend.last_event_id.clone());
+        self.reconnect = resend.map(|resend| ReconnectContext {
+            core: Arc::new(core.clone()),
+            resend,
             policy: None,
             attempt: 0,
         });
         self
     }
 
+    /// Whether this stream holds a request it can resend, so that [`Self::with_reconnect`]
+    /// accepts a policy. `false` when the operation's request could not be cloned (a streaming
+    /// request body, for example) or the stream was decoded from a response alone.
+    pub fn can_reconnect(&self) -> bool {
+        self.reconnect.is_some()
+    }
+
     /// Enable automatic reconnects using a caller-owned policy and timer.
     ///
-    /// Returns [`Error::RequestConstruction`] when the stream holds no request it can resend,
-    /// because the operation's request could not be cloned (a streaming request body, for example).
-    pub fn with_reconnect(mut self, policy: Arc<dyn ReconnectPolicy>) -> Result<Self, StreamError> {
+    /// When the stream holds no request it can resend ([`Self::can_reconnect`] is `false`), the
+    /// error is [`Error::RequestConstruction`] and comes with the stream itself, unchanged and
+    /// still readable without reconnects.
+    pub fn with_reconnect(
+        mut self,
+        policy: Arc<dyn ReconnectPolicy>,
+    ) -> Result<Self, (Self, StreamError)> {
         let Some(reconnect) = self.reconnect.as_mut() else {
-            return Err(Error::request_message(
-                "this streaming request cannot be cloned safely for automatic reconnect",
+            return Err((
+                self,
+                Error::request_message(
+                    "this streaming request cannot be cloned safely for automatic reconnect",
+                ),
             ));
         };
         reconnect.policy = Some(policy);
@@ -267,7 +346,8 @@ impl<T> EventStream<T> {
         self.last_event_id.as_deref()
     }
 
-    /// The latest valid server-provided SSE `retry:` delay.
+    /// The latest valid server-provided SSE `retry:` delay. A `retry:` line applies as soon as it
+    /// is read, whether or not the body goes on to dispatch the event it is part of.
     pub fn reconnect_delay(&self) -> Option<Duration> {
         self.reconnect_delay
     }
@@ -295,7 +375,11 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
         let this = self.get_mut();
         loop {
             let at_eof = matches!(this.state, StreamState::Eof);
-            match next_frame(&mut this.buffer, this.framing, at_eof) {
+            let frame = next_frame(&mut this.buffer, this.framing, at_eof);
+            if let Some(retry) = this.buffer.retry.take() {
+                this.reconnect_delay = Some(Duration::from_millis(retry));
+            }
+            match frame {
                 FramePoll::Item { payload, metadata } => {
                     this.apply_metadata(metadata);
                     let item = deserialize_item::<T>(this.status, &this.headers, &payload);
@@ -426,9 +510,6 @@ impl<T> EventStream<T> {
         if let Some(id) = metadata.id {
             self.last_event_id = Some(id);
         }
-        if let Some(retry) = metadata.retry {
-            self.reconnect_delay = Some(Duration::from_millis(retry));
-        }
     }
 
     /// Schedule a reconnect. `Some(error)` means the policy declined a failure and it must be
@@ -468,27 +549,45 @@ impl<T> EventStream<T> {
 
     fn reconnect_future(&self) -> Option<ReconnectFuture> {
         let reconnect = self.reconnect.as_ref()?;
-        let backend = Arc::clone(&reconnect.backend);
+        let core = Arc::clone(&reconnect.core);
         let max_error_body = self.max_error_body;
-        let mut request = try_clone_request(&reconnect.request)?;
+        let mut request = reconnect.resend.unsigned.try_clone()?;
+        let requirements = reconnect.resend.requirements.clone();
+        let extensions = reconnect.resend.extensions.clone();
         // An empty id resets replay state, so the header goes. So does an id `HeaderValue` refuses
         // (the framer drops an id holding NUL, and keeps every other control character but the
         // line-ending LF and CR): the server's latest resume point cannot be sent, and replaying
         // an older one would claim a position it has superseded, so the reconnect proceeds as a
-        // fresh subscription instead of ending.
-        if let Some(id) = self.last_event_id.as_deref() {
-            match reqwest::header::HeaderValue::from_str(id) {
-                Ok(value) if !id.is_empty() => {
-                    request.headers_mut().insert("last-event-id", value);
-                }
-                _ => {
-                    request.headers_mut().remove("last-event-id");
-                }
-            }
+        // fresh subscription instead of ending. It is set before the credentials are attached, so
+        // a replay after a rejected refreshable credential carries it too, and again on the
+        // prepared request, where a `Last-Event-ID` among the core's option headers would
+        // otherwise have restored a removed one.
+        let last_event_id = self.last_event_id.as_deref().map(|id| {
+            reqwest::header::HeaderValue::from_str(id)
+                .ok()
+                .filter(|_| !id.is_empty())
+        });
+        if let (Some(headers), Some(value)) = (request.headers_mut(), &last_event_id) {
+            set_last_event_id(headers, value.clone());
         }
         let sse = is_sse(self.framing);
         Some(Box::pin(async move {
-            let response = match send_on(backend.as_ref(), request).await {
+            let alternatives: Vec<&[AuthScheme]> = requirements.iter().map(Vec::as_slice).collect();
+            let (request, replay) =
+                match attach_auth_replayable(&core, request, &alternatives).await {
+                    Ok(signed) => signed,
+                    Err(error) => return Reconnected::Failed(error),
+                };
+            let request = match request.build() {
+                Ok(request) => request,
+                Err(error) => return Reconnected::Failed(error),
+            };
+            let mut request = crate::prepare(&core, request, true);
+            request.extensions_mut().extend(extensions);
+            if let Some(value) = last_event_id {
+                set_last_event_id(request.headers_mut(), value);
+            }
+            let response = match crate::execute(&core, request, replay, true).await {
                 Ok(response) => response,
                 Err(error) => return Reconnected::Failed(error),
             };
@@ -505,6 +604,18 @@ impl<T> EventStream<T> {
             }
             Reconnected::Opened(response)
         }))
+    }
+}
+
+/// Send `value` as the reconnect's `Last-Event-ID`, or no such header where it is `None`.
+fn set_last_event_id(headers: &mut HeaderMap, value: Option<reqwest::header::HeaderValue>) {
+    match value {
+        Some(value) => {
+            headers.insert("last-event-id", value);
+        }
+        None => {
+            headers.remove("last-event-id");
+        }
     }
 }
 
@@ -579,6 +690,9 @@ struct FrameBuffer {
     scanned: usize,
     /// SSE only: the fields the lines before `line_start` set.
     event: SseFields,
+    /// SSE only: the latest valid `retry` value read and not yet taken by the stream. Unlike the
+    /// event's other fields it applies on read, not on dispatch, so `clear` keeps it.
+    retry: Option<u64>,
 }
 
 impl FrameBuffer {
@@ -594,7 +708,7 @@ impl FrameBuffer {
         self.bytes.is_empty()
     }
 
-    /// Drop every byte and everything read from them.
+    /// Drop every byte and everything read from them but `retry`, which applied when it was read.
     fn clear(&mut self) {
         self.bytes.clear();
         self.line_start = 0;
@@ -729,7 +843,6 @@ fn frame_item(payload: Vec<u8>) -> FramePoll {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct SseMetadata {
     id: Option<String>,
-    retry: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -761,7 +874,7 @@ fn sse_next(buffer: &mut FrameBuffer, at_eof: bool, output: SseOutput) -> FrameP
                     if line.is_empty() {
                         break Some(next);
                     }
-                    append_sse_field(line, &mut buffer.event);
+                    append_sse_field(line, &mut buffer.event, &mut buffer.retry);
                 }
                 Err(scanned) => {
                     buffer.scanned = scanned;
@@ -783,9 +896,13 @@ fn sse_next(buffer: &mut FrameBuffer, at_eof: bool, output: SseOutput) -> FrameP
                 fields
             }
             // The body ended before the blank line that dispatches the event in progress, so it
-            // is dropped, with the `id` and `retry` it set: "if the file ends in the middle of an
-            // event, before the final empty line, the incomplete event is not dispatched".
+            // is dropped, with the `id` it set: "if the file ends in the middle of an event,
+            // before the final empty line, the incomplete event is not dispatched". A `retry` it
+            // set has already applied, including one on a last line the final CR ends.
             None => {
+                if let Some(line) = buffer.bytes[buffer.line_start..].strip_suffix(b"\r") {
+                    append_sse_field(line, &mut buffer.event, &mut buffer.retry);
+                }
                 buffer.clear();
                 return FramePoll::NeedMore;
             }
@@ -797,7 +914,10 @@ fn sse_next(buffer: &mut FrameBuffer, at_eof: bool, output: SseOutput) -> FrameP
     }
 }
 
-fn append_sse_field(line: &[u8], fields: &mut SseFields) {
+/// Read one SSE field line into the event in progress. A valid `retry` value is also recorded in
+/// `retry`, for the stream to apply at once; one with a non-digit, or too large for a `u64`, is
+/// ignored, leaving any earlier value in place.
+fn append_sse_field(line: &[u8], fields: &mut SseFields, retry: &mut Option<u64>) {
     if line.first() == Some(&b':') {
         return;
     }
@@ -819,9 +939,13 @@ fn append_sse_field(line: &[u8], fields: &mut SseFields) {
         b"event" => fields.event = Some(value.to_vec()),
         b"id" if !value.contains(&0) => fields.id = Some(value.to_vec()),
         b"retry" if !value.is_empty() && value.iter().all(u8::is_ascii_digit) => {
-            fields.retry = std::str::from_utf8(value)
+            if let Some(value) = std::str::from_utf8(value)
                 .ok()
-                .and_then(|value| value.parse().ok());
+                .and_then(|value| value.parse().ok())
+            {
+                fields.retry = Some(value);
+                *retry = Some(value);
+            }
         }
         _ => {}
     }
@@ -833,7 +957,6 @@ fn finish_sse_fields(mut fields: SseFields, output: SseOutput) -> FramePoll {
             .id
             .as_deref()
             .map(|id| String::from_utf8_lossy(id).into_owned()),
-        retry: fields.retry,
     };
     if fields.data.is_empty() {
         return if metadata == SseMetadata::default() {

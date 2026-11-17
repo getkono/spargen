@@ -25,8 +25,8 @@
 // large and is passed by value rather than boxed.
 #![allow(clippy::result_large_err)]
 mod auth;
-// The `contentEncoding: base64` codec needs no dependency beyond `bytes` and `serde`; a generated
-// client embeds this module only when a schema it emits carries that keyword.
+// The `contentEncoding: base64` and `base64url` codecs need no dependency beyond `bytes` and
+// `serde`; a generated client embeds this module only when a schema it emits carries one of them.
 mod base64;
 // The blocking facade owns a current-thread tokio runtime, so it pulls in the optional `tokio`
 // dependency and is compiled only under the `blocking` feature on a non-`wasm32` target, the same
@@ -60,6 +60,9 @@ mod header;
 mod middleware;
 // The tri-state of an optional, nullable member; it needs nothing beyond `serde`.
 mod nullable;
+// The catch-alls of an open string enum and an open discriminated union; they need nothing beyond
+// `serde` and `serde_json`.
+mod open;
 mod paginate;
 mod parameter;
 mod request;
@@ -86,12 +89,14 @@ mod xml;
 
 pub use auth::{
     attach_auth, attach_auth_replayable, replay_rejected, token_provider, AuthError, AuthKind,
-    AuthScheme, Credential, ExposeSecret, RejectionCheck, Replay, SecretString, TokenFuture,
-    TokenProvider, TokenRefresher,
+    AuthScheme, Credential, CredentialKind, ExposeSecret, RejectionCheck, Replay, SchemeCarrier,
+    SecretString, TokenFuture, TokenProvider, TokenRefresher,
 };
-pub use base64::{deserialize_base64, serialize_base64};
+pub use base64::{
+    deserialize_base64, deserialize_base64url, serialize_base64, serialize_base64url,
+};
 #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
-pub use blocking::BlockingRuntime;
+pub use blocking::{BlockingRuntime, NestedRuntime};
 #[cfg(feature = "stream")]
 pub use chunked::read_as_it_arrives;
 pub use client::{ClientConfig, ClientCore, RequestOptions, TransportConfig};
@@ -110,12 +115,15 @@ pub use error::{
 pub use header::{parse_header, require_header, HeaderError, HeaderShape};
 pub use middleware::{Middleware, MiddlewareBackend, Next};
 pub use nullable::Nullable;
+pub use open::{
+    deserialize_open, parse_open, EnumScope, OpenEnum, OpenUnion, UnknownPayload, UnknownValue,
+};
 pub use paginate::{next_link, LinkPaginator};
 pub use parameter::{
-    cookie_pair, encode, serialize_deep_object, serialize_delimited, serialize_form,
-    serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values,
-    serialize_simple, CookieValue, Delimiter, FormMode, FormProperty, FormStyle, ParameterError,
-    PercentEncoding,
+    cookie_pair, encode, holds_non_finite, path_segment, serialize_deep_object,
+    serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix,
+    serialize_multipart_values, serialize_simple, to_json_string, to_json_vec, CookieValue,
+    Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding,
 };
 pub use request::{AsMultipartBody, MultipartBody, MultipartForm, MultipartPart, RequestBuilder};
 pub use response::{stream_success_bytes, ByteStream, ResponseValue};
@@ -124,7 +132,7 @@ pub use retry::{
 };
 #[cfg(feature = "stream")]
 pub use stream::{
-    EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
+    EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, Resend, StreamError,
 };
 pub use transport::{
     try_clone_request, ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend, TotalTimeout,

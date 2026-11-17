@@ -10,7 +10,7 @@
 //! Every diagnostic carries a severity, a stable [`Code`], the [`JsonPointer`] to the offending
 //! construct, a [`Span`] (line and column within the file its [`FileId`] names) when the
 //! construct's location is known, a one-line message, an optional remedy, and the
-//! [`OutcomeClaim`] its message makes. Generation collects all diagnostics into a capped
+//! `OutcomeClaim` its message makes. Generation collects all diagnostics into a capped
 //! [`Diagnostics`] batch rather than stopping at the first error. [`Diagnostic`]'s `Display` is
 //! the one human rendering, which the binary and `Report`'s own `Display` both use.
 
@@ -64,6 +64,11 @@ pub struct Diagnostic {
     /// The message is prose composed at the emission site. This field records the same claim as
     /// data, so it can be checked against the run's `Outcome`, which the emission site does not
     /// know. `Outcome::admits` is that check.
+    ///
+    /// Hidden from the documented API, like `OutcomeClaim` and `Outcome::admits`: public only so
+    /// `spargen/tests/frontend/` and `spargen/tests/corpus_manifest.rs`, outside the crate, can
+    /// read and set it, and outside semver.
+    #[doc(hidden)]
     pub claim: OutcomeClaim,
 }
 
@@ -73,6 +78,11 @@ pub struct Diagnostic {
 /// emitted by `check` and by `generate`. A message can only be true on every run if it claims
 /// nothing more than what its emission site decides, or if it declares the outcome it claims
 /// here. `Outcome::admits` then checks that claim against the run that emitted it (#413).
+///
+/// Hidden from the documented API: it is the internal claim oracle, public only so
+/// `spargen/tests/frontend/` and `spargen/tests/corpus_manifest.rs`, outside the crate, can name
+/// it, and outside semver. Its serialized spelling is the `claim` key of a diagnostic's JSON form.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -227,6 +237,20 @@ impl DiagnosticBuilder {
 #[cfg(test)]
 mod tests {
     use super::{Code, Diagnostic, JsonPointer, OutcomeClaim, Provenance, Severity};
+
+    /// The lookup `spargen explain` uses resolves every code trimmed and in either case, and hands
+    /// back a string naming no code as it was given, untrimmed.
+    #[test]
+    fn the_any_case_lookup_trims_and_folds_case_but_reports_the_input_as_given() {
+        for code in Code::all() {
+            let lower = format!(" {}\t", code.as_str().to_ascii_lowercase());
+            assert_eq!(Code::from_str_any_case(&lower).unwrap(), *code);
+            assert_eq!(Code::from_str_any_case(code.as_str()).unwrap(), *code);
+        }
+        let unknown = Code::from_str_any_case(" e999 ").unwrap_err();
+        assert_eq!(unknown.code(), " e999 ");
+        assert!(Code::from_str_any_case("E0 01").is_err());
+    }
 
     #[test]
     fn an_error_claims_the_rejection_and_a_warning_claims_nothing() {

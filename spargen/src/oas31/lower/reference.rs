@@ -12,7 +12,7 @@ use crate::oas31::{
     ParameterObject, PathItem, RefOr, Reference, RequestBodyObject, Resolver, ResponseObject,
     Schema,
 };
-use crate::source::{is_remote_ref, SpannedValue};
+use crate::source::{is_remote_ref, schema_component_name};
 
 use super::shape::ref_siblings_bear_shape;
 use super::{LowerCtx, MAX_SCHEMA_DEPTH};
@@ -158,7 +158,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         &mut self,
         reference: &crate::oas31::Reference,
         kind: &str,
-        parse: fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
+        parse: crate::oas31::deserialize::ObjectParser<T>,
     ) -> Option<RefOr<T>> {
         let from = self.resolver.written_in(&reference.provenance);
         match self
@@ -364,9 +364,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     let resolved = ctx.resolver.resolve_component(
                         &reference.reference,
                         from,
-                        |value, pointer, diags| {
+                        |value, pointer, dialect, diags| {
                             Some(crate::oas31::deserialize::parse_media_type(
-                                value, pointer, diags,
+                                value, pointer, dialect, diags,
                             ))
                         },
                         ctx.diags,
@@ -429,9 +429,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// first, as lowering reads it; any other target is resolved from the referring file, or from
     /// the root for a remote reference, reporting nothing. `None` where the target cannot be read.
     pub(super) fn ref_target_hop(&self, reference: &str, at: &Provenance) -> Option<RefHop<'_>> {
-        let component = reference
-            .strip_prefix("#/components/schemas/")
-            .and_then(|name| self.document.components.schemas.get(name));
+        let component = schema_component_name(reference)
+            .and_then(|name| self.document.components.schemas.get(&*name));
         let target = match component {
             Some(RefOr::Item(target)) => std::borrow::Cow::Borrowed(target),
             Some(RefOr::Ref(alias)) => {

@@ -50,11 +50,14 @@ pub(super) fn credential_setter_tokens(
         };
         let with = &setter.with;
         let selection = format!(
-            "An operation attaches the first alternative of its `security` whose schemes all have \
-             a credential registered, and fails before anything is sent, as \
-             `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. \
-             It never falls through past the alternative it chose: a credential that fails to \
-             attach fails the call, and `{}` is how a caller reaches a later alternative.",
+            "An operation attaches the first non-empty alternative of its `security` whose \
+             schemes all have a credential registered. Where none has, an empty alternative \
+             (`{{}}`) sends the call anonymously, but only when the operation lists one and no \
+             scheme of its other alternatives has a credential registered; otherwise the call \
+             fails before anything is sent, as `Error::RequestConstruction` with \
+             `RequestError::MissingCredential`. It never falls through past the alternative it \
+             chose: a credential that fails to attach fails the call, and `{}` is how a caller \
+             reaches a later alternative.",
             setter.without.as_str()
         );
         let with_setter = match shape {
@@ -180,10 +183,10 @@ pub(super) fn credential_setter_tokens(
         let without = &setter.without;
         let without_summary = format!(
             "Unregister the credential for the security scheme `{key}`; one never registered is \
-             left as it is. Operations pick the first `security` alternative whose schemes are \
-             all registered and never fall through past it when attaching fails, so this is how \
-             a caller reaches a later alternative: the client this returns no longer selects \
-             one listing `{key}`."
+             left as it is. Operations pick the first non-empty `security` alternative whose \
+             schemes are all registered and never fall through past it when attaching fails, so \
+             this is how a caller reaches a later alternative: the client this returns no longer \
+             selects one listing `{key}`."
         );
         let without_body = match &forward {
             None => quote! { self.core.remove_credential(#key); },
@@ -268,9 +271,10 @@ pub(super) fn with_bound_header_tokens(api: &Api, body: TokenStream) -> Option<T
         /// as written. An operation that requires a bound header fails before anything is sent,
         /// with `RequestError::MissingBoundParameter`, while no value is bound to it; one that
         /// declares it optional leaves it off. A name no operation sends is held and never read.
-        /// Fails with `Error::RequestConstruction`, which does not quote `value`, if `value` is
-        /// not a valid header value: one holding a control character other than a tab, such as
-        /// CR, LF, NUL or DEL.
+        /// Fails with `Error::RequestConstruction`, which does not quote `value`, if `name` is
+        /// not a valid header name (an empty name, or one holding a space, a colon, a control
+        /// character or a byte past ASCII), or if `value` is not a valid header value: one
+        /// holding a control character other than a tab, such as CR, LF, NUL or DEL.
         ///
         #[doc = #headers_doc]
         pub fn with_bound_header(
@@ -660,6 +664,7 @@ fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStre
 
             impl #ident {
                 /// Every server variable at its declared default.
+                #[must_use]
                 pub fn new() -> Self {
                     Self::default()
                 }
@@ -667,6 +672,7 @@ fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStre
                 #(#setters)*
 
                 /// The server URL with every variable substituted.
+                #[must_use]
                 pub fn url(&self) -> String {
                     let mut url = String::new();
                     #(#pieces)*
@@ -683,6 +689,7 @@ fn emit_servers(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStre
             #(#builders)*
 
             /// The first declared server, with every server variable at its declared default.
+            #[must_use]
             pub fn default_url() -> String {
                 #first::new().url()
             }
@@ -1207,5 +1214,106 @@ mod tests {
                  with its documentation"
             );
         }
+    }
+
+    /// Two servers, one described with an enum and a free-form variable, and two operations
+    /// sending the bound `X-Tenant` header, spelled in two letter cases, beside `X-Trace`.
+    const SERVED: &str = r##"openapi: 3.1.0
+info: {title: Served, version: '2', description: The served API.}
+servers:
+  - url: 'https://{region}.example.com/{base}/{tier}'
+    description: The regional server.
+    variables:
+      region: {default: eu, enum: [us, eu], description: The region.}
+      base: {default: v1}
+      tier: {default: a}
+  - url: https://fixed.example.com
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - {name: X-Tenant, in: header, required: true, schema: {type: string}}
+      responses:
+        '204': {description: done}
+  /b:
+    get:
+      operationId: getB
+      parameters:
+        - {name: x-tenant, in: header, schema: {type: string}}
+        - {name: X-Trace, in: header, schema: {type: string}}
+      responses:
+        '204': {description: done}
+"##;
+
+    /// What `SERVED` generates with `X-Tenant` and `X-Trace` bound.
+    fn served() -> String {
+        crate::codegen::test_harness::generated_with(SERVED, |spec| {
+            spec.add_bound_header("X-Tenant")
+                .add_bound_header("X-Trace")
+        })
+    }
+
+    /// Each server is a builder over its variables: an enum variable a typed enum whose
+    /// `#[default]` is the declared default, a free-form one a `String` defaulted by hand, and the
+    /// URL assembled piece by piece, a one-character literal pushed as a `char`. A server with no
+    /// variables derives `Default`, and the first server is the default URL.
+    #[test]
+    fn each_server_is_a_builder_over_its_variables() {
+        crate::codegen::test_harness::assert_contains_all(
+            &served(),
+            &[concat!(
+                r#"pubmodservers{///Permittedvaluesofthe`region`servervariable."#,
+                r#"#[derive(Debug,Clone,Copy,PartialEq,Eq,Default)]pubenumServer0Region{Us,#[default]Eu,}"#,
+                r#"implServer0Region{///ThevaluesubstitutedintotheserverURL.pubfnas_str(self)->&'staticstr"#,
+                r#"{matchself{Self::Us=>"us",Self::Eu=>"eu",}}}"#,
+                r#"///Server`https://{region}.example.com/{base}/{tier}`.///Theregionalserver."#,
+                r#"#[derive(Debug,Clone)]pubstructServer0{region:Server0Region,base:String,tier:String,}"#,
+                r#"implDefaultforServer0{fndefault()->Self{Self{region:<Server0RegionasDefault>::default(),"#,
+                r#"base:"v1".to_owned(),tier:"a".to_owned(),}}}"#,
+                r#"implServer0{///Everyservervariableatitsdeclareddefault.#[must_use]pubfnnew()->Self{Self::default()}"#,
+                r#"///Setthe`region`servervariable.Theregion.#[must_use]pubfnregion(mutself,value:Server0Region)->Self"#,
+                r#"{self.region=value;self}///Setthe`base`servervariable.#[must_use]pubfnbase(mutself,value:implInto<String>)"#,
+                r#"->Self{self.base=value.into();self}"#,
+            )],
+        );
+        crate::codegen::test_harness::assert_contains_all(
+            &served(),
+            &[
+                concat!(
+                    r#"///TheserverURLwitheveryvariablesubstituted.#[must_use]pubfnurl(&self)->String{letmuturl=String::new();"#,
+                    r#"url.push_str("https://");url.push_str(self.region.as_str());url.push_str(".example.com/");"#,
+                    r#"url.push_str(&self.base);url.push('/');url.push_str(&self.tier);url}}"#,
+                    r#"///Server`https://fixed.example.com`.#[derive(Debug,Clone,Default)]pubstructServer1{}"#,
+                ),
+                r#"///Thefirstdeclaredserver,witheveryservervariableatitsdeclareddefault.#[must_use]pubfndefault_url()->String{Server0::new().url()}}"#,
+            ],
+        );
+    }
+
+    /// The `Client` rustdoc names the API, its description, and each server with its description
+    /// where it has one; `with_default_server` builds on the first server; and `with_bound_header`
+    /// names each bound header once, in the spelling the first operation declaring it uses.
+    #[test]
+    fn the_client_documents_its_api_servers_and_bound_headers() {
+        crate::codegen::test_harness::assert_contains_all(
+            &served(),
+            &[
+                concat!(
+                    r#"/**ClientforServedv2.TheservedAPI.Serversdeclaredbythespec:"#,
+                    r#"-`https://{region}.example.com/{base}/{tier}`—Theregionalserver.-`https://fixed.example.com`*/"#,
+                ),
+                concat!(
+                    r#"///Buildaclientonthefirstserverthespecificationdeclares,witheveryserver"#,
+                    r#"///variableatitsdeclareddefault.pubfnwith_default_server()"#,
+                    r#"->Result<Self,support::Error<std::convert::Infallible>,>{Self::new(&servers::default_url())}"#,
+                ),
+                concat!(
+                    r#"//////Theboundheaders:`X-Tenant`,`X-Trace`.pubfnwith_bound_header(mutself,name:&str,"#,
+                    r#"value:implInto<String>,)->Result<Self,support::Error<std::convert::Infallible>>"#,
+                    r#"{self.core.bind_header(name,value)?;Ok(self)}"#,
+                ),
+            ],
+        );
     }
 }

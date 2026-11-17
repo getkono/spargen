@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
-use crate::source::{rewrite_refs_absolute, InputBundle, SpannedValue};
+use crate::source::{rewrite_refs_absolute, schema_component_name, InputBundle, SpannedValue};
 
 use super::{deserialize::parse_schema, Document, Schema};
 
@@ -51,6 +51,46 @@ impl<'doc> Resolver<'doc> {
     /// which files are loaded.
     pub(super) fn root_id(&self) -> crate::diag::FileId {
         self.bundle.root_id()
+    }
+
+    /// The dialect a Schema Object parsed from the node at `pointer` in `file` is read under when
+    /// it declares no `$schema` of its own: the `$schema` of the nearest node enclosing it that
+    /// names a dialect spargen reads, and otherwise the document's `jsonSchemaDialect`.
+    ///
+    /// A reference into a schema (`#/components/schemas/Box/properties/item`) parses its target
+    /// apart from the schema that holds it, so the dialect that schema's `$schema` set, which the
+    /// target inherited where the holder was parsed, is found again here. An enclosing `$schema`
+    /// naming a dialect spargen does not read is `E002` where the holder is parsed, and is passed
+    /// over. The default is that of the file holding the node: the root document's
+    /// `jsonSchemaDialect` in the root document, a referenced file's own where that file is a
+    /// complete OpenAPI document declaring one, and otherwise the OAS dialect, since
+    /// `jsonSchemaDialect` is the default "within this OAS document" alone.
+    pub(super) fn dialect_at(
+        &self,
+        file: crate::diag::FileId,
+        pointer: &crate::diag::JsonPointer,
+    ) -> super::SchemaDialect {
+        let root = self.bundle.value_at(file);
+        let mut enclosing = pointer.parent();
+        while let Some(at) = enclosing {
+            let declared = root
+                .pointer(&at)
+                .and_then(|node| node.get("$schema"))
+                .and_then(SpannedValue::as_str)
+                .and_then(super::deserialize::schema_dialect);
+            if let Some(dialect) = declared {
+                return dialect;
+            }
+            enclosing = at.parent();
+        }
+        if file == self.bundle.root_id() {
+            return self.document.json_schema_dialect;
+        }
+        self.document
+            .referenced_dialects
+            .get(&file)
+            .copied()
+            .unwrap_or(super::SchemaDialect::Oas)
     }
 
     /// The load-order-independent spelling of `file`: empty for the root document; the
@@ -115,9 +155,10 @@ impl<'doc> Resolver<'doc> {
     /// first — and every other reference is the bundle's own answer from the file it is written
     /// in. Reads no schema and emits nothing.
     ///
-    /// The root's answer is the bundle's reading of the fragment from the root, which keeps the
-    /// fragment's characters verbatim: a `~0`/`~1` escape is neither decoded nor re-encoded, so it
-    /// equals the pointer assembled from the stripped name (pinned by this file's tests).
+    /// The root's answer is the bundle's reading of the fragment from the root, its canonical
+    /// pointer: a `~0`/`~1` escape is decoded and re-escaped to the same spelling, so for a key
+    /// structural validation admits it equals the pointer assembled from the stripped name (pinned
+    /// by this file's tests).
     pub(super) fn schema_reference_identity(
         &self,
         reference: &str,
@@ -135,9 +176,8 @@ impl<'doc> Resolver<'doc> {
     /// document declares, which lowering reads as that root component wherever the reference is
     /// written.
     pub(super) fn declares_root_schema(&self, reference: &str) -> bool {
-        reference
-            .strip_prefix("#/components/schemas/")
-            .is_some_and(|name| self.document.components.schemas.contains_key(name))
+        schema_component_name(reference)
+            .is_some_and(|name| self.document.components.schemas.contains_key(&*name))
     }
 
     /// The file a reference or schema at `at` is written in: an unspanned provenance sits in the
@@ -201,8 +241,9 @@ impl<'doc> Resolver<'doc> {
         // types and recursion are shared. Every other JSON Pointer (an alias component, local
         // relative files included) is parsed from its source node with that node's own provenance.
         if from == self.bundle.root_id() {
-            if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                if let Some(super::RefOr::Item(schema)) = self.document.components.schemas.get(name)
+            if let Some(name) = schema_component_name(reference) {
+                if let Some(super::RefOr::Item(schema)) =
+                    self.document.components.schemas.get(&*name)
                 {
                     return Ok(Resolved {
                         schema: Cow::Borrowed(schema),
@@ -227,9 +268,12 @@ impl<'doc> Resolver<'doc> {
         diags: &mut Diagnostics,
     ) -> Option<super::PathItem> {
         match self.component_target(reference, from) {
-            Ok((_, node, pointer)) => {
-                super::deserialize::parse_path_item(&node.clone(), &pointer, diags)
-            }
+            Ok((file, node, pointer)) => super::deserialize::parse_path_item(
+                &node.clone(),
+                &pointer,
+                self.dialect_at(file, &pointer),
+                diags,
+            ),
             Err(miss) => {
                 report_bundle_miss(diags, at, miss, "Path Item `$ref`", reference);
                 None
@@ -249,11 +293,17 @@ impl<'doc> Resolver<'doc> {
         &self,
         reference: &str,
         from: crate::diag::FileId,
-        parse: impl Fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
+        parse: impl Fn(
+            &SpannedValue,
+            &crate::diag::JsonPointer,
+            super::SchemaDialect,
+            &mut Diagnostics,
+        ) -> Option<T>,
         diags: &mut Diagnostics,
     ) -> Result<T, ComponentMiss> {
-        let (_, node, pointer) = self.component_target(reference, from)?;
-        parse(&node.clone(), &pointer, diags).ok_or(ComponentMiss::Unparsable)
+        let (file, node, pointer) = self.component_target(reference, from)?;
+        let dialect = self.dialect_at(file, &pointer);
+        parse(&node.clone(), &pointer, dialect, diags).ok_or(ComponentMiss::Unparsable)
     }
 
     /// [`Self::resolve_component`] for a position whose target may itself be a Reference Object —
@@ -268,11 +318,12 @@ impl<'doc> Resolver<'doc> {
         &self,
         reference: &str,
         from: crate::diag::FileId,
-        parse: fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
+        parse: super::deserialize::ObjectParser<T>,
         diags: &mut Diagnostics,
     ) -> Result<super::RefOr<T>, ComponentMiss> {
-        let (_, node, pointer) = self.component_target(reference, from)?;
-        super::deserialize::parse_ref_or(&node.clone(), &pointer, diags, parse)
+        let (file, node, pointer) = self.component_target(reference, from)?;
+        let dialect = self.dialect_at(file, &pointer);
+        super::deserialize::parse_ref_or(&node.clone(), &pointer, dialect, diags, parse)
             .ok_or(ComponentMiss::Unparsable)
     }
 
@@ -322,7 +373,8 @@ impl<'doc> Resolver<'doc> {
         if let Some(base_url) = self.bundle.remote_origin(file) {
             rewrite_refs_absolute(&mut node, base_url);
         }
-        let Some(schema) = parse_schema(&node, &pointer, diags) else {
+        let dialect = self.dialect_at(file, &pointer);
+        let Some(schema) = parse_schema(&node, &pointer, dialect, diags) else {
             return Err(Aborted);
         };
         Ok(Resolved {
@@ -423,9 +475,11 @@ components:
 
     /// FE-IMPL-005: the two root-component branches lowering spelled — the resolver's answer for
     /// the fragment read from the root, and a pointer assembled from the stripped name — agree for
-    /// every declared key, `~`-escaped spellings included, from the root and from a sub-file. Both
-    /// read the reference's characters verbatim, so a `~0`/`~1` in the reference is neither
-    /// decoded nor re-encoded by either. A name only the sub-file declares is its own.
+    /// every declared key, `~`-escaped spellings included, from the root and from a sub-file. The
+    /// resolver's answer is the canonical pointer, which decodes a `~0`/`~1` and re-escapes it, so
+    /// it equals the stripped name's verbatim spelling. A key no well-formed pointer token spells
+    /// (`a~b`, whose `~` escapes nothing) is no identity: its pointer is malformed, so it names no
+    /// node either. A name only the sub-file declares is its own.
     #[test]
     fn root_component_identity_agrees_with_the_assembled_pointer_for_escaped_names() {
         let (_dir, bundle) = load();
@@ -447,7 +501,12 @@ components:
             .file;
         assert_ne!(lib, root);
         for at in [&document.provenance, &in_lib] {
-            for name in ["Plain", "a~0b", "a~1b", "a~b"] {
+            assert_eq!(
+                resolver
+                    .schema_reference_identity("#/components/schemas/a~b", resolver.written_in(at)),
+                None
+            );
+            for name in ["Plain", "a~0b", "a~1b"] {
                 let reference = format!("#/components/schemas/{name}");
                 let assembled = (
                     root,

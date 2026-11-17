@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|field-requiredness-changed|Pet.id|field now required
+minor|type-added|PetRequired|new public type: the required members of `Pet`
+bump=major

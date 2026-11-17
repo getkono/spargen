@@ -836,6 +836,172 @@ mod tests {
         assert!(!error.contains("ApiErrorBody"), "{error}");
     }
 
+    /// Status codes, headers and bodies the response emitters read through the whole pipeline:
+    /// `getItem` documents a required and an optional, deprecated response header on its `200`,
+    /// and two error bodies of different types, one raw bytes; `getMixed` two success bodies of
+    /// different types, one raw bytes, so its `_stream` twin's enum streams one arm only.
+    const RESPONSES: &str = r##"openapi: 3.1.0
+info: {title: T, version: '1'}
+components:
+  schemas:
+    Item: {type: object, properties: {name: {type: string}}}
+paths:
+  /item:
+    get:
+      operationId: getItem
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Rate: {required: true, schema: {type: integer}}
+            X-Next: {deprecated: true, description: The next page., schema: {type: string}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}
+        '404': {description: missing, content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        '409': {description: conflict, content: {application/octet-stream: {schema: {type: string, format: binary}}}}
+  /mixed:
+    get:
+      operationId: getMixed
+      responses:
+        '200': {description: ok, content: {application/octet-stream: {schema: {type: string, format: binary}}}}
+        '201': {description: created, content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+"##;
+
+    /// A documented status's response headers become a struct beside `Client`: a required header
+    /// as its own type, read by `require_header`, an optional one as an `Option`, read by
+    /// `parse_header`, with its docs and deprecation.
+    #[test]
+    fn documented_response_headers_become_a_struct_read_from_the_header_map() {
+        let generated = crate::codegen::test_harness::generated(RESPONSES);
+        crate::codegen::test_harness::assert_contains_all(
+            &generated,
+            &[concat!(
+                r#"///Documentedresponseheadersfor`getItem``Status200`."#,
+                r#"#[allow(dead_code,deprecated,missing_docs,unreachable_pub,clippy::pedantic,clippy::nursery)]"#,
+                r#"#[derive(Debug,Clone)]pubstructGetItemStatus200Headers"#,
+                r#"{pubx_rate:types::HeaderXRate,///Thenextpage.#[deprecated]pubx_next:Option<types::HeaderXNext>,}"#,
+                r#"#[allow(dead_code,deprecated,missing_docs,unreachable_pub,clippy::pedantic,clippy::nursery)]"#,
+                r#"implGetItemStatus200Headers{"#,
+                r#"///Readthedocumentedheadersoutofarawheadermap.pubfnfrom_headers("#,
+                r#"headers:&reqwest::header::HeaderMap,)->Result<Self,support::HeaderError>{Ok(Self{"#,
+                r#"x_rate:support::require_header(headers,"X-Rate",support::HeaderShape::Scalar,false,)?,"#,
+                r#"x_next:support::parse_header(headers,"X-Next",support::HeaderShape::Scalar,false,)?,})}"#,
+                r#"///Readthedocumentedheadersoutofareturnedresponsevalue.pubfnfrom_response<T>("#,
+                r#"response:&support::ResponseValue<T>,)->Result<Self,support::HeaderError>"#,
+                r#"{Self::from_headers(response.headers())}}"#,
+            )],
+        );
+    }
+
+    /// An error enum whose statuses carry different body types answers `status()` with no body
+    /// accessors, and reads problem details from each body but a raw-bytes one; a success enum
+    /// likewise. The `_stream` twin's enum streams the raw-bytes arm only, keeps the other, and
+    /// answers `status()` with no `into_body()`.
+    #[test]
+    fn enums_of_distinct_bodies_answer_status_and_stream_only_raw_bytes() {
+        let generated = crate::codegen::test_harness::generated(RESPONSES);
+        crate::codegen::test_harness::assert_contains_all(
+            &generated,
+            &[
+                concat!(
+                    r#"implsupport::ApiErrorProblemforGetItemError{fnproblem(&self)->Option<support::ProblemDetails>"#,
+                    r#"{matchself{GetItemError::Status404(body)=>support::ProblemDetails::of(body),"#,
+                    r#"GetItemError::Status409(_)=>None,}}}"#,
+                    r#"#[allow(dead_code,deprecated,missing_docs,unreachable_pub,clippy::pedantic,clippy::nursery)]"#,
+                    r#"implGetItemError{"#,
+                    r#"///TheHTTPstatusthisvaluewasdispatchedon:eachvariantnamesexactlyone."#,
+                    r#"pubfnstatus(&self)->reqwest::StatusCode{matchself{"#,
+                ),
+                concat!(
+                    r#"#[derive(Debug,Clone)]pubenumGetMixedResponse"#,
+                    r#"{Status200(Box<types::ResponseBody8dc94cae>),Status201(Box<types::Item>),}"#,
+                    r#"#[allow(dead_code,deprecated,missing_docs,unreachable_pub,clippy::pedantic,clippy::nursery)]"#,
+                    r#"implGetMixedResponse{"#,
+                    r#"///TheHTTPstatusthisvaluewasdispatchedon:eachvariantnamesexactlyone."#,
+                    r#"pubfnstatus(&self)->reqwest::StatusCode{"#,
+                ),
+                concat!(
+                    r#"#[derive(Debug)]pubenumGetMixedStreamResponse"#,
+                    r#"{Status200(support::ByteStream),Status201(Box<types::Item>),}"#,
+                    r#"#[allow(dead_code,deprecated,missing_docs,unreachable_pub,clippy::pedantic,clippy::nursery)]"#,
+                    r#"implGetMixedStreamResponse{"#,
+                    r#"///TheHTTPstatusthisvaluewasdispatchedon:eachvariantnamesexactlyone."#,
+                    r#"pubfnstatus(&self)->reqwest::StatusCode{matchself{"#,
+                    r#"Self::Status200(_)=>{const{matchreqwest::StatusCode::from_u16(200u16){"#,
+                ),
+            ],
+        );
+        let mixed = crate::codegen::test_harness::between(
+            &generated,
+            "pubenumGetMixedResponse",
+            "pubenumGetMixedStreamResponse",
+        );
+        assert!(!mixed.contains("fnbody("), "{mixed}");
+        let stream = crate::codegen::test_harness::between(
+            &generated,
+            "pubenumGetMixedStreamResponse",
+            "pubstructClient{",
+        );
+        assert!(!stream.contains("fninto_body("), "{stream}");
+    }
+
+    /// The accessors a shared body yields read each variant by its own shape: a boxed payload
+    /// borrowed and moved out of its `Box`, a nullable one through its `Option`, and a bodyless
+    /// status as `None`; the body type is the bare definition even where a variant is boxed.
+    #[test]
+    fn shared_body_accessors_read_each_variant_by_its_shape() {
+        let squash = |text: String| text.split_whitespace().collect::<String>();
+        let boxed = Some(Ty {
+            id: TypeId(0),
+            nullable: false,
+            boxed: true,
+        });
+        let (success, _) = emitted(&[
+            (StatusSpec::Exact(200), boxed),
+            (StatusSpec::Exact(206), body(0, true)),
+            (StatusSpec::Exact(204), None),
+        ]);
+        crate::codegen::test_harness::assert_contains_all(
+            &squash(success),
+            &[
+                "pubenumGetMessageResponse{Status200(Box<types::Message>),Status204,Status206(Option<Box<types::Message>>),}",
+                concat!(
+                    "pubfnbody(&self)->Option<&types::Message>{matchself{",
+                    "Self::Status200(body)=>Some(body.as_ref()),",
+                    "Self::Status204=>None,",
+                    "Self::Status206(body)=>body.as_deref(),}}",
+                ),
+                concat!(
+                    "pubfninto_body(self)->Option<types::Message>{matchself{",
+                    "Self::Status200(body)=>Some(*body),",
+                    "Self::Status204=>None,",
+                    "Self::Status206(body)=>body.map(|body|*body),}}",
+                ),
+            ],
+        );
+    }
+
+    /// A single nullable error body's newtype holds the `Option`, and its `ApiErrorBody::Body` is
+    /// the bare definition, answered through the `Option`.
+    #[test]
+    fn a_nullable_single_error_body_answers_its_bare_definition() {
+        let squash = |text: String| text.split_whitespace().collect::<String>();
+        let nullable = squash(single_error_type(Ty {
+            id: TypeId(0),
+            nullable: true,
+            boxed: false,
+        }));
+        crate::codegen::test_harness::assert_contains_all(
+            &nullable,
+            &[
+                "#[derive(serde::Deserialize)]#[serde(transparent)]pubstructGetMessageError(pubOption<types::Message>);",
+                concat!(
+                    "typeBody=types::Message;fnbody(&self)->Option<&types::Message>{self.0.as_ref()}",
+                    "fninto_body(self)->Option<types::Message>{self.0}",
+                ),
+            ],
+        );
+    }
+
     /// The single-body arm's `boxed: false` normalisation (see its comment on why lowering hands it
     /// an unboxed body) is pinned here directly, so a lowering change that does box a response body
     /// still emits the finite, compiling newtype and its accessor.

@@ -80,21 +80,36 @@ pub enum Carve {
 }
 switch!(Carve, off = Off, on = Auto);
 
-/// How an `enum`/`const` narrowing a plain `string`, `integer` or `boolean` in a response body's
-/// own schema lowers, set with [`Spec::with_open_narrowing`] and read with
-/// [`Spec::open_narrowing`]; the `open_narrowing` key of `spargen.toml`, where `true` is
-/// [`Open`](Self::Open).
+/// How an `enum`/`const` narrowing a plain `integer` or `boolean` in a response body's own schema
+/// lowers, set with [`Spec::with_open_narrowing`] and read with [`Spec::open_narrowing`]; the
+/// `open_narrowing` key of `spargen.toml`, where `true` is [`Open`](Self::Open). A string set is
+/// [`StringEnums`]' to decide.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Narrowing {
     /// A closed set: a value the description does not list is a decode failure.
     #[default]
     Exact,
-    /// An open set: a string enum's one more variant holds any other string, and an integer or
-    /// boolean set's checked newtype decodes any other value of its width.
+    /// An open set: the checked newtype decodes any other value of its width.
     Open,
 }
 switch!(Narrowing, off = Exact, on = Open);
+
+/// Whether a string `enum` takes a value it does not list, set with [`Spec::with_closed_enums`]
+/// and read with [`Spec::closed_enums`]; the `closed_enums` key of `spargen.toml`, where `true` is
+/// [`Closed`](Self::Closed).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StringEnums {
+    /// Every string enum has one more variant, `Unknown(UnknownValue<Self>)`, holding a value it
+    /// does not list.
+    #[default]
+    Open,
+    /// Every string enum lists its values and nothing else, and is `Copy`: a value it does not
+    /// list is a decode failure.
+    Closed,
+}
+switch!(StringEnums, off = Open, on = Closed);
 
 /// Whether a discriminated union takes a tag value it does not list, set with
 /// [`Spec::with_open_unions`] and read with [`Spec::open_unions`]; the `open_unions` key of
@@ -105,7 +120,7 @@ pub enum UnionTags {
     /// An unlisted tag value is a decode failure.
     #[default]
     Closed,
-    /// An unlisted tag value decodes into the union's `Unknown { tag, value }` variant.
+    /// An unlisted tag value decodes into the union's `Unknown(UnknownPayload<Self>)` variant.
     Open,
 }
 switch!(UnionTags, off = Closed, on = Open);
@@ -148,9 +163,14 @@ switch!(TestingModule, off = Omitted, on = Emitted);
 /// Each knob is read by a getter named for it ([`uuid`](Self::uuid),
 /// [`batch_cap`](Self::batch_cap), …) and set by a `with_` setter of the same name
 /// ([`with_uuid`](Self::with_uuid), [`with_batch_cap`](Self::with_batch_cap), …), which replaces
-/// the value; [`omit`](Self::omit), [`omit_rule`](Self::omit_rule),
-/// [`keep_operation`](Self::keep_operation) and [`bind_header`](Self::bind_header) append to a
-/// list instead, which its own getter reads back. Every setter returns the spec by value, which
+/// the value. A list knob is appended to by an `add_` setter instead
+/// ([`add_omit`](Self::add_omit), [`add_omit_rule`](Self::add_omit_rule),
+/// [`add_keep_operation`](Self::add_keep_operation) and
+/// [`add_bound_header`](Self::add_bound_header)), and read back by its own getter
+/// ([`omissions`](Self::omissions), [`bound_headers`](Self::bound_headers)); its `spargen.toml`
+/// key, `generate_api!` argument and CLI flag share that getter's stem (`[[omit]]`, `omit { … }`,
+/// `--omit-*`; `[[keep]]`, `keep { … }`, `--keep-operation`; `bound_headers`,
+/// `bound_header = "…"`, `--bound-header`). Every setter returns the spec by value, which
 /// `#[must_use]` holds a caller to using.
 ///
 /// ```no_run
@@ -171,11 +191,12 @@ pub struct Spec {
     pub(crate) carve: Carve,
     pub(crate) open_narrowing: Narrowing,
     pub(crate) open_unions: UnionTags,
+    pub(crate) closed_enums: StringEnums,
     pub(crate) verbatim_docs: CarriedDocs,
     pub(crate) testing: TestingModule,
-    /// The header names [`Spec::bind_header`] bound, in the order bound, no two equal in any
+    /// The header names [`Spec::add_bound_header`] bound, in the order bound, no two equal in any
     /// letter case.
-    pub(crate) bind_headers: Vec<String>,
+    pub(crate) bound_headers: Vec<String>,
     /// Every config file applied through [`Spec::config_file`] (and so through
     /// [`Spec::discover_config_file`]), in the order applied. Generation reads them, so `build.rs`
     /// names each as a `cargo:rerun-if-changed` path and `generate_api!` tracks each.
@@ -186,7 +207,8 @@ impl Spec {
     /// A spec with defaults: `format: uuid` mapped to `uuid::Uuid` ([`UuidMapping::Uuid`]), dates
     /// mapped through the `time` crate ([`DateTimeBackend::Time`]), a 64 KiB error-body cap, a
     /// 100-diagnostic batch, no omissions, no carving ([`Carve::Off`]), exact narrowing
-    /// ([`Narrowing::Exact`]), closed unions ([`UnionTags::Closed`]), carried docs rewritten for
+    /// ([`Narrowing::Exact`]), closed unions ([`UnionTags::Closed`]), open string enums
+    /// ([`StringEnums::Open`]), carried docs rewritten for
     /// rustdoc ([`CarriedDocs::Rewritten`]), no `testing` module ([`TestingModule::Omitted`]), and
     /// no bound headers.
     pub fn new(path: impl Into<Utf8PathBuf>) -> Self {
@@ -200,9 +222,10 @@ impl Spec {
             carve: Carve::Off,
             open_narrowing: Narrowing::Exact,
             open_unions: UnionTags::Closed,
+            closed_enums: StringEnums::Open,
             verbatim_docs: CarriedDocs::Rewritten,
             testing: TestingModule::Omitted,
-            bind_headers: Vec::new(),
+            bound_headers: Vec::new(),
             config_files: Vec::new(),
         }
     }
@@ -223,9 +246,9 @@ impl Spec {
         self.datetime
     }
 
-    /// The compatibility omissions and keep rules, in chained order: [`omit`](Self::omit),
-    /// [`omit_rule`](Self::omit_rule), [`keep_operation`](Self::keep_operation) and each applied
-    /// config file append to them, and [`clear_omissions`](Self::clear_omissions) empties them.
+    /// The compatibility omissions and keep rules, in chained order:
+    /// [`add_omit`](Self::add_omit), [`add_omit_rule`](Self::add_omit_rule),
+    /// [`add_keep_operation`](Self::add_keep_operation) and each applied config file append to them, and [`clear_omissions`](Self::clear_omissions) empties them.
     pub fn omissions(&self) -> &Omit {
         &self.omit
     }
@@ -259,6 +282,12 @@ impl Spec {
         self.open_unions
     }
 
+    /// Whether a string enum takes a value it does not list, as
+    /// [`with_closed_enums`](Self::with_closed_enums) set it.
+    pub fn closed_enums(&self) -> StringEnums {
+        self.closed_enums
+    }
+
     /// How the spec's prose reaches rustdoc, as [`with_verbatim_docs`](Self::with_verbatim_docs)
     /// set it.
     pub fn verbatim_docs(&self) -> CarriedDocs {
@@ -271,9 +300,9 @@ impl Spec {
         self.testing
     }
 
-    /// The header names [`bind_header`](Self::bind_header) bound, in the order bound.
+    /// The header names [`add_bound_header`](Self::add_bound_header) bound, in the order bound.
     pub fn bound_headers(&self) -> &[String] {
-        &self.bind_headers
+        &self.bound_headers
     }
 
     /// Every config file applied through [`config_file`](Self::config_file) or
@@ -309,16 +338,16 @@ impl Spec {
 
     /// Add every omit and keep rule of `omit` to the compatibility omissions applied before
     /// OpenAPI validation and lowering, after the rules already set, as
-    /// [`omit_rule`](Self::omit_rule), [`keep_operation`](Self::keep_operation) and each applied
-    /// config file add theirs. [`clear_omissions`](Self::clear_omissions) empties the set.
+    /// [`add_omit_rule`](Self::add_omit_rule), [`add_keep_operation`](Self::add_keep_operation)
+    /// and each applied config file add theirs. [`clear_omissions`](Self::clear_omissions) empties the set.
     ///
     /// ```no_run
     /// let spec = spargen::Spec::new("api/openapi.yaml")
     ///     .discover_config_file()?
-    ///     .omit(spargen::omit! { paths { "/internal/**"; } });
+    ///     .add_omit(spargen::omit! { paths { "/internal/**"; } });
     /// # Ok::<(), spargen::ConfigError>(())
     /// ```
-    pub fn omit(mut self, omit: Omit) -> Self {
+    pub fn add_omit(mut self, omit: Omit) -> Self {
         self.omit.rules.extend(omit.rules);
         self.omit.keep.extend(omit.keep);
         self
@@ -331,7 +360,7 @@ impl Spec {
     }
 
     /// Add one omission to the existing set.
-    pub fn omit_rule(mut self, rule: OmitRule) -> Self {
+    pub fn add_omit_rule(mut self, rule: OmitRule) -> Self {
         self.omit.rules.push(rule);
         self
     }
@@ -346,10 +375,10 @@ impl Spec {
     /// use spargen::OmitMethod;
     ///
     /// let spec = spargen::Spec::new("api/openapi.yaml")
-    ///     .keep_operation(OmitMethod::Get, "/v1/sync")
-    ///     .keep_operation(OmitMethod::Get, "/v1/blob/{address}");
+    ///     .add_keep_operation(OmitMethod::Get, "/v1/sync")
+    ///     .add_keep_operation(OmitMethod::Get, "/v1/blob/{address}");
     /// ```
-    pub fn keep_operation(
+    pub fn add_keep_operation(
         mut self,
         method: OmitMethod,
         path: impl Into<Cow<'static, str>>,
@@ -393,17 +422,16 @@ impl Spec {
         self
     }
 
-    /// With [`Narrowing::Open`], lower a string `enum`/`const` that narrows a plain `string` as an
-    /// **open** set (default [`Narrowing::Exact`]), inside a response body's own schema.
+    /// With [`Narrowing::Open`], lower an integer or boolean `enum`/`const` that narrows a plain
+    /// `integer` or `boolean` as an **open** set (default [`Narrowing::Exact`]), inside a response
+    /// body's own schema. A string set is open or closed by [`with_closed_enums`](Self::with_closed_enums)
+    /// alone, wherever it sits.
     ///
     /// The construct is a property that one `allOf` member (or the `$ref` it sits beside) declares
-    /// as a plain `string` and another narrows with `enum`/`const` — the RFC 9457 shape
-    /// `allOf: [$ref: Problem, {properties: {type: {const: …}}}]` that gives each documented error
-    /// status its own problem `type`. By default the narrowing is exact: the field is a closed
-    /// enum, and a value the description does not list is a decode failure (`Error::Decode`).
-    /// With this on, the field is an open enum instead: each listed value is still its own
-    /// variant, and one more variant holds any other string, which is the domain the wider
-    /// declaration admits. A server that adds a problem type then still decodes into `Error::Api`.
+    /// as a plain `integer` or `boolean` and another narrows with `enum`/`const`. By default the
+    /// narrowing is exact: the field's checked newtype refuses a value the description does not
+    /// list, as a decode failure (`Error::Decode`). With this on, the checked newtype decodes any
+    /// value of its width instead, which is the domain the wider declaration admits.
     ///
     /// It applies to the schema written in the response itself, and to what that schema contains
     /// other than a `oneOf`/`anyOf`; a narrowing written inside a `$ref` target stays closed. A
@@ -417,17 +445,18 @@ impl Spec {
     }
 
     /// With [`UnionTags::Open`], give every discriminated union one more variant,
-    /// `Unknown { tag, value }`, holding a payload whose discriminator value the union does not
-    /// list (default [`UnionTags::Closed`]).
+    /// `Unknown(UnknownPayload<Self>)`, holding a payload whose discriminator value the union does
+    /// not list (default [`UnionTags::Closed`]).
     ///
     /// By default a discriminated union is closed: a tag value that selects none of its variants
     /// is a decode failure (`Error::Decode`), the same as a malformed payload. An API that
     /// documents "new kinds may be added; a client ignores kinds it does not know" needs the two
     /// told apart. With this on, a payload whose tag is a string the union lists for no variant,
-    /// and that no untagged variant accepts, decodes as `Unknown`: `tag` is that string and
-    /// `value` the whole payload as it arrived. Serializing `Unknown` writes `value` back, with
-    /// `tag` inserted under the tag property when `value` does not already carry it. A missing or
-    /// non-string tag is still a decode failure.
+    /// and that no untagged variant accepts, decodes as `Unknown`: its `tag()` is that string and
+    /// its `value()` the whole payload as it arrived. Its fields are private, and only decoding or
+    /// `UnknownPayload::from_payload` builds one, which refuses a payload whose tag the union
+    /// lists. Serializing `Unknown` writes `value()` back. A missing or non-string tag is still a
+    /// decode failure.
     ///
     /// It applies to every union with a `discriminator`, in requests and responses alike, except
     /// one with an OpenAPI 3.2 `defaultMapping`, whose fallback variant already takes every tag
@@ -441,6 +470,26 @@ impl Spec {
     /// can fail to decode where it decoded with this option off.
     pub fn with_open_unions(mut self, tags: UnionTags) -> Self {
         self.open_unions = tags;
+        self
+    }
+
+    /// With [`StringEnums::Closed`], generate every string `enum` closed: one unit variant per
+    /// listed value and nothing else (default [`StringEnums::Open`]).
+    ///
+    /// By default a string enum is open: beside one unit variant per listed value it has an
+    /// `Unknown(UnknownValue<Self>)` variant holding any other string, so a server that adds a
+    /// value still decodes. `FromStr` and decoding map a listed value to its own variant and only
+    /// another to `Unknown`, and nothing else builds an `UnknownValue`, so `Unknown` never holds a
+    /// listed value. The enum is `Clone`, `Eq` and `Hash`, has `ALL` (the listed variants),
+    /// `as_str(&self) -> &str`, `Display` and an infallible `FromStr`. An open enum that is a
+    /// variant of a union with no discriminator counts as a match there only for a value it
+    /// lists, as an open union does under [`with_open_unions`](Self::with_open_unions).
+    ///
+    /// With this on, a value the description does not list is a decode failure
+    /// (`Error::Decode`); the enum is `Copy`, `as_str` is a `const fn(self) -> &'static str`, and
+    /// `FromStr` fails with `UnknownVariant`.
+    pub fn with_closed_enums(mut self, enums: StringEnums) -> Self {
+        self.closed_enums = enums;
         self
     }
 
@@ -499,17 +548,17 @@ impl Spec {
     ///
     /// ```no_run
     /// let spec = spargen::Spec::new("api/openapi.yaml")
-    ///     .bind_header("X-Api-Version")
-    ///     .bind_header("X-Tenant");
+    ///     .add_bound_header("X-Api-Version")
+    ///     .add_bound_header("X-Tenant");
     /// ```
-    pub fn bind_header(mut self, name: impl Into<String>) -> Self {
+    pub fn add_bound_header(mut self, name: impl Into<String>) -> Self {
         let name = name.into();
         if !self
-            .bind_headers
+            .bound_headers
             .iter()
             .any(|bound| bound.eq_ignore_ascii_case(&name))
         {
-            self.bind_headers.push(name);
+            self.bound_headers.push(name);
         }
         self
     }
@@ -605,6 +654,15 @@ impl Spec {
                     .to_owned(),
             ));
         }
+        if file.bind_headers.is_some() {
+            // Renamed to match the `bound_headers()` getter; name the new key rather than leave
+            // `deny_unknown_fields`' bare "unknown field".
+            return Err(parse(
+                "the `bind_headers` key was renamed to `bound_headers`; write \
+                 `bound_headers = [...]` with the same list"
+                    .to_owned(),
+            ));
+        }
         if let Some(value) = file.uuid {
             self.uuid = UuidMapping::from_on(value);
         }
@@ -625,6 +683,9 @@ impl Spec {
         }
         if let Some(value) = file.open_unions {
             self.open_unions = UnionTags::from_on(value);
+        }
+        if let Some(value) = file.closed_enums {
+            self.closed_enums = StringEnums::from_on(value);
         }
         if let Some(value) = file.verbatim_docs {
             self.verbatim_docs = CarriedDocs::from_on(value);
@@ -658,8 +719,8 @@ impl Spec {
                     .push(KeepRule::operation(method, entry.path.clone()));
             }
         }
-        for name in file.bind_headers {
-            self = self.bind_header(name);
+        for name in file.bound_headers {
+            self = self.add_bound_header(name);
         }
         Ok(self)
     }
@@ -782,32 +843,16 @@ pub enum ConfigError {
         /// What is wrong with the entry.
         message: String,
     },
-    /// A front end's own flag-syntax error, made with [`flag`](Self::flag).
-    #[non_exhaustive]
-    Flag {
-        /// The message `Display` writes.
-        message: String,
-    },
 }
 
 impl ConfigError {
-    /// A [`Flag`](Self::Flag) error with a caller-supplied message. Public so a front end (the
-    /// CLI, a build script wrapper) can report *its* own flag-syntax errors through the same type
-    /// the library returns, rather than inventing a parallel one.
-    pub fn flag(message: impl Into<String>) -> Self {
-        Self::Flag {
-            message: message.into(),
-        }
-    }
-
-    /// The config file the error is about, or `None` for a [`Flag`](Self::Flag) error.
-    pub fn path(&self) -> Option<&Utf8Path> {
+    /// The config file the error is about, as given.
+    pub fn path(&self) -> &Utf8Path {
         match self {
             Self::Read { path, .. }
             | Self::Parse { path, .. }
             | Self::InvalidOmitRule { path, .. }
-            | Self::InvalidKeepRule { path, .. } => Some(path),
-            Self::Flag { .. } => None,
+            | Self::InvalidKeepRule { path, .. } => path,
         }
     }
 }
@@ -837,7 +882,6 @@ impl std::fmt::Display for ConfigError {
                 "invalid config file `{path}`: keep rule #{}: {message}",
                 index + 1
             ),
-            Self::Flag { message } => formatter.write_str(message),
         }
     }
 }
@@ -865,6 +909,7 @@ struct FileConfig {
     error_body_cap: Option<usize>,
     open_narrowing: Option<bool>,
     open_unions: Option<bool>,
+    closed_enums: Option<bool>,
     verbatim_docs: Option<bool>,
     testing: Option<bool>,
     /// Retained solely to give the removed 0.2 `[features]` table a targeted error.
@@ -874,7 +919,10 @@ struct FileConfig {
     #[serde(default)]
     keep: Vec<KeepToml>,
     #[serde(default)]
-    bind_headers: Vec<String>,
+    bound_headers: Vec<String>,
+    /// Retained solely to give the removed `bind_headers` key a targeted error naming
+    /// `bound_headers`.
+    bind_headers: Option<toml::Value>,
 }
 
 /// A `[[keep]]` entry: one operation, by `method` and `path`, both required.
@@ -992,12 +1040,6 @@ mod tests {
         use std::error::Error as _;
 
         let file = Utf8Path::new("spargen.toml");
-        let flag = ConfigError::flag("bad flag");
-        assert!(matches!(&flag, ConfigError::Flag { message } if message == "bad flag"));
-        assert_eq!(flag.to_string(), "bad flag");
-        assert_eq!(flag.path(), None);
-        assert!(flag.source().is_none());
-
         let missing = Spec::new("openapi.yaml")
             .config_file("/nonexistent/spargen-1328/spargen.toml")
             .unwrap_err();
@@ -1005,6 +1047,7 @@ mod tests {
             panic!("a missing file is a read error: {missing:?}");
         };
         assert_eq!(path, "/nonexistent/spargen-1328/spargen.toml");
+        assert_eq!(missing.path(), "/nonexistent/spargen-1328/spargen.toml");
         assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
         assert_eq!(
             missing.to_string(),
@@ -1031,7 +1074,7 @@ mod tests {
             "{keep:?}"
         );
         for error in [&parse, &omit, &keep] {
-            assert_eq!(error.path(), Some(file));
+            assert_eq!(error.path(), file);
             assert!(error.source().is_none(), "{error:?}");
         }
         assert!(keep.to_string().contains("keep rule #2: "), "{keep}");
@@ -1048,9 +1091,10 @@ mod tests {
         assert_eq!(spec.error_body_cap, 64 * 1024);
         assert_eq!(spec.open_narrowing, Narrowing::Exact);
         assert_eq!(spec.open_unions, UnionTags::Closed);
+        assert_eq!(spec.closed_enums, StringEnums::Open);
         assert_eq!(spec.verbatim_docs, CarriedDocs::Rewritten);
         assert_eq!(spec.testing, TestingModule::Omitted);
-        assert!(spec.bind_headers.is_empty());
+        assert!(spec.bound_headers.is_empty());
         assert!(spec.omit.is_empty());
         assert_eq!(Build::new(spec, "out.rs").cargo, CargoIntegration::Auto);
     }
@@ -1082,23 +1126,23 @@ mod tests {
         assert_eq!(spec.config_files(), [file]);
     }
 
-    /// `bind_headers` in the file is appended to what the spec already binds, in order, and a
+    /// `bound_headers` in the file is appended to what the spec already binds, in order, and a
     /// name already bound in another letter case is not bound twice, from the file or a setter.
     #[test]
     fn config_file_bound_headers_are_appended_and_deduplicated_in_any_case() {
         let spec = Spec::new("openapi.yaml")
-            .bind_header("X-Api-Version")
+            .add_bound_header("X-Api-Version")
             .apply_config(
-                "bind_headers = [\"X-Tenant\", \"x-api-version\"]\n",
+                "bound_headers = [\"X-Tenant\", \"x-api-version\"]\n",
                 Utf8Path::new("spargen.toml"),
                 true,
             )
             .unwrap()
-            .bind_header("X-TENANT");
+            .add_bound_header("X-TENANT");
         assert_eq!(spec.bound_headers(), ["X-Api-Version", "X-Tenant"]);
 
-        let error = apply("bind_headers = \"X-Tenant\"\n").unwrap_err();
-        assert!(error.to_string().contains("bind_headers"), "{error}");
+        let error = apply("bound_headers = \"X-Tenant\"\n").unwrap_err();
+        assert!(error.to_string().contains("bound_headers"), "{error}");
     }
 
     #[test]
@@ -1112,6 +1156,7 @@ mod tests {
             error_body_cap = 11
             open_narrowing = true
             open_unions = true
+            closed_enums = true
             verbatim_docs = true
             testing = true
             "#,
@@ -1124,8 +1169,27 @@ mod tests {
         assert_eq!(spec.error_body_cap, 11);
         assert_eq!(spec.open_narrowing, Narrowing::Open);
         assert_eq!(spec.open_unions, UnionTags::Open);
+        assert_eq!(spec.closed_enums, StringEnums::Closed);
         assert_eq!(spec.verbatim_docs, CarriedDocs::Verbatim);
         assert_eq!(spec.testing, TestingModule::Emitted);
+    }
+
+    /// The removed `bind_headers` key is refused, whatever its value, with an error naming its
+    /// `bound_headers` replacement.
+    #[test]
+    fn the_removed_bind_headers_key_names_its_bound_headers_replacement() {
+        for text in [
+            "bind_headers = [\"X-Tenant\"]\n",
+            "bind_headers = \"X-Tenant\"\n",
+        ] {
+            let error = apply(text).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("the `bind_headers` key was renamed to `bound_headers`"),
+                "{error}"
+            );
+        }
     }
 
     /// The removed `time` switch is refused, whatever its value, with an error naming the
@@ -1199,7 +1263,7 @@ mod tests {
     #[test]
     fn config_file_omits_are_appended_not_replaced() {
         let spec = Spec::new("openapi.yaml")
-            .omit_rule(OmitRule::path("/first"))
+            .add_omit_rule(OmitRule::path("/first"))
             .apply_config(
                 "[[omit]]\npath = \"/second\"\n",
                 Utf8Path::new("c.toml"),
@@ -1217,7 +1281,7 @@ mod tests {
     #[test]
     fn toml_keep_entries_append_kept_operations() {
         let spec = Spec::new("openapi.yaml")
-            .keep_operation(OmitMethod::Get, "/first")
+            .add_keep_operation(OmitMethod::Get, "/first")
             .apply_config(
                 "[[keep]]\nmethod = \"POST\"\npath = \"/second\"\n\n[[keep]]\nmethod = \"get\"\npath = \"/v1/*\"\n",
                 Utf8Path::new("c.toml"),

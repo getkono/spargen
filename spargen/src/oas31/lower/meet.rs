@@ -218,24 +218,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // description forbids. Where `open_narrowing` is out of effect (inside a union, which
             // `intersect_union` reaches with a set the response already opened) the meet is
             // closed: two variants that each held an unlisted value would both match it, and the
-            // trial union would refuse every value. A locked set (one narrowed against a `uuid` or
-            // date string) locks the meet, open side or not, which is again order-independent: the
-            // format's domain holds no unlisted string for the open side to keep. Two integer sets
-            // meet at the narrower of their widths, keeping the shared members it holds.
+            // trial union would refuse every value. Two integer sets meet at the narrower of their
+            // widths, keeping the shared members it holds.
             (TypeKind::Enum(left), TypeKind::Enum(right)) if left.repr == right.repr => {
                 let width = intersect_primitives(left.width, right.width).unwrap_or(left.width);
                 let variants: Vec<ScalarValue> = held_values(&left.variants, width)
                     .into_iter()
                     .filter(|value| right.variants.contains(value))
                     .collect();
-                let openness =
-                    if left.openness == Openness::Locked || right.openness == Openness::Locked {
-                        Openness::Locked
-                    } else if self.narrowing_opens && (left.is_open() || right.is_open()) {
-                        Openness::Open
-                    } else {
-                        Openness::Closed
-                    };
+                let openness = if self.narrowing_opens && (left.is_open() || right.is_open()) {
+                    Openness::Open
+                } else {
+                    Openness::Closed
+                };
                 let keeps = |set: &ScalarEnum| set.variants == variants && set.width == width;
                 if variants.is_empty() {
                     // Both value sets are finite and listed in full, so sharing no value is proof.
@@ -328,12 +323,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the enclosing position's answer holds.
             (TypeKind::Union(union), _) => self.intersect_with_union(a, union, b, hint),
             (_, TypeKind::Union(union)) => self.intersect_with_union(b, union, a, hint),
-            // `contentEncoding: base64` fixes the value's text form, which `format: binary` leaves
-            // open, so the base64 side is the meet, as it is when both sit on one schema.
-            (TypeKind::Bytes(_), TypeKind::Bytes(crate::ir::BytesEncoding::Base64)) => {
-                Ok(non_nullable(b))
-            }
-            (TypeKind::Bytes(_), TypeKind::Bytes(_)) => Ok(non_nullable(a)),
+            // `contentEncoding: base64`/`base64url` fixes the value's text form, which
+            // `format: binary` leaves open, so the encoded side is the meet, as it is when both sit
+            // on one schema. Two encodings of one value in different alphabets share no text but
+            // the empty string, which no single Rust type represents, so that pair has no meet.
+            (TypeKind::Bytes(left), TypeKind::Bytes(right)) => match (left, right) {
+                (left, right) if left == right => Ok(non_nullable(a)),
+                (crate::ir::BytesEncoding::Raw, _) => Ok(non_nullable(b)),
+                (_, crate::ir::BytesEncoding::Raw) => Ok(non_nullable(a)),
+                _ => Err(no_meet(a_kind, b_kind)),
+            },
             // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
             // string conjoined with it is the binary content: `{$ref: Data, format: binary}` over a
             // string `Data` lowers exactly as the inline `{type: string, format: binary}` does. Only
@@ -707,9 +706,9 @@ fn take_declaration(existing: &mut Field, other: &Field) -> bool {
     true
 }
 
-/// Keep a required field consistent with its default: a serde default fires only for an absent
-/// member, so a field that decodes as required drops its applied `default`, which stays documented
-/// in rustdoc. A `required` `readOnly` or `writeOnly` one decodes as optional
+/// Keep a required field consistent with its default: only a member that may be absent gets a
+/// `{field}_or_default` accessor, so a field that decodes as required drops its applied `default`,
+/// which stays documented in rustdoc. A `required` `readOnly` or `writeOnly` one decodes as optional
 /// ([`Field::decodes_optional`]), so it keeps its default as every other optional member does.
 pub(super) fn drop_applied_default_if_required(field: &mut Field) {
     if !field.decodes_optional() {

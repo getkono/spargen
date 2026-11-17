@@ -1,4 +1,4 @@
-//! Header bindings (#1262): a client generated with `Spec::bind_header`, compiled and linted, that
+//! Header bindings (#1262): a client generated with `Spec::add_bound_header`, compiled and linted, that
 //! sends the bound value from every operation declaring the header and refuses a required one
 //! while none is bound.
 
@@ -33,7 +33,7 @@ fn a_bound_header_is_sent_from_the_client_and_required_where_declared() {
     let spec = write_spec(temp.path(), "versioned.yaml", BOUND_HEADERS_SPEC);
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "bound_headers", "2021", |spec| {
-        spec.bind_header("X-Api-Version")
+        spec.add_bound_header("X-Api-Version")
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
@@ -75,7 +75,7 @@ fn every_operation_declaring_the_header_sends_the_bound_value() {
     let client = bound_headers::BlockingClient::new(&base).unwrap();
 
     // Unbound, the required header fails the call before anything is sent...
-    match client.list_items(bound_headers::ListItemsParams::new("t-1")) {
+    match client.list_items(bound_headers::ListItemsParamsRequired { x_trace: "t-1".to_owned() }) {
         Err(bound_headers::Error::RequestConstruction(
             bound_headers::RequestError::MissingBoundParameter { name },
         )) => assert_eq!(name, "X-Api-Version"),
@@ -86,7 +86,7 @@ fn every_operation_declaring_the_header_sends_the_bound_value() {
 
     // A binding in any letter case reaches each operation, in its own spelling of the header.
     let client = client.with_bound_header("x-API-version", "2026-01-01").unwrap();
-    assert_eq!(client.list_items(bound_headers::ListItemsParams::new("t-2")).unwrap().status(), 204);
+    assert_eq!(client.list_items(bound_headers::ListItemsParamsRequired { x_trace: "t-2".to_owned() }).unwrap().status(), 204);
 
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 2);
@@ -104,7 +104,7 @@ fn the_built_request_marks_the_bound_value_sensitive() {
         .unwrap()
         .with_bound_header("X-Api-Version", "TENANTSECRET")
         .unwrap();
-    let mut built = std::pin::pin!(client.list_items_request(bound_headers::ListItemsParams::new("t-1")));
+    let mut built = std::pin::pin!(client.list_items_request(bound_headers::ListItemsParamsRequired { x_trace: "t-1".to_owned() }));
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     let std::task::Poll::Ready(request) = std::future::Future::poll(built.as_mut(), &mut cx) else {
         panic!("a request needing no credential builds on the first poll");
@@ -131,6 +131,19 @@ fn an_invalid_bound_value_is_refused_when_it_is_bound() {
 
     let blocking = bound_headers::BlockingClient::new("http://127.0.0.1:1").unwrap();
     let error = blocking.with_bound_header("X-Api-Version", "nul\0").unwrap_err();
+    assert!(matches!(error, bound_headers::Error::RequestConstruction(_)), "{error:?}");
+}
+
+/// Issue #1433: a name that is not a valid header name is refused when it is bound, on the async
+/// and the blocking client alike, instead of being held under a name no operation reads.
+#[test]
+fn an_invalid_bound_name_is_refused_when_it_is_bound() {
+    let client = bound_headers::Client::new("http://127.0.0.1:1").unwrap();
+    let error = client.with_bound_header("X-Api-Version ", "2").unwrap_err();
+    assert!(matches!(error, bound_headers::Error::RequestConstruction(_)), "{error:?}");
+
+    let blocking = bound_headers::BlockingClient::new("http://127.0.0.1:1").unwrap();
+    let error = blocking.with_bound_header("x:api-version", "2").unwrap_err();
     assert!(matches!(error, bound_headers::Error::RequestConstruction(_)), "{error:?}");
 }
 "##;

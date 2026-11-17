@@ -9,14 +9,15 @@ use crate::source::{SpannedMap, SpannedValue};
 
 use super::super::schema::DiscriminatorTarget;
 use super::super::{
-    is_xml_name, Discriminator, RefOr, Schema, SchemaOr, TypeSet, ValidationKeywords, XmlHints,
+    is_xml_name, Discriminator, RefOr, Schema, SchemaDialect, SchemaOr, TypeSet,
+    ValidationKeywords, XmlHints,
 };
 use super::keywords::{
     oas30_nullable, parse_required, parse_type_set, parse_validation, SUBSCHEMA_KEYWORDS,
 };
 use super::{
-    expect_array, expect_bool, expect_string, is_oas_dialect, object, provenance, reference_object,
-    require_object, required,
+    expect_array, expect_bool, expect_string, object, provenance, reference_object, require_object,
+    required, schema_dialect,
 };
 
 /// Parse a schema position that may be a `$ref` or an inline [`Schema`]. Unlike the generic
@@ -32,17 +33,18 @@ use super::{
 pub(super) fn parse_schema_ref_or(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Option<RefOr<Schema>> {
     let Some(reference) = reference_object(value, pointer) else {
-        return parse_schema(value, pointer, diags).map(RefOr::Item);
+        return parse_schema(value, pointer, dialect, diags).map(RefOr::Item);
     };
     let has_shape_sibling = value.as_object().is_some_and(|map| {
         map.iter()
             .any(|(key, _)| key.name != "$ref" && key.name != "default")
     });
     if has_shape_sibling {
-        return parse_schema(value, pointer, diags).map(RefOr::Item);
+        return parse_schema(value, pointer, dialect, diags).map(RefOr::Item);
     }
     if let Some(default) = value.get("default") {
         warn_ref_default_dropped(provenance(&pointer.push("default"), default), diags);
@@ -62,12 +64,15 @@ pub(in crate::oas31) fn warn_ref_default_dropped(at: Provenance, diags: &mut Dia
         .emit(diags);
 }
 
+/// Parse the Schema Object at `pointer`, read under `dialect` unless it declares a `$schema` of
+/// its own, which then applies to it and to every subschema it holds.
 pub(in crate::oas31) fn parse_schema(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Option<Schema> {
-    match parse_schema_or(value, pointer, diags)? {
+    match parse_schema_or(value, pointer, dialect, diags)? {
         SchemaOr::Schema(schema) => Some(*schema),
         SchemaOr::Bool(boolean) => Some(boolean_schema(boolean, provenance(pointer, value))),
     }
@@ -109,9 +114,41 @@ fn boolean_schema(value: bool, provenance: Provenance) -> Schema {
     }
 }
 
+/// The dialect a Schema Object's own `$schema` names, or `None` where it declares none, or one
+/// spargen does not read, which is `E002` at the `$schema` member.
+fn own_dialect(
+    map: &SpannedMap,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<SchemaDialect> {
+    let dialect_pointer = pointer.push("$schema");
+    let value = map.get("$schema")?;
+    let uri = expect_string(value, &dialect_pointer, diags)?;
+    let dialect = schema_dialect(uri);
+    if dialect.is_none() {
+        Diagnostic::error(
+            Code::UnsupportedDialect,
+            provenance(&dialect_pointer, value),
+        )
+        .message(format!("schema resource uses unsupported dialect `{uri}`"))
+        .emit(diags);
+    }
+    dialect
+}
+
+/// The message for an OAS vocabulary `keyword` met under the plain JSON Schema 2020-12 dialect,
+/// which does not define it, so it is an annotation there and is not applied.
+fn foreign_keyword_message(keyword: &str) -> String {
+    format!(
+        "`{keyword}` is OpenAPI vocabulary, which the plain JSON Schema 2020-12 dialect this \
+         schema is read under does not define, so it is an annotation and is not applied"
+    )
+}
+
 fn parse_schema_or(
     value: &SpannedValue,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Option<SchemaOr> {
     if let Some(value) = value.as_bool() {
@@ -122,6 +159,21 @@ fn parse_schema_or(
     if map.get("$dynamicRef").is_some() || map.get("$dynamicAnchor").is_some() {
         Diagnostic::error(Code::DynamicRefRejected, provenance(pointer, value))
             .message("$dynamicRef and $dynamicAnchor require dynamic schema scope evaluation")
+            .emit(diags);
+    }
+    // Draft 2019-09's spelling of the same mechanism. Read as an unknown keyword, it would leave
+    // the schema untyped, a `serde_json::Value` where its author meant a recursive type.
+    if map.get("$recursiveRef").is_some() || map.get("$recursiveAnchor").is_some() {
+        Diagnostic::error(Code::DynamicRefRejected, provenance(pointer, value))
+            .message(
+                "`$recursiveRef` and `$recursiveAnchor` are JSON Schema 2019-09 keywords, which \
+                 2020-12 replaced with `$dynamicRef`/`$dynamicAnchor`, and require dynamic schema \
+                 scope evaluation",
+            )
+            .remedy(
+                "replace `$recursiveRef` with a JSON Pointer `$ref` to the recursive schema \
+                 (such as `$ref: '#/components/schemas/Node'`), and drop `$recursiveAnchor`",
+            )
             .emit(diags);
     }
     if map.get("$id").is_some() || map.get("$anchor").is_some() {
@@ -137,48 +189,51 @@ fn parse_schema_or(
             )
             .emit(diags);
     }
-    let dialect_pointer = pointer.push("$schema");
-    if let Some((value, dialect)) = map.get("$schema").and_then(|value| {
-        expect_string(value, &dialect_pointer, diags).map(|dialect| (value, dialect))
-    }) {
-        if !is_oas_dialect(dialect) {
-            Diagnostic::error(
-                Code::UnsupportedDialect,
-                provenance(&dialect_pointer, value),
-            )
-            .message(format!(
-                "schema resource uses unsupported dialect `{dialect}`"
-            ))
-            .emit(diags);
-        }
-    }
+    let dialect = own_dialect(map, pointer, diags).unwrap_or(dialect);
 
     let schema = Schema {
         boolean: None,
         types: parse_type_set(map.get("type"), &pointer.push("type"), diags),
         reference: string_keyword(map, "$ref", pointer, diags),
-        properties: parse_schema_map(map, "properties", pointer, diags),
+        properties: parse_schema_map(map, "properties", pointer, dialect, diags),
         required: parse_required(map.get("required"), &pointer.push("required"), diags),
         additional_properties: map.get("additionalProperties").and_then(|value| {
-            parse_schema_or(value, &pointer.push("additionalProperties"), diags).map(Box::new)
+            parse_schema_or(value, &pointer.push("additionalProperties"), dialect, diags)
+                .map(Box::new)
         }),
-        pattern_properties: parse_schema_map(map, "patternProperties", pointer, diags),
-        items: map
-            .get("items")
-            .and_then(|value| parse_schema_or(value, &pointer.push("items"), diags).map(Box::new)),
+        pattern_properties: parse_schema_map(map, "patternProperties", pointer, dialect, diags),
+        items: map.get("items").and_then(|value| {
+            parse_schema_or(value, &pointer.push("items"), dialect, diags).map(Box::new)
+        }),
         prefix_items: parse_schema_array(
             map.get("prefixItems"),
             &pointer.push("prefixItems"),
+            dialect,
             diags,
         ),
-        all_of: parse_schema_array(map.get("allOf"), &pointer.push("allOf"), diags),
-        one_of: parse_schema_array(map.get("oneOf"), &pointer.push("oneOf"), diags),
-        any_of: parse_schema_array(map.get("anyOf"), &pointer.push("anyOf"), diags),
-        discriminator: map
-            .get("discriminator")
-            .and_then(|value| parse_discriminator(value, &pointer.push("discriminator"), diags)),
-        defs: parse_schema_map(map, "$defs", pointer, diags),
-        validation_children: parse_validation_children(map, pointer, diags),
+        all_of: parse_schema_array(map.get("allOf"), &pointer.push("allOf"), dialect, diags),
+        one_of: parse_schema_array(map.get("oneOf"), &pointer.push("oneOf"), dialect, diags),
+        any_of: parse_schema_array(map.get("anyOf"), &pointer.push("anyOf"), dialect, diags),
+        discriminator: map.get("discriminator").and_then(|value| match dialect {
+            SchemaDialect::Oas => parse_discriminator(value, &pointer.push("discriminator"), diags),
+            SchemaDialect::JsonSchema202012 => {
+                // W011 case: foreign-dialect-keyword
+                Diagnostic::warning(
+                    Code::DeclarationHasNoEffect,
+                    provenance(&pointer.push("discriminator"), value),
+                )
+                .message(foreign_keyword_message("discriminator"))
+                .remedy(
+                    "the union is decoded by its members' schemas; to dispatch by tag, \
+                         read the schema under the OAS dialect (drop `$schema`, or set it to \
+                         `https://spec.openapis.org/oas/3.1/dialect/base`)",
+                )
+                .emit(diags);
+                None
+            }
+        }),
+        defs: parse_schema_map(map, "$defs", pointer, dialect, diags),
+        validation_children: parse_validation_children(map, pointer, dialect, diags),
         enum_values: map
             .get("enum")
             .and_then(|value| expect_array(value, &pointer.push("enum"), diags))
@@ -189,11 +244,24 @@ fn parse_schema_or(
         content_encoding: string_keyword(map, "contentEncoding", pointer, diags),
         content_media_type: string_keyword(map, "contentMediaType", pointer, diags),
         content_schema: map.get("contentSchema").and_then(|value| {
-            parse_schema_or(value, &pointer.push("contentSchema"), diags).map(Box::new)
+            parse_schema_or(value, &pointer.push("contentSchema"), dialect, diags).map(Box::new)
         }),
-        xml: map
-            .get("xml")
-            .and_then(|value| parse_xml(value, &pointer.push("xml"), diags)),
+        xml: map.get("xml").and_then(|value| match dialect {
+            SchemaDialect::Oas => parse_xml(value, &pointer.push("xml"), diags),
+            SchemaDialect::JsonSchema202012 => {
+                Diagnostic::warning(
+                    Code::XmlHintIgnored,
+                    provenance(&pointer.push("xml"), value),
+                )
+                .message(foreign_keyword_message("xml"))
+                .remedy(
+                    "to apply the XML hints, read the schema under the OAS dialect (drop \
+                     `$schema`, or set it to `https://spec.openapis.org/oas/3.1/dialect/base`)",
+                )
+                .emit(diags);
+                None
+            }
+        }),
         validation: parse_validation(map, pointer, diags),
         oas30_nullable: oas30_nullable(map),
         deprecated: bool_keyword(map, "deprecated", pointer, diags),
@@ -211,6 +279,7 @@ fn parse_schema_or(
 fn parse_schema_array(
     value: Option<&SpannedValue>,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Vec<SchemaOr> {
     value
@@ -218,7 +287,7 @@ fn parse_schema_array(
         .unwrap_or_default()
         .iter()
         .enumerate()
-        .filter_map(|(index, value)| parse_schema_or(value, &pointer.index(index), diags))
+        .filter_map(|(index, value)| parse_schema_or(value, &pointer.index(index), dialect, diags))
         .collect()
 }
 
@@ -348,6 +417,9 @@ fn parse_xml(
             .get("nodeType")
             .and_then(SpannedValue::as_str)
             .map(str::to_owned),
+        node_type_provenance: value
+            .get("nodeType")
+            .map(|node_type| provenance(&pointer.push("nodeType"), node_type)),
         namespace: value
             .get("namespace")
             .and_then(SpannedValue::as_str)
@@ -366,20 +438,50 @@ fn parse_xml(
 fn parse_validation_children(
     map: &SpannedMap,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> Vec<(String, SchemaOr)> {
     let mut children = Vec::new();
     for keyword in SUBSCHEMA_KEYWORDS {
         if let Some(value) = map.get(keyword) {
-            if let Some(schema) = parse_schema_or(value, &pointer.push(keyword), diags) {
+            if let Some(schema) = parse_schema_or(value, &pointer.push(keyword), dialect, diags) {
                 children.push((keyword.to_owned(), schema));
             }
         }
     }
-    for (name, schema) in parse_schema_map(map, "dependentSchemas", pointer, diags) {
+    for (name, schema) in parse_schema_map(map, "dependentSchemas", pointer, dialect, diags) {
         children.push((format!("dependentSchemas/{name}"), schema));
     }
+    // The pre-2020-12 keywords are unknown here, so a value of an unexpected shape is theirs to
+    // carry rather than `E011`: only a value that is a schema is parsed as one. `dependencies`
+    // maps a property to a schema or, read as `dependentRequired` now is, to a list of names.
+    if let Some(value) = map
+        .get("additionalItems")
+        .filter(|value| is_schema_shaped(value))
+    {
+        if let Some(schema) =
+            parse_schema_or(value, &pointer.push("additionalItems"), dialect, diags)
+        {
+            children.push(("additionalItems".to_owned(), schema));
+        }
+    }
+    if let Some(entries) = map.get("dependencies").and_then(SpannedValue::as_object) {
+        let pointer = pointer.push("dependencies");
+        for (key, value) in entries.iter() {
+            if !is_schema_shaped(value) {
+                continue;
+            }
+            if let Some(schema) = parse_schema_or(value, &pointer.push(&key.name), dialect, diags) {
+                children.push((format!("dependencies/{}", key.name), schema));
+            }
+        }
+    }
     children
+}
+
+/// Whether `value` has a schema's JSON shape: an object or a boolean.
+fn is_schema_shaped(value: &SpannedValue) -> bool {
+    value.as_bool().is_some() || value.as_object().is_some()
 }
 
 /// A keyword whose value maps names to schemas (`properties`, `patternProperties`, `$defs`,
@@ -389,6 +491,7 @@ fn parse_schema_map(
     map: &SpannedMap,
     keyword: &str,
     pointer: &JsonPointer,
+    dialect: SchemaDialect,
     diags: &mut Diagnostics,
 ) -> IndexMap<String, SchemaOr> {
     let Some(value) = map.get(keyword) else {
@@ -401,7 +504,7 @@ fn parse_schema_map(
     entries
         .iter()
         .filter_map(|(key, value)| {
-            parse_schema_or(value, &pointer.push(&key.name), diags)
+            parse_schema_or(value, &pointer.push(&key.name), dialect, diags)
                 .map(|schema| (key.name.clone(), schema))
         })
         .collect()

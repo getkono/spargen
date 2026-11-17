@@ -180,6 +180,7 @@ impl TypeGraph {
             TypeKind::Union(union) => Emission::Union(union),
             TypeKind::Never => Emission::Never,
             TypeKind::Bytes(BytesEncoding::Base64) => Emission::Base64,
+            TypeKind::Bytes(BytesEncoding::Base64Url) => Emission::Base64Url,
             TypeKind::Reserved => unreachable!(
                 "a reservation reached emission; `check_invariants` should have rejected it"
             ),
@@ -351,11 +352,13 @@ impl TypeGraph {
             }
             // Each `Never` is its own empty `pub enum`, but neither decodes a value.
             (TypeKind::Never, TypeKind::Never) => structural,
-            // Each base64 definition is its own newtype, but all decode the same strings. Raw and
-            // base64 bytes differ on the wire, so they never match.
-            (TypeKind::Bytes(BytesEncoding::Base64), TypeKind::Bytes(BytesEncoding::Base64)) => {
-                structural
-            }
+            // Each base64 definition is its own newtype, but all of one alphabet decode the same
+            // strings. Raw, base64 and base64url bytes differ on the wire, so they never match.
+            (TypeKind::Bytes(BytesEncoding::Base64), TypeKind::Bytes(BytesEncoding::Base64))
+            | (
+                TypeKind::Bytes(BytesEncoding::Base64Url),
+                TypeKind::Bytes(BytesEncoding::Base64Url),
+            ) => structural,
             (TypeKind::Bytes(BytesEncoding::Raw), TypeKind::Bytes(BytesEncoding::Raw))
             | (TypeKind::Null, TypeKind::Null)
             | (TypeKind::Any, TypeKind::Any) => true,
@@ -426,6 +429,9 @@ pub(crate) enum Emission<'a> {
     /// `pub struct X(pub bytes::Bytes);` of a `contentEncoding: base64` schema, which serde
     /// writes and reads as a base64 string rather than `bytes::Bytes`' own sequence of numbers.
     Base64,
+    /// The same newtype of a `contentEncoding: base64url` schema, written and read as base64url
+    /// text.
+    Base64Url,
     /// `pub type X = …;` naming the type the definition lowered to.
     Alias,
 }
@@ -490,9 +496,9 @@ mod tests {
 
     /// Two string enums listing one value set decode the same values only when they agree on
     /// openness (#492): an open set also decodes every unlisted string, so it never merges with a
-    /// closed one, while `Locked` is closed and merges with `Closed`. Pinned here rather than in
-    /// `frontend/` because every `oneOf` branch is lowered closed, so no document reaches a
-    /// union with an open and a closed branch.
+    /// closed one. Pinned here rather than in `frontend/` because lowering leaves every string set
+    /// closed until it settles them all at once, so no document reaches a union with an open and a
+    /// closed branch.
     #[test]
     fn string_enums_of_one_value_set_decode_the_same_values_only_at_one_openness() {
         use crate::ir::{Openness, ScalarEnum, ScalarRepr, ScalarValue, Ty, TypeKind};
@@ -516,15 +522,12 @@ mod tests {
         };
         let closed = set(Openness::Closed, ["x", "y"]);
         let reordered = set(Openness::Closed, ["y", "x"]);
-        let locked = set(Openness::Locked, ["x", "y"]);
         let open = set(Openness::Open, ["x", "y"]);
         let open_reordered = set(Openness::Open, ["y", "x"]);
         assert!(graph.same_decoded_values(closed, reordered));
-        assert!(graph.same_decoded_values(closed, locked));
         assert!(graph.same_decoded_values(open, open_reordered));
         assert!(!graph.same_decoded_values(closed, open));
         assert!(!graph.same_decoded_values(open, closed));
-        assert!(!graph.same_decoded_values(locked, open));
         // Two distinct string enums are never one generated type, whatever their values.
         assert!(!graph.same_generated_type(closed, reordered));
     }

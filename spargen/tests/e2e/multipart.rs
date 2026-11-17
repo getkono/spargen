@@ -78,7 +78,7 @@ fn rfc6570_multipart_parts_are_not_percent_encoded() {
         paths: vec!["a/b".into(), "c".into()],
         names: vec!["ada".into(), "grace".into()],
     };
-    client.upload(&body).expect("upload round-trips");
+    client.upload(body).expect("upload round-trips");
 
     let request = server.join().unwrap().text();
 

@@ -3,4 +3,5 @@ source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
 major|file-name-setter-removed|GET /pets|file name setter `photo_file_name` removed
+major|field-type-changed|ListPetsBody.photo|field type `Bytes` -> `String`
 bump=major

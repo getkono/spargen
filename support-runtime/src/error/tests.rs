@@ -2,7 +2,7 @@ use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
 
-use crate::{AuthError, ResponseValue, TransportError};
+use crate::{AuthError, CredentialKind, ResponseValue, SchemeCarrier, TransportError};
 
 use super::{Error, RequestError, TimeoutKind, TransportClass};
 
@@ -114,7 +114,7 @@ fn a_request_cause_forwards_source_to_the_boxed_causes_own_source() {
 
 /// How many variants `RequestError` has. `every_request_variant` returns an array of exactly
 /// this length, so raising it will not compile until a value of the new variant is listed.
-const REQUEST_VARIANTS: usize = 5;
+const REQUEST_VARIANTS: usize = 6;
 
 /// Each variant's position in `every_request_variant`. Indices are dense and unique, which is
 /// what `every_request_variant_lists_each_variant_exactly_once` checks.
@@ -141,6 +141,7 @@ fn request_variant_index(error: &RequestError) -> usize {
         RequestError::Other(_) => 2,
         RequestError::CredentialMismatch { .. } => 3,
         RequestError::MissingBoundParameter { .. } => 4,
+        RequestError::InvalidBasicUsername { .. } => 5,
     }
 }
 
@@ -163,12 +164,13 @@ fn every_request_variant() -> [RequestError; REQUEST_VARIANTS] {
         )))),
         RequestError::CredentialMismatch {
             scheme: "login",
-            required: "http basic",
-            registered: "Provider",
+            required: SchemeCarrier::HttpBasic,
+            registered: CredentialKind::Provider,
         },
         RequestError::MissingBoundParameter {
             name: "X-Api-Version",
         },
+        RequestError::InvalidBasicUsername { scheme: "login" },
     ]
 }
 
@@ -230,12 +232,17 @@ fn every_request_variant_displays_exactly_what_names_its_cause() {
                 "the operation requires header `X-Api-Version`, and the client binds no value to \
                  it"
             }
+            RequestError::InvalidBasicUsername { .. } => {
+                "the `Credential::Basic` registered for security scheme `login` has a username \
+                 holding `:`, which `http basic` cannot carry (RFC 7617 §2)"
+            }
         };
         assert_eq!(rendered, expected, "a variant does not name its cause");
     }
 }
 
-/// `MissingCredential`, `CredentialMismatch` and `MissingBoundParameter` *are* the whole cause,
+/// `MissingCredential`, `CredentialMismatch`, `InvalidBasicUsername` and `MissingBoundParameter`
+/// *are* the whole cause,
 /// so they end the chain; the other two carry a separate cause and must hand it over. A consumer walking the chain
 /// must not find a phantom source, nor lose a real one.
 #[test]
@@ -244,6 +251,7 @@ fn request_source_is_present_exactly_where_the_cause_is_separate() {
         let expected = match &error {
             RequestError::MissingCredential { .. }
             | RequestError::CredentialMismatch { .. }
+            | RequestError::InvalidBasicUsername { .. }
             | RequestError::MissingBoundParameter { .. } => false,
             RequestError::CredentialProvider { .. } | RequestError::Other(_) => true,
         };

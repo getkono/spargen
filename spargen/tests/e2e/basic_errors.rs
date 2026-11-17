@@ -49,11 +49,12 @@ fn every_runtime_type_in_a_signature_is_nameable() {
 fn required_string_params_and_the_params_bundle_accept_conversions() {
     fn call(client: &basic_client::Client) {
         let owned = String::from("k");
-        // A required query string is `ReadFileParams::new`'s argument, widened as a path one is: a
-        // literal, a `&String` and a `String` all work.
-        let _ = client.read_file(basic_client::ReadFileParams::new("k"));
-        let _ = client.read_file(basic_client::ReadFileParams::new(&owned));
-        let _ = client.read_file(basic_client::ReadFileParams::new(owned.clone()));
+        // A required query string is a field of `ReadFileParamsRequired`, which the method takes
+        // straight in, as it takes the bundle itself, or the bundle with an optional one set.
+        let _ = client.read_file(basic_client::ReadFileParamsRequired { path: owned.clone() });
+        let _ = client.read_file(basic_client::ReadFileParams::from(
+            basic_client::ReadFileParamsRequired { path: owned },
+        ));
         // The params bundle takes `None` and `Some(..)` as before, and now the bundle itself.
         let _ = client.get_user("1", None);
         let _ = client.get_user("1", basic_client::GetUserParams::default());

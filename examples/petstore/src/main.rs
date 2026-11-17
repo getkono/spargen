@@ -148,12 +148,15 @@ async fn main() {
         pets[0].name
     );
 
-    // Create with a typed JSON body.
+    // Create with a typed JSON body: built from its required members, named in `NewPetRequired`,
+    // then its optional `tag` set by name. The body is taken as `impl Into<NewPet>`.
     let created = client
-        .create_pet(&types::NewPet {
-            name: "Bella".to_owned(),
-            tag: Some("dog".to_owned()),
-        })
+        .create_pet(
+            types::NewPet::from(types::NewPetRequired {
+                name: "Bella".to_owned(),
+            })
+            .with_tag("dog"),
+        )
         .await
         .expect("create_pet");
     assert_eq!(created.status(), 201);
@@ -176,12 +179,12 @@ async fn main() {
 
     // RFC 9457 problems. The description narrows `createPet`'s `409` problem `type` to
     // `…/name-taken`, and the server answers with `…/name-reserved`, a type it added after the
-    // description was written. `build.rs` turns on `open_narrowing`, so the response is still the
-    // typed `409` body rather than a decode failure, and the unlisted type is kept.
+    // description was written. The problem `type` is an open enum, as every string enum is by
+    // default, so the response is still the typed `409` body rather than a decode failure, and the
+    // unlisted type is kept in its `Unknown` variant.
     let reserved = client
-        .create_pet(&types::NewPet {
+        .create_pet(types::NewPetRequired {
             name: "Taken".to_owned(),
-            tag: None,
         })
         .await;
     match &reserved {
@@ -275,7 +278,7 @@ async fn main() {
     };
     for (pet_id, expected) in [("1", 200), ("2", 204)] {
         let updated = client
-            .update_pet(pet_id, &rename)
+            .update_pet(pet_id, rename.clone())
             .await
             .expect("update_pet");
         assert_eq!(updated.status(), expected);
