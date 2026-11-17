@@ -146,7 +146,7 @@ pub(super) fn emit_union(
                 }
             });
             let unknown_direct_arm = unknown.map(|unknown| {
-                quote! { Self::#unknown { value, .. } => value.serialize(serializer), }
+                quote! { Self::#unknown(payload) => payload.value().serialize(serializer), }
             });
             let wrote_tag_decl = tagged_variant.then(|| {
                 quote! { let wrote_tag = value.get(#tag_field).is_some(); }
