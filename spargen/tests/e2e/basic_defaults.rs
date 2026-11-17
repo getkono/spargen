@@ -57,15 +57,15 @@ fn an_absent_defaulted_member_decodes_as_absent_and_its_accessor_reads_the_defau
 }
 
 #[test]
-fn new_leaves_a_defaulted_member_unset_so_it_is_not_sent() {
-    use basic_client::types::{MergedDefault, Settings};
-    let settings = Settings::new(3);
+fn construction_leaves_a_defaulted_member_unset_so_it_is_not_sent() {
+    use basic_client::types::{MergedDefault, Settings, SettingsRequired};
+    let settings = Settings::from(SettingsRequired { retries: 3 });
     assert_eq!(settings.color, None);
     assert_eq!(settings.enabled, None);
     assert_eq!(serde_json::to_string(&settings).unwrap(), r#"{"retries":3}"#);
     // Setting one member sends that member alone, never the defaults beside it.
     assert_eq!(
-        serde_json::to_string(&Settings::new(3).with_color("blue".to_owned())).unwrap(),
+        serde_json::to_string(&settings.with_color("blue")).unwrap(),
         r#"{"color":"blue","retries":3}"#
     );
     // A struct with no required member derives `Default`, which is `new()`: every member unset.
@@ -711,6 +711,21 @@ fn an_omitted_required_nullable_xml_attribute_decodes_as_none() {
     )
     .unwrap();
     assert_eq!(counted.count, Some(42.0));
+}
+
+#[test]
+fn a_null_required_xml_attribute_is_omitted_and_decodes_back_to_none() {
+    // OAS 3.2 §Handling `null` Values: "For attributes, omit the attribute". An empty `count=""`
+    // is no `null` a reader can recover, and no number at all.
+    let receipt = basic_client::types::XmlReceipt {
+        code: "OK".to_owned(),
+        count: None,
+        note: None,
+    };
+    let xml = quick_xml::se::to_string(&receipt).unwrap();
+    assert_eq!(xml, "<xml-receipt><ReceiptCode>OK</ReceiptCode></xml-receipt>");
+    let decoded: basic_client::types::XmlReceipt = quick_xml::de::from_str(&xml).unwrap();
+    assert_eq!(decoded, receipt);
 }
 
 #[test]

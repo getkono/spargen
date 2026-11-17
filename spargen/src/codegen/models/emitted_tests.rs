@@ -93,13 +93,22 @@ fn types(open: bool, testing: bool) -> String {
     between(&generated, "pubmodtypes{", "pubstructClient{").to_owned()
 }
 
-/// A closed string enum derives serde under each value's rename and lists its values in `ALL`,
-/// `as_str` and `FromStr`; an open one, from a narrowing `open_narrowing` opens, holds any other
-/// string in one more variant, written and read by hand.
+/// The `types` module `MODELS` generates under `closed_enums`, every other switch at its default.
+fn closed_types() -> String {
+    let generated = generated_with(MODELS, |spec| {
+        spec.with_closed_enums(crate::StringEnums::Closed)
+    });
+    between(&generated, "pubmodtypes{", "pubstructClient{").to_owned()
+}
+
+/// A string enum is open by default: one unit variant per listed value and `Unknown` holding an
+/// `UnknownValue` of any other string, which only the runtime's `parse_open` builds, through the
+/// enum's `OpenEnum` impl. Under `closed_enums` it derives serde under each value's rename and is
+/// `Copy`. Either way it lists its values in `ALL`, `as_str` and `FromStr`.
 #[test]
 fn string_enums_list_their_values_closed_or_open() {
     assert_contains_all(
-        &types(false, false),
+        &closed_types(),
         &[concat!(
             r#"#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash,Serialize,Deserialize)]pubenumColor"#,
             r#"{#[serde(rename="red")]Red,#[serde(rename="green")]Green,}implColor{"#,
@@ -113,18 +122,24 @@ fn string_enums_list_their_values_closed_or_open() {
         )],
     );
     assert_contains_all(
-        &types(true, false),
+        &types(false, false),
         &[concat!(
-            r#"pubenumResponseBodyMember1Kind{Rare,"#,
-            r#"///Avaluethedescriptiondoesnotlisthere.Decodingproducesitonlyforastringnoothervariantnames."#,
-            r#"Other(String),}implResponseBodyMember1Kind{///Thewirevalue.pubfnas_str(&self)->&str{matchself{"#,
-            r#"ResponseBodyMember1Kind::Rare=>"rare",ResponseBodyMember1Kind::Other(value)=>value.as_str(),}}}"#,
-            r#"implstd::fmt::DisplayforResponseBodyMember1Kind{fnfmt(&self,f:&mutstd::fmt::Formatter<'_>)->std::fmt::Result{f.write_str(self.as_str())}}"#,
-            r#"implserde::SerializeforResponseBodyMember1Kind{fnserialize<S>(&self,serializer:S)->Result<S::Ok,S::Error>"#,
+            r#"#[derive(Debug,Clone,PartialEq,Eq,Hash)]pubenumColor{Red,Green,"#,
+            r#"///Avaluethedescriptiondoesnotlisthere.Onlydecodingand`FromStr`buildone,andonlyforastringnoothervariantnames."#,
+            r#"Unknown(super::support::UnknownValue<Color>),}implColor{"#,
+            r#"///Everylistedvariant,intheorderthedescriptionlistsitsvalues.pubconstALL:&'static[Self]=&[Color::Red,Color::Green];"#,
+            r#"///Thewirevalue.pubfnas_str(&self)->&str{matchself{Color::Red=>"red",Color::Green=>"green",Color::Unknown(value)=>value.as_str(),}}}"#,
+            r#"implsuper::support::OpenEnumforColor{fnlisted(value:&str)->Option<Self>{matchvalue{"#,
+            r#""red"=>Some(Color::Red),"green"=>Some(Color::Green),_=>None,}}"#,
+            r#"fnunknown(value:super::support::UnknownValue<Self>)->Self{Color::Unknown(value)}}"#,
+            r#"implstd::fmt::DisplayforColor{fnfmt(&self,f:&mutstd::fmt::Formatter<'_>)->std::fmt::Result{f.write_str(self.as_str())}}"#,
+            r#"implstd::str::FromStrforColor{typeErr=std::convert::Infallible;"#,
+            r#"///Parseawirevalue:alistedvalue,matchedbyteforbyte,isitsownvariant,and///anyotherstringis`Unknown`."#,
+            r#"fnfrom_str(value:&str)->Result<Self,std::convert::Infallible>{Ok(super::support::parse_open(value))}}"#,
+            r#"implserde::SerializeforColor{fnserialize<S>(&self,serializer:S)->Result<S::Ok,S::Error>"#,
             r#"whereS:serde::Serializer,{serializer.serialize_str(self.as_str())}}"#,
-            r#"impl<'de>serde::Deserialize<'de>forResponseBodyMember1Kind{fndeserialize<D>(deserializer:D)->Result<Self,D::Error>"#,
-            r#"whereD:serde::Deserializer<'de>,{letvalue=<Stringasserde::Deserialize>::deserialize(deserializer)?;"#,
-            r#"Ok(matchvalue.as_str(){"rare"=>ResponseBodyMember1Kind::Rare,_=>ResponseBodyMember1Kind::Other(value),},)}}"#,
+            r#"impl<'de>serde::Deserialize<'de>forColor{fndeserialize<D>(deserializer:D)->Result<Self,D::Error>"#,
+            r#"whereD:serde::Deserializer<'de>,{super::support::deserialize_open(deserializer)}}"#,
         )],
     );
 }
@@ -258,7 +273,7 @@ fn each_member_takes_its_serde_attribute_and_type() {
                 "{}///Read-only:theserversetsit,soitisneversentinarequest.\
                  ///Write-only:theserveracceptsitinrequestsandomitsitfromresponses,soitdecodesasabsent.{}{}\
                  ///Default:`5`.{}///Default:`green`.{}///Default:`3`.{}///Deprecatedperthespec.{}\
-                 #[serde(flatten)]pubadditional:BTreeMap<String,ThingAdditional>,}}",
+                 #[serde(flatten,serialize_with=\"Thing::serialize_overflow\")]pubadditional:BTreeMap<String,ThingAdditional>,}}",
                 member(
                     "hint",
                     ",default,skip_serializing_if=\"super::support::Nullable::is_absent\",",
@@ -308,12 +323,54 @@ fn each_member_takes_its_serde_attribute_and_type() {
     );
 }
 
-/// `new` takes every constructed member in declaration order (a required `writeOnly` one stored as
-/// present, `null` included) and sets every other member as decoding an absent one does; a
-/// setter follows for each member `new` does not take, a nullable one's beside its `_null`
-/// setter, and for the overflow map, then a `{field}_or_default` accessor per member with an
-/// applied default, returning a `Copy` value as it is and cloning any other. `Default` is derived
-/// where `new` takes nothing, and absent otherwise.
+/// A required nullable XML attribute leaves its `None` off the wire, as OpenAPI writes a `null`
+/// attribute, and decodes an absent one as `None`; a required nullable element keeps its
+/// `missing field` decode and writes its `None`.
+#[test]
+fn a_required_nullable_xml_attribute_skips_its_null() {
+    const XML: &str = r#"openapi: 3.1.0
+info: {title: T, version: '1'}
+paths:
+  /receipt:
+    post:
+      operationId: postReceipt
+      requestBody:
+        required: true
+        content:
+          application/xml:
+            schema:
+              type: object
+              xml: {name: Receipt}
+              required: [count, note]
+              properties:
+                count: {type: [number, 'null'], xml: {attribute: true}}
+                note: {type: [string, 'null']}
+      responses:
+        '204': {description: none}
+"#;
+    for testing in [false, true] {
+        let generated = generated_with(XML, |spec| {
+            spec.with_testing(crate::TestingModule::from_on(testing))
+        });
+        assert_contains_all(
+            between(&generated, "pubmodtypes{", "pubstructClient{"),
+            &[concat!(
+                r#"#[serde(rename="@count",skip_serializing_if="Option::is_none")]"#,
+                r#"pubcount:Option<PostReceiptBodyCount>,"#,
+                r#"#[serde(rename="note",deserialize_with="decode_required")]pubnote:Option<"#,
+            )],
+        );
+    }
+}
+
+/// A struct with a constructed member has a `…Required` struct holding each one in declaration
+/// order, typed as a required field is, and converts from it (a required `writeOnly` one stored as
+/// present, `null` included), setting every other member as decoding an absent one does; it has no
+/// `new` and no `Default`. A setter follows for each member the `…Required` struct does not hold,
+/// taking `impl Into<T>` but where `T` is numeric, a nullable one's beside its `_null` setter, and
+/// for the overflow map, then a `{field}_or_default` accessor per member with an applied default,
+/// returning a `Copy` value as it is and cloning any other. A struct with no constructed member
+/// has `new()` and derives `Default`.
 #[test]
 fn constructors_take_the_constructed_members_and_set_the_rest() {
     let types = types(false, false);
@@ -321,35 +378,46 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
         &types,
         &[
             concat!(
-                r#"implThing{///A`Thing`holdingtherequiredmembersgiven,indeclarationorder,andeveryoptionalmember"#,
-                r#"unset,amemberwithaschema`default`included."#,
-                r#"#[allow(clippy::too_many_arguments)]#[must_use]pubfnnew(label:ThingLabel,maybe:Option<ThingMaybe>,"#,
-                r#"secret:ThingSecret,hint:Option<ThingHint>,)->Self{Self{id:None,label,maybe,secret:Some(secret),"#,
-                r#"hint:matchhint{Some(value)=>super::support::Nullable::Value(value),None=>super::support::Nullable::Null,},"#,
+                r#"///Therequiredmembersof`Thing`,whichconvertsfromthiswitheveryothermemberunset."#,
+                r#"#[derive(Debug,Clone,PartialEq)]pubstructThingRequired{///The`label`member.publabel:ThingLabel,"#,
+                r#"///The`maybe`member.pubmaybe:Option<ThingMaybe>,///The`secret`member."#,
+                r#"///Write-only:theserveracceptsitinrequestsandomitsitfromresponses,soitdecodesasabsent."#,
+                r#"pubsecret:ThingSecret,///The`hint`member."#,
+                r#"///Write-only:theserveracceptsitinrequestsandomitsitfromresponses,soitdecodesasabsent."#,
+                r#"pubhint:Option<ThingHint>,}"#,
+                r#"implstd::convert::From<ThingRequired>forThing{"#,
+                r#"///A`Thing`holdingthemembers`ThingRequired`holds,andeveryoptionalmemberunset,"#,
+                r#"amemberwithaschema`default`included.fnfrom(required:ThingRequired)->Self{Self{id:None,"#,
+                r#"label:required.label,maybe:required.maybe,secret:Some(required.secret),"#,
+                r#"hint:matchrequired.hint{Some(value)=>super::support::Nullable::Value(value),None=>super::support::Nullable::Null,},"#,
                 r#"both:None,note:super::support::Nullable::Absent,count:None,"#,
-                r#"color:None,level:None,old:None,additional:BTreeMap::new(),}}"#,
-                r#"///Setthe`id`member.#[must_use]pubfnwith_id(mutself,value:ThingId)->Self{self.id=Some(value);self}"#,
-                r#"///Setthe`both`member.#[must_use]pubfnwith_both(mutself,value:ThingBoth)->Self{self.both=Some(value);self}"#,
+                r#"color:None,level:None,old:None,additional:BTreeMap::new(),}}}"#,
+                r#"implThing{///Setthe`id`member.#[must_use]pubfnwith_id(mutself,value:ThingId)->Self{self.id=Some(value);self}"#,
+                r#"///Setthe`both`member.#[must_use]pubfnwith_both(mutself,value:implstd::convert::Into<ThingBoth>)->Self"#,
+                r#"{self.both=Some(value.into());self}"#,
                 r#"///Setthe`note`member:avalue,or`Nullable::Null`foranexplicit`null`.#[must_use]pubfnwith_note(mutself,"#,
                 r#"value:implstd::convert::Into<super::support::Nullable<ThingNote>>,)->Self{self.note=value.into();self}"#,
                 r#"///Setthe`note`membertoanexplicit`null`.#[must_use]pubfnwith_note_null(mutself)->Self"#,
                 r#"{self.note=super::support::Nullable::Null;self}"#,
+                r#"///Setthe`count`member.#[must_use]pubfnwith_count(mutself,value:ThingCount)->Self{self.count=Some(value);self}"#,
+                r#"///Setthe`color`member.#[must_use]pubfnwith_color(mutself,value:implstd::convert::Into<Color>)->Self"#,
+                r#"{self.color=Some(value.into());self}"#,
             ),
             concat!(
-                r#"///Setthemembersnopropertydeclares,replacinganysetbefore.#[must_use]pubfnwith_additional(mutself,"#,
+                r#"///Setthemembersnopropertydeclares,replacinganysetbefore.Anentrywhosekeyisadeclaredmember'snameisnotsent."#,
+                r#"#[must_use]pubfnwith_additional(mutself,"#,
                 r#"value:BTreeMap<String,ThingAdditional>,)->Self{self.additional=value;self}"#,
                 r#"///The`count`memberwhereitisset,elseitsschemadefault.//////Default:`5`.#[must_use]"#,
                 r#"pubfncount_or_default(&self)->ThingCount{self.count.unwrap_or(5)}"#,
                 r#"///The`color`memberwhereitisset,elseitsschemadefault.//////Default:`green`.#[must_use]"#,
-                r#"pubfncolor_or_default(&self)->Color{self.color.unwrap_or(Color::Green)}"#,
+                r#"pubfncolor_or_default(&self)->Color{self.color.clone().unwrap_or(Color::Green)}"#,
                 r#"///The`level`memberwhereitisset,elseitsschemadefault.//////Default:`3`.#[must_use]"#,
                 r#"pubfnlevel_or_default(&self)->Level{self.level.unwrap_or(Level(3))}}"#,
             ),
             "#[derive(Debug,Clone,PartialEq,Default,Serialize,Deserialize)]pubstructLoose{",
             concat!(
                 r#"implLoose{///A`Loose`witheveryoptionalmemberunset,amemberwithaschema`default`included."#,
-                r#"`Default`buildsthesamevalue.#[allow(clippy::too_many_arguments)]"#,
-                r#"#[must_use]pubfnnew()->Self{Self{x:None}}"#,
+                r#"`Default`buildsthesamevalue.#[must_use]pubfnnew()->Self{Self{x:None}}"#,
             ),
             "#[derive(Debug,Clone,PartialEq,Default,Serialize,Deserialize)]pubstructDefaulted{",
             "pubfnnew()->Self{Self{n:None,s:None,b:None}}",
@@ -361,8 +429,10 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
             r#"pubfnb_or_default(&self)->DefaultedB{self.b.unwrap_or(true)}"#,
             concat!(
                 r#"#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]pubstructOnly{#[serde(rename="a")]puba:OnlyA,}"#,
-                r#"implOnly{///A`Only`holdingeverymembergiven,indeclarationorder.#[allow(clippy::too_many_arguments)]"#,
-                r#"#[must_use]pubfnnew(a:OnlyA)->Self{Self{a}}}"#,
+                r#"///Therequiredmembersof`Only`,whichconvertsfromthiswitheveryothermemberunset."#,
+                r#"#[derive(Debug,Clone,PartialEq)]pubstructOnlyRequired{///The`a`member.puba:OnlyA,}"#,
+                r#"implstd::convert::From<OnlyRequired>forOnly{///A`Only`holdingthemembers`OnlyRequired`holds."#,
+                r#"fnfrom(required:OnlyRequired)->Self{Self{a:required.a}}}"#,
             ),
         ],
     );
@@ -370,8 +440,11 @@ fn constructors_take_the_constructed_members_and_set_the_rest() {
     for absent in [
         "pubfnwith_label(",
         "pubfnwith_secret(",
+        "pubfnnew(",
         "implstd::default::DefaultforThing",
     ] {
         assert!(!thing.contains(absent), "`{absent}` in {thing}");
     }
+    // Every member of `Only` is required, so it has no inherent method at all.
+    assert!(!types.contains("implOnly{"), "{types}");
 }

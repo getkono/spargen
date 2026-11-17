@@ -11,6 +11,7 @@ use crate::ir::{
 use crate::name::Names;
 
 use super::docs::{doc_tokens, normalize_rustdoc};
+use super::operation::takes_into;
 use super::ty::{prim_tokens, ty_tokens};
 use super::union::emit_union;
 use super::CodegenOptions;
@@ -72,10 +73,11 @@ pub(super) fn emit_models(
     }
 }
 
-/// Emit an open string enum (`open_narrowing`): one unit variant per listed value, as the closed
-/// enum has, plus a variant holding any other string. It cannot derive serde with a catch-all and
-/// stay a plain string on the wire, so `Serialize` writes `as_str()` and `Deserialize` reads a
-/// string and matches it, reaching the catch-all only for a value no unit variant lists.
+/// Emit an open string enum, every string enum unless `closed_enums` is set: one unit variant per
+/// listed value, as the closed enum has, plus `Unknown(UnknownValue<Self>)` holding any other
+/// string. Its `OpenEnum` impl names the listed values, and `FromStr` and `Deserialize` both read
+/// through the runtime's `parse_open`, which asks it first, so `Unknown` never holds a listed value.
+/// `Serialize` writes `as_str()`.
 ///
 /// `listed` are the [`string_variants`] the closed enum declares, and `display_arms` its `Display`
 /// arms, which map each unit variant to its value.
@@ -88,41 +90,72 @@ fn emit_open_string_enum(
     deprecated: Option<TokenStream>,
     display_arms: Vec<TokenStream>,
 ) -> TokenStream {
-    let other = names
+    let unknown = names
         .open_variants
         .get(&id)
         .expect("open variant name allocated");
     let variants = listed
         .iter()
         .map(|(_, variant_ident)| quote! { #variant_ident, });
-    let decode_arms = listed.iter().map(|(value, variant_ident)| {
-        quote! { #value => #ident::#variant_ident, }
+    let listed_arms = listed.iter().map(|(value, variant_ident)| {
+        quote! { #value => Some(#ident::#variant_ident), }
     });
-    let other_doc = "A value the description does not list here. Decoding produces it only for a \
-                     string no other variant names.";
+    let all = listed
+        .iter()
+        .map(|(_, variant_ident)| quote! { #ident::#variant_ident, });
+    // Reserved in the variant scope, so no variant shadows it.
+    let all_const = format_ident!("{}", crate::name::STRING_ENUM_ALL);
+    let unknown_doc = "A value the description does not list here. Only decoding and `FromStr` \
+                       build one, and only for a string no other variant names.";
     quote! {
         #docs
         #deprecated
-        #[derive(Debug, Clone, PartialEq, Eq)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         pub enum #ident {
             #(#variants)*
-            #[doc = #other_doc]
-            #other(String),
+            #[doc = #unknown_doc]
+            #unknown(super::support::UnknownValue<#ident>),
         }
 
         impl #ident {
+            /// Every listed variant, in the order the description lists its values.
+            pub const #all_const: &'static [Self] = &[#(#all)*];
+
             /// The wire value.
             pub fn as_str(&self) -> &str {
                 match self {
                     #(#display_arms)*
-                    #ident::#other(value) => value.as_str(),
+                    #ident::#unknown(value) => value.as_str(),
                 }
+            }
+        }
+
+        impl super::support::OpenEnum for #ident {
+            fn listed(value: &str) -> Option<Self> {
+                match value {
+                    #(#listed_arms)*
+                    _ => None,
+                }
+            }
+
+            fn unknown(value: super::support::UnknownValue<Self>) -> Self {
+                #ident::#unknown(value)
             }
         }
 
         impl std::fmt::Display for #ident {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(self.as_str())
+            }
+        }
+
+        impl std::str::FromStr for #ident {
+            type Err = std::convert::Infallible;
+
+            /// Parse a wire value: a listed value, matched byte for byte, is its own variant, and
+            /// any other string is `Unknown`.
+            fn from_str(value: &str) -> Result<Self, std::convert::Infallible> {
+                Ok(super::support::parse_open(value))
             }
         }
 
@@ -140,11 +173,7 @@ fn emit_open_string_enum(
             where
                 D: serde::Deserializer<'de>,
             {
-                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-                Ok(match value.as_str() {
-                    #(#decode_arms)*
-                    _ => #ident::#other(value),
-                })
+                super::support::deserialize_open(deserializer)
             }
         }
     }
@@ -174,7 +203,7 @@ fn emit_closed_string_enum(
     });
     let type_name = ident.as_str();
     // Reserved in the variant scope, so no variant shadows it.
-    let all_const = format_ident!("{}", crate::name::CLOSED_ENUM_ALL);
+    let all_const = format_ident!("{}", crate::name::STRING_ENUM_ALL);
     quote! {
         #docs
         #deprecated
@@ -269,21 +298,14 @@ fn emit_type_def(
                 .fields
                 .iter()
                 .map(|field| emit_field(id, field, names, options.testing));
-            let additional = match &object.additional {
-                AdditionalProps::Typed(ty) => {
-                    let ty = ty_tokens(**ty, names, false);
-                    let overflow = names
-                        .struct_overflow
-                        .get(&id)
-                        .expect("overflow field name allocated");
-                    quote! { #[serde(flatten)] pub #overflow: BTreeMap<String, #ty>, }
-                }
-                AdditionalProps::Allow | AdditionalProps::Deny => quote! {},
+            let (additional, serialize_overflow) = match &object.additional {
+                AdditionalProps::Typed(ty) => emit_overflow(id, ident, object, **ty, names),
+                AdditionalProps::Allow | AdditionalProps::Deny => (quote! {}, quote! {}),
             };
             let StructConstructors {
                 derive_default,
                 constructors,
-            } = emit_struct_constructors(id, object, types, names);
+            } = emit_struct_constructors(id, object, types, names, deprecated.as_ref());
             quote! {
                 #docs
                 #deprecated
@@ -295,6 +317,7 @@ fn emit_type_def(
                     #additional
                 }
                 #constructors
+                #serialize_overflow
             }
         }
         Emission::StringEnum(enumeration) => {
@@ -582,8 +605,91 @@ fn emit_base64_newtype(
     }
 }
 
-/// One struct field: its rustdoc notes, its serde attribute (wire name, default, and the
-/// present-value decode an optional non-nullable field takes), and its declaration. `testing` is
+/// The name of the private associated function a struct with declared members and a typed
+/// overflow map carries: the overflow's `serialize_with`. The struct's other methods are `new`,
+/// where no member is required, the `with_` setters and the `_or_default` accessors, and this
+/// name is none of them.
+const SERIALIZE_OVERFLOW: &str = "serialize_overflow";
+
+/// A struct's typed `additionalProperties` field, flattened into the struct's object, and the
+/// `impl` block that carries its `serialize_with`, if it has one. An overflow entry whose key is a
+/// declared member's name is not written, whether that member is set or not, so the object never
+/// carries a key twice and the overflow never stands in for a declared member, the rule the form
+/// and multipart encoders follow. A declared name is the one serde writes the member under: the
+/// property's name, or the name an XML hint gives it, as [`emit_field`] renames it. Decoding never
+/// puts a key serde reads as a declared member into the map, so a decoded value writes back what
+/// it read.
+fn emit_overflow(
+    id: crate::ir::TypeId,
+    ident: &crate::name::Ident,
+    object: &crate::ir::Struct,
+    value_ty: Ty,
+    names: &Names,
+) -> (TokenStream, TokenStream) {
+    let ty = ty_tokens(value_ty, names, false);
+    let overflow = names
+        .struct_overflow
+        .get(&id)
+        .expect("overflow field name allocated");
+    let declared = overflow_skipped_keys(object);
+    if declared.is_empty() {
+        return (
+            quote! { #[serde(flatten)] pub #overflow: BTreeMap<String, #ty>, },
+            quote! {},
+        );
+    }
+    let function = format_ident!("{SERIALIZE_OVERFLOW}");
+    let path = format!("{ident}::{SERIALIZE_OVERFLOW}");
+    let field = quote! {
+        #[serde(flatten, serialize_with = #path)]
+        pub #overflow: BTreeMap<String, #ty>,
+    };
+    let serialize = quote! {
+        impl #ident {
+            /// The overflow map's `serialize_with`: every entry but one whose key is a declared
+            /// member's name, which only the member itself is written under.
+            fn #function<S>(overflow: &BTreeMap<String, #ty>, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.collect_map(
+                    overflow
+                        .iter()
+                        .filter(|(key, _)| !matches!(key.as_str(), #(#declared)|*)),
+                )
+            }
+        }
+    };
+    (field, serialize)
+}
+
+/// The overflow keys struct `object`'s serde encoding leaves out: each declared member's serde
+/// name, once, in declaration order. Empty when the struct declares no member.
+fn overflow_skipped_keys(object: &crate::ir::Struct) -> Vec<String> {
+    let mut declared: Vec<String> = Vec::new();
+    for field in &object.fields {
+        let name = serde_wire(field);
+        if !declared.contains(&name) {
+            declared.push(name);
+        }
+    }
+    declared
+}
+
+/// The name serde writes and reads struct field `field` under. An `xml.name`/`xml.attribute` hint
+/// overrides it for XML bodies (an attribute uses quick-xml's `@name` convention); otherwise it is
+/// the plain property wire name. The Rust identifier and the names-table key stay keyed off the
+/// original property name, so only the wire string changes.
+fn serde_wire(field: &Field) -> String {
+    field
+        .xml
+        .wire_override(&field.name.wire)
+        .unwrap_or_else(|| field.name.wire.clone())
+}
+
+/// One struct field: its rustdoc notes, its serde attribute (wire name, default, the skip a
+/// required nullable XML attribute's `null` takes, and the present-value decode an optional
+/// non-nullable field takes), and its declaration. `testing` is
 /// whether the `testing` module is emitted, whose typed replies serialize a `readOnly` or
 /// `writeOnly` member in the response direction.
 fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool) -> TokenStream {
@@ -591,14 +697,7 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
         .fields
         .get(&(id, field.name.wire.clone()))
         .expect("field name allocated");
-    // An `xml.name`/`xml.attribute` hint overrides the serde wire name for XML bodies (an attribute
-    // uses quick-xml's `@name` convention); otherwise the plain property wire name is used. The Rust
-    // identifier and the names-table key stay keyed off the original property name, so only the wire
-    // string changes.
-    let wire = field
-        .xml
-        .wire_override(&field.name.wire)
-        .unwrap_or_else(|| field.name.wire.clone());
+    let wire = serde_wire(field);
     let ty = field_ty_tokens(field, names);
     // An optional field always deserializes an absent value as the type's `Default`: `None` for an
     // `Option`, and `Nullable::Absent` for a nullable member, a schema `default` included, which
@@ -635,8 +734,13 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
         }
         _ => quote! { skip_serializing_if = #skip, },
     };
+    // A required nullable XML attribute writes its `null` by leaving the attribute out (OAS
+    // §Handling `null` Values), never as an empty `name=""` no reader recovers as `null`; decoding
+    // reads that absent attribute back as `None`, below.
     let serde_default = if field.decodes_optional() {
         quote! { default, #skip }
+    } else if field.ty.nullable && field.xml.attribute {
+        quote! { skip_serializing_if = "Option::is_none", }
     } else {
         quote! {}
     };
@@ -661,6 +765,21 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
         _ => None,
     }
     .map(|path| quote! { deserialize_with = #path, });
+    let notes = field_notes(field);
+    let notes = notes
+        .iter()
+        .map(|note| normalize_rustdoc(note))
+        .map(|note| quote! { #[doc = #note] });
+    quote! {
+        #(#notes)*
+        #[serde(rename = #wire, #serde_default #decode_with)]
+        pub #ident: #ty,
+    }
+}
+
+/// The rustdoc notes struct field `field` carries, on the struct and on its `…Required` struct
+/// alike: its deprecation, `readOnly`, `writeOnly` and schema `default`.
+fn field_notes(field: &Field) -> Vec<String> {
     let mut notes: Vec<String> = Vec::new();
     if field.deprecated {
         notes.push("Deprecated per the spec.".to_owned());
@@ -678,14 +797,14 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names, testing: bool
     if let Some(default) = &field.default {
         notes.push(default.doc_note.clone());
     }
-    let notes = notes
-        .iter()
-        .map(|note| normalize_rustdoc(note))
-        .map(|note| quote! { #[doc = #note] });
-    quote! {
-        #(#notes)*
-        #[serde(rename = #wire, #serde_default #decode_with)]
-        pub #ident: #ty,
+    notes
+}
+
+/// `ty` with its nullability dropped.
+fn non_null(ty: Ty) -> Ty {
+    Ty {
+        nullable: false,
+        ..ty
     }
 }
 
@@ -735,26 +854,32 @@ struct StructConstructors {
     constructors: TokenStream,
 }
 
-/// The inherent `impl` of object struct `id`: `new`, taking every [constructed] member by value in
-/// declaration order (every required member but a `readOnly` one; a `writeOnly` one is stored as
-/// `Some` of it) and setting every other member as decoding an absent one does (`None` or
-/// `Nullable::Absent`, a schema `default` included, and the overflow map empty), then one
-/// consuming `with_<field>` setter per member `new` does not take and for the overflow map, in
-/// field order, then one `{field}_or_default` accessor per member with an
-/// [applied default](Field::applied_default) ([`default_accessor`]). A non-nullable member's
-/// setter takes the bare `T` by value, as the `…Params` setters take theirs, and stores `Some` of
-/// it. A nullable member's takes
-/// `impl Into<Nullable<T>>`, so a value or `Nullable::Null` fits, and stores what it converts to;
-/// `Nullable` has no `From<Option<T>>`, so a `None` meaning "unset" never becomes a `null` that
-/// clears the member. Its `with_<field>_null()` setter stores that explicit `null`. The overflow
-/// map's takes the whole map.
+/// How object struct `id` is built, and its inherent `impl`.
 ///
-/// So `new` with the constructed members equals what decoding an object of just those members
-/// yields, and so does serializing it: a member left unset is left off the wire. With no
-/// constructed member, `Default` is derived, and builds what `new()` does. Setter names are
-/// `with_` before the field identifier, or the null setter's stem ([`Names::null_setters`]),
-/// unraw, so they are distinct exactly when those identifiers are, which allocation makes them
-/// within one struct; the accessors are allocated after them ([`Names::default_accessors`]).
+/// With a [constructed] member (every required member but a `readOnly` one), the `{Type}Required`
+/// struct ([`Names::required_structs`]), one `pub` field per constructed member in declaration
+/// order, typed as a required field is (`T`, or `Option<T>` when nullable), and `From` it for the
+/// struct: each constructed member taken from it (a `writeOnly` one stored as `Some` of it), and
+/// every other member set as decoding an absent one does (`None` or `Nullable::Absent`, a schema
+/// `default` included, and the overflow map empty). With none, `new()`, building that value, and
+/// `Default`, derived, which builds the same.
+///
+/// Then one consuming `with_<field>` setter per member the `…Required` struct does not hold and
+/// for the overflow map, in field order, then one `{field}_or_default` accessor per member with an
+/// [applied default](Field::applied_default) ([`default_accessor`]). A non-nullable member's
+/// setter takes `impl Into<T>` ([`takes_into`]), as the `…Params` setters take theirs, and stores
+/// `Some` of it. A nullable member's takes `impl Into<Nullable<T>>`, so a value or
+/// `Nullable::Null` fits, and stores what it converts to; `Nullable` has no `From<Option<T>>`, so
+/// a `None` meaning "unset" never becomes a `null` that clears the member. Its
+/// `with_<field>_null()` setter stores that explicit `null`. The overflow map's takes the whole
+/// map.
+///
+/// So the struct built from its required members equals what decoding an object of just those
+/// members yields, and so does serializing it: a member left unset is left off the wire. Setter
+/// names are `with_` before the field identifier, or the null setter's stem
+/// ([`Names::null_setters`]), unraw, so they are distinct exactly when those identifiers are,
+/// which allocation makes them within one struct; the accessors are allocated after them
+/// ([`Names::default_accessors`]).
 ///
 /// [constructed]: Field::constructed
 fn emit_struct_constructors(
@@ -762,6 +887,7 @@ fn emit_struct_constructors(
     object: &crate::ir::Struct,
     types: &TypeGraph,
     names: &Names,
+    deprecated: Option<&TokenStream>,
 ) -> StructConstructors {
     let ident = names.types.get(&id).expect("type name allocated");
     let field_ident = |field: &Field| {
@@ -770,31 +896,40 @@ fn emit_struct_constructors(
             .get(&(id, field.name.wire.clone()))
             .expect("field name allocated")
     };
-    // A constructed member is taken as the type a required field has (`T`, or `Option<T>` when
+    // A constructed member is held as the type a required field has (`T`, or `Option<T>` when
     // nullable); a `writeOnly` one is stored as its optional member's value.
-    let params = object
+    let required_fields = object
         .fields
         .iter()
         .filter(|field| field.constructed())
         .map(|field| {
             let field_ident = field_ident(field);
             let ty = ty_tokens(field.ty, names, false);
-            quote! { #field_ident: #ty }
+            let doc = format!("The `{}` member.", field.name.wire);
+            let notes = field_notes(field)
+                .into_iter()
+                .map(|note| normalize_rustdoc(&note))
+                .map(|note| quote! { #[doc = #note] });
+            quote! {
+                #[doc = #doc]
+                #(#notes)*
+                pub #field_ident: #ty,
+            }
         });
     let inits = object.fields.iter().map(|field| {
         let field_ident = field_ident(field);
         if field.constructed() && !field.decodes_optional() {
-            quote! { #field_ident, }
+            quote! { #field_ident: required.#field_ident, }
         } else if field.constructed() && field.ty.nullable {
-            // The argument is a required member's `Option<T>`, its `None` the `null` it may be.
+            // The member is a required one's `Option<T>`, its `None` the `null` it may be.
             quote! {
-                #field_ident: match #field_ident {
+                #field_ident: match required.#field_ident {
                     Some(value) => super::support::Nullable::Value(value),
                     None => super::support::Nullable::Null,
                 },
             }
         } else if field.constructed() {
-            quote! { #field_ident: Some(#field_ident), }
+            quote! { #field_ident: Some(required.#field_ident), }
         } else if field.ty.nullable {
             quote! { #field_ident: super::support::Nullable::Absent, }
         } else {
@@ -841,6 +976,16 @@ fn emit_struct_constructors(
                         self
                     }
                 }
+            } else if takes_into(types, non_null(field.ty)) {
+                let doc = format!("Set the `{}` member.", field.name.wire);
+                quote! {
+                    #[doc = #doc]
+                    #[must_use]
+                    pub fn #setter(mut self, value: impl std::convert::Into<#inner>) -> Self {
+                        self.#field_ident = Some(value.into());
+                        self
+                    }
+                }
             } else {
                 let doc = format!("Set the `{}` member.", field.name.wire);
                 quote! {
@@ -862,8 +1007,14 @@ fn emit_struct_constructors(
                 .get(&id)
                 .expect("overflow field name allocated");
             let setter = format_ident!("with_{}", overflow.unraw());
+            let doc = if object.fields.is_empty() {
+                "Set the members no property declares, replacing any set before."
+            } else {
+                "Set the members no property declares, replacing any set before. An entry whose \
+                 key is a declared member's name is not sent."
+            };
             setters.push(quote! {
-                /// Set the members no property declares, replacing any set before.
+                #[doc = #doc]
                 #[must_use]
                 pub fn #setter(mut self, value: BTreeMap<String, #ty>) -> Self {
                     self.#overflow = value;
@@ -880,43 +1031,79 @@ fn emit_struct_constructors(
         .filter(|field| field.constructed())
         .count();
     let optional_doc = "every optional member unset, a member with a schema `default` included.";
-    let new_doc = if required == 0 {
-        format!("A `{ident}` with {optional_doc} `Default` builds the same value.")
-    } else if setters.is_empty() {
-        format!("A `{ident}` holding every member given, in declaration order.")
-    } else {
-        format!(
-            "A `{ident}` holding the required members given, in declaration order, and \
-             {optional_doc}"
-        )
-    };
-    // With no constructed member, `new` sets every member to its type's `Default`.
-    let derive_default = (required == 0).then(|| quote! { Default, });
-    let accessors = object
+    let accessors: Vec<TokenStream> = object
         .fields
         .iter()
-        .filter_map(|field| default_accessor(id, field, types, names));
-    // A description decides how many members are required, and a consumer's `clippy.toml` where
-    // `too_many_arguments` fires, so `new` allows it whatever its arity.
+        .filter_map(|field| default_accessor(id, field, types, names))
+        .collect();
+    let has_methods = !setters.is_empty() || !accessors.is_empty();
+    let methods = quote! {
+        #(#setters)*
+
+        #(#accessors)*
+    };
+    if required == 0 {
+        // With no constructed member, `new` sets every member to its type's `Default`, so the
+        // derive builds what `new` does.
+        let new_doc = format!("A `{ident}` with {optional_doc} `Default` builds the same value.");
+        return StructConstructors {
+            derive_default: Some(quote! { Default, }),
+            constructors: quote! {
+                impl #ident {
+                    #[doc = #new_doc]
+                    #[must_use]
+                    pub fn new() -> Self {
+                        Self {
+                            #(#inits)*
+                            #overflow_init
+                        }
+                    }
+
+                    #methods
+                }
+            },
+        };
+    }
+    let required_ident = names
+        .required_structs
+        .get(&id)
+        .expect("`…Required` struct name allocated");
+    let required_doc = format!(
+        "The required members of `{ident}`, which converts from this with every other member \
+         unset."
+    );
+    let from_doc = if setters.is_empty() {
+        format!("A `{ident}` holding the members `{required_ident}` holds.")
+    } else {
+        format!("A `{ident}` holding the members `{required_ident}` holds, and {optional_doc}")
+    };
+    // A struct whose every member is required has no setter and, with no optional member, no
+    // `_or_default` accessor, so no inherent method at all.
+    let methods = has_methods.then(|| quote! { impl #ident { #methods } });
+    // Spelled by path: `name::TYPES_MODULE_NAMES` does not reserve `From`, so a schema may take
+    // that name in this module.
     let constructors = quote! {
-        impl #ident {
-            #[doc = #new_doc]
-            #[allow(clippy::too_many_arguments)]
-            #[must_use]
-            pub fn new(#(#params),*) -> Self {
+        #[doc = #required_doc]
+        #deprecated
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct #required_ident {
+            #(#required_fields)*
+        }
+
+        impl std::convert::From<#required_ident> for #ident {
+            #[doc = #from_doc]
+            fn from(required: #required_ident) -> Self {
                 Self {
                     #(#inits)*
                     #overflow_init
                 }
             }
-
-            #(#setters)*
-
-            #(#accessors)*
         }
+
+        #methods
     };
     StructConstructors {
-        derive_default,
+        derive_default: None,
         constructors,
     }
 }

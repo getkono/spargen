@@ -49,7 +49,8 @@ Options:
 
 `check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, the switch pairs
 `--carve`/`--no-carve`, `--uuid`/`--no-uuid`, `--open-narrowing`/`--no-open-narrowing`,
-`--open-unions`/`--no-open-unions`, `--verbatim-docs`/`--no-verbatim-docs` and
+`--open-unions`/`--no-open-unions`, `--closed-enums`/`--no-closed-enums`,
+`--verbatim-docs`/`--no-verbatim-docs` and
 `--testing`/`--no-testing`, `--datetime`,
 `--error-body-cap`, `--batch-cap`, and the repeatable
 `--omit-path`, `--omit-operation`, `--omit-component`, `--omit-pointer`, `--keep-operation` and
@@ -87,8 +88,9 @@ datetime = "time"       # default "time"; the crate `format: date-time`/`date` m
 carve = false           # default false; auto-carve unsupported constructs
 batch_cap = 100         # default 100; diagnostics collected before the report is truncated
 error_body_cap = 65536  # default 64 KiB
-open_narrowing = false  # default false; open a response body's `enum`/`const` narrowings
-open_unions = false     # default false; give a discriminated union an `Unknown { tag, value }` variant
+open_narrowing = false  # default false; open a response body's integer/boolean narrowings
+open_unions = false     # default false; give a discriminated union an `Unknown(UnknownPayload<Self>)` variant
+closed_enums = false    # default false; generate string enums without their `Unknown` variant
 verbatim_docs = false   # default false; carry the spec's prose into rustdoc as written
 testing = false         # default false; emit the `testing` module and its typed `MockBackend`
 bound_headers = []      # default none; header parameters bound once on the client
@@ -100,7 +102,10 @@ one statement of what it bounds on each target and which paths it does not cap. 
 described under [auto-carve](./compatibility.md#auto-carve), `open_narrowing` under
 [problem details](./runtime.md#problem-details), `open_unions` on `Spec::with_open_unions` (a
 discriminator value no variant lists decodes into the `Unknown` variant instead of failing; a
-union with a 3.2 `defaultMapping` keeps its fallback), `verbatim_docs` on `Spec::with_verbatim_docs`
+union with a 3.2 `defaultMapping` keeps its fallback), `closed_enums` on `Spec::with_closed_enums`
+(every string enum lists its values and nothing else, and is `Copy`; by default each has an
+`Unknown` variant holding a value it does not list; see
+[the generated surface](./generated-api.md#generated-surface)), `verbatim_docs` on `Spec::with_verbatim_docs`
 (by default the spec's `summary`, `description` and `title` text is rewritten so rustdoc has
 nothing to report at the `include!` site: an intra-doc link such as ``[`crate::serve`]`` becomes
 its text, a bare URL is wrapped in `<…>`, and an HTML tag nothing closes has its `<` escaped),
@@ -245,8 +250,8 @@ spec lowers with warnings, the comparison is printed on stdout as usual and thos
 stderr in the same format: each warning side's report under an `old spec:` / `new spec:` heading,
 or, under `--format json`, one object keyed `old` and `new`.
 
-Each side is compared as generated under its own settings, so a `uuid`, `datetime` or `testing`
-setting that only one side's config file changes is classified like a spec change: every member it
+Each side is compared as generated under its own settings, so a `uuid`, `datetime`, `testing` or
+`closed_enums` setting that only one side's config file changes is classified like a spec change: every member it
 retypes is a type change (`major`), and the `testing` module appearing is `minor`, disappearing
 `major`.
 

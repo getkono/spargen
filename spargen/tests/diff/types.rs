@@ -178,9 +178,10 @@ fn flipping_a_field_between_required_and_optional_is_major_both_ways() {
 }
 
 #[test]
-fn a_required_field_gaining_read_only_leaves_new_and_is_major() {
-    // A `required` `readOnly` member is an `Option<T>` `new` no longer takes (#1326), so gaining
-    // the keyword is the requiredness flip a consumer's constructor call sees.
+fn a_required_field_gaining_read_only_leaves_the_required_struct_and_is_major() {
+    // A `required` `readOnly` member is an `Option<T>` the `…Required` struct does not hold
+    // (#1326), so gaining the keyword is the requiredness flip a consumer's constructor call sees.
+    // `id` is `Pet`'s one required member, so `PetRequired` goes with it, and comes back with it.
     let plain = base();
     let read_only = spec(
         "",
@@ -189,11 +190,14 @@ fn a_required_field_gaining_read_only_leaves_new_and_is_major() {
         "",
     );
 
-    for (old, new) in [(&plain, &read_only), (&read_only, &plain)] {
+    for (old, new, companion) in [
+        (&plain, &read_only, ChangeKind::TypeRemoved),
+        (&read_only, &plain, ChangeKind::TypeAdded),
+    ] {
         let report = diff(old, new);
         assert_eq!(
             kinds(&report),
-            vec![ChangeKind::FieldRequirednessChanged],
+            vec![ChangeKind::FieldRequirednessChanged, companion],
             "{:?}",
             report.changes
         );

@@ -153,7 +153,7 @@ fn a_json_querystring_parameter_is_one_encoded_query() {
     let query = |term: &str| oas32_client::types::Query { term: Some(term.to_owned()) };
     let client = oas32_client::BlockingClient::new(&base).unwrap();
     client
-        .lookup_records(oas32_client::LookupRecordsParams::new(query("a&b=c#d")))
+        .lookup_records(oas32_client::LookupRecordsParamsRequired { filter: query("a&b=c#d") })
         .unwrap();
     client
         .lookup_records_maybe(Some(
@@ -183,18 +183,18 @@ fn a_form_querystring_parameter_follows_its_encoding_objects() {
 
     let client = oas32_client::BlockingClient::new(&base).unwrap();
     client
-        .filter_records(oas32_client::FilterRecordsParams::new(
-            oas32_client::types::RecordFilter {
+        .filter_records(oas32_client::FilterRecordsParamsRequired {
+            filter: oas32_client::types::RecordFilter {
                 tags: Some(vec!["a".to_owned(), "b c".to_owned()]),
                 at: Some(oas32_client::types::RecordFilterAt { x: Some("y".to_owned()) }),
                 term: Some("t".to_owned()),
             },
-        ))
+        })
         .unwrap();
     client
-        .filter_records(oas32_client::FilterRecordsParams::new(
-            oas32_client::types::RecordFilter::default(),
-        ))
+        .filter_records(oas32_client::FilterRecordsParamsRequired {
+            filter: oas32_client::types::RecordFilter::default(),
+        })
         .unwrap();
 
     let requests = server.join().unwrap();
@@ -219,7 +219,7 @@ fn a_query_operation_sends_its_method_and_body() {
 
     let client = oas32_client::BlockingClient::new(&base).unwrap();
     let records: Vec<oas32_client::types::Record> = client
-        .search_records(&oas32_client::types::Query { term: Some("find me".to_owned()) })
+        .search_records(oas32_client::types::Query { term: Some("find me".to_owned()) })
         .unwrap()
         .into_inner();
 
@@ -252,7 +252,7 @@ fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
 
         let client = oas32_client::BlockingClient::new(&base).unwrap();
         let outcome = client
-            .purge_cache(&oas32_client::types::Query { term: Some("drop".to_owned()) })
+            .purge_cache(oas32_client::types::Query { term: Some("drop".to_owned()) })
             .unwrap()
             .into_inner();
 

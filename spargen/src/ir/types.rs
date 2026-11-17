@@ -110,8 +110,8 @@ pub(crate) enum BytesEncoding {
 /// A `oneOf`/`anyOf` union lowered to a Rust enum. Never `serde(untagged)` and never degraded to
 /// `serde_json::Value`: it is emitted with content-inspecting custom `Deserialize`/`Serialize`.
 /// The one opt-in exception is an open union ([`UnionStrategy::Discriminated`]'s `open`), whose
-/// extra explicit `Unknown { tag, value }` variant holds a payload no listed variant claims as a
-/// `serde_json::Value`; every listed variant stays typed.
+/// extra explicit `Unknown(UnknownPayload<Self>)` variant holds a payload no listed variant
+/// claims as a `serde_json::Value`; every listed variant stays typed.
 /// Dispatch uses discriminator tags / unique JSON categories, statically disjoint features, or
 /// typed trial matching with the source applicator's exact semantics.
 #[derive(Debug, Clone)]
@@ -499,7 +499,8 @@ pub(crate) struct Field {
     /// `deprecated: true`, emitted as a "Deprecated per the spec." rustdoc note on the field.
     pub(crate) deprecated: bool,
     /// `readOnly`: the server sets the member, so it is never serialized into a request, and is
-    /// not a `new` argument even when `required` (see [`Field::constructed`]).
+    /// not a field of its struct's `…Required` struct even when `required` (see
+    /// [`Field::constructed`]).
     pub(crate) read_only: bool,
     /// `writeOnly`: the server accepts the member in requests and leaves it out of responses, so
     /// it decodes as absent even when `required` (see [`Field::decodes_optional`]).
@@ -527,15 +528,16 @@ impl Field {
         !self.required || self.read_only || self.write_only
     }
 
-    /// Whether the struct's `new` takes the member: a `required` property that is not `readOnly`.
-    /// A `required` `writeOnly` one stays an argument, because every request must carry it, and
-    /// `new` stores `Some` of it.
+    /// Whether the struct's `…Required` struct holds the member: a `required` property that is
+    /// not `readOnly`.
+    /// A `required` `writeOnly` one stays in it, because every request must carry it, and the
+    /// conversion stores `Some` of it.
     pub(crate) fn constructed(&self) -> bool {
         self.required && !self.read_only
     }
 
     /// The schema `default` an absent member stands for, when it is [applied]: the value its
-    /// generated `{field}_or_default` accessor returns for an absent member. Decoding and `new`
+    /// generated `{field}_or_default` accessor returns for an absent member. Decoding and building
     /// leave the member absent either way.
     ///
     /// [applied]: FieldDefault::applied
@@ -680,9 +682,9 @@ pub(crate) struct ScalarEnum {
     /// [`Prim::Bool`] for a boolean one and [`Prim::String`] for a string one. Every listed value
     /// fits it.
     pub(crate) width: Prim,
-    /// Whether the set is open, closed, or closed for good. Only an [`Openness::Open`] set admits
-    /// a value beyond the listed ones: a string enum's catch-all variant, or a checked newtype
-    /// whose decode accepts any value of its width.
+    /// Whether the set is open or closed. Only an [`Openness::Open`] set admits a value beyond the
+    /// listed ones: a string enum's catch-all variant, or a checked newtype whose decode accepts
+    /// any value of its width.
     pub(crate) openness: Openness,
 }
 
@@ -702,26 +704,25 @@ impl ScalarEnum {
     }
 }
 
-/// How a [`ScalarEnum`]'s value set relates to the strings beyond it. Only `open_narrowing`
-/// produces anything but [`Openness::Closed`].
+/// How a [`ScalarEnum`]'s value set relates to the values beyond it.
+///
+/// An integer or boolean set is opened only by `open_narrowing`. A string set is closed throughout
+/// lowering, and once lowering is done every string set is opened together unless
+/// `Spec::closed_enums` is set: whether a string enum takes an unlisted value does not depend on
+/// where it sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Openness {
-    /// The listed values and nothing else. A plain `string`, `integer` or `boolean` it narrows
-    /// inside a response body's own schema opens it under `open_narrowing`.
+    /// The listed values and nothing else. A plain `integer` or `boolean` it narrows inside a
+    /// response body's own schema opens it under `open_narrowing`.
     Closed,
     /// A set whose values name the members the description lists, beside any other value of its
-    /// kind: an `enum`/`const` that narrows a property another `allOf` member (or the `$ref` it
-    /// sits beside) declares as a plain `string`, `integer` or `boolean`, inside a response body's
-    /// own schema. A string set holds the other string in one more variant; an integer or boolean
-    /// set's checked newtype decodes any value of its width. The open set's domain is that wider
-    /// declaration's, so it is still exactly what the description admits there, minus the
-    /// narrowing.
+    /// kind. A string set holds the other string in one more variant. An integer or boolean set is
+    /// open where an `enum`/`const` narrows a property another `allOf` member (or the `$ref` it
+    /// sits beside) declares as a plain `integer` or `boolean`, inside a response body's own
+    /// schema, and its checked newtype decodes any value of its width: the open set's domain is
+    /// that wider declaration's, so it is still exactly what the description admits there, minus
+    /// the narrowing.
     Open,
-    /// The listed values and nothing else, narrowed against a `uuid`, `date`, or `date-time`
-    /// string (in its own schema, or in a schema it met). That format admits no arbitrary string,
-    /// so no plain `string` it later meets opens it, and an open set meeting it closes: the set
-    /// stays closed whichever order an `allOf` lists its members in.
-    Locked,
 }
 
 /// The scalar kind backing a [`ScalarEnum`].

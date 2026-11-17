@@ -65,9 +65,9 @@ fn a_method_its_preparer_and_companions_share_one_signature() {
         &generated,
         &[
             concat!(
-                r#"asyncfnprepare_get_thing(&self,id:implInto<types::Id>,n:types::N,params:GetThingParams,)"#,
+                r#"asyncfnprepare_get_thing(&self,id:implInto<types::Id>,n:types::N,params:implInto<GetThingParams>,)"#,
                 r#"->Result<(http::Request<support::HttpBody>,Option<support::Replay>),support::Error<std::convert::Infallible>,>"#,
-                r#"{letid:types::Id=id.into();letmutpath="/things/{id}/{n}".to_owned();"#,
+                r#"{letid:types::Id=id.into();letparams:GetThingParams=params.into();letmutpath="/things/{id}/{n}".to_owned();"#,
             ),
             concat!(
                 r#"letmutrequest=support::RequestBuilder::new(reqwest::Method::GET,url);"#,
@@ -81,7 +81,7 @@ fn a_method_its_preparer_and_companions_share_one_signature() {
                 r#"///Response`204`:done///Parameter`n`isdeprecatedperthespec.///Parameter`n`default:`3`."#,
                 r#"///Header`X-Tenant`issentfromthevalueboundwith`with_bound_header`(required,failingthecallwhilenoneisbound)."#,
                 r#"///Header`X-Trace`issentfromthevalueboundwith`with_bound_header`(optional,leftoffwhilenoneisbound)."#,
-                r#"#[deprecated]#[inline]pubasyncfnget_thing(&self,id:implInto<types::Id>,n:types::N,params:GetThingParams,)"#,
+                r#"#[deprecated]#[inline]pubasyncfnget_thing(&self,id:implInto<types::Id>,n:types::N,params:implInto<GetThingParams>,)"#,
                 r#"->Result<support::ResponseValue<()>,support::Error<GetThingError>>"#,
                 r#"{let(request,replay)=self.prepare_get_thing(id,n,params).await.map_err(support::Error::widen)?;"#,
                 r#"letresponse=support::execute(&self.core,request,replay,false).await.map_err(support::Error::widen)?;"#,
@@ -91,7 +91,7 @@ fn a_method_its_preparer_and_companions_share_one_signature() {
                 r#"withoutsendingit,foracallerthatsendsititself(signingit,pacingit,oroveranothertransport)"#,
                 r#"andhandstheresponsetoitsdecoder.Nothingisreplayedafterarejectedrefreshablecredential:"#,
                 r#"thatis`get_thing`'sownsend.#[deprecated]#[inline]pubasyncfnget_thing_request(&self,"#,
-                r#"id:implInto<types::Id>,n:types::N,params:GetThingParams,)"#,
+                r#"id:implInto<types::Id>,n:types::N,params:implInto<GetThingParams>,)"#,
                 r#"->Result<http::Request<support::HttpBody>,support::Error<std::convert::Infallible>,>"#,
                 r#"{self.prepare_get_thing(id,n,params).await.map(|(request,_)|request)}"#,
                 r#"///Decodearesponsetotherequest`get_thing`sends(`ops::GET_THING`),obtainedhoweverthecallersentit,"#,
@@ -103,12 +103,12 @@ fn a_method_its_preparer_and_companions_share_one_signature() {
                 r#"{letresponse=support::with_body_limits(&self.core,response);"#,
             ),
             concat!(
-                r#"#[deprecated]#[inline]pubfnget_thing_url(&self,id:implInto<types::Id>,n:types::N,params:GetThingParams,)"#,
-                r#"->Result<url::Url,support::Error<std::convert::Infallible>>{letid:types::Id=id.into();"#,
+                r#"#[deprecated]#[inline]pubfnget_thing_url(&self,id:implInto<types::Id>,n:types::N,params:implInto<GetThingParams>,)"#,
+                r#"->Result<url::Url,support::Error<std::convert::Infallible>>{letid:types::Id=id.into();letparams:GetThingParams=params.into();"#,
                 r#"letmutpath="/things/{id}/{n}".to_owned();"#,
             ),
-            // A required nullable string stays concrete, so `None` needs no annotation.
-            r#"pubfnnew(nr:Option<types::Nr>)->Self{Self{nr,ck:None}}"#,
+            // A required nullable parameter is an `Option` field of the `…Required` struct.
+            r#"pubstructGetThingParamsRequired{///The`nr`parameter.pubnr:Option<types::Nr>,}"#,
         ],
     );
     let plain = between(
@@ -132,14 +132,14 @@ fn the_blocking_client_forwards_under_the_same_signature() {
         &[
             concat!(
                 r#"///Header`X-Trace`issentfromthevalueboundwith`with_bound_header`(optional,leftoffwhilenoneisbound)."#,
-                r#"#[deprecated]#[inline]pubfnget_thing(&self,id:implInto<types::Id>,n:types::N,params:GetThingParams,)"#,
+                r#"#[deprecated]#[inline]pubfnget_thing(&self,id:implInto<types::Id>,n:types::N,params:implInto<GetThingParams>,)"#,
                 r#"->Result<support::ResponseValue<()>,support::Error<GetThingError>>"#,
                 r#"{self.runtime.block_on(self.inner.get_thing(id,n,params))}"#,
                 r#"///Therequest`get_thing`sends,builtwithoutsendingit(mirrorstheasyncclient's`get_thing_request`)."#,
                 r#"#[deprecated]#[inline]"#,
             ),
             concat!(
-                r#"pubfnget_thing_url(&self,id:implInto<types::Id>,n:types::N,params:GetThingParams,)"#,
+                r#"pubfnget_thing_url(&self,id:implInto<types::Id>,n:types::N,params:implInto<GetThingParams>,)"#,
                 r#"->Result<url::Url,support::Error<std::convert::Infallible>>{self.inner.get_thing_url(id,n,params)}"#,
             ),
         ],
@@ -184,7 +184,9 @@ fn a_binary_success_has_a_stream_twin_and_a_stream_reads_without_body_limits() {
                 r#"operation'stypederror.#[inline]pubasyncfndecode_get_file_stream(&self,"#,
                 r#"response:http::Response<support::HttpBody>,)"#,
                 r#"->Result<support::ResponseValue<support::ByteStream>,support::Error<GetFileError>,>"#,
-                r#"{ifresponse.status().is_success(){Ok(support::stream_success_bytes(response.map(support::read_as_it_arrives)))}"#,
+                r#"{ifresponse.status().is_success(){if!support::StatusSpec::Exact(200u16).matches(response.status())"#,
+                r#"{returnErr(support::unexpected_status::<GetFileError>(&self.core,response).await,);}"#,
+                r#"Ok(support::stream_success_bytes(response.map(support::read_as_it_arrives)))}"#,
             ),
             concat!(
                 r#"///`get_parts`,witheachrawbinarysuccessbodyhandedoverunreadasa`ByteStream`initsstatus'svariant,"#,

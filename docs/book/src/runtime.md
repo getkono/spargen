@@ -280,24 +280,22 @@ fn validation_errors<E: api::ApiErrorProblem>(error: &api::Error<E>) -> Option<s
 A standard member carried with another type than the RFC gives it is in neither place.
 
 A description that narrows the problem `type` per status (`allOf: [$ref: Problem, {properties:
-{type: {const: …}}}]`) makes an unlisted `type` a decode failure by default, so it reaches the raw
-path above. The opt-in `open_narrowing` (`Spec::with_open_narrowing(Narrowing::Open)`, `open_narrowing = true` in
-`spargen.toml`, `--open-narrowing`, or `open_narrowing` in `generate_api!`) lowers that narrowing,
-in a response body's own schema, to an open enum instead: each listed value keeps its variant, one
-more (`Other(String)`, renamed when a listed value takes that name) holds any other string, and
-the response decodes into `Error::Api`, where `problem()` reads it like any other. An integer or
-boolean `enum`/`const` narrowing a plain `integer` or `boolean` there opens the same way: its
-checked newtype decodes any value of its width, while its `TryFrom` still accepts only the listed
-values.
+{type: {const: …}}}]`) generates an open enum, as every string enum is by default: each listed
+value keeps its variant, one more (`Unknown(UnknownValue<Self>)`, renamed when a listed value
+takes that name) holds any other string, and the response decodes into `Error::Api`, where
+`problem()` reads it like any other. Under `closed_enums` an unlisted `type` is a decode failure
+instead, which reaches the raw path above.
 
-Only that position opens. A narrowing written inside a `$ref` target (a component, a sub-file
-schema) or inside a `oneOf`/`anyOf` stays closed, because a target is shared by every use and a
-union's variants are told apart by what each refuses. A narrowing whose value set is itself a
-`$ref` target opens a copy and leaves the target closed. Request bodies, parameters, and a
-formatted (`uuid`, date) string base stay closed. `spargen diff` reads a string set's catch-all as
-a variant: `variant-added` when a set opens, `variant-removed` when it closes or is renamed. Both
-are `major`, as is a value added to an open set, because the open enum is as exhaustive as a
-closed one. An
+The opt-in `open_narrowing` (`Spec::with_open_narrowing(Narrowing::Open)`, `open_narrowing = true`
+in `spargen.toml`, `--open-narrowing`, or `open_narrowing` in `generate_api!`) does the same for an
+integer or boolean `enum`/`const` narrowing a plain `integer` or `boolean` in a response body's own
+schema: its checked newtype decodes any value of its width, while its `TryFrom` still accepts only
+the listed values. A narrowing written inside a `$ref` target (a component, a sub-file schema) or
+inside a `oneOf`/`anyOf` stays closed, because a target is shared by every use and a union's
+variants are told apart by what each refuses; request bodies and parameters stay closed too.
+`spargen diff` reads a string enum's catch-all as a variant: `variant-added` when `closed_enums` is
+turned off, `variant-removed` when it is turned on or the catch-all is renamed. Both are `major`,
+as is a value added to an open enum, because the open enum is as exhaustive as a closed one. An
 integer or boolean set opening or closing changes what it decodes, not its API.
 
 ## Middleware

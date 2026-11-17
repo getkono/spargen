@@ -25,6 +25,17 @@ fn union_and_allof_roundtrip_under_proptest() {
     let report = generate_fixture_crate(&spec, &out, "roundtrip_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
+    // A model with a required member is built only from its `…Required` struct: its inherent
+    // `impl` holds the optional members' setters and no positional `new` (#1441).
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    let person = generated
+        .split("    impl Person {\n")
+        .nth(1)
+        .expect("`Person` has an inherent impl for its optional member's setter");
+    let person = &person[..person.find("\n    }\n").expect("the impl closes")];
+    assert!(person.contains("fn with_nickname("), "{person}");
+    assert!(!person.contains("fn new("), "{person}");
+
     // The property-test dependency is exclusively scaffolding for this test harness's crate.
     let mut manifest = std::fs::read_to_string(out.join("Cargo.toml")).unwrap();
     assert!(
@@ -381,6 +392,48 @@ fn an_untagged_discriminated_any_of_member_is_selected_only_where_it_keeps_the_p
     let decoded = serde_json::from_value::<types::Gadget>(serde_json::json!({ "kind": "bike", "z": 1 }));
     assert!(decoded.is_err(), "no member keeps `z`: {decoded:?}");
 }
+
+// An overflow entry whose key is a declared member's name is never written, so the declared
+// member's own value is the only one on the wire, as the form and multipart encoders already do
+// (#1412).
+#[test]
+fn an_overflow_key_naming_a_declared_member_is_not_serialized() {
+    let overflow = std::collections::BTreeMap::from([
+        ("host".to_owned(), "b".to_owned()),
+        ("code".to_owned(), "c".to_owned()),
+        ("x-extra".to_owned(), "e".to_owned()),
+    ]);
+    let headers = types::Headers::new()
+        .with_host("a".to_owned())
+        .with_code("z".to_owned())
+        .with_additional(overflow.clone());
+    let written = serde_json::to_string(&headers).unwrap();
+    assert_eq!(written, r#"{"host":"a","code":"z","x-extra":"e"}"#);
+    // With the declared members unset, the overflow still does not stand in for them.
+    let headers = types::Headers::new().with_additional(overflow);
+    let written = serde_json::to_string(&headers).unwrap();
+    assert_eq!(written, r#"{"x-extra":"e"}"#);
+}
+
+// A model with required members is built from its `…Required` struct, which names each one, so
+// two same-typed members can never trade places at the call site (#1441). The optional member is
+// left unset, and set by name; the value round-trips.
+#[test]
+fn a_model_with_required_members_is_built_from_its_required_struct() {
+    let person = types::Person::from(types::PersonRequired {
+        first_name: "Ada".to_owned(),
+        last_name: "Lovelace".to_owned(),
+    });
+    assert_eq!(
+        serde_json::to_value(&person).unwrap(),
+        serde_json::json!({ "first_name": "Ada", "last_name": "Lovelace" })
+    );
+    let person = person.with_nickname("Countess");
+    let written = serde_json::to_value(&person).unwrap();
+    let back: types::Person = serde_json::from_value(written.clone()).unwrap();
+    assert_eq!(back, person);
+    assert_eq!(written["nickname"], "Countess");
+}
 "####;
 
 /// The spec generated for [`union_and_allof_roundtrip_under_proptest`]: a `User` object pulling in a
@@ -393,7 +446,8 @@ fn an_untagged_discriminated_any_of_member_is_selected_only_where_it_keeps_the_p
 /// still being lowered (`Chain`), and one with a union member and two string members (`Creature`);
 /// two `anyOf` unions of open objects whose selection keeps every member of the payload, one of
 /// inline members no specificity favours correctly (`Thing`) and one ranked by it (`Briefing`), and
-/// a discriminated `anyOf` whose untagged members are held to the same rule (`Gadget`).
+/// a discriminated `anyOf` whose untagged members are held to the same rule (`Gadget`); and a
+/// struct with a typed overflow map beside declared members (`Headers`).
 /// One operation references `User` so every type is emitted. The document is 3.1, so the
 /// `defaultMapping` union (`Ride`) is in `OAS32_SPEC`, whose fixture's `wire` test drives it.
 const ROUNDTRIP_SPEC: &str = r##"
@@ -433,6 +487,21 @@ components:
         thing: { $ref: "#/components/schemas/Thing" }
         briefing: { $ref: "#/components/schemas/Briefing" }
         gadget: { $ref: "#/components/schemas/Gadget" }
+        headers: { $ref: "#/components/schemas/Headers" }
+        person: { $ref: "#/components/schemas/Person" }
+    Person:
+      type: object
+      required: [first_name, last_name]
+      properties:
+        first_name: { type: string }
+        last_name: { type: string }
+        nickname: { type: string }
+    Headers:
+      type: object
+      properties:
+        host: { type: string }
+        code: { type: string }
+      additionalProperties: { type: string }
     Thing:
       anyOf:
         - type: object

@@ -765,10 +765,12 @@ mod manifest_audit;
 mod mock_server;
 #[path = "e2e/oas32.rs"]
 mod oas32;
-#[path = "e2e/open_narrowing.rs"]
-mod open_narrowing;
+#[path = "e2e/open_enums.rs"]
+mod open_enums;
 #[path = "e2e/open_unions.rs"]
 mod open_unions;
+#[path = "e2e/optional_security.rs"]
+mod optional_security;
 #[path = "e2e/parameter_values.rs"]
 mod parameter_values;
 #[path = "e2e/read_write_only.rs"]

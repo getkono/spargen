@@ -175,7 +175,7 @@ fn a_number_is_sent_and_read_as_its_shortest_spelling() {
 fn a_boolean_is_sent_and_read_as_its_keyword() {
     let mock = testing::MockBackend::new()
         .on_echo_flag(|_| testing::echo_flag::Reply::status_200(&false));
-    let echoed = block_on(client(&mock).echo_flag(&true)).unwrap();
+    let echoed = block_on(client(&mock).echo_flag(true)).unwrap();
     assert!(!echoed.into_inner());
     assert_eq!(sent(&mock, ops::ECHO_FLAG).0, "true");
 }
@@ -186,7 +186,7 @@ fn an_untyped_string_is_sent_unquoted() {
         testing::echo_note::Reply::status_200(&serde_json::Value::String("back".to_owned()))
     });
     let note = serde_json::Value::String("hi".to_owned());
-    let echoed = block_on(client(&mock).echo_note(&note)).unwrap();
+    let echoed = block_on(client(&mock).echo_note(note.clone())).unwrap();
     assert_eq!(echoed.into_inner(), serde_json::Value::String("back".to_owned()));
     assert_eq!(sent(&mock, ops::ECHO_NOTE).0, "hi");
 }
@@ -201,7 +201,7 @@ fn a_union_of_strings_is_sent_as_the_text_of_its_variant() {
         testing::echo_word::Reply::status_200(&word)
     });
     let word: types::Word = serde_json::from_value(serde_json::json!("special")).unwrap();
-    let echoed = block_on(client(&mock).echo_word(&word)).unwrap();
+    let echoed = block_on(client(&mock).echo_word(word.clone())).unwrap();
     assert_eq!(
         serde_json::to_value(echoed.into_inner()).unwrap(),
         serde_json::json!("special")

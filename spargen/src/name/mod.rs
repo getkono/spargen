@@ -37,6 +37,13 @@ pub(crate) struct Names {
     operations: HashMap<OperationId, OperationNames>,
     /// Type name per type.
     pub(crate) types: HashMap<TypeId, Ident>,
+    /// The `{Type}Required` struct per object struct with a member its `From` impl takes
+    /// ([`Field::constructed`](crate::ir::Field::constructed)): the members a value of the struct
+    /// cannot be built without, by name. Allocated in the `types` module's scope after every type
+    /// and response-header struct, as one batch ranked as the types are, so a declared schema that
+    /// already spells `PetRequired` keeps that name and `Pet`'s companion takes a pointer-seeded
+    /// suffix instead.
+    pub(crate) required_structs: HashMap<TypeId, Ident>,
     /// Field name per `(type, wire property name)`.
     pub(crate) fields: HashMap<(TypeId, String), Ident>,
     /// The synthetic `#[serde(flatten)]` overflow-map field ident per struct that has a typed
@@ -52,7 +59,8 @@ pub(crate) struct Names {
     pub(crate) null_setters: HashMap<(TypeId, String), Ident>,
     /// The `{field}_or_default` accessor per `(type, wire property name)` of every optional member
     /// whose schema `default` is [applied](crate::ir::FieldDefault::applied). Allocated in the
-    /// struct's method scope, which holds `new` and every `with_` setter the struct emits, so a
+    /// struct's method scope, which holds `new` (emitted where no member is required, reserved
+    /// either way) and every `with_` setter the struct emits, so a
     /// setter keeps its name and an accessor that would spell one (`with_b_or_default`, of a
     /// member `with_b`, beside a member `b_or_default`) takes a pointer-seeded suffix instead.
     pub(crate) default_accessors: HashMap<(TypeId, String), Ident>,
@@ -61,8 +69,7 @@ pub(crate) struct Names {
     /// The variant holding any unlisted string, per open string enum, and the one holding any
     /// unlisted discriminator value, per open union. Allocated in the type's variant scope after
     /// every listed variant, so a listed variant keeps the name it has in the closed type, and one
-    /// spelled `other` (`unknown` for a union) pushes this one to a disambiguated name instead. A
-    /// type id is either an enum or a union, so the two never collide.
+    /// spelled `unknown` pushes this one to a disambiguated name instead. A type id is either an enum or a union, so the two never collide.
     pub(crate) open_variants: HashMap<TypeId, Ident>,
     /// Builder type name per declared server, by index.
     pub(crate) servers: Vec<Ident>,
@@ -94,10 +101,10 @@ pub(crate) struct CredentialSetterNames {
     pub(crate) without: Ident,
 }
 
-/// The inherent associated `const` listing a closed string enum's variants. It shares the
-/// variants' namespace, so [`allocate`] reserves it in each closed string enum's variant scope and
-/// codegen emits it under this spelling.
-pub(crate) const CLOSED_ENUM_ALL: &str = "ALL";
+/// The inherent associated `const` listing a string enum's listed variants, open or closed. It
+/// shares the variants' namespace, so [`allocate`] reserves it in each string enum's variant scope
+/// and codegen emits it under this spelling.
+pub(crate) const STRING_ENUM_ALL: &str = "ALL";
 
 impl Names {
     /// The names allocated for the operation `id`, which every operation of the allocated [`Api`]
@@ -166,6 +173,10 @@ pub(crate) struct OperationNames {
     pub(crate) preparer: Ident,
     /// The `…Params` struct every parameter but a path one rides in.
     pub(crate) params_struct: Ident,
+    /// The `{Params}Required` struct holding the `…Params` struct's required parameters, present
+    /// exactly when [`Operation::params_required`](crate::ir::Operation::params_required) holds.
+    /// Allocated in the root scope after every other root type, so it yields to all of them.
+    params_required: Option<Ident>,
     /// The error type: `{Method}Error`, or `{Method}OperationError` where the first form would
     /// shadow a root re-export. Allocated as one ranked batch in the root scope, which the
     /// `…Params` structs and the success enums share, so two operations whose methods PascalCase
@@ -181,7 +192,7 @@ pub(crate) struct OperationNames {
     pub(crate) bindings: OperationBindings,
     /// Identifier per parameter, in `Operation::params` order: a method argument for a path
     /// parameter, a `…Params` field for every other one (and a setter where it is optional, a
-    /// `…Params::new` argument where it is required). Each kind shares one scope
+    /// field of the `…Required` struct too where it is required). Each kind shares one scope
     /// per operation, so two parameters whose names escape to the same spelling (a path and a
     /// query `id`, a query `page-size` and a header `page_size`) are disambiguated instead of
     /// emitting a duplicate argument or field.
@@ -224,6 +235,14 @@ impl OperationNames {
         self.success_enum
             .as_ref()
             .expect("a success enum is allocated for every enum-shaped success")
+    }
+
+    /// The `{Params}Required` struct of an operation whose
+    /// [`params_required`](crate::ir::Operation::params_required) holds.
+    pub(crate) fn params_required(&self) -> &Ident {
+        self.params_required
+            .as_ref()
+            .expect("a `…Required` struct is allocated for every bundle with a required parameter")
     }
 
     /// Each parameter of `operation`, the operation these names were allocated for, beside its
@@ -303,10 +322,10 @@ pub(crate) const CLIENT_TRAIT_METHODS: &[&str] = &["clone"];
 
 /// The methods a `…Params` struct already answers to beside its setters, which are named after its
 /// optional parameters: `default` (its derived `Default`, the builder's entry point
-/// `…Params::default()` where every parameter is optional), `clone` (its derived `Clone`), and
-/// `new`, its constructor where a parameter is required. A setter of one of these names would
-/// shadow the trait method or the constructor, so a parameter spelling one is disambiguated,
-/// field and setter alike.
+/// `…Params::default()` where every parameter is optional) and `clone` (its derived `Clone`). A
+/// setter of one of these names would shadow the trait method, so a parameter spelling one is
+/// disambiguated, field and setter alike. `new` is reserved too, so a setter never reads as a
+/// constructor: a bundle with a required parameter is built from its `…Required` struct.
 pub(crate) const PARAMS_METHODS: &[&str] = &["clone", "default", "new"];
 
 /// The methods a server builder in the `servers` module already answers to beside its setters,
@@ -362,7 +381,8 @@ pub(crate) const SERVERS_MODULE_NAMES: &[&str] = &["Default", "Into", "String"];
 /// takes, `ClientConfig` and `TransportConfig` what `Client::with_config`'s closure configures,
 /// `HttpBody` is the body of every request and
 /// response an `HttpBackend` handles, `MaybeSend` and `MaybeSync` bound the body `HttpBody::wrap`
-/// adopts, and the taxonomy's payload types are matched on.
+/// adopts, the taxonomy's payload types are matched on, and `UnknownValue` and `UnknownPayload` are
+/// what an open string enum's and an open discriminated union's `Unknown` variant holds.
 /// Anything short of that leaves a generated signature a caller can call but cannot write down.
 /// `ApiErrorBody` is the bound `Error::api_body` needs, implemented by the uniform-body error enum,
 /// the single-body newtype, and the uninhabited shape (an enum whose bodies are different generated
@@ -427,6 +447,8 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "TotalTimeout",
     "TransportConfig",
     "TransportError",
+    "UnknownPayload",
+    "UnknownValue",
     "UnknownVariant",
     "exponential_backoff",
     "full_jitter",
@@ -552,19 +574,10 @@ pub(crate) fn allocate(api: &Api) -> Names {
     let definitions: Vec<_> = api.types.iter().collect();
     let requests: Vec<_> = definitions
         .iter()
-        .map(|(_, def)| {
-            let pointer = &def.provenance.pointer;
-            let anonymous = def.document.is_empty() && pointer.as_str().is_empty();
-            RankedRequest {
-                hint: &def.name_hint,
-                provenance: pointer,
-                rank: (
-                    anonymous,
-                    !anonymous && !is_declared_schema(pointer),
-                    def.document.as_str(),
-                    pointer.as_str(),
-                ),
-            }
+        .map(|(_, def)| RankedRequest {
+            hint: &def.name_hint,
+            provenance: &def.provenance.pointer,
+            rank: type_rank(def),
         })
         .collect();
     let allocated = type_scope.alloc_ranked(&requests, IdentRole::Type);
@@ -576,6 +589,9 @@ pub(crate) fn allocate(api: &Api) -> Names {
     // so a documented header's struct can never collide with a generated model. The `…Params`
     // structs, error types and success enums take the module root's scope below.
     let response_headers = allocate_response_headers(api, &mut type_scope);
+
+    // After every type and header struct, so a declared name never yields to a companion.
+    names.required_structs = allocate_required_structs(api, &names.types, &mut type_scope);
 
     // Operation methods share `impl Client` and `impl BlockingClient` with the fixed methods, so
     // those spellings are taken before any operation asks for one.
@@ -703,6 +719,31 @@ pub(crate) fn allocate(api: &Api) -> Names {
     let methods: Vec<&Ident> = signatures.iter().map(|(method, ..)| method).collect();
     let (errors, success_enums) = allocate_operation_types(api, &methods, &mut root_scope);
     let stream_success_enums = allocate_stream_success_enums(api, &methods, &mut root_scope);
+    // After every other root type, so it yields to all of them (see
+    // `OperationNames::params_required`).
+    let params_required = {
+        let hints: Vec<String> = signatures
+            .iter()
+            .map(|(_, params_struct, ..)| format!("{} required", params_struct.unraw()))
+            .collect();
+        let requests: Vec<_> = operation_requests(api, &hints)
+            .into_iter()
+            .zip(&api.operations)
+            .filter(|(_, operation)| operation.params_required())
+            .map(|(request, _)| request)
+            .collect();
+        let mut allocated = root_scope
+            .alloc_ranked(&requests, IdentRole::Type)
+            .into_iter();
+        api.operations
+            .iter()
+            .map(|operation| {
+                operation
+                    .params_required()
+                    .then(|| allocated.next().expect("one name per required bundle"))
+            })
+            .collect::<Vec<_>>()
+    };
     let byte_streams = byte_streams
         .into_iter()
         .zip(stream_request_builders)
@@ -723,13 +764,17 @@ pub(crate) fn allocate(api: &Api) -> Names {
         .zip(url_accessors.into_iter().zip(byte_streams).zip(companions))
         .zip(errors)
         .zip(success_enums)
-        .zip(response_headers);
+        .zip(response_headers)
+        .zip(params_required);
     for (
         (
-            (((operation, signature), ((url_accessor, byte_stream), companions)), error),
-            success_enum,
+            (
+                (((operation, signature), ((url_accessor, byte_stream), companions)), error),
+                success_enum,
+            ),
+            response_headers,
         ),
-        response_headers,
+        params_required,
     ) in records
     {
         let (method, params_struct, (parameters, null_setters), bindings) = signature;
@@ -744,6 +789,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
                 preparer,
                 byte_stream,
                 params_struct,
+                params_required,
                 error,
                 success_enum,
                 bindings,
@@ -782,7 +828,8 @@ pub(crate) fn allocate(api: &Api) -> Names {
                     );
                 }
                 // After every field and the overflow field, so neither is renamed by a stem. A
-                // member `new` does not take and whose type is nullable has a `Nullable<T>` setter.
+                // member the `…Required` struct does not hold and whose type is nullable has a
+                // `Nullable<T>` setter.
                 let null_settable =
                     |field: &&crate::ir::Field| !field.constructed() && field.ty.nullable;
                 for field in object.fields.iter().filter(null_settable) {
@@ -802,10 +849,10 @@ pub(crate) fn allocate(api: &Api) -> Names {
             }
             TypeKind::Enum(enumeration) => {
                 let mut scope = Scope::default();
-                // A closed string enum's inherent `ALL` constant shares the variants' namespace,
-                // and a variant spelled `ALL` (the value `a_l_l`) would shadow it.
-                if enumeration.repr == ScalarRepr::String && !enumeration.is_open() {
-                    scope.reserve_exact(CLOSED_ENUM_ALL);
+                // A string enum's inherent `ALL` constant, open or closed, shares the variants'
+                // namespace, and a variant spelled `ALL` (the value `a_l_l`) would shadow it.
+                if enumeration.repr == ScalarRepr::String {
+                    scope.reserve_exact(STRING_ENUM_ALL);
                 }
                 let values: Vec<String> =
                     enumeration.variants.iter().map(ScalarValue::wire).collect();
@@ -822,7 +869,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
                 if enumeration.is_open() {
                     names.open_variants.insert(
                         id,
-                        scope.alloc("Other", IdentRole::Variant, &def.provenance.pointer),
+                        scope.alloc("Unknown", IdentRole::Variant, &def.provenance.pointer),
                     );
                 }
             }
@@ -864,9 +911,52 @@ pub(crate) fn allocate(api: &Api) -> Names {
     names
 }
 
-/// Whether a type's `pointer` is a declared schema's own: a component (`/components/schemas/{name}`)
-/// or a whole document (the empty pointer, which a sub-file schema carries), rather than a
-/// position inside one.
+/// The rank of type `def`'s name request, the smaller winning a contested spelling: a definition
+/// with a `(document, pointer)` identity before one without, a declared schema before an inline
+/// one, then by that identity.
+fn type_rank(def: &crate::ir::TypeDef) -> (bool, bool, &str, &str) {
+    let pointer = &def.provenance.pointer;
+    let anonymous = def.document.is_empty() && pointer.as_str().is_empty();
+    (
+        anonymous,
+        !anonymous && !is_declared_schema(pointer),
+        def.document.as_str(),
+        pointer.as_str(),
+    )
+}
+
+/// Allocate the [`Names::required_structs`] of `api`, `{Type}Required` spelled from each struct's
+/// allocated name in `types`, in the `types` module's `scope`: one batch ranked as the types
+/// themselves are ([`type_rank`]), a loser's suffix seeded from its type's pointer.
+fn allocate_required_structs(
+    api: &Api,
+    types: &HashMap<TypeId, Ident>,
+    scope: &mut Scope,
+) -> HashMap<TypeId, Ident> {
+    let structs: Vec<(TypeId, &crate::ir::TypeDef, String)> = api
+        .types
+        .iter()
+        .filter(|(_, def)| {
+            matches!(&def.kind, TypeKind::Struct(object)
+                if object.fields.iter().any(crate::ir::Field::constructed))
+        })
+        .map(|(id, def)| (id, def, format!("{} required", types[&id].unraw())))
+        .collect();
+    let requests: Vec<_> = structs
+        .iter()
+        .map(|(_, def, hint)| RankedRequest {
+            hint,
+            provenance: &def.provenance.pointer,
+            rank: type_rank(def),
+        })
+        .collect();
+    let allocated = scope.alloc_ranked(&requests, IdentRole::Type);
+    structs.iter().map(|(id, ..)| *id).zip(allocated).collect()
+}
+
+/// Whether a type's `pointer` is a declared schema's own: a component
+/// (`/components/schemas/{name}`) or a whole document (the empty pointer, which a sub-file schema
+/// carries), rather than a position inside one.
 fn is_declared_schema(pointer: &crate::diag::JsonPointer) -> bool {
     let tokens = pointer.tokens();
     tokens.is_empty()
@@ -1277,7 +1367,8 @@ fn allocate_parameters(
 /// [applied default](crate::ir::Field::applied_default), once its fields, overflow field and
 /// explicit-`null` stems are in `names`. The accessors share the struct's inherent method
 /// namespace with `new` and the `with_` setters codegen's `emit_struct_constructors` emits — one
-/// per member `new` does not take, one per explicit-`null` stem, and one for the overflow map — so
+/// per member the `…Required` struct does not hold, one per explicit-`null` stem, and one for the
+/// overflow map — so
 /// those are reserved first and keep their spellings. One ranked batch, ranked by the field's
 /// spelling, which is unique in the struct, so the outcome does not depend on the order the spec
 /// lists the properties in.

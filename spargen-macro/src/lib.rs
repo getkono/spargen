@@ -61,6 +61,7 @@ struct Args {
     carve: Option<spargen::Carve>,
     open_narrowing: Option<spargen::Narrowing>,
     open_unions: Option<spargen::UnionTags>,
+    closed_enums: Option<spargen::StringEnums>,
     verbatim_docs: Option<spargen::CarriedDocs>,
     testing: Option<spargen::TestingModule>,
     error_body_cap: Option<usize>,
@@ -74,11 +75,12 @@ struct Args {
 
 /// Every switch `generate_api!` takes, in the order its errors list them. Each is spelled `<name>`
 /// (alone, `= true` or `= false`) or `no_<name>`.
-const SWITCHES: [&str; 6] = [
+const SWITCHES: [&str; 7] = [
     "uuid",
     "carve",
     "open_narrowing",
     "open_unions",
+    "closed_enums",
     "verbatim_docs",
     "testing",
 ];
@@ -139,7 +141,9 @@ fn parse_switch<T>(
 
 impl Parse for Args {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        use spargen::{CarriedDocs, Carve, Narrowing, TestingModule, UnionTags, UuidMapping};
+        use spargen::{
+            CarriedDocs, Carve, Narrowing, StringEnums, TestingModule, UnionTags, UuidMapping,
+        };
 
         let mut spec: Option<LitStr> = None;
         let mut uuid = None;
@@ -147,6 +151,7 @@ impl Parse for Args {
         let mut carve = None;
         let mut open_narrowing = None;
         let mut open_unions = None;
+        let mut closed_enums = None;
         let mut verbatim_docs = None;
         let mut testing = None;
         let mut error_body_cap = None;
@@ -196,6 +201,14 @@ impl Parse for Args {
                             &mut open_unions,
                             UnionTags::Open,
                             UnionTags::Closed,
+                        )?,
+                        "closed_enums" => parse_switch(
+                            input,
+                            &key,
+                            switch,
+                            &mut closed_enums,
+                            StringEnums::Closed,
+                            StringEnums::Open,
                         )?,
                         "verbatim_docs" => parse_switch(
                             input,
@@ -273,6 +286,7 @@ impl Parse for Args {
             carve,
             open_narrowing,
             open_unions,
+            closed_enums,
             verbatim_docs,
             testing,
             error_body_cap,
@@ -386,6 +400,9 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
     }
     if let Some(tags) = args.open_unions {
         config = config.with_open_unions(tags);
+    }
+    if let Some(enums) = args.closed_enums {
+        config = config.with_closed_enums(enums);
     }
     if let Some(docs) = args.verbatim_docs {
         config = config.with_verbatim_docs(docs);

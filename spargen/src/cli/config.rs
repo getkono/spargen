@@ -12,7 +12,7 @@ use camino::Utf8PathBuf;
 
 use spargen::{
     CarriedDocs, Carve, ComponentKind, ConfigError, Narrowing, OmitMethod, OmitRule, Spec,
-    TestingModule, UnionTags, UnknownOmitToken, UuidMapping,
+    StringEnums, TestingModule, UnionTags, UnknownOmitToken, UuidMapping,
 };
 
 use super::args::SpecArgs;
@@ -64,6 +64,14 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Resolv
         UnionTags::Closed,
     ) {
         spec = spec.with_open_unions(tags);
+    }
+    if let Some(enums) = switch(
+        args.closed_enums,
+        args.no_closed_enums,
+        StringEnums::Closed,
+        StringEnums::Open,
+    ) {
+        spec = spec.with_closed_enums(enums);
     }
     if let Some(docs) = switch(
         args.verbatim_docs,
@@ -268,11 +276,11 @@ mod tests {
     fn each_switch_pair_overrides_the_config_file_either_way() {
         let (_on, on) = with_config(
             "carve = true\nuuid = true\nopen_narrowing = true\nopen_unions = true\n\
-             verbatim_docs = true\ntesting = true\n",
+             closed_enums = true\nverbatim_docs = true\ntesting = true\n",
         );
         let (_off, off) = with_config(
             "carve = false\nuuid = false\nopen_narrowing = false\nopen_unions = false\n\
-             verbatim_docs = false\ntesting = false\n",
+             closed_enums = false\nverbatim_docs = false\ntesting = false\n",
         );
         let file_on = Spec::new(on.join("openapi.yaml"))
             .config_file(on.join("spargen.toml"))
@@ -291,6 +299,7 @@ mod tests {
                     "--no-uuid",
                     "--no-open-narrowing",
                     "--no-open-unions",
+                    "--no-closed-enums",
                     "--no-verbatim-docs",
                     "--no-testing"
                 ]
@@ -301,6 +310,7 @@ mod tests {
                 .with_uuid(spargen::UuidMapping::String)
                 .with_open_narrowing(spargen::Narrowing::Exact)
                 .with_open_unions(spargen::UnionTags::Closed)
+                .with_closed_enums(spargen::StringEnums::Open)
                 .with_verbatim_docs(spargen::CarriedDocs::Rewritten)
                 .with_testing(TestingModule::Omitted)
         );
@@ -312,6 +322,7 @@ mod tests {
                     "--uuid",
                     "--open-narrowing",
                     "--open-unions",
+                    "--closed-enums",
                     "--verbatim-docs",
                     "--testing"
                 ]
@@ -322,6 +333,7 @@ mod tests {
                 .with_uuid(spargen::UuidMapping::Uuid)
                 .with_open_narrowing(spargen::Narrowing::Open)
                 .with_open_unions(spargen::UnionTags::Open)
+                .with_closed_enums(spargen::StringEnums::Closed)
                 .with_verbatim_docs(spargen::CarriedDocs::Verbatim)
                 .with_testing(TestingModule::Emitted)
         );
@@ -332,17 +344,17 @@ mod tests {
         );
     }
 
-    /// Each of the twelve switch flags, alone, moves its own setting off the file's value and
-    /// leaves the other five where the file put them.
+    /// Each of the fourteen switch flags, alone, moves its own setting off the file's value and
+    /// leaves the other six where the file put them.
     #[test]
     fn each_switch_flag_moves_only_its_own_setting() {
         let (_on, on) = with_config(
             "carve = true\nuuid = true\nopen_narrowing = true\nopen_unions = true\n\
-             verbatim_docs = true\ntesting = true\n",
+             closed_enums = true\nverbatim_docs = true\ntesting = true\n",
         );
         let (_off, off) = with_config(
             "carve = false\nuuid = false\nopen_narrowing = false\nopen_unions = false\n\
-             verbatim_docs = false\ntesting = false\n",
+             closed_enums = false\nverbatim_docs = false\ntesting = false\n",
         );
         let file = |dir: &Utf8PathBuf| {
             Spec::new(dir.join("openapi.yaml"))
@@ -350,7 +362,7 @@ mod tests {
                 .unwrap()
         };
         type Moved = fn(Spec) -> Spec;
-        let rows: [(&str, &Utf8PathBuf, Moved); 12] = [
+        let rows: [(&str, &Utf8PathBuf, Moved); 14] = [
             ("--no-carve", &on, |spec| {
                 spec.with_carve(spargen::Carve::Off)
             }),
@@ -362,6 +374,9 @@ mod tests {
             }),
             ("--no-open-unions", &on, |spec| {
                 spec.with_open_unions(spargen::UnionTags::Closed)
+            }),
+            ("--no-closed-enums", &on, |spec| {
+                spec.with_closed_enums(spargen::StringEnums::Open)
             }),
             ("--no-verbatim-docs", &on, |spec| {
                 spec.with_verbatim_docs(spargen::CarriedDocs::Rewritten)
@@ -380,6 +395,9 @@ mod tests {
             }),
             ("--open-unions", &off, |spec| {
                 spec.with_open_unions(spargen::UnionTags::Open)
+            }),
+            ("--closed-enums", &off, |spec| {
+                spec.with_closed_enums(spargen::StringEnums::Closed)
             }),
             ("--verbatim-docs", &off, |spec| {
                 spec.with_verbatim_docs(spargen::CarriedDocs::Verbatim)
@@ -454,6 +472,8 @@ mod tests {
             "--no-open-narrowing",
             "--open-unions",
             "--no-open-unions",
+            "--closed-enums",
+            "--no-closed-enums",
             "--verbatim-docs",
             "--no-verbatim-docs",
             "--testing",
@@ -496,6 +516,7 @@ mod tests {
             ("--uuid", "--no-uuid"),
             ("--open-narrowing", "--no-open-narrowing"),
             ("--open-unions", "--no-open-unions"),
+            ("--closed-enums", "--no-closed-enums"),
             ("--verbatim-docs", "--no-verbatim-docs"),
             ("--testing", "--no-testing"),
         ] {

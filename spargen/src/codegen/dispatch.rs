@@ -14,7 +14,7 @@ use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 
 /// The statements that attach the operation's credentials to `request_binding` and bind
 /// `replay_binding` to what replays a call a refreshable credential was rejected on: the first
-/// `security` alternative whose schemes are all registered is attached through
+/// non-empty `security` alternative whose schemes are all registered is attached through
 /// `support::attach_auth_replayable`, and `support::execute` spends the replay. An operation with
 /// no `security` requirement attaches nothing and has no replay.
 ///
@@ -177,7 +177,8 @@ pub(super) fn error_branch_tokens(
 
 /// The decoder's success branch. `success_ty` is [`success_type`]'s rendering and `error_ident`
 /// the operation's error type. A streaming success yields a stream with no request to resend,
-/// which the operation method hands the request it sent.
+/// which the operation method hands the request it sent. Every shape decodes only a documented
+/// 2xx, so any other is `Error::UnexpectedStatus` ([`undocumented_success_guard`]).
 pub(super) fn success_decode_tokens(
     operation: &Operation,
     api: &Api,
@@ -185,14 +186,24 @@ pub(super) fn success_decode_tokens(
     success_ty: &TokenStream,
     error_ident: &crate::name::Ident,
 ) -> TokenStream {
-    let success_decode = match operation.responses.success() {
-        SuccessShape::Unit => quote! {
+    let shape = operation.responses.success();
+    let guard = undocumented_success_guard(&shape, error_ident);
+    // With no 2xx documented, every 2xx is unexpected: the guard would return unconditionally, and
+    // a decode after it would be unreachable code. (The decoder emits no success branch for it at
+    // all, since its error branch answers a 2xx so too.)
+    if shape.documents_no_2xx() {
+        return quote! {
+            Err(support::unexpected_status::<#error_ident>(&self.core, response).await)
+        };
+    }
+    let success_decode = match shape {
+        SuccessShape::Unit(_) => quote! {
             let status = response.status();
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         },
         // A single success body: decode into the aliased `T` through its selected wire codec.
-        SuccessShape::Plain(body_ty) => {
+        SuccessShape::Plain(body_ty, _) => {
             let decode =
                 match BodyCodec::of(api, body_ty, operation.responses.single_success_media()) {
                     BodyCodec::Bytes => {
@@ -237,7 +248,7 @@ pub(super) fn success_decode_tokens(
         .responses
         .stream_success()
         .map(|(framing, _)| framing);
-    match stream_framing {
+    let decode = match stream_framing {
         Some(framing) => {
             let framing_tokens = match framing {
                 crate::ir::Framing::Sse => quote! { support::Framing::Sse },
@@ -256,6 +267,56 @@ pub(super) fn success_decode_tokens(
             }
         }
         None => success_decode,
+    };
+    quote! {
+        #guard
+        #decode
+    }
+}
+
+/// The statement a decoder whose success is `shape` opens its success branch with: a 2xx none of
+/// the success statuses a [`SuccessShape::Unit`] or [`SuccessShape::Plain`] carries documents
+/// returns `Error::UnexpectedStatus` into `error_ident`, its status, headers and capped body kept,
+/// before any body is read or stream opened. The `_stream` twin of a single binary body opens its
+/// success branch with it too. Empty where the statuses match every 2xx (a `2XX` range, or the
+/// success-source `default`), and for a [`SuccessShape::Enum`], whose by-status dispatch
+/// ([`success_enum_dispatch`]) ends in the same error.
+pub(super) fn undocumented_success_guard(
+    shape: &SuccessShape,
+    error_ident: &crate::name::Ident,
+) -> TokenStream {
+    let statuses = match shape {
+        SuccessShape::Unit(statuses) | SuccessShape::Plain(_, statuses) => statuses,
+        SuccessShape::Enum(_) => return TokenStream::new(),
+    };
+    if statuses.cover_every_2xx() {
+        return TokenStream::new();
+    }
+    let documented = match statuses.selectors() {
+        // No 2xx documented: every one is unexpected. `success_decode_tokens` writes that error as
+        // the whole success branch instead, with no decode after it.
+        [] => {
+            return quote! {
+                return Err(support::unexpected_status::<#error_ident>(&self.core, response).await);
+            };
+        }
+        [status] => {
+            let status = runtime_status_spec(*status);
+            quote! { #status.matches(response.status()) }
+        }
+        statuses => {
+            let statuses = statuses.iter().map(|status| runtime_status_spec(*status));
+            quote! {
+                [#(#statuses),*]
+                    .iter()
+                    .any(|documented| documented.matches(response.status()))
+            }
+        }
+    };
+    quote! {
+        if !#documented {
+            return Err(support::unexpected_status::<#error_ident>(&self.core, response).await);
+        }
     }
 }
 
@@ -417,8 +478,8 @@ impl BodyCodec {
 /// operation's response enum for several (or one beside a documented bodyless status).
 pub(super) fn success_type(operation: &Operation, names: &Names) -> TokenStream {
     match operation.responses.success() {
-        SuccessShape::Unit => quote! { () },
-        SuccessShape::Plain(ty) => ty_tokens(ty, names, true),
+        SuccessShape::Unit(_) => quote! { () },
+        SuccessShape::Plain(ty, _) => ty_tokens(ty, names, true),
         SuccessShape::Enum(_) => {
             let ident = names.operation(&operation.id).success_enum();
             quote! { #ident }
@@ -554,6 +615,69 @@ paths:
         ] {
             assert!(many.contains(fragment), "`{fragment}` in {many}");
         }
+    }
+
+    /// Issue #1426: a unit or single-body success opens its success branch by refusing a 2xx it
+    /// does not document, unless a `2XX` range or the success-source `default` documents them all,
+    /// and an operation documenting no 2xx answers every one with the unexpected status.
+    #[test]
+    fn a_unit_or_single_body_success_refuses_an_undocumented_2xx() {
+        let generated = generated(
+            r##"openapi: 3.1.0
+info: {title: T, version: '1'}
+paths:
+  /accepted:
+    post:
+      operationId: postAccepted
+      responses:
+        '204': {description: done}
+        '202': {description: queued}
+  /ranged:
+    get:
+      operationId: getRanged
+      responses:
+        '2XX': {description: ok, content: {application/json: {schema: {type: string}}}}
+  /fallback:
+    get:
+      operationId: getFallback
+      responses:
+        default: {description: any}
+  /gone:
+    get:
+      operationId: getGone
+      responses:
+        '410': {description: gone}
+"##,
+        );
+        let unexpected = |error: &str| {
+            format!("Err(support::unexpected_status::<{error}>(&self.core,response).await")
+        };
+        let accepted = method(&generated, "post_accepted");
+        let guard = format!(
+            "ifresponse.status().is_success(){{if![support::StatusSpec::Exact(202u16),\
+             support::StatusSpec::Exact(204u16)].iter().any(|documented|documented\
+             .matches(response.status())){{return{},);}}letstatus=response.status();",
+            unexpected("PostAcceptedError")
+        );
+        assert!(accepted.contains(&guard), "`{guard}` in {accepted}");
+
+        for (name, error) in [
+            ("get_ranged", "GetRangedError"),
+            ("get_fallback", "GetFallbackError"),
+        ] {
+            let body = method(&generated, name);
+            assert!(!body.contains(".matches(response.status())"), "{body}");
+            assert_eq!(body.matches(&unexpected(error)).count(), 1, "{body}");
+        }
+
+        // Its error branch, which answers a 2xx as every undocumented status, is the whole decode.
+        let gone = method(&generated, "get_gone");
+        let decode = format!(
+            "letresponse=support::with_body_limits(&self.core,response);{})}}",
+            unexpected("GetGoneError")
+        );
+        assert!(gone.contains(&decode), "`{decode}` in {gone}");
+        assert!(!gone.contains("is_success"), "{gone}");
     }
 
     /// Each IR status selector maps to the runtime selector that classifies the same statuses,

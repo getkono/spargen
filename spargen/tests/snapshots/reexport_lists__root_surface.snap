@@ -21,7 +21,8 @@ pub use support::{
     RequestOptions, ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome,
     RetryPolicy, RetryWait, SchemeCarrier, SecretString, TimeoutKind, TokenFuture,
     TokenProvider, TokenRefresher, TotalTimeout, TransportConfig, TransportError,
-    UnknownVariant, exponential_backoff, full_jitter, next_link, token_provider,
+    UnknownPayload, UnknownValue, UnknownVariant, exponential_backoff, full_jitter,
+    next_link, token_provider,
 };
 #[allow(
     unused_imports,
@@ -52,7 +53,8 @@ pub use support::{
     RequestOptions, ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome,
     RetryPolicy, RetryWait, SchemeCarrier, SecretString, TimeoutKind, TokenFuture,
     TokenProvider, TokenRefresher, TotalTimeout, TransportConfig, TransportError,
-    UnknownVariant, exponential_backoff, full_jitter, next_link, token_provider,
+    UnknownPayload, UnknownValue, UnknownVariant, exponential_backoff, full_jitter,
+    next_link, token_provider,
 };
 #[allow(
     unused_imports,

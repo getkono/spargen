@@ -50,11 +50,14 @@ pub(super) fn credential_setter_tokens(
         };
         let with = &setter.with;
         let selection = format!(
-            "An operation attaches the first alternative of its `security` whose schemes all have \
-             a credential registered, and fails before anything is sent, as \
-             `Error::RequestConstruction` with `RequestError::MissingCredential`, when none has. \
-             It never falls through past the alternative it chose: a credential that fails to \
-             attach fails the call, and `{}` is how a caller reaches a later alternative.",
+            "An operation attaches the first non-empty alternative of its `security` whose \
+             schemes all have a credential registered. Where none has, an empty alternative \
+             (`{{}}`) sends the call anonymously, but only when the operation lists one and no \
+             scheme of its other alternatives has a credential registered; otherwise the call \
+             fails before anything is sent, as `Error::RequestConstruction` with \
+             `RequestError::MissingCredential`. It never falls through past the alternative it \
+             chose: a credential that fails to attach fails the call, and `{}` is how a caller \
+             reaches a later alternative.",
             setter.without.as_str()
         );
         let with_setter = match shape {
@@ -180,10 +183,10 @@ pub(super) fn credential_setter_tokens(
         let without = &setter.without;
         let without_summary = format!(
             "Unregister the credential for the security scheme `{key}`; one never registered is \
-             left as it is. Operations pick the first `security` alternative whose schemes are \
-             all registered and never fall through past it when attaching fails, so this is how \
-             a caller reaches a later alternative: the client this returns no longer selects \
-             one listing `{key}`."
+             left as it is. Operations pick the first non-empty `security` alternative whose \
+             schemes are all registered and never fall through past it when attaching fails, so \
+             this is how a caller reaches a later alternative: the client this returns no longer \
+             selects one listing `{key}`."
         );
         let without_body = match &forward {
             None => quote! { self.core.remove_credential(#key); },

@@ -266,16 +266,36 @@ pub(super) fn form_serialization_tokens(
     properties: &TokenStream,
 ) -> TokenStream {
     let entries = form_properties_tokens(encoding);
-    // The typed `additionalProperties` members, rendered in their type's default mode, with the
-    // overflow map's length, which tells the runtime how many of the serialized members are
-    // overflow; `None` when the struct has no typed overflow to send.
+    // The typed `additionalProperties` members, rendered in their type's default mode, with how
+    // many overflow entries the struct serializes, which tells the runtime how many of the
+    // serialized members are overflow; `None` when the struct has no typed overflow to send. The
+    // struct's serde encoding leaves out an entry keyed by a declared property's name, so the
+    // count does too.
     let additional = match (&encoding.additional, names.struct_overflow.get(&ty.id)) {
         (Some(mode), Some(overflow)) => {
             let mode = form_mode_tokens(mode);
+            let declared = encoding
+                .properties
+                .iter()
+                .map(|property| property.name.as_str())
+                .collect::<Vec<_>>();
+            let count = |map: TokenStream| {
+                if declared.is_empty() {
+                    quote! { #map.len() }
+                } else {
+                    quote! {
+                        #map
+                            .keys()
+                            .filter(|key| !matches!(key.as_str(), #(#declared)|*))
+                            .count()
+                    }
+                }
+            };
             let len = if ty.nullable {
-                quote! { #value.as_ref().map_or(0, |value| value.#overflow.len()) }
+                let count = count(quote! { value.#overflow });
+                quote! { #value.as_ref().map_or(0, |value| #count) }
             } else {
-                quote! { #value.#overflow.len() }
+                count(quote! { #value.#overflow })
             };
             quote! { Some((#mode, #len)) }
         }

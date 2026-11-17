@@ -280,6 +280,104 @@ fn empty_alternative_marks_security_optional() {
     assert!(request.headers().is_empty());
 }
 
+/// `{}` marks security optional, not preferred: a registered credential for a credentialed
+/// alternative is sent wherever `{}` sits in the list. Choosing the first satisfied alternative
+/// would send this call anonymously although the caller registered a token.
+#[test]
+fn empty_alternative_listed_first_still_sends_a_registered_credential() {
+    let mut core = core();
+    core.set_credential("token", Credential::Bearer(SecretString::from("t0k")));
+    for requirements in [&[&[][..], BEARER][..], &[BEARER, &[]]] {
+        let request = poll_ready(attach_auth(&core, get(&core), requirements))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Bearer t0k",
+            "{requirements:?}"
+        );
+    }
+}
+
+/// With nothing registered for any credentialed alternative, `{}` sends the call anonymously,
+/// in either position, rather than failing as `MissingCredential`.
+#[test]
+fn empty_alternative_sends_anonymously_when_nothing_is_registered() {
+    let core = core();
+    for requirements in [&[&[][..], BEARER][..], &[BEARER, &[]]] {
+        let request = poll_ready(attach_auth(&core, get(&core), requirements))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(request.headers().is_empty(), "{requirements:?}");
+    }
+}
+
+/// An alternative with some but not all of its schemes registered shows the caller meant to
+/// authenticate, so `{}` does not absorb it: the call fails as `MissingCredential`, naming the
+/// missing scheme and never `{}`'s empty list.
+#[test]
+fn partially_registered_alternative_fails_instead_of_falling_back_to_anonymous() {
+    const BOTH: &[AuthScheme] = &[
+        AuthScheme {
+            name: "a",
+            kind: AuthKind::Bearer,
+        },
+        AuthScheme {
+            name: "b",
+            kind: AuthKind::ApiKeyHeader("X-B"),
+        },
+    ];
+    let mut core = core();
+    core.set_credential("a", Credential::Bearer(SecretString::from("t0k")));
+    for requirements in [&[&[][..], BOTH][..], &[BOTH, &[]]] {
+        let error = poll_ready(attach_auth(&core, get(&core), requirements)).unwrap_err();
+        let Error::RequestConstruction(RequestError::MissingCredential { alternatives }) = &error
+        else {
+            panic!("expected MissingCredential, got {error:?}");
+        };
+        assert_eq!(*alternatives, [vec!["b"]], "{requirements:?}");
+    }
+}
+
+/// A `mutualTLS`-only alternative counts as credentialed: the transport holds its credential, so
+/// it is always satisfied and selected in declared order like any credentialed alternative. It
+/// attaches nothing, exactly as `{}` does, so between the two the wire shows today's
+/// first-listed order. A registered credential of an earlier alternative still wins over it.
+#[test]
+fn mutual_tls_only_alternative_counts_as_credentialed() {
+    const MTLS: &[AuthScheme] = &[AuthScheme {
+        name: "cert",
+        kind: AuthKind::MutualTls,
+    }];
+    let mut core = core();
+    for requirements in [&[&[][..], MTLS][..], &[MTLS, &[]]] {
+        let request = poll_ready(attach_auth(&core, get(&core), requirements))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(request.headers().is_empty(), "{requirements:?}");
+    }
+    core.set_credential("token", Credential::Bearer(SecretString::from("t0k")));
+    let request = poll_ready(attach_auth(&core, get(&core), &[&[], BEARER, MTLS]))
+        .unwrap()
+        .build()
+        .unwrap();
+    assert_eq!(
+        request.headers()[reqwest::header::AUTHORIZATION],
+        "Bearer t0k"
+    );
+    // An unregistered credentialed alternative beside it does not fail the call: the
+    // `mutualTLS` alternative is satisfied.
+    core.remove_credential("token");
+    let request = poll_ready(attach_auth(&core, get(&core), &[&[], BEARER, MTLS]))
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(request.headers().is_empty());
+}
+
 /// No requirement at all is distinct from a requirement nothing satisfies: it attaches nothing
 /// and succeeds. Without the early return an empty slice falls through the selection loop
 /// without choosing anything, and the call would fail as `MissingCredential` naming no
@@ -528,6 +626,39 @@ fn a_failed_token_provider_is_a_typed_credential_provider_error() {
     );
     let provider = std::error::Error::source(cause).expect("the provider's error is the cause");
     assert!(provider.downcast_ref::<AuthError>().is_some());
+}
+
+/// A provider whose token-endpoint call failed chains that failure: walking `source()` from the
+/// request error reaches the provider's own cause, and each level displays only its own text.
+#[test]
+fn a_failed_token_provider_chains_its_cause_below_the_auth_error() {
+    let mut core = core();
+    core.set_credential(
+        "token",
+        Credential::Provider(Arc::new(|| {
+            Box::pin(async {
+                Err(AuthError::with_source(
+                    "token endpoint",
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out"),
+                ))
+            }) as TokenFuture
+        })),
+    );
+    let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
+    assert!(matches!(
+        error,
+        Error::RequestConstruction(RequestError::CredentialProvider { .. })
+    ));
+    let request = std::error::Error::source(&error).expect("the request error");
+    let auth = std::error::Error::source(request).expect("the provider's error");
+    assert!(auth.downcast_ref::<AuthError>().is_some());
+    assert_eq!(auth.to_string(), "token endpoint");
+    let io = std::error::Error::source(auth)
+        .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+        .expect("the provider's cause is the io::Error it was built with");
+    assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
+    assert_eq!(io.to_string(), "connect timed out");
+    assert!(std::error::Error::source(io).is_none());
 }
 
 /// A provider under a scheme that takes no token is a registration mismatch, and it must stay

@@ -2,5 +2,5 @@
 source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
-major|variant-added|ResponseBodyKind|variant added: `Other(String)`, holding any unlisted value
+major|success-type-changed|GET /pets|success statuses `204` -> `none` of success type `()`
 bump=major

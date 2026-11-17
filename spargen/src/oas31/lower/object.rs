@@ -248,13 +248,13 @@ pub(super) fn warn_relaxed_requiredness(graph: &TypeGraph, diags: &mut Diagnosti
                 (
                     "readOnly",
                     "a request leaves it out, so its member may be absent, is never serialized, \
-                     and is not a `new` argument",
+                     and is not a field of its `…Required` struct",
                 )
             } else {
                 (
                     "writeOnly",
                     "a response leaves it out, so its member may be absent when decoded, and \
-                     `new` still takes it",
+                     its `…Required` struct still holds it",
                 )
             };
             Diagnostic::warning(
