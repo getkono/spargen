@@ -639,14 +639,20 @@ fn reject_oas32_schema_fields(schema: &Schema, diags: &mut Diagnostics) {
 }
 
 /// The `Content-Type` an untyped multipart part's `contentMediaType` gives it, canonicalized: the
-/// schema says nothing but `contentMediaType` (annotations and validation keywords aside, which
-/// leave its lowered type untyped), and the value is one concrete, sendable media type. Lowering
-/// sends it as the part's default `Content-Type`, so the audit treats it as read there.
+/// schema says nothing but `contentMediaType` (annotations, validation keywords and a
+/// `format: binary` aside, which leave its lowered type untyped and its part raw bytes), and the
+/// value is one concrete, sendable media type. Lowering sends it as the part's default
+/// `Content-Type`, so the audit treats it as read there. Beside `format: binary` it is the more
+/// specific of the two statements of the part's bytes, so it, not `application/octet-stream`, is
+/// the header.
 pub(super) fn raw_part_media(schema: &Schema) -> Option<String> {
     let media = schema.content_media_type.as_deref()?;
     let mut rest = schema.clone();
     rest.content_media_type = None;
     rest.validation = super::schema::ValidationKeywords::default();
+    if rest.format.as_deref() == Some("binary") {
+        rest.format = None;
+    }
     if !rest.constrains_nothing() {
         return None;
     }
