@@ -74,7 +74,7 @@ time = {{ version = "0.3.55", features = ["formatting", "parsing"] }}
 #[test]
 fn each_datetime_backend_prints_its_crate_and_passes_its_own_audit() {
     for (backend, line) in [
-        (DateTimeBackend::Jiff, "jiff = \"0.2.42\"\n"),
+        (DateTimeBackend::Jiff, "jiff = \"1.0.1\"\n"),
         (DateTimeBackend::Chrono, "chrono = \"0.4.45\"\n"),
     ] {
         let requirements = RuntimeRequirements {
