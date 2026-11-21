@@ -263,7 +263,16 @@ const PAIRINGS: &[Pairing] = &[
     Pairing::Identical(Pair {
         job: "github-api",
         tasks: &["github-api"],
-        ci_only: &[CHECKOUT_LFS, STABLE_CLIPPY_WASM, CACHE],
+        ci_only: &[
+            CHECKOUT_LFS,
+            STABLE_CLIPPY_WASM,
+            CACHE,
+            CiOnly {
+                step: "name: Enlarge swap\nrun: |\n  sudo swapoff -a\n  sudo rm -f /mnt/swapfile\n  sudo fallocate -l 16G /mnt/swapfile\n  sudo chmod 600 /mnt/swapfile\n  sudo mkswap /mnt/swapfile\n  sudo swapon /mnt/swapfile\n  free -h\n",
+                why: "sizes the hosted runner's swap: type-checking the generated GitHub client \
+                      outgrows its 16 GB of RAM (#1283), and a developer machine has its own",
+            },
+        ],
         job_if: Some(SLOW_GATE_IF),
         ..PAIR
     }),
