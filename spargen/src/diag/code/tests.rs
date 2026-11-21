@@ -304,6 +304,7 @@ fn variant_name(code: Code) -> &'static str {
         Code::BoundHeaderNotDeclared => "BoundHeaderNotDeclared",
         Code::ReadWriteOnlyRequirednessRelaxed => "ReadWriteOnlyRequirednessRelaxed",
         Code::CacheWriteFailed => "CacheWriteFailed",
+        Code::DeprecatedOption => "DeprecatedOption",
     }
 }
 
@@ -405,7 +406,7 @@ fn a_comment_or_an_absence_is_not_a_fixture() {
 /// and this fails until `all()` lists it too.
 #[test]
 fn all_lists_every_declared_variant() {
-    const DECLARED: usize = 36;
+    const DECLARED: usize = 37;
 
     assert_eq!(
         Code::all().len(),
@@ -615,6 +616,9 @@ const OWNED_ELSEWHERE: &[(&str, &str)] = &[
     // spec; `frontend/` deliberately runs every fixture with the integration off.
     ("CargoIntegrationDegraded", "config.rs"),
     ("CargoIntegrationRequired", "config.rs"),
+    // A deprecated option is a setting of the `Spec`, and `frontend/` runs every fixture under
+    // the default settings.
+    ("DeprecatedOption", "config.rs"),
     // `spargen lock`'s fetch failure: `check`/`generate` never fetch, so only a vendor
     // run over the real fetcher can produce it. Its one positive assertion is the
     // `fetch_failure` helper, which `vendor_remote.rs` and `tls_strictness.rs` both call.

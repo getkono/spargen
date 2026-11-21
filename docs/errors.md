@@ -41,3 +41,4 @@ the library API.
 | `W014` | Warning | alternative media type not generated |
 | `W015` | Warning | read-only or write-only property's requiredness relaxed |
 | `W016` | Warning | build cache record not written |
+| `W017` | Warning | deprecated option |

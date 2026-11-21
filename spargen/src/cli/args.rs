@@ -57,8 +57,9 @@ pub(crate) struct SpecArgs {
     /// `spargen.toml`.
     #[arg(long)]
     pub(crate) no_uuid: bool,
-    /// The crate `format: date-time`/`date` map to: `time` (the default), `jiff`, `chrono`, or
-    /// `string` for no date-time crate, overriding `datetime` in `spargen.toml`.
+    /// The crate `format: date-time`/`date` map to: `time` (the default), `jiff`, `chrono`
+    /// (deprecated, reported as `W017`), or `string` for no date-time crate, overriding `datetime`
+    /// in `spargen.toml`.
     #[arg(long, value_name = "BACKEND")]
     pub(crate) datetime: Option<spargen::DateTimeBackend>,
     /// Max bytes of a response body retained on generated error variants (default 65536).

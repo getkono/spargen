@@ -148,6 +148,8 @@ fn datetime_byte(backend: DateTimeBackend) -> u8 {
         DateTimeBackend::String => 0,
         DateTimeBackend::Time => 1,
         DateTimeBackend::Jiff => 2,
+        // The deprecated backend generates until its removal, reporting `W017`.
+        #[allow(deprecated)]
         DateTimeBackend::Chrono => 3,
     }
 }

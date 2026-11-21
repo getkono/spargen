@@ -137,6 +137,7 @@ components:
 /// a `date-time`, and is accepted once it declares the line `spargen deps` prints for the same
 /// spec. The `String` backend requires no date-time crate.
 #[test]
+#[allow(deprecated)] // covers the deprecated `chrono` backend until its removal
 fn the_manifest_audit_requires_the_selected_datetime_crate() {
     const CORE: &str = r#"[package]
 name = "datetime-consumer"

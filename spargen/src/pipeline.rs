@@ -406,13 +406,32 @@ fn build_emit_plan(
 /// makes the same decision per side in `diff_api`'s `lower_side`, through the same
 /// [`carve_spec`] fixpoint.
 pub(crate) fn run_mode(spec: &Spec, mode: PipelineMode) -> PipelineResult {
-    run_on_frontend_stack(|| {
+    let mut result = run_on_frontend_stack(|| {
         if spec.carve.is_on() {
             run_carve(spec, mode)
         } else {
             run_pipeline(spec, mode)
         }
-    })
+    });
+    result.report = with_leading(result.report, deprecated_options(spec));
+    result
+}
+
+/// The `W017` for each deprecated option `spec` selects, reported once per run (once per side of a
+/// diff) ahead of the run's own diagnostics, whatever its outcome.
+pub(crate) fn deprecated_options(spec: &Spec) -> Vec<Diagnostic> {
+    let backend = spec.datetime;
+    if !backend.is_deprecated() {
+        return Vec::new();
+    }
+    vec![Diagnostic::at_root(
+        Code::DeprecatedOption,
+        format!(
+            "the `{backend}` date-time backend is deprecated and is removed in a future \
+                 breaking release; select `time` (the default) or `jiff` instead"
+        ),
+    )
+    .build()]
 }
 
 fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {

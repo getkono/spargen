@@ -175,8 +175,25 @@ fn surface_settings(spec: &Spec) -> surface::Settings {
 /// it, as [`run_mode`](crate::pipeline::run_mode) does for every other entry point, and the plain
 /// frontend otherwise. A side that does not lower returns its rejection [`Report`]; one that
 /// lowers returns its [`Outcome::Clean`] report beside the lowered API, so its warnings reach the
-/// caller.
+/// caller. Either report leads with the `W017` of each deprecated option the side selects, as
+/// `run_mode`'s does.
 fn lower_side(
+    spec: &Spec,
+    elsewhere: &compat::MatchedElsewhere,
+) -> Result<(ir::Api, name::Names, Report), Report> {
+    let leading = |mut report: Report| {
+        report
+            .diagnostics
+            .splice(0..0, crate::pipeline::deprecated_options(spec));
+        report
+    };
+    lower_side_unled(spec, elsewhere)
+        .map(|(api, names, report)| (api, names, leading(report)))
+        .map_err(leading)
+}
+
+/// [`lower_side`] without the leading deprecation warnings.
+fn lower_side_unled(
     spec: &Spec,
     elsewhere: &compat::MatchedElsewhere,
 ) -> Result<(ir::Api, name::Names, Report), Report> {

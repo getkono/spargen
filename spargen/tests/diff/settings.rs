@@ -61,6 +61,7 @@ fn a_changed_uuid_mapping_retypes_every_uuid_member() {
 /// and `string` maps both formats to `String`: moving between any two retypes every `date-time`
 /// and `date` member, which is breaking.
 #[test]
+#[allow(deprecated)] // covers the deprecated `chrono` backend until its removal
 fn a_changed_datetime_backend_retypes_every_date_member() {
     use spargen::DateTimeBackend;
 

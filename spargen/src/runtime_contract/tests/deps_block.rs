@@ -72,6 +72,7 @@ time = {{ version = "0.3.55", features = ["formatting", "parsing"] }}
 /// The `jiff` and `chrono` backends print their crate as a bare floor where `time` sits, and each
 /// printed block passes the audit it describes.
 #[test]
+#[allow(deprecated)] // covers the deprecated `chrono` backend until its removal
 fn each_datetime_backend_prints_its_crate_and_passes_its_own_audit() {
     for (backend, line) in [
         (DateTimeBackend::Jiff, "jiff = \"1.0.1\"\n"),

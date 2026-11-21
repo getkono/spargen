@@ -118,6 +118,7 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
 /// for it, and no `time`; the generated module, its embedded `rfc3339` codec included, passes
 /// clippy with warnings denied.
 #[test]
+#[allow(deprecated)] // covers the deprecated `chrono` backend until its removal
 fn every_typed_backend_puts_rfc3339_on_the_wire() {
     for (backend, crate_name, inner, test) in [
         (

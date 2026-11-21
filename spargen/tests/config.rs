@@ -1270,3 +1270,69 @@ fn omit_after_a_config_file_keeps_the_file_rules_and_a_reapplied_file_adds_none(
     assert_eq!(spec.config_files(), [file]);
     assert_eq!(spec.batch_cap(), 7);
 }
+
+// --- Deprecated options -------------------------------------------------------------------------
+//
+// `W017` is the facade's own diagnostic, raised by the `Spec` rather than the spec document, so
+// `frontend/` (which runs every fixture under the default settings) cannot reach it.
+
+/// The `chrono` date-time backend is deprecated: selecting it, through the setter or through
+/// `spargen.toml`, still generates and checks, and says so exactly once with `W017`. The other
+/// backends say nothing.
+#[test]
+#[allow(deprecated)]
+fn the_chrono_backend_is_reported_as_deprecated() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(dir.join("openapi.yaml"), SPEC).unwrap();
+    std::fs::write(dir.join("spargen.toml"), "datetime = \"chrono\"\n").unwrap();
+
+    let from_setter = spargen::Spec::new(dir.join("openapi.yaml"))
+        .with_datetime(spargen::DateTimeBackend::Chrono);
+    let from_file = spargen::Spec::new(dir.join("openapi.yaml"))
+        .config_file(dir.join("spargen.toml"))
+        .unwrap();
+    for spec in [from_setter, from_file] {
+        assert_eq!(spec.datetime(), spargen::DateTimeBackend::Chrono);
+
+        let checked = spargen::check(&spec);
+        assert_eq!(checked.outcome(), spargen::Outcome::Clean, "{checked:#?}");
+        assert_eq!(
+            report_codes(&checked),
+            [spargen::Code::DeprecatedOption],
+            "{checked:#?}"
+        );
+        let warning = &checked.diagnostics()[0];
+        assert!(
+            warning
+                .message
+                .contains("`chrono` date-time backend is deprecated"),
+            "{warning:#?}"
+        );
+
+        let build = spec
+            .build(dir.join("client.rs"))
+            .with_cargo(spargen::CargoIntegration::Off);
+        let generated = spargen::generate(&build);
+        assert_eq!(
+            generated.outcome(),
+            spargen::Outcome::Generated,
+            "{generated:#?}"
+        );
+        assert_eq!(
+            report_codes(&generated),
+            [spargen::Code::DeprecatedOption],
+            "{generated:#?}"
+        );
+    }
+
+    for backend in [
+        spargen::DateTimeBackend::Time,
+        spargen::DateTimeBackend::Jiff,
+        spargen::DateTimeBackend::String,
+    ] {
+        let spec = spargen::Spec::new(dir.join("openapi.yaml")).with_datetime(backend);
+        let checked = spargen::check(&spec);
+        assert!(report_codes(&checked).is_empty(), "{backend}: {checked:#?}");
+    }
+}

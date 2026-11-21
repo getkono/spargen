@@ -194,6 +194,8 @@ pub(super) fn requirement_table(requirements: &RuntimeRequirements) -> Vec<Requi
         // The other backends need no feature: the embedded `rfc3339` codec reads and writes the
         // text, and only each crate's calendar types and conversions are named.
         Some(DateTimeBackend::Jiff) => push(JIFF, NONE, false),
+        // The deprecated backend generates until its removal, reporting `W017`.
+        #[allow(deprecated)]
         Some(DateTimeBackend::Chrono) => push(CHRONO, NONE, false),
         Some(DateTimeBackend::String) | None => {}
     }

@@ -79,6 +79,8 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
                 let newtypes = embed(&crate::support::datetime_jiff_runtime_file());
                 quote! { #newtypes #codec }
             }
+            // The deprecated backend generates until its removal, reporting `W017`.
+            #[allow(deprecated)]
             DateTimeBackend::Chrono => {
                 let codec = codec();
                 let newtypes = embed(&crate::support::datetime_chrono_runtime_file());

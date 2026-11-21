@@ -29,6 +29,7 @@ fn the_time_requirement_never_asks_for_serde() {
 /// embedded codec writes the text) and no other date-time crate; `String` and an API without dates
 /// require none.
 #[test]
+#[allow(deprecated)] // covers the deprecated `chrono` backend until its removal
 fn each_datetime_backend_requires_exactly_its_own_crate() {
     let crates = ["time", "jiff", "chrono"];
     let cases = [

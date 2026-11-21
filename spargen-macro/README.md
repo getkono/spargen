@@ -22,7 +22,8 @@ Each switch — `uuid`, `carve`, `open_narrowing`, `open_unions`, `closed_enums`
 `testing` — is
 written alone or as `= true` to turn it on, and as `no_<switch>` (`no_carve`, `no_testing`, …) or
 `= false` to turn it off. `datetime = "…"` names the crate `format: date-time`/`date` map to —
-`"time"`, `"jiff"`, `"chrono"`, or `"string"` for none.
+`"time"`, `"jiff"`, `"chrono"` (deprecated; warned as `W017`, which the macro does not surface),
+or `"string"` for none.
 
 Repetition:
 

@@ -368,7 +368,7 @@ impl Prim {
 /// | --- | --- | --- | --- |
 /// | [`Time`](Self::Time) (default) | `time::OffsetDateTime` | `time::Date` | `time` |
 /// | [`Jiff`](Self::Jiff) | `jiff::civil::DateTime` and `jiff::tz::Offset` | `jiff::civil::Date` | `jiff` |
-/// | [`Chrono`](Self::Chrono) | `chrono::DateTime<chrono::FixedOffset>` | `chrono::NaiveDate` | `chrono` |
+/// | [`Chrono`](Self::Chrono) (deprecated) | `chrono::DateTime<chrono::FixedOffset>` | `chrono::NaiveDate` | `chrono` |
 /// | [`String`](Self::String) | — (`String`) | — (`String`) | none |
 ///
 /// The `Jiff` backend's `DateTime` holds two values, because `jiff::Timestamp` ends before year
@@ -386,17 +386,27 @@ pub enum DateTimeBackend {
     /// The `jiff` crate: a `jiff::civil::DateTime` at a `jiff::tz::Offset`, and `jiff::civil::Date`.
     Jiff,
     /// The `chrono` crate: `chrono::DateTime<chrono::FixedOffset>` and `chrono::NaiveDate`.
+    ///
+    /// Deprecated: it still generates, reporting `W017`, and is removed in a future breaking
+    /// release. Choose [`Time`](Self::Time), the default, or [`Jiff`](Self::Jiff).
+    #[deprecated(
+        since = "0.8.0",
+        note = "use `DateTimeBackend::Time` (the default) or `DateTimeBackend::Jiff`; the chrono \
+                backend is removed in a future breaking release"
+    )]
     Chrono,
     /// No date-time crate: both formats stay `String`, a deliberate, documented loss of typing.
     String,
 }
 
 impl DateTimeBackend {
-    /// Every backend, in declaration order.
+    /// Every backend, in declaration order, the deprecated [`Chrono`](Self::Chrono) included.
+    #[allow(deprecated)]
     pub const ALL: &'static [Self] = &[Self::Time, Self::Jiff, Self::Chrono, Self::String];
 
     /// The spelling `spargen.toml`'s `datetime` key, the CLI's `--datetime` flag and
     /// `generate_api!`'s `datetime` argument take: `time`, `jiff`, `chrono` or `string`.
+    #[allow(deprecated)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Time => "time",
@@ -410,6 +420,12 @@ impl DateTimeBackend {
     /// `String`.
     pub(crate) fn is_typed(self) -> bool {
         self != Self::String
+    }
+
+    /// Whether selecting this backend is deprecated, which a run reports as `W017`.
+    #[allow(deprecated)]
+    pub(crate) fn is_deprecated(self) -> bool {
+        self == Self::Chrono
     }
 }
 

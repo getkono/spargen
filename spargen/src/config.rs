@@ -650,7 +650,7 @@ impl Spec {
             return Err(parse(
                 "the `time` key was replaced by `datetime`; write `datetime = \"time\"` for \
                  `time = true` or `datetime = \"string\"` for `time = false` (or \
-                 `datetime = \"jiff\"` or `\"chrono\"`)"
+                 `datetime = \"jiff\"`)"
                     .to_owned(),
             ));
         }

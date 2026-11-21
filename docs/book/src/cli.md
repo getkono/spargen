@@ -84,7 +84,7 @@ The same file is read by `build.rs` (`Spec::config_file`, `Spec::discover_config
 ```toml
 uuid = true             # default true; map `format: uuid` to `uuid::Uuid`
 datetime = "time"       # default "time"; the crate `format: date-time`/`date` map to: "time",
-                        # "jiff", "chrono", or "string" for none
+                        # "jiff", "chrono" (deprecated, W017), or "string" for none
 carve = false           # default false; auto-carve unsupported constructs
 batch_cap = 100         # default 100; diagnostics collected before the report is truncated
 error_body_cap = 65536  # default 64 KiB

@@ -14,7 +14,7 @@ itself, so it adds nothing:
 | A model holding a raw `bytes` value (a `format: binary` multipart part; a [`contentEncoding: base64`](#binary-content) or `base64url` one carries its own codec) | `bytes`' `serde` feature |
 | A body read as it arrives: [streaming](#streaming) (sequential responses), or a [binary `_stream` twin](#binary-content) | `futures-core` and reqwest's `stream` feature |
 | [XML bodies](#xml-bodies) | `quick-xml` |
-| [`format: date-time` / `date`](#uuid-and-dates) | `time`, or the `jiff` or `chrono` crate the `datetime` backend selects |
+| [`format: date-time` / `date`](#uuid-and-dates) | `time`, or the `jiff` or (deprecated) `chrono` crate the `datetime` backend selects |
 | [`format: uuid`](#uuid-and-dates) | `uuid` |
 | [Blocking client](#blocking-feature-blocking) | an optional, native-only `tokio`, behind the consumer's own `blocking` feature |
 
@@ -441,11 +441,17 @@ the macro's `datetime = "…"`.
 | --- | --- | --- | --- |
 | `time` (default) | `time::OffsetDateTime` | `time::Date` | `time` with `formatting` and `parsing` |
 | `jiff` | `jiff::civil::DateTime` and `jiff::tz::Offset` | `jiff::civil::Date` | `jiff` |
-| `chrono` | `chrono::DateTime<chrono::FixedOffset>` | `chrono::NaiveDate` | `chrono` |
+| `chrono` (deprecated) | `chrono::DateTime<chrono::FixedOffset>` | `chrono::NaiveDate` | `chrono` |
 | `string` | — (`String`) | — (`String`) | nothing |
 
 Each dependency is required only when its mapping is selected and actually occurs in the compiled
 API.
+
+The `chrono` backend is deprecated since 0.8.0 and is removed in a future breaking release.
+It still generates, and every run that selects it reports `W017`. Moving to `time` or `jiff` keeps
+the wire form (every backend reads and writes the same RFC 3339 text); what changes is the crate
+the consuming package declares (`spargen deps` prints it) and the conversions caller code uses
+between the newtypes and the wrapped crate's types.
 
 Dates are emitted as the embedded `DateTime` and `Date` newtypes rather than the crate's own types,
 because `time`'s serde output is not the RFC 3339 text these formats are defined as, and so that

@@ -180,6 +180,7 @@ fn every_argument_maps_onto_its_spec_field() {
 /// The macro overrides the discovered config file only where it was given an argument: an
 /// absent flag keeps the file's value rather than resetting it, and omit rules append.
 #[test]
+#[allow(deprecated)] // covers the deprecated `chrono` backend until its removal
 fn an_absent_argument_keeps_the_config_files_value() {
     let discovered = Spec::new("openapi.yaml")
         .with_uuid(spargen::UuidMapping::String)
@@ -341,6 +342,7 @@ fn both_spellings_of_a_switch_together_are_an_error() {
 /// `datetime = "…"` replaces the config file's backend with any of the four, and leaves it in
 /// place when not given.
 #[test]
+#[allow(deprecated)] // covers the deprecated `chrono` backend until its removal
 fn the_datetime_argument_overrides_the_config_file() {
     let discovered = Spec::new("openapi.yaml").with_datetime(DateTimeBackend::Chrono);
     assert_eq!(

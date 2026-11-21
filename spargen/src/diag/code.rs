@@ -120,6 +120,9 @@ pub enum Code {
     /// A build wrote its generated module but could not write the build-cache record beside it,
     /// so the next build over the same inputs regenerates instead of replaying the record.
     CacheWriteFailed,
+    /// The run's settings select a deprecated option (the `chrono` date-time backend), which still
+    /// works and is removed in a future breaking release.
+    DeprecatedOption,
 }
 
 impl Code {
@@ -162,6 +165,7 @@ impl Code {
             Code::BoundHeaderNotDeclared => "E026",
             Code::ReadWriteOnlyRequirednessRelaxed => "W015",
             Code::CacheWriteFailed => "W016",
+            Code::DeprecatedOption => "W017",
         }
     }
 
@@ -215,6 +219,7 @@ impl Code {
                 "read-only or write-only property's requiredness relaxed"
             }
             Code::CacheWriteFailed => "build cache record not written",
+            Code::DeprecatedOption => "deprecated option",
         }
     }
 
@@ -348,6 +353,9 @@ impl Code {
             Code::CacheWriteFailed => {
                 "Build-time generation keeps a cache record for each generated module under Cargo's `OUT_DIR` (in its `spargen` directory): the fingerprint of every input, the digest of the module written, and the run's diagnostics and runtime requirements, so a later build over unchanged inputs replays the record instead of running the pipeline again. This generation wrote its module, but the record could not be written — `OUT_DIR` is not writable, the disk is full, or something other than a directory stands where the `spargen` directory goes — and the message names the record and the error. The module on disk is complete and current, so the run still succeeds: the cache is only an optimisation, and without a record the next build regenerates the module, as it would after the record were deleted. Clear what stopped the write to have later builds replay the record again."
             }
+            Code::DeprecatedOption => {
+                "The run's settings select an option that is deprecated: it still works, and generated output under it is unchanged, but it is removed in a future breaking release. The one deprecated option is the `chrono` date-time backend (`DateTimeBackend::Chrono`), selected by `Spec::with_datetime`, `datetime = \"chrono\"` in `spargen.toml`, `--datetime chrono` on the command line, or `datetime = \"chrono\"` in `generate_api!` (which, like every warning, the macro does not surface). Switch to `time`, the default, or `jiff`. The generated `DateTime` and `Date` newtypes read and write the same RFC 3339 strings under every backend and keep the offset a value was written with; what changes is the crate they wrap, and so the crate the consuming package declares (`spargen deps` prints it) and the conversions caller code uses: the `time` backend's newtypes `Deref` to and convert `From` `time::OffsetDateTime` and `time::Date`, and the `jiff` backend's `DateTime` reads its parts through `datetime()` and `offset()` and converts from a `jiff::Timestamp`. The warning is reported once per run, at the document root."
+            }
         }
     }
 
@@ -402,6 +410,7 @@ impl Code {
             Code::BoundHeaderNotDeclared,
             Code::ReadWriteOnlyRequirednessRelaxed,
             Code::CacheWriteFailed,
+            Code::DeprecatedOption,
         ];
         ALL
     }
