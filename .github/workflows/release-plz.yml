@@ -76,19 +76,39 @@ jobs:
           fi
 
   # Create a PR with the new versions and changelog, preparing the next release.
+  #
+  # Every write goes through a GitHub App token, not `GITHUB_TOKEN`: a release branch pushed with
+  # `GITHUB_TOKEN` leaves the pull request's CI run at `action_required`, so none of its checks,
+  # the slow gates included, ran until a maintainer approved it or pushed a commit (#1279). The App
+  # needs Contents and Pull requests write access on this repository, and its ID and private key
+  # are the `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY` secrets.
+  #
+  # release-plz edits no Markdown, so after each run that opens or updates the release PR this job
+  # brings the install lines to the new minor (`mise run install-lines`) and commits that onto the
+  # release branch. It runs every time because release-plz force-pushes the branch on every run,
+  # dropping any commit made on top of it. Pinned by
+  # `the_release_pull_request_runs_ci_and_bumps_install_lines`.
   release-plz-pr:
     name: Release-plz PR
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     concurrency:
       group: release-plz-${{ github.ref }}
       cancel-in-progress: false
     steps:
+      - name: Mint the release App token
+        id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
       - *checkout
       - *install-rust
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         with:
           command: release-pr
@@ -97,4 +117,33 @@ jobs:
           version: 0.3.160
         env:
           # release-pr only opens the version-bump PR; it never publishes, so no registry token.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+      # `prs_created` is true whenever release-plz opened or updated the release PR.
+      - name: Bump the install lines on the release branch
+        if: steps.release-plz.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ steps.release-plz.outputs.pr }}
+        run: |
+          branch=$(jq -r .head_branch <<< "$PR")
+          git fetch --quiet origin "$branch"
+          git switch --quiet --detach FETCH_HEAD
+          head=$(git rev-parse HEAD)
+          cargo test -p spargen --test docs bump_install_lines_to_the_released_minor -- --exact --ignored --nocapture
+          if [ -n "$(git status --porcelain -- . ':!*.md')" ]; then
+            git status --porcelain; echo "the install-line bump changed more than Markdown" >&2; exit 1
+          fi
+          changed=$(git diff --name-only -- '*.md')
+          if [ -z "$changed" ]; then
+            echo "every install line already names the released minor"; exit 0
+          fi
+          minor=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "spargen") | .version' | cut -d. -f1,2)
+          additions=$(for file in $changed; do jq -n --arg path "$file" --arg contents "$(base64 -w0 "$file")" '{path: $path, contents: $contents}'; done | jq -s .)
+          # createCommitOnBranch signs the commit as the App; expectedHeadOid refuses it if
+          # release-plz moved the branch since the fetch above.
+          jq -n --arg repo "$GITHUB_REPOSITORY" --arg branch "$branch" --arg head "$head" \
+            --arg headline "docs: require spargen $minor in the install lines" --argjson additions "$additions" \
+            '{query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }",
+              variables: {input: {branch: {repositoryNameWithOwner: $repo, branchName: $branch}, expectedHeadOid: $head,
+                message: {headline: $headline}, fileChanges: {additions: $additions}}}}' \
+            | gh api graphql --input -

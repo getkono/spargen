@@ -421,6 +421,11 @@ const PAIRINGS: &[Pairing] = &[
         task: "hooks",
         why: "installs the git hooks",
     },
+    Pairing::LocalOnly {
+        task: "install-lines",
+        why: "rewrites the tree; `release-plz.yml` runs it on the release branch \
+              (`the_release_pull_request_runs_ci_and_bumps_install_lines`)",
+    },
 ];
 
 /// Actions a [`provision`] step may use. Each provisions a checkout, a toolchain, a cache, or a
@@ -966,6 +971,106 @@ fn every_release_waits_on_the_latest_release_check() {
     assert!(
         workflow_triggers(&called["on"], "deps-latest.yml").contains_key("workflow_call"),
         "`deps-latest.yml` must accept the `workflow_call` `release-plz.yml` makes"
+    );
+}
+
+#[test]
+fn the_release_pull_request_runs_ci_and_bumps_install_lines() {
+    // Two gaps made the v0.8.0 release pull request (#1279) depend on a hand-pushed commit. Pushed
+    // with `GITHUB_TOKEN`, every update of the release branch left its CI run at
+    // `action_required`, so no check ran until a maintainer approved or pushed. And release-plz
+    // edits no Markdown, so a minor bump failed `every_install_line_names_the_released_minor`
+    // until someone pushed a `docs:` commit, which the next release-plz run force-pushed away.
+    // So the job mints a GitHub App token, whose pushes start CI like anyone's, hands it to
+    // release-plz, and then runs the `install-lines` task on the release branch, committing what
+    // it rewrites through the API (which signs the commit) on every run.
+    let release = workflow("release-plz.yml");
+    let steps = release["jobs"]["release-plz-pr"]["steps"]
+        .as_vec()
+        .expect("`release-plz.yml`'s `release-plz-pr` job must carry steps");
+    let position = |what: &str, matches: &dyn Fn(&yaml_rust2::Yaml) -> bool| {
+        steps
+            .iter()
+            .position(matches)
+            .unwrap_or_else(|| panic!("`release-plz.yml`'s `release-plz-pr` job has no {what}"))
+    };
+    let uses = |step: &yaml_rust2::Yaml, action: &str| {
+        step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with(action))
+    };
+
+    let token = position("`actions/create-github-app-token` step", &|step| {
+        uses(step, "actions/create-github-app-token@")
+    });
+    let token_step = &steps[token];
+    assert_eq!(
+        (
+            token_step["with"]["app-id"].as_str(),
+            token_step["with"]["private-key"].as_str()
+        ),
+        (
+            Some("${{ secrets.RELEASE_APP_ID }}"),
+            Some("${{ secrets.RELEASE_APP_PRIVATE_KEY }}")
+        ),
+        "the release PR's App token must come from the `RELEASE_APP_ID` and \
+         `RELEASE_APP_PRIVATE_KEY` secrets"
+    );
+    let token_id = token_step["id"]
+        .as_str()
+        .expect("the App token step must carry an `id:` the release-plz step reads");
+
+    let release_plz = position("release-plz step", &|step| {
+        uses(step, "release-plz/action@")
+    });
+    assert!(
+        token < release_plz,
+        "the App token must exist before release-plz runs"
+    );
+    let release_plz_step = &steps[release_plz];
+    assert_eq!(
+        release_plz_step["env"]["GITHUB_TOKEN"].as_str(),
+        Some(format!("${{{{ steps.{token_id}.outputs.token }}}}").as_str()),
+        "release-plz must push the release branch with the App token: a `GITHUB_TOKEN` push \
+         leaves the release PR's CI run waiting for approval"
+    );
+    let release_plz_id = release_plz_step["id"]
+        .as_str()
+        .expect("the release-plz step must carry an `id:` the install-line step reads");
+
+    let tasks = mise_tasks();
+    let bump = mise_commands(&tasks, "install-lines");
+    assert_eq!(
+        bump.len(),
+        1,
+        "`mise run install-lines` must be one command"
+    );
+    let bump = &bump[0];
+    let install_lines = position("step running the `install-lines` task's command", &|step| {
+        step["run"]
+            .as_str()
+            .is_some_and(|run| run.lines().any(|line| line.trim() == bump))
+    });
+    assert!(
+        release_plz < install_lines,
+        "the install lines must be bumped after release-plz writes the release branch"
+    );
+    let install_step = &steps[install_lines];
+    assert_eq!(
+        install_step["if"].as_str(),
+        Some(format!("steps.{release_plz_id}.outputs.prs_created == 'true'").as_str()),
+        "the install-line step must run whenever release-plz opened or updated the release PR"
+    );
+    let run = install_step["run"].as_str().expect("checked above");
+    assert!(
+        run.contains("createCommitOnBranch") && run.contains("expectedHeadOid"),
+        "the install-line commit must go through the API's `createCommitOnBranch`, which signs \
+         it, guarded by `expectedHeadOid` so it never lands on a branch release-plz moved"
+    );
+    assert_eq!(
+        install_step["env"]["GH_TOKEN"].as_str(),
+        Some(format!("${{{{ steps.{token_id}.outputs.token }}}}").as_str()),
+        "the install-line commit must be pushed with the App token, so it starts CI too"
     );
 }
 
