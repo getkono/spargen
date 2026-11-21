@@ -193,6 +193,19 @@ jobs:
           components: clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      # Type-checking the generated GitHub client takes more than the runner's 16 GB of RAM since
+      # operations split into a request builder and a decoder (#1283), and the default 4 GB swap
+      # let the kernel kill rustc mid-clippy on every run after it. A 16 GB swap file on the
+      # runner's scratch disk covers the overflow.
+      - name: Enlarge swap
+        run: |
+          sudo swapoff -a
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
       - run: CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=1 cargo clippy --manifest-path examples/github-api/Cargo.toml --target-dir target/github-api-client --lib --all-features -- -D warnings -W clippy::expect-used
       - run: CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=1 cargo check --manifest-path examples/github-api/Cargo.toml --target-dir target/github-api-client --lib --target wasm32-unknown-unknown --all-features
 
