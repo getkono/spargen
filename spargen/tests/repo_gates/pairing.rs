@@ -412,6 +412,11 @@ const PAIRINGS: &[Pairing] = &[
         task: "hooks",
         why: "installs the git hooks",
     },
+    Pairing::LocalOnly {
+        task: "install-lines",
+        why: "rewrites the tree; `release-plz.yml` runs it on the release branch \
+              (`the_release_pull_request_runs_ci_and_bumps_install_lines`)",
+    },
 ];
 
 /// Actions a [`provision`] step may use. Each provisions a checkout, a toolchain, a cache, or a

@@ -17,7 +17,8 @@ paths:
 - Each gate workflow's `on:`, `concurrency:`, `permissions:` and other steps are pinned literally,
   and a task key that changes what runs without appearing in its command is rejected.
 - Slow gates carry one pinned `if:` (`SLOW_GATE_IF`): every push to `master`, `workflow_dispatch`,
-  and release-plz's release pull request once a maintainer approves its runs.
+  and release-plz's release pull request, whose branch `release-plz.yml` pushes with a GitHub App
+  token so its runs start without approval.
 - `hk.pkl`'s steps are each a `mise run` of an existing task; every other task is too slow for a
   hook. Pre-commit runs `fmt` and `lint` as fixers; pre-push runs only `fmt-check`,
   `commit-range` and the globbed `deny`, and CI is the gate for `lint` and `test`

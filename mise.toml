@@ -118,6 +118,13 @@ echo "auditing the Cargo.lock published in spargen $version"
 description = "Check each runtime dependency requirement against its crate's latest crates.io release (needs curl)"
 run = "cargo test -p spargen --test repo_gates supply_chain::runtime_requirements_admit_their_latest_release -- --exact --ignored --nocapture"
 
+[tasks.install-lines]
+# release-plz edits no Markdown, so a release that moves the minor leaves the `spargen` and
+# `spargen-macro` install lines behind. This rewrites each to the workspace minor and nothing else;
+# `release-plz.yml` runs the same command on the release branch and commits the result.
+description = "Bump every spargen/spargen-macro install line in the Markdown to the workspace's minor version"
+run = "cargo test -p spargen --test docs bump_install_lines_to_the_released_minor -- --exact --ignored --nocapture"
+
 [tasks.release-preview]
 # `release-plz update` has no dry-run mode, so it runs in a clone under `target/` on a fresh local
 # branch (it refuses a detached HEAD), and skips LFS smudging, which would fetch from a checkout that

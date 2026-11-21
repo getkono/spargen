@@ -6,7 +6,8 @@
 //! [`every_link_in_the_built_book_resolves`] is the check they now run after the build. And the
 //! install lines still pinned `0.4` a release after the workspace moved to `0.5`;
 //! [`every_install_line_names_the_released_minor`] holds them to `Cargo.toml`'s version, so a
-//! release bump that leaves one behind fails.
+//! release bump that leaves one behind fails, and [`bump_install_lines_to_the_released_minor`]
+//! (`mise run install-lines`) is how the release pull request brings them forward.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -91,48 +92,133 @@ fn install_lines_are_recognised_in_both_spellings() {
     );
 }
 
-#[test]
-fn every_install_line_names_the_released_minor() {
-    // `version.workspace = true`, so this is the workspace `Cargo.toml`'s version: the one the
-    // next release publishes. A caret requirement on its minor is what a reader should copy.
-    let expected = format!(
+/// The minor every install line must require. `version.workspace = true`, so this is the
+/// workspace `Cargo.toml`'s version: the one the next release publishes. A caret requirement on
+/// its minor is what a reader should copy.
+fn released_minor() -> String {
+    format!(
         "{}.{}",
         env!("CARGO_PKG_VERSION_MAJOR"),
         env!("CARGO_PKG_VERSION_MINOR")
-    );
+    )
+}
+
+/// One `spargen`/`spargen-macro` install line in the repository's Markdown.
+struct InstallLine {
+    path: Utf8PathBuf,
+    /// Zero-based.
+    index: usize,
+    name: String,
+    requirement: String,
+}
+
+impl std::fmt::Display for InstallLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let root = workspace_root();
+        let relative = self
+            .path
+            .strip_prefix(&root)
+            .expect("a listed file is under the root");
+        write!(
+            f,
+            "{relative}:{}: {} = \"{}\"",
+            self.index + 1,
+            self.name,
+            self.requirement
+        )
+    }
+}
+
+/// Every install line in the repository's Markdown, failing if the scan finds none.
+fn install_lines() -> Vec<InstallLine> {
     let root = workspace_root();
-    let mut lines = 0usize;
-    let mut stale = Vec::new();
+    let mut found = Vec::new();
     for path in files(&root, "md", &["target", "docs/book/book", "references"]) {
         // A changelog records what each past release required; it is history, not an install line.
         if path.file_name() == Some("CHANGELOG.md") {
             continue;
         }
-        for (number, line) in read(&path).lines().enumerate() {
+        for (index, line) in read(&path).lines().enumerate() {
             let Some((name, requirement)) = install_requirement(line) else {
                 continue;
             };
-            lines += 1;
-            if requirement != expected {
-                let relative = path
-                    .strip_prefix(&root)
-                    .expect("a listed file is under the root");
-                stale.push(format!(
-                    "{relative}:{}: {name} = \"{requirement}\"",
-                    number + 1
-                ));
-            }
+            found.push(InstallLine {
+                path: path.clone(),
+                index,
+                name: name.to_owned(),
+                requirement: requirement.to_owned(),
+            });
         }
     }
     assert!(
-        lines > 0,
+        !found.is_empty(),
         "found no `spargen`/`spargen-macro` install line in any Markdown file; the scan reads nothing"
     );
+    found
+}
+
+#[test]
+fn every_install_line_names_the_released_minor() {
+    let expected = released_minor();
+    let stale: Vec<String> = install_lines()
+        .into_iter()
+        .filter(|line| line.requirement != expected)
+        .map(|line| line.to_string())
+        .collect();
     assert!(
         stale.is_empty(),
         "these install lines do not require the workspace's current minor `{expected}` \
-         (Cargo.toml `version`); a reader copying them gets an older release:\n{}",
+         (Cargo.toml `version`); a reader copying them gets an older release. \
+         `mise run install-lines` rewrites them:\n{}",
         stale.join("\n")
+    );
+}
+
+/// Rewrites every stale install line to [`released_minor`], touching nothing else. release-plz
+/// edits no Markdown, so `release-plz.yml` runs this (as `mise run install-lines`) on the release
+/// branch after each version bump and commits what it changes
+/// (`the_release_pull_request_runs_ci_and_bumps_install_lines`). Ignored because it writes the
+/// tree.
+#[test]
+#[ignore = "rewrites the tree; run it with `mise run install-lines`"]
+fn bump_install_lines_to_the_released_minor() {
+    let expected = released_minor();
+    let mut stale: BTreeMap<Utf8PathBuf, Vec<InstallLine>> = BTreeMap::new();
+    for line in install_lines() {
+        if line.requirement != expected {
+            stale.entry(line.path.clone()).or_default().push(line);
+        }
+    }
+    for (path, lines) in &stale {
+        let text = read(path);
+        let mut rewritten = String::with_capacity(text.len());
+        for (index, line) in text.split_inclusive('\n').enumerate() {
+            match lines.iter().find(|stale| stale.index == index) {
+                // The first quoted string on an install line is its requirement:
+                // `install_requirement` reads the value after `=` or after `version =`.
+                Some(stale) => {
+                    let old = format!("\"{}\"", stale.requirement);
+                    assert!(line.contains(&old), "{stale} must carry {old}");
+                    rewritten.push_str(&line.replacen(&old, &format!("\"{expected}\""), 1));
+                }
+                None => rewritten.push_str(line),
+            }
+        }
+        std::fs::write(path, rewritten)
+            .unwrap_or_else(|error| panic!("{path} must be writable: {error}"));
+        for line in lines {
+            println!("bumped {line} to \"{expected}\"");
+        }
+    }
+    let left: Vec<String> = install_lines()
+        .into_iter()
+        .filter(|line| line.requirement != expected)
+        .map(|line| line.to_string())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the rewrite left install lines behind:\n{}",
+        left.join("\n")
     );
 }
 
