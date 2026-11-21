@@ -6,6 +6,14 @@ version = 2
 yanked = "deny"
 # Inside the gitignored `target/`; cargo-deny clones into `advisory-db-<hash of the URL>` below it.
 db-path = "target/advisory-dbs"
+# Every `cargo audit` in `mise run deny` and `deny-published` passes the same `--ignore`s.
+ignore = [
+    # chrono has no maintained release to move to. It reaches this graph only through the
+    # unpublished `support-runtime`'s optional `chrono` feature, which tests the deprecated
+    # `chrono` date-time backend; neither published crate depends on it, and a consumer gets it
+    # only by selecting that backend, which reports `W017`. Removing the backend lifts this.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; reached only by the deprecated chrono date-time backend's unpublished runtime tests, until that backend is removed" },
+]
 
 [licenses]
 version = 2
